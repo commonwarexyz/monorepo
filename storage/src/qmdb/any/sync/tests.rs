@@ -67,7 +67,12 @@ pub(crate) trait Destructible {
 // Implement Destructible once for the generic full Merkle type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl<F: merkle::Family> Destructible
-    for crate::merkle::full::Merkle<F, deterministic::Context, Digest>
+    for crate::merkle::full::Merkle<
+        F,
+        deterministic::Context,
+        Digest,
+        commonware_parallel::Sequential,
+    >
 {
     type Family = F;
 
@@ -2251,7 +2256,7 @@ mod harnesses {
         fn config(
             suffix: &str,
             pooler: &impl BufferPooler,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
@@ -2276,7 +2281,7 @@ mod harnesses {
 
         async fn init_db_with_config(
             ctx: Context,
-            config: crate::qmdb::any::FixedConfig<TwoCap>,
+            config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
             Self::Db::init(ctx, config).await.unwrap()
         }
@@ -2374,7 +2379,7 @@ mod harnesses {
         fn config(
             suffix: &str,
             pooler: &impl BufferPooler,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
@@ -2399,7 +2404,7 @@ mod harnesses {
 
         async fn init_db_with_config(
             ctx: Context,
-            config: crate::qmdb::any::FixedConfig<TwoCap>,
+            config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
             Self::Db::init(ctx, config).await.unwrap()
         }
@@ -2502,6 +2507,7 @@ mod harnesses {
             Digest,
             commonware_cryptography::Sha256,
             TwoCap,
+            commonware_parallel::Sequential,
         >;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -2511,7 +2517,7 @@ mod harnesses {
         fn config(
             suffix: &str,
             pooler: &impl BufferPooler,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
@@ -2536,7 +2542,7 @@ mod harnesses {
 
         async fn init_db_with_config(
             ctx: Context,
-            config: crate::qmdb::any::FixedConfig<TwoCap>,
+            config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
             Self::Db::init(ctx, config).await.unwrap()
         }
@@ -2579,6 +2585,7 @@ mod harnesses {
             Vec<u8>,
             commonware_cryptography::Sha256,
             TwoCap,
+            commonware_parallel::Sequential,
         >;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -2665,6 +2672,7 @@ mod harnesses {
             Digest,
             commonware_cryptography::Sha256,
             TwoCap,
+            commonware_parallel::Sequential,
         >;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
@@ -2674,7 +2682,7 @@ mod harnesses {
         fn config(
             suffix: &str,
             pooler: &impl BufferPooler,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap> {
+        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
         }
 
@@ -2701,7 +2709,7 @@ mod harnesses {
 
         async fn init_db_with_config(
             ctx: Context,
-            config: crate::qmdb::any::FixedConfig<TwoCap>,
+            config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
             Self::Db::init(ctx, config).await.unwrap()
         }
@@ -2744,6 +2752,7 @@ mod harnesses {
             Vec<u8>,
             commonware_cryptography::Sha256,
             TwoCap,
+            commonware_parallel::Sequential,
         >;
 
         fn sync_target_root(db: &Self::Db) -> Digest {

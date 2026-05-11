@@ -37,14 +37,22 @@ use tracing::error;
 const CHUNK_SIZE: usize = sha256::Digest::SIZE;
 
 /// Database type alias.
-pub type Database<E> =
-    current::unordered::fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator, CHUNK_SIZE>;
+pub type Database<E> = current::unordered::fixed::Db<
+    mmr::Family,
+    E,
+    Key,
+    Value,
+    Hasher,
+    Translator,
+    CHUNK_SIZE,
+    Sequential,
+>;
 
 /// Operation type alias. Same as the `any` operation type.
 pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequential> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
         merkle_config: MmrConfig {

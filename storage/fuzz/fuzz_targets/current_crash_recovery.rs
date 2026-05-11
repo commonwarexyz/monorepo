@@ -38,7 +38,7 @@ type RawValue = [u8; 32];
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32, Sequential>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -99,7 +99,7 @@ fn make_config(
     merkle_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
-) -> VariableConfig<TwoCap, ((), ())> {
+) -> VariableConfig<TwoCap, ((), ()), Sequential> {
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
         merkle_config: MerkleConfig {

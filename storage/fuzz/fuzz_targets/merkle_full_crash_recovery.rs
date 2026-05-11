@@ -23,7 +23,8 @@ const DATA_SIZE: usize = 32;
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Merkle<F> = commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest>;
+type Merkle<F> =
+    commonware_storage::merkle::full::Merkle<F, deterministic::Context, Digest, Sequential>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -93,7 +94,7 @@ fn merkle_config(
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
     write_buffer: NonZeroUsize,
-) -> Config {
+) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),

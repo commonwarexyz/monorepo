@@ -12,7 +12,7 @@ use crate::{
     Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
@@ -20,7 +20,7 @@ pub type Operation<F, K, V> = unordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<
+pub type Db<F, E, K, V, H, T, S> = super::Db<
     F,
     E,
     Journal<E, Operation<F, K, V>>,
@@ -60,7 +60,7 @@ pub mod partitioned {
         Context,
     };
     use commonware_cryptography::Hasher;
-    use commonware_parallel::{Sequential, Strategy};
+    use commonware_parallel::Strategy;
     use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index.
@@ -72,7 +72,7 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<F, E, K, V, H, T, const P: usize, S = Sequential> = crate::qmdb::any::unordered::Db<
+    pub type Db<F, E, K, V, H, T, const P: usize, S> = crate::qmdb::any::unordered::Db<
         F,
         E,
         Journal<E, Operation<F, K, V>>,
@@ -103,16 +103,14 @@ pub mod partitioned {
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
-        use super::Sequential;
         /// Fixed-value DB with 256 partitions.
-        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
-        use super::Sequential;
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<F, E, K, V, H, T, S = Sequential> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
     }
 }
 
@@ -139,6 +137,7 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Context},
         Metrics as _, Runner as _, Supervisor as _,
@@ -157,11 +156,13 @@ pub(crate) mod test {
         Index<TwoCap, GenericLocation<F>>,
         Sha256,
         crate::qmdb::any::operation::update::Unordered<Digest, FixedEncoding<Digest>>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+        Sequential,
     >;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
-        Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+        Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
@@ -826,7 +827,7 @@ pub(crate) mod test {
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest>;
+        type TestMmr = Mmr<deterministic::Context, Digest, Sequential>;
 
         impl FromSyncTestable for AnyTest {
             type Merkle = TestMmr;

@@ -25,7 +25,7 @@ use alloc::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use core::num::NonZeroU64;
 use futures::{try_join, TryFutureExt as _};
 use thiserror::Error;
@@ -46,7 +46,7 @@ type MerkleizedParent<F, H, Item, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Dig
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strategy = Sequential> {
+pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync, S: Strategy> {
     // The inner batch of Merkle leaf digests.
     inner: batch::UnmerkleizedBatch<F, H::Digest, S>,
     // The hasher to use for hashing the items.
@@ -163,7 +163,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone, Debug)]
-pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy = Sequential> {
+pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy> {
     /// The inner batch of Merkle leaf digests.
     pub(crate) inner: Arc<batch::MerkleizedBatch<F, D, S>>,
     /// The peak bagging policy inherited from the parent journal or batch.
@@ -261,7 +261,7 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
 /// Merkle-family structure. The item at index i in the journal corresponds to the leaf at Location
 /// i in the Merkle structure. This structure enables efficient proofs that an item is included in
 /// the journal at a specific location.
-pub struct Journal<F, E, C, H, S = Sequential>
+pub struct Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
@@ -866,6 +866,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
@@ -887,6 +888,7 @@ mod tests {
         deterministic::Context,
         ContiguousJournal<deterministic::Context, TestOp<F>>,
         Sha256,
+        Sequential,
     >;
 
     fn journal_root<F: Family>(journal: &TestJournal<F>) -> Digest {
@@ -895,7 +897,7 @@ mod tests {
 
     fn batch_root<F: Family>(
         journal: &TestJournal<F>,
-        batch: &MerkleizedBatch<F, Digest, TestOp<F>>,
+        batch: &MerkleizedBatch<F, Digest, TestOp<F>, Sequential>,
     ) -> Digest {
         journal
             .merkle
@@ -904,7 +906,7 @@ mod tests {
     }
 
     /// Create Merkle configuration for tests.
-    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig {
+    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
@@ -962,7 +964,7 @@ mod tests {
             assert_eq!(batch.hasher.root_bagging(), BackwardFold);
 
             let merkleized = journal.merkle.with_mem(|mem| batch.merkleize(mem));
-            let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>> =
+            let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>, Sequential> =
                 merkleized.new_batch();
             assert_eq!(child.hasher.root_bagging(), BackwardFold);
         });
@@ -1005,12 +1007,12 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        Merkle<F, deterministic::Context, Digest>,
+        Merkle<F, deterministic::Context, Digest, Sequential>,
         ContiguousJournal<deterministic::Context, TestOp<F>>,
         StandardHasher<Sha256>,
     ) {
         let hasher = StandardHasher::new(ForwardFold);
-        let merkle = Merkle::<F, _, Digest>::init(
+        let merkle = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr"),
             &hasher,
             merkle_config(suffix, &context),

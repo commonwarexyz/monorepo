@@ -14,13 +14,12 @@
 pub use crate::merkle::full::Config;
 pub use crate::merkle::full::UnmerkleizedBatch;
 use crate::merkle::mmr::Family;
-use commonware_parallel::Sequential;
 
 /// Configuration for initializing a full MMR for synchronization.
-pub type SyncConfig<D, S = Sequential> = crate::merkle::full::SyncConfig<Family, D, S>;
+pub type SyncConfig<D, S> = crate::merkle::full::SyncConfig<Family, D, S>;
 
 /// A MMR backed by a fixed-item-length journal.
-pub type Mmr<E, D, S = Sequential> = crate::merkle::full::Merkle<Family, E, D, S>;
+pub type Mmr<E, D, S> = crate::merkle::full::Merkle<Family, E, D, S>;
 
 #[cfg(test)]
 mod tests {
@@ -45,7 +44,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config(pooler: &impl BufferPooler) -> Config {
+    fn test_config(pooler: &impl BufferPooler) -> Config<Sequential> {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
@@ -93,7 +92,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-            let peek = Mmr::<_, Digest>::peek_root(
+            let peek = Mmr::<_, Digest, Sequential>::peek_root(
                 context.child("storage"),
                 test_config(&context),
                 &hasher,
@@ -304,10 +303,13 @@ mod tests {
             let hasher = Standard::<Sha256>::new(ForwardFold);
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
-            let mut mmr =
-                Mmr::<_, Digest>::init(context.child("init"), &hasher, test_config(&context))
-                    .await
-                    .unwrap();
+            let mut mmr = Mmr::<_, Digest, Sequential>::init(
+                context.child("init"),
+                &hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
             let mut batch = mmr.new_batch();
             for i in 0..5 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -327,9 +329,10 @@ mod tests {
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut ref_mmr = Mmr::<_, Digest>::init(context.child("ref"), &hasher, ref_cfg)
-                .await
-                .unwrap();
+            let mut ref_mmr =
+                Mmr::<_, Digest, Sequential>::init(context.child("ref"), &hasher, ref_cfg)
+                    .await
+                    .unwrap();
             let mut batch = ref_mmr.new_batch();
             for i in 0..100 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -346,7 +349,7 @@ mod tests {
 
             // init_sync with range starting beyond the existing data triggers the
             // "fresh start" path (clear_to_size).
-            let sync_cfg = SyncConfig::<Digest> {
+            let sync_cfg = SyncConfig::<Digest, Sequential> {
                 config: test_config(&context),
                 range: non_empty_range!(Location::new(100), Location::new(200)),
                 pinned_nodes: Some(pinned),

@@ -98,7 +98,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 fn db_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>> {
+) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>, Sequential> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle_config: MerkleConfig {
@@ -147,9 +147,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let mut rng = StdRng::seed_from_u64(input.seed);
 
             let cfg = db_config(suffix, &context);
-            let mut db = Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
-                .await
-                .unwrap();
+            let mut db =
+                Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap, Sequential>::init(context, cfg)
+                    .await
+                    .unwrap();
 
             let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();

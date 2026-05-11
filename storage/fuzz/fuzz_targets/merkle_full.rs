@@ -79,7 +79,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config {
+fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
@@ -108,8 +108,8 @@ fn historical_root<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
-    type Merkle<F, E, D> = commonware_storage::merkle::full::Merkle<F, E, D>;
-    type SyncConfig<F, D> = commonware_storage::merkle::full::SyncConfig<F, D>;
+    type Merkle<F, E, D> = commonware_storage::merkle::full::Merkle<F, E, D, Sequential>;
+    type SyncConfig<F, D> = commonware_storage::merkle::full::SyncConfig<F, D, Sequential>;
 
     let runner = deterministic::Runner::seeded(input.seed);
 

@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use std::sync::{Arc, Weak};
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
@@ -19,7 +19,7 @@ type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, <H as Hasher>::Digest
 /// to [`MerkleizedBatch`].
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
-pub struct UnmerkleizedBatch<F, H, V, S: Strategy = Sequential>
+pub struct UnmerkleizedBatch<F, H, V, S: Strategy>
 where
     F: Family,
     V: ValueEncoding,
@@ -46,7 +46,7 @@ where
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy = Sequential>
+pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
     Operation<F, V>: EncodeShared,
 {
@@ -142,7 +142,7 @@ where
     pub async fn get<E, C>(
         &self,
         loc: Location<F>,
-        db: &Keyless<F, E, V, C, H>,
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -181,7 +181,7 @@ where
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
-        db: &Keyless<F, E, V, C, H>,
+        db: &Keyless<F, E, V, C, H, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,

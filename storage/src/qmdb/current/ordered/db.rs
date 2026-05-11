@@ -21,7 +21,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -80,7 +80,7 @@ where
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<F, E, C, K, V, I, H, const N: usize, S = Sequential> =
+pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
     crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 // Shared read-only functionality.
@@ -153,7 +153,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>>::span_contains(
+                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>, N, S>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,

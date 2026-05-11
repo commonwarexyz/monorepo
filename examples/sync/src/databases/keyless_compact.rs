@@ -17,13 +17,13 @@ use commonware_storage::{
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = fixed::CompactDb<mmr::Family, E, Value, Hasher>;
+pub type Database<E> = fixed::CompactDb<mmr::Family, E, Value, Hasher, Sequential>;
 
 /// Operation type alias.
 pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the compact keyless variant.
-pub fn create_config(_context: &impl BufferPooler) -> CompactConfig {
+pub fn create_config(_context: &impl BufferPooler) -> CompactConfig<Sequential> {
     CompactConfig {
         merkle: MerkleConfig {
             partition: "compact-keyless".into(),

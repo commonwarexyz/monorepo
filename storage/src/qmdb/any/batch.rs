@@ -25,7 +25,7 @@ use crate::{
 use ahash::AHashSet;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::ops::Range;
 use std::{
@@ -100,7 +100,7 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
 }
 
 /// Where this batch's inherited state comes from.
-enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy = Sequential>
+enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
 where
     Operation<F, U>: Send + Sync,
 {
@@ -167,7 +167,7 @@ where
 ///
 /// Methods that need the committed DB (e.g. `get`, `merkleize`) accept it as a
 /// parameter, so the batch is lifetime-free and can be stored independently of the DB.
-pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy = Sequential>
+pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
@@ -206,12 +206,8 @@ where
 /// ```
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
-pub struct MerkleizedBatch<
-    F: Family,
-    D: Digest,
-    U: update::Update + Send + Sync,
-    S: Strategy = Sequential,
-> where
+pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
+where
     Operation<F, U>: Send + Sync,
 {
     /// Merkleized authenticated journal batch (provides the speculative Merkle root).
@@ -248,7 +244,7 @@ type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 /// from the resolution/merkleization machinery. Helpers that need access to the parent
 /// chain, DB snapshot, or operation log are methods on this struct, eliminating parameter
 /// threading.
-struct Merkleizer<F: Family, H, U, S: Strategy = Sequential>
+struct Merkleizer<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
@@ -1943,6 +1939,7 @@ mod tests {
         translator::OneCap,
     };
     use commonware_cryptography::{sha256, Sha256};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _};
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -2201,6 +2198,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
@@ -2294,6 +2292,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
@@ -2410,6 +2409,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
@@ -2491,6 +2491,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
@@ -2569,6 +2570,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
@@ -2637,6 +2639,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
@@ -2710,6 +2713,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
@@ -2790,6 +2794,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("ff-cross", &context);
@@ -2858,6 +2863,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
@@ -2930,6 +2936,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("get-many-basic", &context);

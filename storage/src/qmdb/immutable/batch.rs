@@ -16,7 +16,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -37,7 +37,7 @@ pub(crate) struct DiffEntry<F: Family, V> {
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
 /// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
 #[allow(clippy::type_complexity)]
-pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy = Sequential>
+pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
 where
     F: Family,
     K: Key,
@@ -67,8 +67,7 @@ type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Oper
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy = Sequential>
-{
+pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: JournalBatch<F, D, K, V, S>,
 
@@ -166,7 +165,7 @@ where
     pub async fn get_many<E, C, T>(
         &self,
         keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T>,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
