@@ -37,7 +37,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
         + Into<Self::Block>
         + Clone
-        + Codec<Cfg = <Self::Block as Read>::Cfg>;
+        + Codec<Cfg = <Self::ApplicationBlock as Read>::Cfg>;
 
     /// The [`Digest`] type used by consensus.
     type Commitment: Digest;
@@ -59,6 +59,15 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Returns the parent commitment referenced by `block`.
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
+
+    /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
+    ///
+    /// The returned configuration may bind `expected_commitment` so that decoding rejects
+    /// blocks that do not match the expected commitment.
+    fn block_cfg(
+        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+        expected: Self::Commitment,
+    ) -> <Self::Block as Read>::Cfg;
 
     /// Converts a working block to an application block.
     ///

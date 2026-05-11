@@ -230,7 +230,7 @@ where
     // Maximum number of blocks to repair at once
     max_repair: NonZeroUsize,
     // Codec configuration for block type
-    block_codec_config: <V::Block as Read>::Cfg,
+    block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     // Strategy for parallel operations
     strategy: T,
 
@@ -285,7 +285,7 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<V::Block, P, ES, T>,
+        config: Config<V::ApplicationBlock, P, ES, T>,
     ) -> (Self, Mailbox<P::Scheme, V>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
@@ -947,15 +947,15 @@ where
     async fn handle_deliver(
         &mut self,
         key: Request<V::Commitment>,
-        value: Bytes,
+        mut value: Bytes,
         response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         match key {
             Request::Block(commitment) => {
-                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config)
-                else {
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return false;
                 };
@@ -995,20 +995,21 @@ where
                     return false;
                 };
 
-                let Ok((finalization, block)) =
-                    <(Finalization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
-                        value,
-                        &(
-                            scheme.certificate_codec_config(),
-                            self.block_codec_config.clone(),
-                        ),
-                    )
+                let certificate_codec_config = scheme.certificate_codec_config();
+                let Ok(finalization) =
+                    Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
                     response.send_lossy(false);
                     return false;
                 };
 
                 let commitment = finalization.proposal.payload;
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                    response.send_lossy(false);
+                    return false;
+                };
+
                 if block.height() != height
                     || V::commitment(&block) != commitment
                     || finalization.epoch() != bounds.epoch()
@@ -1034,15 +1035,17 @@ where
                     return false;
                 };
 
-                let Ok((notarization, block)) =
-                    <(Notarization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
-                        value,
-                        &(
-                            scheme.certificate_codec_config(),
-                            self.block_codec_config.clone(),
-                        ),
-                    )
+                let certificate_codec_config = scheme.certificate_codec_config();
+                let Ok(notarization) =
+                    Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
+                    response.send_lossy(false);
+                    return false;
+                };
+
+                let commitment = notarization.proposal.payload;
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;
                 };
