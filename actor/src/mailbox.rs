@@ -13,7 +13,10 @@
 //! refill lock attempts dominate, this can be revisited.
 //!
 //! Concurrent enqueue calls, including calls from cloned senders, are not
-//! globally ordered and may be observed in any interleaving.
+//! globally ordered and may be observed in any interleaving. The ready fast path
+//! intentionally does not reserve the inactive overflow state; preserving a
+//! global order between racing producers would add synchronization to the common
+//! no-overflow path.
 
 use crate::Feedback;
 #[cfg(not(feature = "loom"))]
@@ -209,6 +212,9 @@ impl<T> OverflowState<T> {
     }
 
     fn try_push_ready(&self, ready: &ReadyQueue<T>, message: T) -> Result<(), T> {
+        // This is an opportunistic fast path, not a global ordering point. If a
+        // racing sender begins overflow mutation after this load, both sends
+        // are concurrent and may be observed in either order.
         if self.is_active() {
             return Err(message);
         }
