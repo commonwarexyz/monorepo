@@ -1114,8 +1114,18 @@ mod tests {
                 .map(|chunk_idx| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx))
                 .collect::<Vec<_>>();
             assert!(proof.verify(&hasher, start_loc, &elements, &chunks, &root,));
+
+            // Flip a byte in the trailing partial chunk while preserving the window shape.
+            let mut bad_chunks = chunks.clone();
+            let last = bad_chunks.last_mut().unwrap();
+            last[0] ^= 1;
+            assert!(
+                !proof.verify(&hasher, start_loc, &elements, &bad_chunks, &root),
+                "tampered partial chunk bytes should not verify"
+            );
         });
     }
+
     #[test_traced]
     fn test_range_proof_rejects_unexpected_partial_chunk_digest() {
         let executor = deterministic::Runner::default();

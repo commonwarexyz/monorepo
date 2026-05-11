@@ -55,7 +55,7 @@ enum CurrentOperation {
         bad_pending_digest: Option<[u8; 32]>,
         bad_partial_digest: Option<[u8; 32]>,
         max_ops: NonZeroU64,
-        bad_chunks: Vec<[u8; 32]>,
+        chunk_xor: [u8; 32],
     },
     GetSpan {
         key: RawKey,
@@ -315,7 +315,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     bad_pending_digest,
                     bad_partial_digest,
                     max_ops,
-                    bad_chunks,
+                    chunk_xor,
                 } => {
                     let current_op_count = db.bounds().await.end;
                     if current_op_count == 0 {
@@ -377,14 +377,21 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             ), "proof with bad partial chunk digest should not verify");
                         }
 
-                        // Try to verify the proof when providing bad input chunks.
-                        if &chunks != bad_chunks {
+                        // Try to verify the proof with same-length corrupted chunks.
+                        let bad_chunks: Vec<[u8; 32]> = chunks.iter().map(|c| {
+                            let mut corrupted = *c;
+                            for (b, x) in corrupted.iter_mut().zip(chunk_xor.iter()) {
+                                *b ^= *x;
+                            }
+                            corrupted
+                        }).collect();
+                        if chunks != bad_chunks {
                             assert!(!Db::<F>::verify_range_proof(
                                 &hasher,
                                 &range_proof,
                                 start_loc,
                                 &ops,
-                                bad_chunks,
+                                &bad_chunks,
                                 &root
                             ), "proof with bad chunks should not verify");
                         }
