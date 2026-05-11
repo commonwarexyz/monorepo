@@ -19,13 +19,14 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
+    sync::Mutex,
     FuzzRng,
 };
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -229,20 +230,16 @@ impl Monitor for FuzzMonitor {
         response: Self::Response,
         count: usize,
     ) {
-        self.model
-            .lock()
-            .expect("engine model mutex poisoned")
-            .events
-            .push(CollectedEvent {
-                handler,
-                response,
-                count,
-            });
+        self.model.lock().events.push(CollectedEvent {
+            handler,
+            response,
+            count,
+        });
     }
 }
 
 fn record_request(model: &SharedModel, commitment: Digest, recipients: Vec<PublicKey>) {
-    let mut model = model.lock().expect("engine model mutex poisoned");
+    let mut model = model.lock();
     model
         .tracked
         .entry(commitment)
@@ -252,16 +249,12 @@ fn record_request(model: &SharedModel, commitment: Digest, recipients: Vec<Publi
 }
 
 fn record_cancel(model: &SharedModel, commitment: &Digest) {
-    model
-        .lock()
-        .expect("engine model mutex poisoned")
-        .tracked
-        .remove(commitment);
+    model.lock().tracked.remove(commitment);
 }
 
 fn validate_monitor_events(models: &[SharedModel]) {
     for model in models {
-        let mut model = model.lock().expect("engine model mutex poisoned");
+        let mut model = model.lock();
         let events = std::mem::take(&mut model.events);
         for event in events {
             let commitment = event.response.commitment();
@@ -297,7 +290,7 @@ impl Blocker for FuzzBlocker {
 
 #[derive(Debug)]
 enum MockInbound {
-    Message(PublicKey, IoBuf),
+    Message(Box<PublicKey>, IoBuf),
     Error,
 }
 
@@ -375,7 +368,7 @@ impl CheckedSender for MockCheckedSender {
             Recipients::Some(peers) => peers,
         };
         let deliveries = {
-            let routes = self.routes.lock().expect("mock routes mutex poisoned");
+            let routes = self.routes.lock();
             recipients
                 .into_iter()
                 .filter(|recipient| *recipient != self.origin)
@@ -386,7 +379,10 @@ impl CheckedSender for MockCheckedSender {
         let mut delivered = Vec::new();
         for (recipient, tx) in deliveries {
             if tx
-                .send(MockInbound::Message(self.origin.clone(), message.clone()))
+                .send(MockInbound::Message(
+                    Box::new(self.origin.clone()),
+                    message.clone(),
+                ))
                 .is_ok()
             {
                 delivered.push(recipient);
@@ -411,7 +407,7 @@ impl Receiver for MockReceiver {
 
     async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
         match self.rx.recv().await.ok_or(MockRecvError)? {
-            MockInbound::Message(peer, message) => Ok((peer, message)),
+            MockInbound::Message(peer, message) => Ok((*peer, message)),
             MockInbound::Error => Err(MockRecvError),
         }
     }
@@ -429,11 +425,7 @@ fn malformed_message(seed: u64) -> IoBuf {
 }
 
 fn send_inbound(routes: &MockRoutes, recipient: &PublicKey, message: MockInbound) {
-    let tx = routes
-        .lock()
-        .expect("mock routes mutex poisoned")
-        .get(recipient)
-        .cloned();
+    let tx = routes.lock().get(recipient).cloned();
     if let Some(tx) = tx {
         let _ = tx.send(message);
     }
@@ -560,11 +552,9 @@ fn start_engine(
     let (response_tx, response_rx) = mpsc::unbounded_channel();
     request_routes
         .lock()
-        .expect("mock routes mutex poisoned")
         .insert(public_keys[params.peer_idx].clone(), request_tx);
     response_routes
         .lock()
-        .expect("mock routes mutex poisoned")
         .insert(public_keys[params.peer_idx].clone(), response_tx);
 
     let (engine, mailbox) = Engine::new(engine_context, cfg);
@@ -697,7 +687,7 @@ fn fuzz(input: FuzzInput) {
                     send_inbound(
                         &request_routes,
                         &public_keys[idx],
-                        MockInbound::Message(origin, message),
+                        MockInbound::Message(Box::new(origin), message),
                     );
                 }
                 CollectorOperation::InjectResponse {
@@ -716,7 +706,7 @@ fn fuzz(input: FuzzInput) {
                     send_inbound(
                         &response_routes,
                         &public_keys[idx],
-                        MockInbound::Message(origin, message),
+                        MockInbound::Message(Box::new(origin), message),
                     );
                 }
                 CollectorOperation::CloseReceiver {
