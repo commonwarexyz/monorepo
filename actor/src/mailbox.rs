@@ -399,7 +399,7 @@ impl<T: Policy> fmt::Debug for Sender<T> {
 
 impl<T: Policy> Sender<T> {
     /// Submit a message without waiting for inbox capacity.
-    #[must_use = "handle dropped/closed submissions; required actor messages must not be silently dropped"]
+    #[must_use = "caller must handle enqueue feedback"]
     pub fn enqueue(&self, message: T) -> Feedback {
         if self.state.closed.load(Ordering::Acquire) {
             return Feedback::Closed;
@@ -416,6 +416,7 @@ impl<T: Policy> Sender<T> {
         let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
             self.state.closed.load(Ordering::Acquire)
         });
+
         // Wake on any handled enqueue rather than interpreting policy feedback:
         // a policy may retain overflow while reporting `Dropped`, and a
         // receiver may have skipped refill while this overflow mutation was
