@@ -1,30 +1,29 @@
 //! Shared synchronization logic for [crate::qmdb::current] databases.
 //!
-//! Contains implementation of [crate::qmdb::sync::Database] for all [Db](crate::qmdb::current::db::Db)
-//! variants (ordered/unordered, fixed/variable).
+//! Contains implementation of [crate::qmdb::sync::Database] for all
+//! [Db](crate::qmdb::current::db::Db) variants (ordered/unordered, fixed/variable).
 //!
-//! The canonical root of a `current` database combines the ops root, grafted tree root, and
-//! optional partial chunk into a single hash (see the [Root structure](super) section in the
-//! module documentation). The sync engine operates on the **ops root**, not the canonical root:
+//! The canonical root of a `current` database combines the ops root, grafted root, and optional
+//! pending and partial chunk digests into a single hash (see the [Root structure](super) section in
+//! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
-//! (identical to `any` sync). Callers that verify current ops proofs directly should
-//! use `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be
-//! used by callers that need to authenticate the synced ops root against a trusted canonical root;
-//! the sync engine does not perform this check itself.
+//! (identical to `any` sync). Callers that verify current ops proofs directly should use
+//! `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need
+//! to authenticate the synced ops root against a trusted canonical root; the sync engine does not
+//! perform this check itself.
 //!
-//! After all operations are synced, the bitmap and grafted tree are reconstructed
-//! deterministically from the operations. The canonical root is then computed from the
-//! ops root, the reconstructed grafted tree root, and any partial chunk.
+//! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
+//! from the operations. The canonical root is then computed from the ops root, the reconstructed
+//! grafted root, and any pending or partial chunk digests.
 //!
-//! The [Database]`::`[root()](crate::qmdb::sync::Database::root)
-//! implementation returns the **ops root** (not the canonical root) because that is what the
-//! sync engine verifies against.
+//! The [Database]`::`[root()](crate::qmdb::sync::Database::root) implementation returns the **ops
+//! root** (not the canonical root) because that is what the sync engine verifies against.
 //!
-//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are
-//! read directly from the ops tree after it is built. This works because of the zero-chunk
-//! identity: for all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals
-//! the ops subtree root, making the grafted tree structurally identical to the ops tree at
-//! and above the grafting height.
+//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
+//! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
+//! all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals the ops subtree
+//! root, making the grafted tree structurally identical to the ops tree at and above the grafting
+//! height.
 
 use crate::{
     index::Factory as IndexFactory,
