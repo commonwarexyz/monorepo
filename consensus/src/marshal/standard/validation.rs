@@ -9,7 +9,7 @@ use crate::{
     },
     simplex::types::Context,
     types::{Epocher, Round},
-    Application, Block, Epochable, VerifyingApplication,
+    Application, Block, Epochable,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
@@ -130,12 +130,7 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
     let (parent_view, parent_digest) = context.parent;
