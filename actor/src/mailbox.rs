@@ -694,6 +694,12 @@ mod loom_tests {
         Spill(u8),
     }
 
+    #[derive(Clone, Debug)]
+    enum OrderedMessage {
+        Item(u8),
+        Coordinated(u8, Arc<AtomicUsize>),
+    }
+
     impl Policy for Message {
         fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
             match message {
@@ -706,6 +712,23 @@ mod loom_tests {
         }
     }
 
+    impl Policy for OrderedMessage {
+        fn handle(overflow: &mut Overflow<'_, Self>, message: Self) -> bool {
+            let gate = match &message {
+                Self::Item(_) => None,
+                Self::Coordinated(_, gate) => Some(gate.clone()),
+            };
+            overflow.spill(message);
+            if let Some(gate) = gate {
+                gate.store(1, Ordering::Release);
+                while gate.load(Ordering::Acquire) == 1 {
+                    thread::yield_now();
+                }
+            }
+            true
+        }
+    }
+
     fn assert_closed(sender: &Sender<Message>) {
         assert!(sender.state.closed.load(Ordering::Acquire));
     }
@@ -715,6 +738,12 @@ mod loom_tests {
             Message::Drop(value) | Message::Spill(value) => value,
         };
         seen.fetch_or(1usize << usize::from(value), Ordering::AcqRel);
+    }
+
+    fn value(message: OrderedMessage) -> u8 {
+        match message {
+            OrderedMessage::Item(value) | OrderedMessage::Coordinated(value, _) => value,
+        }
     }
 
     #[test]
@@ -806,6 +835,41 @@ mod loom_tests {
             assert_eq!(sender.enqueue(Message::Drop(3)), Feedback::Ok);
             assert_eq!(receiver.try_recv(), Ok(Message::Spill(2)));
             assert_eq!(receiver.try_recv(), Ok(Message::Drop(3)));
+        });
+    }
+
+    #[test]
+    fn concurrent_overflow_cannot_be_bypassed_by_ready_fast_path() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<OrderedMessage>(NZUsize!(2));
+            assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Ok);
+
+            let gate = Arc::new(AtomicUsize::new(0));
+            let overflow_sender = sender.clone();
+            let overflow_gate = gate.clone();
+            let overflow = thread::spawn(move || {
+                assert_eq!(
+                    overflow_sender.enqueue(OrderedMessage::Coordinated(2, overflow_gate)),
+                    Feedback::Backoff
+                );
+            });
+
+            while gate.load(Ordering::Acquire) == 0 {
+                thread::yield_now();
+            }
+
+            let mut observed = vec![value(receiver.try_recv().unwrap())];
+            gate.store(2, Ordering::Release);
+            let feedback = sender.enqueue(OrderedMessage::Item(3));
+            assert!(matches!(feedback, Feedback::Backoff | Feedback::Ok));
+
+            overflow.join().unwrap();
+            while let Ok(message) = receiver.try_recv() {
+                observed.push(value(message));
+            }
+
+            assert_eq!(observed, vec![0, 1, 2, 3]);
         });
     }
 }
