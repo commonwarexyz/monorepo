@@ -4,9 +4,16 @@
 //! eagerly refills ready from published overflow so senders can return to the
 //! ready fast path without waiting for ready to drain completely. Overflow is
 //! refilled from front to back, but policies decide which overflow messages are
-//! retained and in what order. Concurrent enqueue calls, including calls from
-//! cloned senders, are not globally ordered and may be observed in any
-//! interleaving.
+//! retained and in what order.
+//!
+//! Eager refill favors keeping producer enqueue on the ready fast path over
+//! batching receiver refill work. It may take the overflow lock more often under
+//! sustained overflow, but avoids leaving ready slots empty while overflow
+//! remains populated. Overflow is expected to be exceptional; if benchmarks show
+//! refill lock attempts dominate, this can be revisited.
+//!
+//! Concurrent enqueue calls, including calls from cloned senders, are not
+//! globally ordered and may be observed in any interleaving.
 
 use crate::Feedback;
 #[cfg(not(feature = "loom"))]
@@ -49,11 +56,12 @@ pub trait Policy: Sized {
     ///
     /// Messages already in the ready queue are not provided here; policy changes only apply to
     /// overflow retained beyond ready capacity. The receiver eagerly refills ready from overflow
-    /// after ready pops. Policies may append, remove, replace, reorder, or clear overflow, and are
-    /// responsible for bounding it when a hard memory limit is required. The returned value is
-    /// feedback for this enqueue attempt after the policy has made any overflow changes; it does
-    /// not guarantee that `message` or any existing overflow item was retained. Return `true` to
-    /// report [`Feedback::Backoff`] or `false` to report [`Feedback::Dropped`].
+    /// after ready pops so producer enqueue can return to the ready fast path as soon as capacity
+    /// opens. Policies may append, remove, replace, reorder, or clear overflow, and are responsible
+    /// for bounding it when a hard memory limit is required. The returned value is feedback for
+    /// this enqueue attempt after the policy has made any overflow changes; it does not guarantee
+    /// that `message` or any existing overflow item was retained. Return `true` to report
+    /// [`Feedback::Backoff`] or `false` to report [`Feedback::Dropped`].
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
 }
 
