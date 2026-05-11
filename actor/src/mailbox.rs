@@ -30,10 +30,10 @@
 //! refilled from front to back, but policies decide which overflow messages are
 //! retained and in what order.
 //!
-//! Eager refill favors keeping producer enqueue on the ready fast path over
-//! batching receiver refill work. It may take the overflow lock more often under
-//! sustained overflow, but avoids leaving ready slots empty while overflow
-//! remains populated. Overflow is expected to be exceptional.
+//! Overflow should be rare. When overflow is populated, the receiver refills
+//! ready immediately instead of waiting to batch refill work. This can take the
+//! overflow lock once per popped message, but it keeps ready capacity available
+//! for later sends as soon as possible.
 //!
 //! # Ordering
 //!
