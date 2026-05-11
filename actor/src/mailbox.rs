@@ -759,10 +759,6 @@ mod loom_tests {
         }
     }
 
-    fn assert_closed(sender: &Sender<Message>) {
-        assert!(sender.state.closed.load(Ordering::Acquire));
-    }
-
     fn record(seen: &AtomicUsize, message: Message) {
         let value = match message {
             Message::Drop(value) | Message::Spill(value) => value,
@@ -792,7 +788,6 @@ mod loom_tests {
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            assert_closed(&sender);
             assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
         });
     }
@@ -814,7 +809,6 @@ mod loom_tests {
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            assert_closed(&sender);
             assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
         });
     }
@@ -823,6 +817,7 @@ mod loom_tests {
     fn concurrent_spill_and_refill_preserves_messages() {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let idle_sender = sender.clone();
             assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
 
             let seen = Arc::new(AtomicUsize::new(0));
@@ -845,8 +840,8 @@ mod loom_tests {
             while let Ok(message) = receiver.try_recv() {
                 record(&seen, message);
             }
-            assert_eq!(receiver.state.ready.len(), 0);
-            assert_eq!(receiver.state.overflow.len(), 0);
+            assert_eq!(receiver.try_recv(), Err(TryRecvError::Empty));
+            drop(idle_sender);
             assert_eq!(seen.load(Ordering::Acquire), 0b11);
         });
     }
@@ -900,6 +895,27 @@ mod loom_tests {
             }
 
             assert_eq!(observed, vec![0, 1, 2, 3]);
+        });
+    }
+
+    #[test]
+    fn concurrent_refill_and_enqueue_preserves_overflow_order() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<OrderedMessage>(NZUsize!(1));
+            assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Backoff);
+
+            let enqueue_sender = sender.clone();
+            let enqueue = thread::spawn(move || enqueue_sender.enqueue(OrderedMessage::Item(2)));
+            let receive = thread::spawn(move || {
+                assert_eq!(receiver.try_recv().map(value), Ok(0));
+                receiver
+            });
+
+            let mut receiver = receive.join().unwrap();
+            assert_eq!(enqueue.join().unwrap(), Feedback::Backoff);
+            assert_eq!(receiver.try_recv().map(value), Ok(1));
+            assert_eq!(receiver.try_recv().map(value), Ok(2));
         });
     }
 }
