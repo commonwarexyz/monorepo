@@ -878,3 +878,16 @@ fn foo() -> usize {
 - Minimize unsafe blocks with clear `// SAFETY:` comments
 - Prefer safe abstractions over raw unsafe code
 - Enable overflow checks in all profiles (already configured)
+
+
+## Fuzzing
+
+### Consensus Protocols
+
+#### Specifications
+
+Detailed system specification for ByzzFuzz testing method for Simplex live in `consensus/fuzz/src/byzzfuzz/specs/`.
+Before making structural or behavioral changes in `consensus/fuzz/src/byzzfuzz`, read the relevant spec:
+
+- Start with `consensus/fuzz/src/byzzfuzz/specs/INDEX.md` to find the right document for the task.
+- `consensus/fuzz/src/byzzfuzz/specs/META.md` defines spec formats and update rules.

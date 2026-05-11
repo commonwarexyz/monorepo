@@ -1,11 +1,8 @@
 //! Run a single ByzzFuzz iteration.
 //!
-//! [`run`] applies network faults during a bounded *fault phase*, reaches
-//! GST on a shared `FaultGate`, then requires each non-byzantine reporter
-//! to advance at least one finalized view inside a fixed *post-GST window*.
-//! Failure to advance panics; Byzantine process faults are scheduled for a
-//! second sampled view budget. The liveness shape is intentional: it also
-//! catches the safety violations a finalization-or-timeout runner would.
+//! [`run`] applies network faults during a bounded fault phase, reaches GST
+//! when needed, and checks post-GST liveness targets. The full liveness model
+//! is documented in `specs/decisions/005-post-gst-required-container-catch-up.md`.
 
 use super::BYZANTINE_IDX;
 use crate::{
@@ -42,22 +39,10 @@ use futures::future::join_all;
 use rand::Rng;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 
-/// Fault phase length. Network partition faults apply during this
-/// virtual-time window. The window closes when either:
-/// - all non-byzantine reporters reach `required_containers` -- the run
-///   short-circuits to safety invariants without raising the [`FaultGate`]
-///   or running the post-GST check; or
-/// - the timer elapses -- [`run`] then raises the [`FaultGate`] (GST) and
-///   enters Phase 2.
+/// Fault phase length before GST is reached when the run does not complete early.
 const BYZZFUZZ_FAULT_PHASE: Duration = Duration::from_secs(30);
 
-/// Liveness-mode post-GST window. After GST, each non-byzantine reporter
-/// must finalize at least one new view within this virtual-time window;
-/// otherwise [`run`] panics with a liveness violation.
-///
-/// Intentionally generous to avoid false liveness failures while the target
-/// is still being calibrated. This should dominate honest retry/recovery
-/// timers after GST.
+/// Liveness-mode post-GST window.
 const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(360);
 
 type ByzzReporter<P> =
@@ -287,42 +272,7 @@ where
     }
 }
 
-/// Run a single ByzzFuzz iteration. Designed around a liveness check so
-/// the harness panics on both safety violations and stalled progress.
-///
-/// Phase 1 applies network partition faults until either every non-byzantine
-/// reporter reaches `required_containers` or the fault phase elapses. Phase 2
-/// reaches GST on the shared gate and requires each non-byzantine reporter
-/// to finalize at least one view above its pre-GST baseline within the
-/// post-GST window; otherwise it panics. Byzantine process faults may fire
-/// in either phase. At GST the runner prunes any dormant pre-GST faults at
-/// views the byzantine has not yet reached, then appends fresh faults for
-/// `[byzantine_rnd + 1, byzantine_rnd + r_post_gst]` so the appended post-GST
-/// views never double-fire and Phase 2 keeps the post-GST adversary
-/// schedulable (the appended faults still only fire when the byzantine emits
-/// matching outbound messages at those views).
-///
-/// ```text
-/// time
-///   |------ Phase 1: fault phase -------|---- Phase 2: post-GST window -----|
-///   | network partitions may drop msgs  | all network links deliver msgs    |
-///   | Byzantine process faults may run  | Byzantine process faults may run  |
-///   |                                   |                                   |
-///   | phase timer elapses               | each correct reporter must        |
-///   |                                   | finalize above its baseline       |
-///   |                                   |                                   |
-///   +-----------------------------------+-----------------------------------+
-///                                       |
-///                                       +-- record finalization baselines,
-///                                           then reach GST
-///
-///   (alternative) Phase 1 early completion: every non-byzantine reporter
-///   reaches `required_containers` before the phase timer elapses. The run
-///   skips GST and Phase 2, going straight to safety invariants.
-/// ```
-///
-/// If all non-byzantine reporters reach `required_containers` during Phase 1,
-/// the run skips the post-GST check and proceeds directly to safety invariants.
+/// Run a single ByzzFuzz iteration.
 pub fn run<P: Simplex>(mut input: crate::FuzzInput)
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -386,29 +336,27 @@ where
         };
 
         if !phase1_early_complete {
-            // Phase 2: record each correct reporter's finalization baseline,
-            // reach GST, then require a strictly newer finalization.
-            // Keep `baselines` separate so timeout diagnostics can
-            // re-subscribe and report each node's current view.
-            let mut baselines: Vec<(usize, u64)> = Vec::with_capacity(non_byzantine.len());
+            // Phase 2 targets are recorded before GST for stable diagnostics.
+            let mut watch_targets: Vec<(usize, u64, u64)> =
+                Vec::with_capacity(non_byzantine.len());
             let mut watcher_inputs = Vec::with_capacity(non_byzantine.len());
             for &i in &non_byzantine {
                 let (latest, monitor): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
                 let baseline = latest.get();
-                baselines.push((i, baseline));
-                watcher_inputs.push((i, baseline, latest, monitor));
+                let target = if baseline < required_containers {
+                    required_containers
+                } else {
+                    baseline
+                        .checked_add(1)
+                        .expect("finalized view reached u64::MAX")
+                };
+                watch_targets.push((i, baseline, target));
+                watcher_inputs.push((i, target, latest, monitor));
             }
 
-            // GST: disable partition drops. Prune pre-GST faults at views
-            // strictly above `byzantine_rnd` so the appended `[byzantine_rnd
-            // + 1, ...]` post-GST schedule cannot double-fire on the same
-            // view, then append fresh process faults so Phase 2 actually
-            // exercises the post-GST adversary. Pre-GST faults at views
-            // `<= byzantine_rnd` are retained: a fault at exactly
-            // `byzantine_rnd` may still fire (the cell can equal `V` because
-            // the byzantine *received* a `V`-tagged message, not because it
-            // already sent every outbound `V` message), and that is the
-            // intended Phase-1-leftover behavior, not a clean slate.
+            // GST disables partition drops. Keep already-reachable process
+            // faults, then append future faults so the byzantine sender
+            // remains adversarial after GST.
             let byzantine_rnd = byzantine_view.get();
             let pruned_pre_gst_proc_faults = {
                 let mut schedule = proc_schedule.lock();
@@ -433,16 +381,15 @@ where
             ));
             gate.reach_gst();
 
-            // Phase 2 watchers: true means the reporter advanced strictly
-            // past its finalization baseline before the post-GST window closed.
+            // Phase 2 watchers return true once their reporter reaches target.
             let mut watchers = Vec::new();
-            for (i, baseline, mut latest, mut monitor) in watcher_inputs {
+            for (i, target, mut latest, mut monitor) in watcher_inputs {
                 watchers.push(
                     context
                         .child("byzzfuzz_post_gst_watcher")
                         .with_attribute("index", i)
                         .spawn(move |_| async move {
-                            while latest.get() <= baseline {
+                            while latest.get() < target {
                                 let Some(next) = monitor.recv().await else {
                                     return false;
                                 };
@@ -462,10 +409,13 @@ where
 
             if !phase2_complete {
                 let mut diag = String::new();
-                for &(i, baseline) in &baselines {
+                for &(i, baseline, target) in &watch_targets {
                     let (latest, _): (View, ViewReceiver<View>) = reporters[i].subscribe().await;
                     let current = latest.get();
-                    let _ = write!(diag, " node{i}={{baseline={baseline} current={current}}}");
+                    let _ = write!(
+                        diag,
+                        " node{i}={{baseline={baseline} target={target} current={current}}}"
+                    );
                 }
                 panic!(
                     "byzzfuzz: no post-GST progress within {:?};{diag}",
