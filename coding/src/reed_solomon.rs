@@ -205,12 +205,12 @@ const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
     shard_len
 }
 
-/// Extract data from encoded shards.
+/// Extract data from encoded shards and verify that original shards use the canonical width.
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
 /// This function copies only the data bytes while validating trailing zero
 /// padding directly from the shard slices.
-fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
+fn extract_data(shards: &[&[u8]], k: usize, shard_len: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
     let data_len = read_data_len(shards)?;
     let mut data = Vec::with_capacity(data_len);
@@ -243,19 +243,7 @@ fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
         return Err(Error::Inconsistent);
     }
 
-    Ok(data)
-}
-
-/// Extract data and verify that original shards use the canonical width.
-///
-/// `extract_data` validates the length prefix and zero padding, but zero
-/// padding alone does not make a commitment unique. A proposer can choose a
-/// larger even shard width, append zeroes, and produce a different valid root
-/// for the same payload. Checking the canonical shard width is sufficient
-/// because `extract_data` already validates the canonical byte layout within
-/// that width.
-fn extract_canonical_data(shards: &[&[u8]], k: usize, shard_len: usize) -> Result<Vec<u8>, Error> {
-    let data = extract_data(shards, k)?;
+    // Validate that the original shards use the canonical shard width.
     if canonical_shard_len(data.len(), k) != shard_len {
         return Err(Error::Inconsistent);
     }
@@ -471,7 +459,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     {
         shards[idx] = shard;
     }
-    let data = extract_canonical_data(&shards, k, shard_len)?;
+    let data = extract_data(&shards, k, shard_len)?;
 
     // Re-encode recovered data to get recovery shards
     let mut encoder = Cached::take(
@@ -1224,7 +1212,7 @@ mod tests {
         let tree = builder.build();
         let root = tree.root();
 
-        let pieces = [0u16, 1u16, 2u16, 3u16]
+        let pieces = (0u16..=3u16)
             .into_iter()
             .map(|i| {
                 let proof = tree.proof(i as u32).unwrap();
