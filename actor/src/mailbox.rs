@@ -130,12 +130,12 @@ cfg_if::cfg_if! {
             reserved: usize,
         }
 
-        struct ReadyQueue<T> {
+        struct Ready<T> {
             state: Mutex<ReadyState<T>>,
             capacity: usize,
         }
 
-        impl<T> ReadyQueue<T> {
+        impl<T> Ready<T> {
             fn new(capacity: usize) -> Self {
                 Self {
                     state: Mutex::new(ReadyState {
@@ -194,11 +194,11 @@ cfg_if::cfg_if! {
             mutex.lock()
         }
 
-        struct ReadyQueue<T> {
+        struct Ready<T> {
             queue: ArrayQueue<T>,
         }
 
-        impl<T> ReadyQueue<T> {
+        impl<T> Ready<T> {
             fn new(capacity: usize) -> Self {
                 Self {
                     queue: ArrayQueue::new(capacity),
@@ -220,12 +220,12 @@ cfg_if::cfg_if! {
     }
 }
 
-struct OverflowState<T> {
+struct Overflow<T> {
     queue: Mutex<VecDeque<T>>,
     activity: AtomicUsize,
 }
 
-impl<T> OverflowState<T> {
+impl<T> Overflow<T> {
     #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
@@ -242,7 +242,7 @@ impl<T> OverflowState<T> {
         self.activity.load(Ordering::Relaxed) == OVERFLOW_HAS_MESSAGES
     }
 
-    fn try_ready(&self, ready: &ReadyQueue<T>, message: T) -> Result<(), T> {
+    fn try_ready(&self, ready: &Ready<T>, message: T) -> Result<(), T> {
         // If a racing sender begins overflow mutation after this load, both sends
         // are concurrent and may be observed in either order.
         if self.is_active() {
@@ -253,7 +253,7 @@ impl<T> OverflowState<T> {
 
     fn try_ready_if_overflow_empty(
         queue: &VecDeque<T>,
-        ready: &ReadyQueue<T>,
+        ready: &Ready<T>,
         message: T,
     ) -> Result<(), T> {
         // The fast-path push may have observed stale ready fullness. Retry
@@ -277,7 +277,7 @@ impl<T> OverflowState<T> {
         }
     }
 
-    fn enqueue(&self, ready: &ReadyQueue<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback
+    fn enqueue(&self, ready: &Ready<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback
     where
         T: Policy,
     {
@@ -301,7 +301,7 @@ impl<T> OverflowState<T> {
         feedback
     }
 
-    fn refill_ready(queue: &mut VecDeque<T>, ready: &ReadyQueue<T>) {
+    fn refill_ready(queue: &mut VecDeque<T>, ready: &Ready<T>) {
         while let Some(message) = queue.pop_front() {
             match ready.push(message) {
                 Ok(()) => {}
@@ -313,7 +313,7 @@ impl<T> OverflowState<T> {
         }
     }
 
-    fn refill(&self, ready: &ReadyQueue<T>) {
+    fn refill(&self, ready: &Ready<T>) {
         if !self.has_refillable_messages() {
             return;
         }
@@ -356,8 +356,8 @@ impl Drop for Mutation<'_> {
 }
 
 struct State<T> {
-    ready: ReadyQueue<T>,
-    overflow: OverflowState<T>,
+    ready: Ready<T>,
+    overflow: Overflow<T>,
     closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
@@ -504,8 +504,8 @@ impl<T> Drop for Receiver<T> {
 /// Create a mailbox with a bounded ready queue and policy-managed overflow.
 pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let state = Arc::new(State {
-        ready: ReadyQueue::new(capacity.get()),
-        overflow: OverflowState::new(),
+        ready: Ready::new(capacity.get()),
+        overflow: Overflow::new(),
         closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),
