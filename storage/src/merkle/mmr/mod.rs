@@ -215,6 +215,8 @@ impl merkle::Family for Family {
 }
 
 impl Graftable for Family {
+    const HAS_PENDING_CHUNKS: bool = false;
+
     fn chunk_peaks(
         size: Position,
         chunk_idx: u64,

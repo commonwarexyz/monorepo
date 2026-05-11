@@ -461,7 +461,7 @@ impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
     }
 }
 
-impl<F: Family, D: Digest> Read for RangeProof<F, D> {
+impl<F: Graftable, D: Digest> Read for RangeProof<F, D> {
     /// The maximum number of digests in the embedded Merkle proof.
     type Cfg = usize;
 
@@ -471,6 +471,12 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
         let pending_chunk_digest = Option::<D>::read(buf)?;
+        if pending_chunk_digest.is_some() && !F::HAS_PENDING_CHUNKS {
+            return Err(commonware_codec::Error::Invalid(
+                "RangeProof",
+                "pending_chunk_digest present for family without pending chunks",
+            ));
+        }
         let partial_chunk_digest = Option::<D>::read(buf)?;
         let ops_root = D::read(buf)?;
         Ok(Self {
@@ -585,7 +591,7 @@ impl<F: Family, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N
     }
 }
 
-impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
+impl<F: Graftable, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
     /// The maximum number of digests forwarded to the embedded range proof.
     type Cfg = usize;
 
@@ -728,6 +734,39 @@ mod tests {
         assert_eq!(decoded, proof);
         assert!(
             RangeProof::<F, sha256::Digest>::decode_cfg(encoded, &(total_digests - 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn test_range_proof_decode_rejects_pending_for_mmr() {
+        const MAX_DIGESTS: usize = 64;
+
+        let proof = RangeProof {
+            proof: Proof::<mmb::Family, sha256::Digest> {
+                leaves: mmb::Location::new(42),
+                inactive_peaks: 0,
+                digests: vec![Sha256::hash(b"d0")],
+            },
+            pending_chunk_digest: Some(Sha256::hash(b"pending")),
+            partial_chunk_digest: None,
+            ops_root: Sha256::hash(b"ops-root"),
+        };
+        let encoded = proof.encode();
+
+        // MMB allows pending_chunk_digest.
+        assert!(RangeProof::<mmb::Family, sha256::Digest>::decode_cfg(
+            encoded.clone(),
+            &MAX_DIGESTS
+        )
+        .is_ok());
+
+        // MMR rejects it on decode.
+        assert!(
+            RangeProof::<crate::merkle::mmr::Family, sha256::Digest>::decode_cfg(
+                encoded,
+                &MAX_DIGESTS
+            )
+            .is_err()
         );
     }
 
@@ -1803,6 +1842,105 @@ mod tests {
             let element = hasher.digest(&(*loc).to_be_bytes());
             let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
             assert!(proof.verify(&hasher, loc, &[element], &[chunk], &root));
+        });
+    }
+
+    #[test_traced]
+    fn test_mmr_range_proof_rejects_pending_chunk_digest() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            type F = crate::merkle::mmr::Family;
+            const N: usize = 1;
+
+            let hasher = qmdb::hasher::<Sha256>();
+            let grafting_height = grafting::height::<N>();
+            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+
+            let leaf_count = chunk_bits * 2;
+            let mut status = BitMap::<N>::new();
+            for _ in 0..leaf_count {
+                status.push(true);
+            }
+            let ops = build_test_mem(&hasher, crate::merkle::mmr::mem::Mmr::new(), leaf_count);
+            let ops_root = ops.root(&hasher, 0).unwrap();
+
+            let graftable = grafting::graftable_chunks::<F>(
+                *Location::<F>::try_from(ops.size()).unwrap(),
+                grafting_height,
+            )
+            .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+                as usize;
+            let chunk_inputs: Vec<_> = (0..graftable)
+                .map(|idx| {
+                    (
+                        idx,
+                        <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, idx),
+                    )
+                })
+                .collect();
+            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+                &hasher,
+                &ops,
+                chunk_inputs,
+                &Sequential,
+            )
+            .await
+            .unwrap();
+            leaf_digests.sort_by_key(|(idx, _)| *idx);
+
+            let grafted_hasher =
+                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+            let mut grafted = Mem::<F, sha256::Digest>::new();
+            let merkleized = {
+                let mut batch = grafted.new_batch();
+                for (_, digest) in leaf_digests {
+                    batch = batch.add_leaf_digest(digest);
+                }
+                batch.merkleize(&grafted, &grafted_hasher)
+            };
+            grafted.apply_batch(&merkleized).unwrap();
+
+            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+            let ops_leaves = Location::<F>::try_from(ops.size()).unwrap();
+            let root = db::compute_db_root::<F, Sha256, _, _, N>(
+                &hasher,
+                &status,
+                &storage,
+                ops_leaves,
+                None,
+                Location::new(0),
+                &ops_root,
+            )
+            .await
+            .unwrap();
+
+            let loc = crate::merkle::mmr::Location::new(0);
+            let proof = RangeProof::new(
+                &hasher,
+                &status,
+                &storage,
+                Location::new(0),
+                loc..loc + 1,
+                ops_root,
+            )
+            .await
+            .unwrap();
+
+            assert!(
+                proof.pending_chunk_digest.is_none(),
+                "MMR should never produce a pending chunk"
+            );
+
+            let element = hasher.digest(&0u64.to_be_bytes());
+            let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
+
+            // Inject a fake pending_chunk_digest and confirm verification rejects it.
+            let mut tampered = proof;
+            tampered.pending_chunk_digest = Some(hasher.digest(b"fake pending"));
+            assert!(
+                !tampered.verify(&hasher, loc, &[element], &[chunk], &root),
+                "MMR proof with pending_chunk_digest should not verify"
+            );
         });
     }
 

@@ -228,6 +228,8 @@ impl merkle::Family for Family {
 }
 
 impl Graftable for Family {
+    const HAS_PENDING_CHUNKS: bool = true;
+
     fn peak_birth_size(pos: Position, height: u32) -> u64 {
         if height == 0 {
             // Leaves have no merge delay; born as soon as appended.

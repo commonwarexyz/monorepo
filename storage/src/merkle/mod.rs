@@ -149,6 +149,13 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
 /// together with ops subtree roots. These methods provide the coordinate conversions and
 /// chunk-to-peak mappings required by that process.
 pub trait Graftable: Family {
+    /// Whether this family can have pending bitmap chunks (bit-complete but not yet graftable).
+    ///
+    /// MMR never has pending chunks because a chunk's height-`gh` ancestor is born the moment
+    /// the chunk is bit-complete. MMB has a delayed-merge gap that allows at most one pending
+    /// chunk at a time.
+    const HAS_PENDING_CHUNKS: bool;
+
     /// Return the nodes that collectively cover the leaf range of a bitmap chunk in a structure of
     /// the given `size`.
     ///
