@@ -238,10 +238,6 @@ impl<T> Overflow<T> {
         self.activity.load(Ordering::Relaxed) != 0
     }
 
-    fn has_refillable_messages(&self) -> bool {
-        self.activity.load(Ordering::Relaxed) == OVERFLOW_HAS_MESSAGES
-    }
-
     fn try_ready(&self, ready: &Ready<T>, message: T) -> Result<(), T> {
         // If a racing sender begins overflow mutation after this load, both sends
         // are concurrent and may be observed in either order
@@ -287,7 +283,7 @@ impl<T> Overflow<T> {
     }
 
     fn refill(&self, ready: &Ready<T>) {
-        if !self.has_refillable_messages() {
+        if self.activity.load(Ordering::Relaxed) != OVERFLOW_HAS_MESSAGES {
             return;
         }
 
@@ -443,9 +439,7 @@ impl<T> Receiver<T> {
 
     fn pop(&mut self) -> Option<T> {
         if let Some(message) = self.state.ready.pop() {
-            if self.state.overflow.has_refillable_messages() {
-                self.state.overflow.refill(&self.state.ready);
-            }
+            self.state.overflow.refill(&self.state.ready);
             return Some(message);
         }
 
