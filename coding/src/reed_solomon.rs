@@ -86,36 +86,24 @@ impl<D: Digest> Chunk<D> {
             .verify_element_inclusion(&mut hasher, &shard_digest, self.index as u32, root)
             .ok()?;
 
-        Some(CheckedChunk::new(
-            *root,
-            self.shard.clone(),
-            self.index,
-            shard_digest,
-        ))
+        Some(CheckedChunk::new(*root, self.shard.clone(), self.index))
     }
 }
 
 /// A shard that has been checked against a commitment.
 ///
-/// This stores the shard digest computed during [`Chunk::verify`] and the
-/// commitment root it was verified against. The root is checked at decode
-/// time to prevent cross-commitment shard mixing.
+/// This stores the commitment root that [`Chunk::verify`] checked against.
+/// The root is checked at decode time to prevent cross-commitment shard mixing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedChunk<D: Digest> {
     root: D,
     shard: Bytes,
     index: u16,
-    digest: D,
 }
 
 impl<D: Digest> CheckedChunk<D> {
-    const fn new(root: D, shard: Bytes, index: u16, digest: D) -> Self {
-        Self {
-            root,
-            shard,
-            index,
-            digest,
-        }
+    const fn new(root: D, shard: Bytes, index: u16) -> Self {
+        Self { root, shard, index }
     }
 }
 
@@ -205,7 +193,7 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
 /// `k` original shards, and rounds up to an even width required by
 /// `reed-solomon-simd`. Decode uses the same calculation to reject commitments
 /// that decode to the same payload with a non-canonical shard width.
-fn canonical_shard_len(data_len: usize, k: usize) -> usize {
+const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
     let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
 
@@ -425,7 +413,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = first.shard.len();
-    let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
+    let mut seen_shards = vec![false; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     let mut provided = 0usize;
@@ -439,13 +427,13 @@ fn decode<'a, H: Hasher, S: Strategy>(
         if index >= total {
             return Err(Error::InvalidIndex(index));
         }
-        let digest_slot = &mut shard_digests[index as usize];
-        if digest_slot.is_some() {
+        let seen = &mut seen_shards[index as usize];
+        if *seen {
             return Err(Error::DuplicateIndex(index));
         }
 
-        // Add to provided shards and retain the checked digest for this index.
-        *digest_slot = Some(chunk.digest);
+        // Add to provided shards.
+        *seen = true;
         if index < min {
             provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
@@ -500,28 +488,15 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
     shards.extend(encoding.recovery_iter());
 
-    // Build Merkle tree
-    for (i, digest) in strategy.map_init_collect_vec(
-        shard_digests
-            .iter()
-            .enumerate()
-            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
-        H::new,
-        |hasher, i| {
-            hasher.update(shards[i]);
-            (i, hasher.finalize())
-        },
-    ) {
-        shard_digests[i] = Some(digest);
-    }
-
+    // Build Merkle tree from the canonical codeword.
     let mut builder = Builder::<H>::new(n);
-    shard_digests
-        .into_iter()
-        .map(|digest| digest.expect("digest must be present for every shard"))
-        .for_each(|digest| {
-            builder.add(&digest);
-        });
+    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
+        hasher.update(shard);
+        hasher.finalize()
+    });
+    for hash in &shard_hashes {
+        builder.add(hash);
+    }
     let tree = builder.build();
 
     // Confirm root is consistent
@@ -703,8 +678,7 @@ mod tests {
         chunk: Chunk<<Sha256 as Hasher>::Digest>,
     ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
         let Chunk { shard, index, .. } = chunk;
-        let digest = Sha256::hash(&shard);
-        CheckedChunk::new(root, shard, index, digest)
+        CheckedChunk::new(root, shard, index)
     }
 
     fn build_chunks(
@@ -1055,7 +1029,6 @@ mod tests {
             let mut shard = pieces[1].shard.to_vec();
             shard[0] ^= 0xFF; // Flip bits in first byte
             pieces[1].shard = shard.into();
-            pieces[1].digest = Sha256::hash(&pieces[1].shard);
         }
 
         // Try to decode with the tampered chunk
@@ -1235,6 +1208,43 @@ mod tests {
             .collect::<Vec<_>>();
 
         let result = decode::<Sha256, _>(total, min, &oversized_root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_extra_non_canonical_recovery_rejected() {
+        let data = b"canonical originals with bad recovery";
+        let total = 6u16;
+        let min = 3u16;
+
+        let (_root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        let mut shards = chunks
+            .iter()
+            .map(|chunk| chunk.shard.to_vec())
+            .collect::<Vec<_>>();
+        shards[min as usize][0] ^= 0xFF;
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        let pieces = [0u16, 1u16, 2u16, 3u16]
+            .into_iter()
+            .map(|i| {
+                let proof = tree.proof(i as u32).unwrap();
+                checked(
+                    root,
+                    Chunk::new(shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
