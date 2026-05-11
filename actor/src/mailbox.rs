@@ -1,5 +1,11 @@
 //! Bounded message queue with caller-managed overflow.
 //!
+//! Internally, the mailbox is split into two queues: a bounded `ready` queue
+//! that producers push to and the receiver pops from, and an unbounded
+//! `overflow` queue that holds messages displaced when ready is full. A
+//! [`Policy`] decides what enters overflow and what is retained or dropped
+//! when overflow is contended.
+//!
 //! ```text
 //!                          senders
 //!                             |
