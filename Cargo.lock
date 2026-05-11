@@ -1005,6 +1005,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-actor"
+version = "2026.4.0"
+dependencies = [
+ "cfg-if",
+ "commonware-macros",
+ "commonware-utils",
+ "criterion",
+ "crossbeam-queue",
+ "futures",
+ "futures-util",
+ "loom",
+ "parking_lot",
+]
+
+[[package]]
 name = "commonware-bridge"
 version = "2026.4.0"
 dependencies = [
@@ -3427,6 +3442,7 @@ checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
 dependencies = [
  "cfg-if",
  "generator",
+ "pin-utils",
  "scoped-tls",
  "tracing",
  "tracing-subscriber",
