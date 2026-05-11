@@ -1534,13 +1534,13 @@ where
     /// loss detected at `apply_batch` time.
     #[tracing::instrument(
         name = "qmdb::any::batch::new",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(
             source = "batch",
-            base_size = self.base_size,
-            total_size = self.total_size,
-            ancestor_batches = self.ancestor_diff_ends.len() as u64,
+            base_size = self.bounds.base_size,
+            total_size = self.bounds.total_size,
+            ancestor_batches = self.ancestor_diffs.len() as u64,
         ),
     )]
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S>
@@ -1653,7 +1653,7 @@ where
     /// Create a new speculative batch of operations with this database as its parent.
     #[tracing::instrument(
         name = "qmdb::any::batch::new",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(
             source = "db",
@@ -1702,10 +1702,10 @@ where
         level = "info",
         skip_all,
         fields(
-            batch_total_size = batch.total_size,
-            batch_base_size = batch.base_size,
+            batch_total_size = batch.bounds.total_size,
+            batch_base_size = batch.bounds.base_size,
             db_size = *self.last_commit_loc + 1,
-            ancestor_batches = batch.ancestor_diff_ends.len() as u64,
+            ancestor_batches = batch.ancestor_diffs.len() as u64,
         ),
     )]
     pub async fn apply_batch(
