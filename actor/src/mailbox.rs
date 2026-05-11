@@ -401,6 +401,10 @@ impl<T: Policy> Sender<T> {
 }
 
 /// Receiver half of a mailbox.
+///
+/// Dropping the receiver closes the mailbox but does not drain buffered messages.
+/// Messages already in ready or overflow, or racing through an in-flight enqueue,
+/// remain owned by shared mailbox state until the last sender is dropped.
 pub struct Receiver<T> {
     state: Arc<State<T>>,
 }
