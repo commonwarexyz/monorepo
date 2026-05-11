@@ -46,6 +46,18 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
         .map_err(|_| Error::TooManyTotalShards(total))
 }
 
+fn canonical_shard_len(data_len: usize, k: usize) -> usize {
+    let prefixed_len = u32::SIZE + data_len;
+    let mut shard_len = prefixed_len.div_ceil(k);
+
+    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
+    if !shard_len.is_multiple_of(2) {
+        shard_len += 1;
+    }
+
+    shard_len
+}
+
 /// A piece of data from a Reed-Solomon encoded object.
 #[derive(Debug, Clone)]
 pub struct Chunk<D: Digest> {
@@ -187,15 +199,8 @@ where
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
 fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
-    // Compute shard length
     let data_len = data.remaining();
-    let prefixed_len = u32::SIZE + data_len;
-    let mut shard_len = prefixed_len.div_ceil(k);
-
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
-    if !shard_len.is_multiple_of(2) {
-        shard_len += 1;
-    }
+    let shard_len = canonical_shard_len(data_len, k);
 
     // Prepare data
     let length_bytes = (data_len as u32).to_be_bytes();
@@ -457,6 +462,14 @@ fn decode<'a, H: Hasher, S: Strategy>(
         shards[idx] = shard;
     }
 
+    // Reject non-canonical original layouts before re-encoding. extract_data()
+    // validates zero padding; the remaining invariant is the minimal even shard
+    // size derived from the decoded payload.
+    let data = extract_data(&shards, k)?;
+    if canonical_shard_len(data.len(), k) != shard_len {
+        return Err(Error::Inconsistent);
+    }
+
     // Re-encode recovered data to get recovery shards
     let mut encoder = Cached::take(
         &CACHED_ENCODER,
@@ -501,8 +514,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::Inconsistent);
     }
 
-    // Extract original data
-    extract_data(&shards, k)
+    Ok(data)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
@@ -997,6 +1009,59 @@ mod tests {
         }
 
         let result = decode::<Sha256, _>(total, min, &non_canonical_root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_oversized_zero_padded_shards_rejected() {
+        let data = b"X";
+        let total = 6u16;
+        let min = 3u16;
+        let k = min as usize;
+        let m = total as usize - k;
+
+        let oversized_shard_len = 4usize;
+        let mut padded = vec![0u8; k * oversized_shard_len];
+        padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
+        padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(data);
+
+        let mut encoder = ReedSolomonEncoder::new(k, m, oversized_shard_len).unwrap();
+        for shard in padded.chunks(oversized_shard_len) {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let recovery = encoder.encode().unwrap();
+
+        let mut oversized_shards: Vec<Vec<u8>> = padded
+            .chunks(oversized_shard_len)
+            .map(|s| s.to_vec())
+            .collect();
+        oversized_shards.extend(recovery.recovery_iter().map(|s| s.to_vec()));
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &oversized_shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let oversized_tree = builder.build();
+        let oversized_root = oversized_tree.root();
+
+        let (canonical_root, _) =
+            encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        assert_ne!(oversized_root, canonical_root);
+
+        let pieces = [0u16, 1u16, 4u16]
+            .into_iter()
+            .map(|i| {
+                let proof = oversized_tree.proof(i as u32).unwrap();
+                checked(
+                    oversized_root,
+                    Chunk::new(oversized_shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &oversized_root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
