@@ -574,7 +574,7 @@ where
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
     // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.
-    let overlay_ops_leaves = Location::<F>::new(*inner.new_last_commit_loc + 1);
+    let overlay_ops_leaves = Location::<F>::new(inner.bounds.total_size);
 
     // Distinguish three counters:
     //   - new_complete_chunks: chunks with all bits filled in the post-batch bitmap
