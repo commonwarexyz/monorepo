@@ -97,8 +97,9 @@ where
     D: Digest,
     Update<K, V>: Read,
 {
-    /// `(max_digests, update_cfg, value_cfg)`: total digest cap for the embedded operation
-    /// proof, the read configuration for [Update], and the read configuration for the value type.
+    /// `(max_digests, update_cfg, value_cfg)`: Merkle digest cap forwarded to the embedded
+    /// operation proof, the read configuration for [Update], and the read configuration for the
+    /// value type.
     type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
 
     fn read_cfg(
@@ -919,7 +920,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_key_value_proof_codec_enforces_total_digest_budget() {
+    fn test_key_value_proof_codec_enforces_merkle_digest_budget() {
         let proof = CodecKeyValueProof {
             proof: sample_op_proof(),
             next_key: Sha256::hash(b"next-key"),
@@ -957,7 +958,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_exclusion_proof_codec_enforces_total_digest_budget() {
+    fn test_exclusion_proof_codec_enforces_merkle_digest_budget() {
         let cases = [
             CodecExclusionProof::KeyValue(
                 sample_op_proof(),

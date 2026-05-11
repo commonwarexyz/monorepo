@@ -462,7 +462,7 @@ impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
 }
 
 impl<F: Family, D: Digest> Read for RangeProof<F, D> {
-    /// The maximum number of digests allowed across the range proof.
+    /// The maximum number of digests in the embedded Merkle proof.
     type Cfg = usize;
 
     fn read_cfg(
@@ -586,7 +586,7 @@ impl<F: Family, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N
 }
 
 impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
-    /// The total digest cap forwarded to the embedded range proof.
+    /// The maximum number of digests forwarded to the embedded range proof.
     type Cfg = usize;
 
     fn read_cfg(
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn test_range_proof_codec_enforces_total_digest_budget() {
+    fn test_range_proof_codec_enforces_merkle_digest_budget() {
         type F = mmb::Family;
 
         let proof = RangeProof {
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_proof_codec_enforces_total_digest_budget() {
+    fn test_operation_proof_codec_enforces_merkle_digest_budget() {
         type F = mmb::Family;
         const N: usize = 32;
 
