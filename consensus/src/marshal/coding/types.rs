@@ -297,14 +297,21 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
-    type Cfg = <B as Read>::Cfg;
+    type Cfg = (<B as Read>::Cfg, u32);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        block_cfg: &Self::Cfg,
+        (block_cfg, expected_shards): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, block_cfg)?;
         let config = CodingConfig::read(buf)?;
+
+        if config.total_shards() != *expected_shards {
+            return Err(commonware_codec::Error::Invalid(
+                "CodedBlock",
+                "shard count mismatch",
+            ));
+        }
 
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
@@ -530,7 +537,7 @@ mod test {
     use super::*;
     use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
     use bytes::Buf;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, Error};
     use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
     use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
@@ -616,9 +623,37 @@ mod test {
         let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
-        let decoded = CodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
+        let decoded =
+            CodedBlock::<Block, RS, H>::decode_cfg(encoded, &((), CONFIG.total_shards())).unwrap();
 
         assert!(coded_block == decoded);
+    }
+
+    #[test]
+    fn test_coded_block_decode_rejects_shard_count_mismatch() {
+        const EXPECTED_CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+        const EMBEDDED_CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(2),
+        };
+
+        let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
+        let encoded = (block, EMBEDDED_CONFIG).encode();
+
+        let Err(err) = CodedBlock::<Block, RS, H>::decode_cfg(
+            encoded.as_ref(),
+            &((), EXPECTED_CONFIG.total_shards()),
+        ) else {
+            panic!("shard count mismatch should be rejected");
+        };
+
+        assert!(
+            matches!(err, Error::Invalid("CodedBlock", "shard count mismatch")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

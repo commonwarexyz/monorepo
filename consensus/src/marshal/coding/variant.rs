@@ -10,6 +10,7 @@ use crate::{
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
+use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
@@ -52,6 +53,13 @@ where
     fn parent_commitment(block: &Self::Block) -> Self::Commitment {
         // Parent commitment is embedded in the consensus context.
         block.context().parent.1
+    }
+
+    fn decode_block_cfg(
+        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+        commitment: Self::Commitment,
+    ) -> <Self::Block as Read>::Cfg {
+        (block_cfg.clone(), commitment.config().total_shards())
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {

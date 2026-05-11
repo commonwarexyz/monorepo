@@ -9,6 +9,7 @@ use crate::{
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
+use commonware_codec::Read;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
@@ -41,6 +42,13 @@ where
     fn parent_commitment(block: &Self::Block) -> Self::Commitment {
         // In standard mode, commitments are digests, so parent commitment is parent digest.
         block.parent()
+    }
+
+    fn decode_block_cfg(
+        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+        _commitment: Self::Commitment,
+    ) -> <Self::Block as Read>::Cfg {
+        block_cfg.clone()
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
