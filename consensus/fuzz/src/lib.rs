@@ -1526,6 +1526,10 @@ fn install_byzzfuzz_panic_hook() {
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
+    // TODO: enabled it again after the application mock support forwarding policies
+    // or remove this mode entirely from fuzzing
+    input.forwarding = ForwardingPolicy::Disabled;
+
     let raw_bytes = input.raw_bytes.clone();
     if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
@@ -1570,7 +1574,11 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     }
 }
 
-pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
+pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(mut input: NodeFuzzInput) {
+    // TODO: enabled it again after the application mock support forwarding policies
+    // or remove this mode entirely from fuzzing
+    input.forwarding = ForwardingPolicy::Disabled;
+
     let raw_bytes_for_panic = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));
     if let Err(payload) = run_result {
