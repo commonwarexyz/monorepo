@@ -87,8 +87,9 @@ pub trait Policy: Sized {
 // Useful states:
 // - `activity == 0`: no published overflow and no active overflow mutation, so
 //   senders may try the direct ready fast path.
-// - `activity == OVERFLOW_HAS_MESSAGES`: overflow has published messages and no
-//   active mutation, so the receiver may try to refill ready.
+// - `activity & OVERFLOW_HAS_MESSAGES != 0`: overflow has published messages,
+//   so the receiver may try to refill ready. The overflow lock serializes
+//   refill with any active mutation.
 // - `activity >= OVERFLOW_MUTATION`: at least one overflow mutation is active.
 //   The overflow lock still serializes queue access; this state only keeps
 //   lock-free fast-path/refill decisions from acting on a changing overflow
@@ -277,7 +278,7 @@ impl<T> Overflow<T> {
 
     fn refill(&self, ready: &Ready<T>) {
         // Skip the overflow lock unless non-empty overflow was published.
-        if self.activity.load(Ordering::Relaxed) != OVERFLOW_HAS_MESSAGES {
+        if self.activity.load(Ordering::Relaxed) & OVERFLOW_HAS_MESSAGES == 0 {
             return;
         }
 
@@ -421,7 +422,7 @@ impl<T> Receiver<T> {
         }
 
         if self.is_disconnected() {
-            return Poll::Ready(None);
+            return Poll::Ready(self.pop());
         }
 
         register_waker(&self.state.waker, cx.waker());
@@ -433,7 +434,7 @@ impl<T> Receiver<T> {
         }
 
         if self.is_disconnected() {
-            Poll::Ready(None)
+            Poll::Ready(self.pop())
         } else {
             Poll::Pending
         }
@@ -467,7 +468,7 @@ impl<T> Receiver<T> {
             return Ok(message);
         }
         if self.is_disconnected() {
-            return Err(TryRecvError::Disconnected);
+            return self.pop().ok_or(TryRecvError::Disconnected);
         }
         Err(TryRecvError::Empty)
     }
@@ -623,6 +624,40 @@ mod tests {
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
+    }
+
+    #[test]
+    fn try_recv_drains_buffered_messages_after_senders_drop() {
+        let (sender, mut receiver) = new(NZUsize!(1));
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        drop(sender);
+
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
+    }
+
+    #[test]
+    fn poll_recv_drains_buffered_messages_after_senders_drop() {
+        let (sender, mut receiver) = new(NZUsize!(1));
+        let wakes = Arc::new(WakeCounter::default());
+        let waker = waker_ref(&wakes);
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        drop(sender);
+
+        assert_eq!(
+            receiver.poll_recv(&mut cx),
+            Poll::Ready(Some(Message::Vote(1)))
+        );
+        assert_eq!(
+            receiver.poll_recv(&mut cx),
+            Poll::Ready(Some(Message::Buffered(2)))
+        );
+        assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
     }
 
     #[test]
@@ -1035,6 +1070,65 @@ mod loom_tests {
     }
 
     #[test]
+    fn sender_enqueue_then_drop_racing_poll_recv_drains_message() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            let enqueue = thread::spawn(move || {
+                assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            });
+
+            let poll = receiver.poll_recv(&mut cx);
+            enqueue.join().unwrap();
+
+            match poll {
+                Poll::Ready(Some(Message::Spill(0))) => {}
+                Poll::Pending => {
+                    assert!(wakes.load(Ordering::Acquire) > 0);
+                    assert_eq!(
+                        receiver.poll_recv(&mut cx),
+                        Poll::Ready(Some(Message::Spill(0)))
+                    );
+                }
+                Poll::Ready(None) => panic!("disconnected before draining message"),
+                Poll::Ready(Some(message)) => panic!("unexpected message: {message:?}"),
+            }
+
+            assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+        });
+    }
+
+    #[test]
+    fn sender_enqueue_then_drop_racing_try_recv_drains_message() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+
+            let enqueue = thread::spawn(move || {
+                assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            });
+
+            let result = receiver.try_recv();
+            enqueue.join().unwrap();
+
+            match result {
+                Ok(Message::Spill(0)) => {}
+                Err(TryRecvError::Empty) => {
+                    assert_eq!(receiver.try_recv(), Ok(Message::Spill(0)));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    panic!("disconnected before draining message");
+                }
+                Ok(message) => panic!("unexpected message: {message:?}"),
+            }
+
+            assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
+        });
+    }
+
+    #[test]
     fn handled_enqueue_wakes_registered_receiver() {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(1));
@@ -1262,6 +1356,42 @@ mod loom_tests {
             }
 
             assert_eq!(observed, vec![0, 1, 2, 3]);
+        });
+    }
+
+    #[test]
+    fn concurrent_overflow_mutation_does_not_hide_published_overflow() {
+        loom::model(|| {
+            let (sender, mut receiver) = new::<OrderedMessage>(NZUsize!(1));
+            assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Backoff);
+
+            let gate = Arc::new(AtomicUsize::new(0));
+            let overflow_sender = sender.clone();
+            let overflow_gate = gate.clone();
+            let overflow = thread::spawn(move || {
+                overflow_sender.enqueue(OrderedMessage::Coordinated(2, overflow_gate))
+            });
+
+            while gate.load(Ordering::Acquire) == 0 {
+                thread::yield_now();
+            }
+
+            let release_gate = gate.clone();
+            let release = thread::spawn(move || {
+                release_gate.store(2, Ordering::Release);
+            });
+
+            let receive = thread::spawn(move || {
+                assert_eq!(receiver.try_recv().map(value), Ok(0));
+                assert_eq!(receiver.try_recv().map(value), Ok(1));
+                receiver
+            });
+
+            release.join().unwrap();
+            let mut receiver = receive.join().unwrap();
+            assert_eq!(overflow.join().unwrap(), Feedback::Backoff);
+            assert_eq!(receiver.try_recv().map(value), Ok(2));
         });
     }
 
