@@ -1,8 +1,8 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
-use std::num::NonZeroUsize;
 
 fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
@@ -14,6 +14,7 @@ fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
             msgs.push(msg);
         }
         for concurrency in [1, 8].into_iter() {
+            let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
             c.bench_function(
                 &format!("{}/conc={} msgs={}", module_path!(), concurrency, n),
                 |b| {
@@ -32,10 +33,9 @@ fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
                             (public, messages, agg_sig)
                         },
                         |(public, messages, agg_sig)| {
-                            let combined_msg = if concurrency > 1 {
-                                let strategy =
-                                    Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                                ops::aggregate::combine_messages::<MinSig, _>(&messages, &strategy)
+                            #[allow(clippy::option_if_let_else)]
+                            let combined_msg = if let Some(rayon) = rayon.as_ref() {
+                                ops::aggregate::combine_messages::<MinSig, _>(&messages, rayon)
                             } else {
                                 ops::aggregate::combine_messages::<MinSig, _>(
                                     &messages,

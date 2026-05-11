@@ -12,6 +12,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
     thread_rng().fill(&mut msg);
     for n_signers in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
+            let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
             c.bench_function(
                 &format!("{}/pks={} conc={}", module_path!(), n_signers, concurrency),
                 |b| {
@@ -23,12 +24,12 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                                 let sig = signer.sign(namespace, &msg);
                                 assert!(batch.add(namespace, &msg, &signer.public_key(), &sig));
                             }
-                            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
-                            (batch, strategy)
+                            batch
                         },
-                        |(batch, strategy)| {
-                            if concurrency > 1 {
-                                black_box(batch.verify(&mut thread_rng(), &strategy))
+                        |batch| {
+                            #[allow(clippy::option_if_let_else)]
+                            if let Some(rayon) = rayon.as_ref() {
+                                black_box(batch.verify(&mut thread_rng(), rayon))
                             } else {
                                 black_box(batch.verify(&mut thread_rng(), &Sequential))
                             }

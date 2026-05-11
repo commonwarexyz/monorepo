@@ -10,6 +10,7 @@ fn bench_scheme_batch_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
     for n_messages in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
+            let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
             let mut msgs = Vec::with_capacity(n_messages);
             for _ in 0..n_messages {
                 let mut msg = [0u8; 32];
@@ -32,12 +33,12 @@ fn bench_scheme_batch_verify_same_signer(c: &mut Criterion) {
                                 let sig = signer.sign(namespace, msg);
                                 assert!(batch.add(namespace, msg, &signer.public_key(), &sig));
                             }
-                            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
-                            (batch, strategy)
+                            batch
                         },
-                        |(batch, strategy)| {
-                            if concurrency > 1 {
-                                black_box(batch.verify(&mut thread_rng(), &strategy))
+                        |batch| {
+                            #[allow(clippy::option_if_let_else)]
+                            if let Some(rayon) = rayon.as_ref() {
+                                black_box(batch.verify(&mut thread_rng(), rayon))
                             } else {
                                 black_box(batch.verify(&mut thread_rng(), &Sequential))
                             }
