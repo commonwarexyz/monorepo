@@ -723,15 +723,6 @@ mod tests {
         Ok(selected)
     }
 
-    fn fuzz_canonical_shard_len(data_len: usize, k: usize) -> usize {
-        let prefixed_len = u32::SIZE + data_len;
-        let mut shard_len = prefixed_len.div_ceil(k);
-        if !shard_len.is_multiple_of(2) {
-            shard_len += 1;
-        }
-        shard_len
-    }
-
     fn assert_decode_unique_commitment(
         total: u16,
         min: u16,
@@ -764,7 +755,7 @@ mod tests {
 
         let data_len = u.int_in_range(0..=FUZZ_MAX_DATA_LEN)?;
         let data = u.bytes(data_len)?.to_vec();
-        let canonical = fuzz_canonical_shard_len(data.len(), k);
+        let canonical = canonical_shard_len(data.len(), k);
         let extra_width = u.int_in_range(0..=FUZZ_MAX_EXTRA_SHARD_WIDTH / 2)? * 2;
         let shard_len = canonical + extra_width;
 
