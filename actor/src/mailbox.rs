@@ -251,7 +251,6 @@ impl<T> OverflowState<T> {
         ready.push(message)
     }
 
-    #[inline(always)]
     fn try_ready_if_overflow_empty(
         queue: &VecDeque<T>,
         ready: &ReadyQueue<T>,
@@ -264,6 +263,17 @@ impl<T> OverflowState<T> {
             ready.push(message)
         } else {
             Err(message)
+        }
+    }
+
+    fn apply_policy(queue: &mut VecDeque<T>, message: T) -> Feedback
+    where
+        T: Policy,
+    {
+        if T::handle(queue, message) {
+            Feedback::Backoff
+        } else {
+            Feedback::Dropped
         }
     }
 
@@ -312,17 +322,6 @@ impl<T> OverflowState<T> {
         let mut queue = lock(&self.queue);
         Self::refill_ready(&mut queue, ready);
         mutation.publish(&queue);
-    }
-
-    fn apply_policy(queue: &mut VecDeque<T>, message: T) -> Feedback
-    where
-        T: Policy,
-    {
-        if T::handle(queue, message) {
-            Feedback::Backoff
-        } else {
-            Feedback::Dropped
-        }
     }
 }
 
