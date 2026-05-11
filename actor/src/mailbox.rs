@@ -93,32 +93,14 @@ const OVERFLOW_MUTATION: usize = 2;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
+        use loom::future::AtomicWaker;
         use loom::sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, Mutex, MutexGuard,
         };
 
-        struct AtomicWaker {
-            waker: Mutex<Option<std::task::Waker>>,
-        }
-
-        impl AtomicWaker {
-            fn new() -> Self {
-                Self {
-                    waker: Mutex::new(None),
-                }
-            }
-
-            fn register(&self, waker: &std::task::Waker) {
-                *lock(&self.waker) = Some(waker.clone());
-            }
-
-            fn wake(&self) {
-                let waker = lock(&self.waker).take();
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
-            }
+        fn register_waker(waker: &AtomicWaker, task: &std::task::Waker) {
+            waker.register_by_ref(task);
         }
 
         fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -189,6 +171,10 @@ cfg_if::cfg_if! {
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         };
+
+        fn register_waker(waker: &AtomicWaker, task: &std::task::Waker) {
+            waker.register(task);
+        }
 
         fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
             mutex.lock()
@@ -428,7 +414,7 @@ impl<T> Receiver<T> {
             return Poll::Ready(None);
         }
 
-        self.state.waker.register(cx.waker());
+        register_waker(&self.state.waker, cx.waker());
 
         // A sender can enqueue and wake after the first pop but before this
         // waker is installed. Re-check before sleeping so the wake is not lost.
