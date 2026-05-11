@@ -12,9 +12,9 @@ use crate::{
     qmdb::{
         self,
         any::ValueEncoding,
-        build_snapshot_from_log, compact_witness,
+        build_snapshot_from_log,
         immutable::{self, CompactDb, Metrics, Operation},
-        operation::{Key, Operation as _},
+        operation::Key,
         sync::{self},
         Error,
     },
@@ -185,7 +185,7 @@ where
             return Err(Error::UnexpectedData(last_commit_loc));
         };
         let commit_codec_config = config.commit_codec_config.clone();
-        let commit_op_bytes =
+        let last_commit_op_bytes =
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
@@ -208,7 +208,7 @@ where
             last_commit_metadata,
             inactivity_floor_loc,
             root,
-            commit_op_bytes,
+            last_commit_op_bytes,
             last_commit_proof,
             pinned_nodes,
         )
@@ -219,7 +219,7 @@ where
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {
-        compact_witness::persist_cached_serve_state(self).await
+        self.persist_cached_witness().await
     }
 }
 

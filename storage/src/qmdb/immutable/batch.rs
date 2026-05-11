@@ -6,6 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
+        batch_chain,
         immutable::operation::Operation,
         operation::Key,
         Error,
@@ -16,7 +17,6 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_parallel::{Sequential, Strategy};
-use core::iter;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -82,31 +82,13 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
 
-    /// Total operations before this batch's own ops (DB + ancestor batches).
-    pub(super) base_size: u64,
-
-    /// Total operation count after this batch.
-    pub(super) total_size: u64,
-
-    /// The database size when the initial batch was created.
-    pub(super) db_size: u64,
-
     /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent
     /// is alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// 1:1 with `ancestor_diff_ends` (same length, same ordering).
+    /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
-    /// Each ancestor's `total_size` (operation count after that ancestor).
-    /// 1:1 with `ancestor_diffs`: `ancestor_diff_ends[i]` is the boundary for
-    /// `ancestor_diffs[i]`. A batch is committed when `ancestor_diff_ends[i] <= db_size`.
-    pub(super) ancestor_diff_ends: Vec<u64>,
-
-    /// The inactivity floor declared by each ancestor batch's commit operation.
-    /// 1:1 with `ancestor_diffs` and `ancestor_diff_ends`.
-    pub(super) ancestor_new_inactivity_floor_locs: Vec<Location<F>>,
-
-    /// The inactivity floor declared by this batch's commit operation.
-    pub(super) new_inactivity_floor_loc: Location<F>,
+    /// Position and floor bounds for this batch chain.
+    pub(super) bounds: batch_chain::Bounds<F>,
 }
 
 impl<F, H, K, V, S: Strategy> UnmerkleizedBatch<F, H, K, V, S>
@@ -295,17 +277,15 @@ where
             .expect("inactive_peaks computed from batch size");
 
         let mut ancestor_diffs = Vec::new();
-        let mut ancestor_diff_ends = Vec::new();
-        let mut ancestor_new_inactivity_floor_locs = Vec::new();
-        if let Some(parent) = &self.parent {
-            ancestor_diffs.push(Arc::clone(&parent.diff));
-            ancestor_diff_ends.push(parent.total_size);
-            ancestor_new_inactivity_floor_locs.push(parent.new_inactivity_floor_loc);
-            for batch in parent.ancestors() {
-                ancestor_diffs.push(Arc::clone(&batch.diff));
-                ancestor_diff_ends.push(batch.total_size);
-                ancestor_new_inactivity_floor_locs.push(batch.new_inactivity_floor_loc);
-            }
+        let mut ancestors = Vec::new();
+        for batch in
+            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+        {
+            ancestor_diffs.push(Arc::clone(&batch.diff));
+            ancestors.push(batch_chain::AncestorBounds {
+                floor: batch.bounds.inactivity_floor,
+                end: batch.bounds.total_size,
+            });
         }
 
         Arc::new(MerkleizedBatch {
@@ -313,13 +293,14 @@ where
             root,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
-            base_size: self.base_size,
-            total_size,
-            db_size: self.db_size,
             ancestor_diffs,
-            ancestor_diff_ends,
-            ancestor_new_inactivity_floor_locs,
-            new_inactivity_floor_loc: inactivity_floor,
+            bounds: batch_chain::Bounds {
+                base_size: self.base_size,
+                db_size: self.db_size,
+                total_size,
+                ancestors,
+                inactivity_floor,
+            },
         })
     }
 }
@@ -335,12 +316,7 @@ where
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
-        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        iter::from_fn(move || {
-            let batch = next.take()?;
-            next = batch.parent.as_ref().and_then(Weak::upgrade);
-            Some(batch)
-        })
+        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
@@ -440,8 +416,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
-            base_size: self.total_size,
-            db_size: self.db_size,
+            base_size: self.bounds.total_size,
+            db_size: self.bounds.db_size,
         }
     }
 }
@@ -466,13 +442,14 @@ where
             root: self.root,
             diff: Arc::new(Vec::new()),
             parent: None,
-            base_size: journal_size,
-            total_size: journal_size,
-            db_size: journal_size,
             ancestor_diffs: Vec::new(),
-            ancestor_diff_ends: Vec::new(),
-            ancestor_new_inactivity_floor_locs: Vec::new(),
-            new_inactivity_floor_loc: self.inactivity_floor_loc,
+            bounds: batch_chain::Bounds {
+                base_size: journal_size,
+                db_size: journal_size,
+                total_size: journal_size,
+                ancestors: Vec::new(),
+                inactivity_floor: self.inactivity_floor_loc,
+            },
         })
     }
 }
