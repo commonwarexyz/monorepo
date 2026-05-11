@@ -123,7 +123,7 @@ impl<const N: usize> ChunkOverlay<N> {
 ///
 /// False positives can arise two ways:
 /// - In the committed prefix, an uncommitted ancestor batch in the chain may have superseded
-///   the location — the committed bitmap doesn't reflect uncommitted shadows.
+///   the location -- the committed bitmap doesn't reflect uncommitted shadows.
 /// - Beyond the committed bitmap, locations are returned as sequential candidates (one per
 ///   index) without per-location filtering, so any inactive uncommitted op shows up here.
 pub(crate) fn next_candidate<F: Graftable, B: bitmap::Readable<N>, const N: usize>(
@@ -660,7 +660,7 @@ where
     let grafted_storage =
         grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
-    // index `new_complete_chunks` (the chunk currently being filled with bits) — distinct
+    // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
     // from `graftable_overlay` (the grafted-tree boundary). At G >= 3, partial and pending can
     // coexist; this branch only handles partial. The pending chunk (when present) is read
     // from the bitmap inside `compute_db_root` via `pending_chunk()`.
@@ -1361,7 +1361,7 @@ mod tests {
         lens
     }
 
-    /// Input is already a bare `Base` with no speculative layers on top — the loop body never
+    /// Input is already a bare `Base` with no speculative layers on top -- the loop body never
     /// runs, `kept` stays empty, and the result is a freshly constructed `Base` pointing at the
     /// same `Shared`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose
     /// chain was previously trimmed flat (e.g., immediately after an apply collapsed everything).
@@ -1377,7 +1377,7 @@ mod tests {
         }
     }
 
-    /// Every layer has been absorbed by prior applies — the loop breaks on the first iteration
+    /// Every layer has been absorbed by prior applies -- the loop breaks on the first iteration
     /// and `kept` stays empty, so the result is a bare `Base`. This is the steady-state
     /// "extend a just-applied batch" flow: after `apply_batch(A)`, `A`'s own layer has
     /// `overlay.len == committed` and the next `new_batch` call should start from a clean
@@ -1395,7 +1395,7 @@ mod tests {
         }
     }
 
-    /// Every layer is still speculative — the loop walks all the way to `Base` without
+    /// Every layer is still speculative -- the loop walks all the way to `Base` without
     /// breaking, and `kept` holds every overlay. The rebuilt chain is structurally equivalent
     /// to the input (same overlay lens, same shared terminal). Real-world trigger: speculating
     /// multiple batches deep (A, then B off A, then C off B) without `apply_batch` in between.
@@ -1409,7 +1409,7 @@ mod tests {
         assert_eq!(chain_overlays(&result), vec![64, 96]);
     }
 
-    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix — the
+    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix -- the
     /// dominant pattern in chained growth. The loop collects the one uncommitted overlay, and
     /// the rebuild produces `Layer(Base, overlay_B)`. Also verifies the rebuilt layer carries
     /// the cached `shared` reference correctly. Real-world trigger: apply parent A, then B
@@ -1426,7 +1426,7 @@ mod tests {
         assert!(Arc::ptr_eq(result.shared(), &shared));
     }
 
-    /// Two or more uncommitted layers on top of a committed prefix — exercises the loop's
+    /// Two or more uncommitted layers on top of a committed prefix -- exercises the loop's
     /// iterated `kept.push` and the rebuild's iterated `Arc::new(BitmapBatchLayer)`, including
     /// the cached `shared` wire-through on every reconstructed layer. Real-world trigger:
     /// build A, then B off A, then C off B; apply only A; then call `C.new_batch()`.

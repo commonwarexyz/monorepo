@@ -348,7 +348,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             ), "proof with bad partial chunk digest should not verify");
                         }
 
-                        // Try to verify the proof with same-length corrupted chunks.
+                        // Try to verify the proof when providing bad input chunks.
                         let bad_chunks: Vec<[u8; 32]> = chunks.iter().map(|c| {
                             let mut corrupted = *c;
                             for (b, x) in corrupted.iter_mut().zip(chunk_xor.iter()) {

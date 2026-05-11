@@ -1116,7 +1116,7 @@ mod tests {
             assert!(proof.verify(&hasher, start_loc, &elements, &chunks, &root,));
 
             // Flip a byte in the trailing partial chunk while preserving the window shape.
-            let mut bad_chunks = chunks.clone();
+            let mut bad_chunks = chunks;
             let last = bad_chunks.last_mut().unwrap();
             last[0] ^= 1;
             assert!(
