@@ -187,15 +187,8 @@ where
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
 fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
-    // Compute shard length
     let data_len = data.remaining();
-    let prefixed_len = u32::SIZE + data_len;
-    let mut shard_len = prefixed_len.div_ceil(k);
-
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
-    if !shard_len.is_multiple_of(2) {
-        shard_len += 1;
-    }
+    let shard_len = canonical_shard_len(data_len, k);
 
     // Prepare data
     let length_bytes = (data_len as u32).to_be_bytes();
@@ -204,6 +197,24 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
     data.copy_to_slice(&mut padded[u32::SIZE..u32::SIZE + data_len]);
 
     (padded, shard_len)
+}
+
+/// Return the canonical shard width for a payload and shard count.
+///
+/// Encoding prefixes the payload with its length, splits the result across
+/// `k` original shards, and rounds up to an even width required by
+/// `reed-solomon-simd`. Decode uses the same calculation to reject commitments
+/// that decode to the same payload with a non-canonical shard width.
+fn canonical_shard_len(data_len: usize, k: usize) -> usize {
+    let prefixed_len = u32::SIZE + data_len;
+    let mut shard_len = prefixed_len.div_ceil(k);
+
+    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
+    if !shard_len.is_multiple_of(2) {
+        shard_len += 1;
+    }
+
+    shard_len
 }
 
 /// Extract data from encoded shards.
@@ -244,6 +255,22 @@ fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
         return Err(Error::Inconsistent);
     }
 
+    Ok(data)
+}
+
+/// Extract data and verify that original shards use the canonical width.
+///
+/// `extract_data` validates the length prefix and zero padding, but zero
+/// padding alone does not make a commitment unique. A proposer can choose a
+/// larger even shard width, append zeroes, and produce a different valid root
+/// for the same payload. Checking the canonical shard width is sufficient
+/// because `extract_data` already validates the canonical byte layout within
+/// that width.
+fn extract_canonical_data(shards: &[&[u8]], k: usize, shard_len: usize) -> Result<Vec<u8>, Error> {
+    let data = extract_data(shards, k)?;
+    if canonical_shard_len(data.len(), k) != shard_len {
+        return Err(Error::Inconsistent);
+    }
     Ok(data)
 }
 
@@ -456,6 +483,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     {
         shards[idx] = shard;
     }
+    let data = extract_canonical_data(&shards, k, shard_len)?;
 
     // Re-encode recovered data to get recovery shards
     let mut encoder = Cached::take(
@@ -501,8 +529,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::Inconsistent);
     }
 
-    // Extract original data
-    extract_data(&shards, k)
+    Ok(data)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
@@ -1156,6 +1183,59 @@ mod tests {
                 fuzz_mixed_codeword(u)?;
                 Ok(())
             });
+    }
+
+    #[test]
+    fn test_oversized_zero_padded_shards_rejected() {
+        let data = b"X";
+        let total = 6u16;
+        let min = 3u16;
+        let k = min as usize;
+        let m = total as usize - k;
+
+        let oversized_shard_len = 4usize;
+        let mut padded = vec![0u8; k * oversized_shard_len];
+        padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
+        padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(data);
+
+        let mut encoder = ReedSolomonEncoder::new(k, m, oversized_shard_len).unwrap();
+        for shard in padded.chunks(oversized_shard_len) {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let recovery = encoder.encode().unwrap();
+
+        let mut oversized_shards: Vec<Vec<u8>> = padded
+            .chunks(oversized_shard_len)
+            .map(|shard| shard.to_vec())
+            .collect();
+        oversized_shards.extend(recovery.recovery_iter().map(|shard| shard.to_vec()));
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &oversized_shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let oversized_tree = builder.build();
+        let oversized_root = oversized_tree.root();
+
+        let (canonical_root, _) =
+            encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        assert_ne!(oversized_root, canonical_root);
+
+        let pieces = [0u16, 1u16, 4u16]
+            .into_iter()
+            .map(|i| {
+                let proof = oversized_tree.proof(i as u32).unwrap();
+                checked(
+                    oversized_root,
+                    Chunk::new(oversized_shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &oversized_root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]
