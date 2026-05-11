@@ -95,7 +95,7 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::future::AtomicWaker;
         use loom::sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, Mutex, MutexGuard,
         };
 
@@ -105,10 +105,6 @@ cfg_if::cfg_if! {
 
         fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
             mutex.lock().unwrap()
-        }
-
-        fn spin_loop() {
-            loom::thread::yield_now();
         }
 
         struct ReadyState<T> {
@@ -172,7 +168,7 @@ cfg_if::cfg_if! {
         use futures_util::task::AtomicWaker;
         use parking_lot::{Mutex, MutexGuard};
         use std::sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         };
 
@@ -182,10 +178,6 @@ cfg_if::cfg_if! {
 
         fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
             mutex.lock()
-        }
-
-        fn spin_loop() {
-            std::hint::spin_loop();
         }
 
         struct Ready<T> {
@@ -292,13 +284,6 @@ impl<T> Overflow<T> {
         }
         mutation.publish(&queue);
     }
-
-    fn clear(&self) {
-        let mutation = Mutation::begin(&self.activity);
-        let mut queue = lock(&self.queue);
-        queue.clear();
-        mutation.publish(&queue);
-    }
 }
 
 struct Mutation<'a> {
@@ -334,39 +319,9 @@ impl Drop for Mutation<'_> {
 struct State<T> {
     ready: Ready<T>,
     overflow: Overflow<T>,
-    lifecycle: AtomicUsize,
+    closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
-}
-
-const LIFECYCLE_CLOSED: usize = 1;
-const LIFECYCLE_INFLIGHT: usize = 2;
-
-impl<T> State<T> {
-    fn is_closed(&self) -> bool {
-        self.lifecycle.load(Ordering::Acquire) & LIFECYCLE_CLOSED != 0
-    }
-
-    fn close(&self) {
-        self.lifecycle
-            .fetch_or(LIFECYCLE_CLOSED, Ordering::AcqRel);
-    }
-
-    fn inflight(&self) -> usize {
-        self.lifecycle.load(Ordering::Acquire) & !LIFECYCLE_CLOSED
-    }
-}
-
-struct SendPermit<'a, T> {
-    state: &'a State<T>,
-}
-
-impl<T> Drop for SendPermit<'_, T> {
-    fn drop(&mut self) {
-        self.state
-            .lifecycle
-            .fetch_sub(LIFECYCLE_INFLIGHT, Ordering::AcqRel);
-    }
 }
 
 /// Sender half of a mailbox.
@@ -399,7 +354,7 @@ impl<T: Policy> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Sender")
             .field("capacity", &self.state.ready.capacity())
-            .field("closed", &self.state.is_closed())
+            .field("closed", &self.state.closed.load(Ordering::Acquire))
             .finish()
     }
 }
@@ -408,10 +363,10 @@ impl<T: Policy> Sender<T> {
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "caller must handle enqueue feedback"]
     pub fn enqueue(&self, message: T) -> Feedback {
-        let (_permit, message) = match self.acquire_send(message) {
-            Ok(send) => send,
-            Err(_) => return Feedback::Closed,
-        };
+        // Receiver closure makes new sends fail immediately.
+        if self.state.closed.load(Ordering::Acquire) {
+            return Feedback::Closed;
+        }
 
         // Common case: publish directly to ready without taking overflow lock.
         let message = match self.state.overflow.try_ready(&self.state.ready, message) {
@@ -424,7 +379,7 @@ impl<T: Policy> Sender<T> {
 
         // Slow path: serialize through overflow and apply the policy.
         let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
-            self.state.is_closed()
+            self.state.closed.load(Ordering::Acquire)
         });
 
         // Wake on any handled enqueue rather than interpreting policy feedback:
@@ -437,38 +392,13 @@ impl<T: Policy> Sender<T> {
         }
         feedback
     }
-
-    fn acquire_send(&self, message: T) -> Result<(SendPermit<'_, T>, T), T> {
-        let mut lifecycle = self.state.lifecycle.load(Ordering::Acquire);
-        loop {
-            if lifecycle & LIFECYCLE_CLOSED != 0 {
-                return Err(message);
-            }
-            match self.state.lifecycle.compare_exchange_weak(
-                lifecycle,
-                lifecycle + LIFECYCLE_INFLIGHT,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Ok((
-                        SendPermit {
-                            state: &self.state,
-                        },
-                        message,
-                    ));
-                }
-                Err(next) => lifecycle = next,
-            }
-        }
-    }
 }
 
 /// Receiver half of a mailbox.
 ///
-/// Dropping the receiver closes the mailbox and drains buffered messages.
-/// Messages racing through an in-flight enqueue are either rejected or drained
-/// before receiver drop returns.
+/// Dropping the receiver closes the mailbox but does not drain buffered messages.
+/// Messages already in ready or overflow, or racing through an in-flight enqueue,
+/// remain owned by shared mailbox state until the last sender is dropped.
 pub struct Receiver<T> {
     state: Arc<State<T>>,
 }
@@ -513,7 +443,7 @@ impl<T> Receiver<T> {
     }
 
     fn is_disconnected(&self) -> bool {
-        self.state.is_closed() || self.state.senders.load(Ordering::Acquire) == 0
+        self.state.closed.load(Ordering::Acquire) || self.state.senders.load(Ordering::Acquire) == 0
     }
 
     /// Receive the next message.
@@ -535,12 +465,8 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.state.close();
-        while self.state.inflight() != 0 {
-            spin_loop();
-        }
-        while self.state.ready.pop().is_some() {}
-        self.state.overflow.clear();
+        // Publish closure so future sends stop accepting messages.
+        self.state.closed.store(true, Ordering::Release);
     }
 }
 
@@ -549,7 +475,7 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let state = Arc::new(State {
         ready: Ready::new(capacity.get()),
         overflow: Overflow::new(),
-        lifecycle: AtomicUsize::new(0),
+        closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),
     });
@@ -852,46 +778,6 @@ mod tests {
         drop(receiver);
 
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Closed);
-    }
-
-    #[test]
-    fn receiver_drop_drains_buffered_messages() {
-        struct AckMessage {
-            drops: Arc<AtomicUsize>,
-        }
-
-        impl Drop for AckMessage {
-            fn drop(&mut self) {
-                self.drops.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-
-        impl Policy for AckMessage {
-            fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-                overflow.push_back(message);
-                true
-            }
-        }
-
-        let (sender, receiver) = new(NZUsize!(1));
-        let drops = Arc::new(AtomicUsize::new(0));
-
-        assert_eq!(
-            sender.enqueue(AckMessage {
-                drops: drops.clone()
-            }),
-            Feedback::Ok
-        );
-        assert_eq!(
-            sender.enqueue(AckMessage {
-                drops: drops.clone()
-            }),
-            Feedback::Backoff
-        );
-
-        drop(receiver);
-
-        assert_eq!(drops.load(Ordering::Acquire), 2);
     }
 
     #[derive(Debug, PartialEq, Eq)]

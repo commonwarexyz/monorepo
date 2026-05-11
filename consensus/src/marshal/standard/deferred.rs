@@ -1224,6 +1224,7 @@ mod tests {
                 .await
                 .expect("verify should reach application before marshal abort");
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());
 
             select! {
