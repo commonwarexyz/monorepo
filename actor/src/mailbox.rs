@@ -19,8 +19,6 @@
 //! no-overflow path.
 
 use crate::Feedback;
-#[cfg(not(feature = "loom"))]
-use futures_util::task::AtomicWaker;
 use std::{
     collections::VecDeque,
     fmt,
@@ -29,22 +27,6 @@ use std::{
     sync::mpsc::TryRecvError,
     task::{Context, Poll},
 };
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "loom")] {
-        use loom::sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc, Mutex, MutexGuard,
-        };
-    } else {
-        use crossbeam_queue::ArrayQueue;
-        use parking_lot::{Mutex, MutexGuard};
-        use std::sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc,
-        };
-    }
-}
 
 const OVERFLOW_HAS_MESSAGES: usize = 1;
 const OVERFLOW_MUTATION: usize = 2;
@@ -68,124 +50,132 @@ pub trait Policy: Sized {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
 }
 
-#[cfg(feature = "loom")]
-struct AtomicWaker {
-    waker: Mutex<Option<std::task::Waker>>,
-}
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Mutex, MutexGuard,
+        };
 
-#[cfg(feature = "loom")]
-impl AtomicWaker {
-    fn new() -> Self {
-        Self {
-            waker: Mutex::new(None),
+        struct AtomicWaker {
+            waker: Mutex<Option<std::task::Waker>>,
         }
-    }
 
-    fn register(&self, waker: &std::task::Waker) {
-        *lock(&self.waker) = Some(waker.clone());
-    }
-
-    fn wake(&self) {
-        let waker = lock(&self.waker).take();
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-}
-
-#[cfg(feature = "loom")]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap()
-}
-
-#[cfg(not(feature = "loom"))]
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock()
-}
-
-#[cfg(feature = "loom")]
-struct ReadyState<T> {
-    published: VecDeque<T>,
-    reserved: usize,
-}
-
-#[cfg(feature = "loom")]
-struct ReadyQueue<T> {
-    state: Mutex<ReadyState<T>>,
-    capacity: usize,
-}
-
-#[cfg(feature = "loom")]
-impl<T> ReadyQueue<T> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            state: Mutex::new(ReadyState {
-                published: VecDeque::new(),
-                reserved: 0,
-            }),
-            capacity,
-        }
-    }
-
-    const fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    fn push(&self, message: T) -> Result<(), T> {
-        {
-            let mut state = lock(&self.state);
-            if state.published.len() + state.reserved >= self.capacity {
-                return Err(message);
+        impl AtomicWaker {
+            fn new() -> Self {
+                Self {
+                    waker: Mutex::new(None),
+                }
             }
-            state.reserved += 1;
-        }
 
-        loom::thread::yield_now();
-
-        let mut state = lock(&self.state);
-        state.reserved -= 1;
-        state.published.push_back(message);
-        Ok(())
-    }
-
-    fn pop(&self) -> Option<T> {
-        loop {
-            let mut state = lock(&self.state);
-            if let Some(message) = state.published.pop_front() {
-                return Some(message);
+            fn register(&self, waker: &std::task::Waker) {
+                *lock(&self.waker) = Some(waker.clone());
             }
-            if state.reserved == 0 {
-                return None;
+
+            fn wake(&self) {
+                let waker = lock(&self.waker).take();
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
             }
-            drop(state);
-            loom::thread::yield_now();
         }
-    }
-}
 
-#[cfg(not(feature = "loom"))]
-struct ReadyQueue<T> {
-    queue: ArrayQueue<T>,
-}
-
-#[cfg(not(feature = "loom"))]
-impl<T> ReadyQueue<T> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            queue: ArrayQueue::new(capacity),
+        fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+            mutex.lock().unwrap()
         }
-    }
 
-    fn capacity(&self) -> usize {
-        self.queue.capacity()
-    }
+        struct ReadyState<T> {
+            published: VecDeque<T>,
+            reserved: usize,
+        }
 
-    fn push(&self, message: T) -> Result<(), T> {
-        self.queue.push(message)
-    }
+        struct ReadyQueue<T> {
+            state: Mutex<ReadyState<T>>,
+            capacity: usize,
+        }
 
-    fn pop(&self) -> Option<T> {
-        self.queue.pop()
+        impl<T> ReadyQueue<T> {
+            fn new(capacity: usize) -> Self {
+                Self {
+                    state: Mutex::new(ReadyState {
+                        published: VecDeque::new(),
+                        reserved: 0,
+                    }),
+                    capacity,
+                }
+            }
+
+            const fn capacity(&self) -> usize {
+                self.capacity
+            }
+
+            fn push(&self, message: T) -> Result<(), T> {
+                {
+                    let mut state = lock(&self.state);
+                    if state.published.len() + state.reserved >= self.capacity {
+                        return Err(message);
+                    }
+                    state.reserved += 1;
+                }
+
+                loom::thread::yield_now();
+
+                let mut state = lock(&self.state);
+                state.reserved -= 1;
+                state.published.push_back(message);
+                Ok(())
+            }
+
+            fn pop(&self) -> Option<T> {
+                loop {
+                    let mut state = lock(&self.state);
+                    if let Some(message) = state.published.pop_front() {
+                        return Some(message);
+                    }
+                    if state.reserved == 0 {
+                        return None;
+                    }
+                    drop(state);
+                    loom::thread::yield_now();
+                }
+            }
+        }
+    } else {
+        use crossbeam_queue::ArrayQueue;
+        use futures_util::task::AtomicWaker;
+        use parking_lot::{Mutex, MutexGuard};
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+
+        fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+            mutex.lock()
+        }
+
+        struct ReadyQueue<T> {
+            queue: ArrayQueue<T>,
+        }
+
+        impl<T> ReadyQueue<T> {
+            fn new(capacity: usize) -> Self {
+                Self {
+                    queue: ArrayQueue::new(capacity),
+                }
+            }
+
+            fn capacity(&self) -> usize {
+                self.queue.capacity()
+            }
+
+            fn push(&self, message: T) -> Result<(), T> {
+                self.queue.push(message)
+            }
+
+            fn pop(&self) -> Option<T> {
+                self.queue.pop()
+            }
+        }
     }
 }
 
