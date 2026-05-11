@@ -81,7 +81,7 @@ fn bench_enqueue_ready(c: &mut Criterion) {
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop_on_overflow()));
-                    assert_eq!(result, Feedback::Ok);
+                    assert_eq!(result, Feedback::Ok(false));
                     black_box(result);
                 }
             },
@@ -101,7 +101,10 @@ fn bench_try_recv_ready(c: &mut Criterion) {
             || {
                 let (sender, receiver) = mailbox::new::<Message>(NZUsize!(CAPACITY));
                 for _ in 0..MESSAGES {
-                    assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
+                    assert_eq!(
+                        sender.enqueue(Message::drop_on_overflow()),
+                        Feedback::Ok(false)
+                    );
                 }
                 receiver
             },
@@ -126,10 +129,13 @@ fn bench_try_recv_overflow(c: &mut Criterion) {
             || {
                 let (sender, receiver) = mailbox::new::<Message>(NZUsize!(CAPACITY));
                 for _ in 0..CAPACITY {
-                    assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
+                    assert_eq!(
+                        sender.enqueue(Message::drop_on_overflow()),
+                        Feedback::Ok(false)
+                    );
                 }
                 for _ in 0..MESSAGES {
-                    assert_eq!(sender.enqueue(Message::spill()), Feedback::Backoff);
+                    assert_eq!(sender.enqueue(Message::spill()), Feedback::Ok(true));
                 }
                 receiver
             },
@@ -155,7 +161,7 @@ fn bench_round_trip_ready(c: &mut Criterion) {
             |(sender, mut receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop_on_overflow()));
-                    assert_eq!(result, Feedback::Ok);
+                    assert_eq!(result, Feedback::Ok(false));
                     black_box(result);
                     black_box(receiver.try_recv().unwrap());
                 }
@@ -187,7 +193,7 @@ fn bench_recv_waiting(c: &mut Criterion) {
                         .await;
 
                         let result = sender.enqueue(Message::drop_on_overflow());
-                        assert_eq!(result, Feedback::Ok);
+                        assert_eq!(result, Feedback::Ok(false));
                         black_box(result);
                         black_box(next.await.unwrap());
                     }
@@ -208,7 +214,10 @@ fn bench_overflow_drop(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = mailbox::new::<Message>(NZUsize!(1));
-                assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
+                assert_eq!(
+                    sender.enqueue(Message::drop_on_overflow()),
+                    Feedback::Ok(false)
+                );
                 (sender, receiver)
             },
             |(sender, _receiver)| {
@@ -233,13 +242,16 @@ fn bench_overflow_spill(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = mailbox::new::<Message>(NZUsize!(1));
-                assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
+                assert_eq!(
+                    sender.enqueue(Message::drop_on_overflow()),
+                    Feedback::Ok(false)
+                );
                 (sender, receiver)
             },
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::spill()));
-                    assert_eq!(result, Feedback::Backoff);
+                    assert_eq!(result, Feedback::Ok(true));
                     black_box(result);
                 }
             },
@@ -254,13 +266,16 @@ fn replace_queue(newest: bool) -> (mailbox::Sender<Message>, mailbox::Receiver<M
     let (sender, receiver) = mailbox::new::<Message>(NZUsize!(REPLACE_CAPACITY));
 
     for _ in 0..REPLACE_CAPACITY {
-        assert_eq!(sender.enqueue(Message::drop_on_overflow()), Feedback::Ok);
+        assert_eq!(
+            sender.enqueue(Message::drop_on_overflow()),
+            Feedback::Ok(false)
+        );
     }
-    assert_eq!(sender.enqueue(Message::replace()), Feedback::Backoff);
+    assert_eq!(sender.enqueue(Message::replace()), Feedback::Ok(true));
 
     if !newest {
         for _ in 1..REPLACE_CAPACITY {
-            assert_eq!(sender.enqueue(Message::spill()), Feedback::Backoff);
+            assert_eq!(sender.enqueue(Message::spill()), Feedback::Ok(true));
         }
     }
 
@@ -280,7 +295,7 @@ fn bench_overflow_replace(c: &mut Criterion) {
                     |(sender, _receiver)| {
                         for _ in 0..MESSAGES {
                             let result = sender.enqueue(black_box(Message::replace()));
-                            assert_eq!(result, Feedback::Backoff);
+                            assert_eq!(result, Feedback::Ok(true));
                             black_box(result);
                         }
                     },
@@ -308,7 +323,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
                     scope.spawn(move || {
                         for _ in 0..PRODUCER_MESSAGES {
                             let result = sender.enqueue(Message::drop_on_overflow());
-                            assert_eq!(result, Feedback::Ok);
+                            assert_eq!(result, Feedback::Ok(false));
                             black_box(result);
                         }
                     });

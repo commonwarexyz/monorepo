@@ -59,7 +59,7 @@ pub trait Policy: Sized {
     /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
     ///
     /// The returned value is feedback for this enqueue attempt after the policy has made any
-    /// overflow changes. Return `true` to report [`Feedback::Backoff`] or `false` to report
+    /// overflow changes. Return `true` to request backoff or `false` to report
     /// [`Feedback::Dropped`].
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
 }
@@ -247,7 +247,7 @@ impl<T> Overflow<T> {
             match ready.push(message) {
                 Ok(()) => {
                     mutation.publish(&queue);
-                    return Feedback::Ok;
+                    return Feedback::Ok(false);
                 }
                 Err(message) => message,
             }
@@ -257,7 +257,7 @@ impl<T> Overflow<T> {
 
         // Preserve overflow order, or handle a still-full ready queue.
         let feedback = if T::handle(&mut queue, message) {
-            Feedback::Backoff
+            Feedback::Ok(true)
         } else {
             Feedback::Dropped
         };
@@ -372,7 +372,7 @@ impl<T: Policy> Sender<T> {
         let message = match self.state.overflow.try_ready(&self.state.ready, message) {
             Ok(()) => {
                 self.state.waker.wake();
-                return Feedback::Ok;
+                return Feedback::Ok(false);
             }
             Err(message) => message,
         };
@@ -565,9 +565,9 @@ mod tests {
     #[test_async]
     async fn full_inbox_replaces_stale_overflow_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Update(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Update(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok(true));
+        assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Ok(true));
 
         assert_eq!(receiver.recv().await, Some(Message::Update(1)));
         assert_eq!(receiver.recv().await, Some(Message::Update(3)));
@@ -576,10 +576,10 @@ mod tests {
     #[test_async]
     async fn policy_can_replace_stale_overflow_at_back() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Update(4)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok(true));
+        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Ok(true));
+        assert_eq!(sender.enqueue(Message::Update(4)), Feedback::Ok(true));
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(3)));
@@ -589,7 +589,7 @@ mod tests {
     #[test_async]
     async fn full_inbox_rejects_non_replaceable_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
         assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Dropped);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
@@ -598,8 +598,8 @@ mod tests {
     #[test_async]
     async fn full_inbox_retains_required_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Ok(true));
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Buffered(2)));
@@ -608,8 +608,8 @@ mod tests {
     #[test]
     fn try_recv_refills_from_overflow() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Ok(true));
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
@@ -618,14 +618,14 @@ mod tests {
     #[test]
     fn enqueue_uses_ready_capacity_after_partial_drain() {
         let (sender, mut receiver) = new(NZUsize!(2));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Ok(true));
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(2)));
 
-        assert_eq!(sender.enqueue(Message::Vote(4)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(4)), Feedback::Ok(false));
         assert_eq!(receiver.try_recv(), Ok(Message::Required(3)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(4)));
     }
@@ -633,15 +633,15 @@ mod tests {
     #[test]
     fn receiver_refills_overflow_after_partial_drain() {
         let (sender, mut receiver) = new(NZUsize!(3));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(3)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(4)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Vote(3)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Required(4)), Feedback::Ok(true));
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(2)));
 
-        assert_eq!(sender.enqueue(Message::Vote(5)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(5)), Feedback::Ok(false));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(3)));
         assert_eq!(receiver.try_recv(), Ok(Message::Required(4)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(5)));
@@ -650,8 +650,8 @@ mod tests {
     #[test_async]
     async fn full_inbox_retains_unmatched_replaceable_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Ok(true));
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(2)));
@@ -660,10 +660,10 @@ mod tests {
     #[test_async]
     async fn full_inbox_replaces_stale_overflow_after_ready_fills() {
         let (sender, mut receiver) = new(NZUsize!(2));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Update(4)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Ok(true));
+        assert_eq!(sender.enqueue(Message::Update(4)), Feedback::Ok(true));
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Update(2)));
@@ -673,9 +673,9 @@ mod tests {
     #[test_async]
     async fn mailbox_capacity_is_soft_limit_for_required_messages() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Ok(true));
+        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Ok(true));
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(2)));
@@ -685,7 +685,7 @@ mod tests {
     #[test_async]
     async fn full_inbox_rejects_hint() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
         assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Dropped);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
@@ -694,9 +694,9 @@ mod tests {
     #[test_async]
     async fn full_inbox_can_replace_or_drop_by_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Hint(3)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
+        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok(true));
+        assert_eq!(sender.enqueue(Message::Hint(3)), Feedback::Ok(true));
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Hint(3)));
@@ -710,7 +710,7 @@ mod tests {
         pin_mut!(next);
         assert!(next.as_mut().now_or_never().is_none());
 
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok(false));
         assert_eq!(next.await, Some(Message::Vote(1)));
     }
 
@@ -742,7 +742,7 @@ mod tests {
 
         // Prime ready directly to isolate the overflow wake after registration.
         assert_eq!(sender.state.ready.push(Message::Vote(1)), Ok(()));
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Ok(true));
 
         assert_eq!(wakes.count(), 1);
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
@@ -797,10 +797,10 @@ mod tests {
     #[test]
     fn policy_can_clear_overflow_and_request_backoff() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(ClearingMessage::FillReady), Feedback::Ok);
+        assert_eq!(sender.enqueue(ClearingMessage::FillReady), Feedback::Ok(false));
         assert_eq!(
             sender.enqueue(ClearingMessage::ClearOverflow),
-            Feedback::Backoff
+            Feedback::Ok(true)
         );
 
         assert!(matches!(
@@ -1035,7 +1035,7 @@ mod loom_tests {
             let next = receiver.recv();
             pin_mut!(next);
             assert!(matches!(next.as_mut().poll(&mut cx), Poll::Pending));
-            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok(false));
 
             assert_eq!(wakes.load(Ordering::Acquire), 1);
             assert_eq!(
@@ -1062,7 +1062,7 @@ mod loom_tests {
             close.join().unwrap();
 
             match feedback {
-                Feedback::Ok => assert!(wakes.load(Ordering::Acquire) > 0),
+                Feedback::Ok(false) => assert!(wakes.load(Ordering::Acquire) > 0),
                 Feedback::Closed => {}
                 feedback => panic!("unexpected feedback: {feedback:?}"),
             }
@@ -1094,7 +1094,7 @@ mod loom_tests {
     fn concurrent_close_and_overflow_enqueue_remains_closed() {
         loom::model(|| {
             let (sender, receiver) = new::<Message>(NZUsize!(1));
-            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok(false));
 
             let enqueue_sender = sender.clone();
             let enqueue = thread::spawn(move || {
@@ -1116,12 +1116,12 @@ mod loom_tests {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(1));
             let idle_sender = sender.clone();
-            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok(false));
 
             let seen = Arc::new(AtomicUsize::new(0));
             let enqueue = thread::spawn(move || {
                 let feedback = sender.enqueue(Message::Spill(1));
-                assert!(matches!(feedback, Feedback::Backoff | Feedback::Ok));
+                assert!(feedback.accepted());
             });
 
             let seen_by_receiver = seen.clone();
@@ -1149,7 +1149,7 @@ mod loom_tests {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(1));
             let idle_sender = sender.clone();
-            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok(false));
 
             let sender_1 = sender.clone();
             let enqueue_1 = thread::spawn(move || sender_1.enqueue(Message::Spill(1)));
@@ -1159,11 +1159,11 @@ mod loom_tests {
 
             assert!(matches!(
                 enqueue_1.join().unwrap(),
-                Feedback::Ok | Feedback::Backoff
+                Feedback::Ok(_)
             ));
             assert!(matches!(
                 enqueue_2.join().unwrap(),
-                Feedback::Ok | Feedback::Backoff
+                Feedback::Ok(_)
             ));
 
             while let Ok(message) = receiver.try_recv() {
@@ -1180,18 +1180,18 @@ mod loom_tests {
         loom::model(|| {
             let (sender, mut receiver) = new::<ReplacingMessage>(NZUsize!(1));
             let idle_sender = sender.clone();
-            assert_eq!(sender.enqueue(ReplacingMessage::FillReady), Feedback::Ok);
+            assert_eq!(sender.enqueue(ReplacingMessage::FillReady), Feedback::Ok(false));
             assert_eq!(
                 sender.enqueue(ReplacingMessage::Replace(1)),
-                Feedback::Backoff
+                Feedback::Ok(true)
             );
 
             let sender_1 = sender.clone();
             let replace_1 = thread::spawn(move || sender_1.enqueue(ReplacingMessage::Replace(2)));
             let replace_2 = thread::spawn(move || sender.enqueue(ReplacingMessage::Replace(3)));
 
-            assert_eq!(replace_1.join().unwrap(), Feedback::Backoff);
-            assert_eq!(replace_2.join().unwrap(), Feedback::Backoff);
+            assert_eq!(replace_1.join().unwrap(), Feedback::Ok(true));
+            assert_eq!(replace_2.join().unwrap(), Feedback::Ok(true));
             assert_eq!(receiver.try_recv(), Ok(ReplacingMessage::FillReady));
 
             let retained = replacement_value(receiver.try_recv().unwrap()).unwrap();
@@ -1205,14 +1205,14 @@ mod loom_tests {
     fn stale_overflow_hint_retries_ready_before_policy() {
         loom::model(|| {
             let (sender, mut receiver) = new::<Message>(NZUsize!(2));
-            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
-            assert_eq!(sender.enqueue(Message::Drop(1)), Feedback::Ok);
-            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Backoff);
+            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok(false));
+            assert_eq!(sender.enqueue(Message::Drop(1)), Feedback::Ok(false));
+            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Ok(true));
 
             assert_eq!(receiver.try_recv(), Ok(Message::Drop(0)));
             assert_eq!(receiver.try_recv(), Ok(Message::Drop(1)));
 
-            assert_eq!(sender.enqueue(Message::Drop(3)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Drop(3)), Feedback::Ok(false));
             assert_eq!(receiver.try_recv(), Ok(Message::Spill(2)));
             assert_eq!(receiver.try_recv(), Ok(Message::Drop(3)));
         });
@@ -1222,8 +1222,8 @@ mod loom_tests {
     fn concurrent_overflow_cannot_be_bypassed_by_ready_fast_path() {
         loom::model(|| {
             let (sender, mut receiver) = new::<OrderedMessage>(NZUsize!(2));
-            assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
-            assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Ok);
+            assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok(false));
+            assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Ok(false));
 
             let gate = Arc::new(AtomicUsize::new(0));
             let overflow_sender = sender.clone();
@@ -1231,7 +1231,7 @@ mod loom_tests {
             let overflow = thread::spawn(move || {
                 assert_eq!(
                     overflow_sender.enqueue(OrderedMessage::Coordinated(2, overflow_gate)),
-                    Feedback::Backoff
+                    Feedback::Ok(true)
                 );
             });
 
@@ -1244,7 +1244,7 @@ mod loom_tests {
             let mut observed = vec![value(receiver.try_recv().unwrap())];
             gate.store(2, Ordering::Release);
             let feedback = sender.enqueue(OrderedMessage::Item(3));
-            assert!(matches!(feedback, Feedback::Backoff | Feedback::Ok));
+            assert!(feedback.accepted());
 
             overflow.join().unwrap();
             while let Ok(message) = receiver.try_recv() {
@@ -1269,7 +1269,7 @@ mod loom_tests {
                 pin_mut!(next);
                 assert!(matches!(next.as_mut().poll(&mut cx), Poll::Pending));
 
-                assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
+                assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok(false));
                 while wakes.load(Ordering::Acquire) == 0 {
                     thread::yield_now();
                 }
@@ -1311,7 +1311,7 @@ mod loom_tests {
                     Poll::Ready(Some(1))
                 );
             }
-            assert_eq!(overflow.join().unwrap(), Feedback::Backoff);
+            assert_eq!(overflow.join().unwrap(), Feedback::Ok(true));
         });
     }
 
@@ -1319,8 +1319,8 @@ mod loom_tests {
     fn concurrent_refill_and_enqueue_preserves_overflow_order() {
         loom::model(|| {
             let (sender, mut receiver) = new::<OrderedMessage>(NZUsize!(1));
-            assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok);
-            assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Backoff);
+            assert_eq!(sender.enqueue(OrderedMessage::Item(0)), Feedback::Ok(false));
+            assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Ok(true));
 
             let enqueue = thread::spawn(move || sender.enqueue(OrderedMessage::Item(2)));
             let receive = thread::spawn(move || {
@@ -1329,7 +1329,7 @@ mod loom_tests {
             });
 
             let mut receiver = receive.join().unwrap();
-            assert_eq!(enqueue.join().unwrap(), Feedback::Backoff);
+            assert_eq!(enqueue.join().unwrap(), Feedback::Ok(true));
             assert_eq!(receiver.try_recv().map(value), Ok(1));
             assert_eq!(receiver.try_recv().map(value), Ok(2));
         });

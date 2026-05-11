@@ -156,8 +156,8 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{WrappedBackgroundReceiver, WrappedMailboxSender},
-    Blocker, Provider as PeerProvider, Receiver, Recipients,
+    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
+    Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
 };
 use commonware_actor::{mailbox, Feedback};
 use commonware_parallel::Strategy;
@@ -401,7 +401,7 @@ where
     pub fn start(
         mut self,
         network: (
-            impl commonware_p2p::MailboxSender<PublicKey = P>,
+            impl Sender<PublicKey = P>,
             impl Receiver<PublicKey = P>,
         ),
     ) -> Handle<()> {
@@ -412,11 +412,11 @@ where
     async fn run(
         mut self,
         (sender, receiver): (
-            impl commonware_p2p::MailboxSender<PublicKey = P>,
+            impl Sender<PublicKey = P>,
             impl Receiver<PublicKey = P>,
         ),
     ) {
-        let sender = WrappedMailboxSender::<_, Shard<C, H>>::new(
+        let sender = WrappedSender::<_, Shard<C, H>>::new(
             self.context.network_buffer_pool().clone(),
             sender,
         );
@@ -647,9 +647,9 @@ where
     }
 
     /// Handles leader announcements for a commitment and advances reconstruction.
-    async fn handle_external_proposal<Sr: commonware_p2p::MailboxSender<PublicKey = P>>(
+    async fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &WrappedMailboxSender<Sr, Shard<C, H>>,
+        sender: &WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
         leader: P,
         round: Round,
@@ -759,9 +759,9 @@ where
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
-    fn broadcast_shards<Sr: commonware_p2p::MailboxSender<PublicKey = P>>(
+    fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &WrappedMailboxSender<Sr, Shard<C, H>>,
+        sender: &WrappedSender<Sr, Shard<C, H>>,
         round: Round,
         mut block: CodedBlock<B, C, H>,
     ) {
@@ -810,8 +810,8 @@ where
                 );
                 return;
             };
-            match sender.send(Recipients::One(peer.clone()), shard, true) {
-                Feedback::Ok | Feedback::Backoff => {}
+            match sender.send_lossy(Recipients::One(peer.clone()), shard, true).0 {
+                Feedback::Ok(_) => {}
                 result => warn!(?result, ?peer, %commitment, "unable to enqueue shard"),
             }
         }
@@ -824,8 +824,11 @@ where
             .cloned()
             .collect();
         if !non_participants.is_empty() {
-            match sender.send(Recipients::Some(non_participants), leader_shard, true) {
-                Feedback::Ok | Feedback::Backoff => {}
+            match sender
+                .send_lossy(Recipients::Some(non_participants), leader_shard, true)
+                .0
+            {
+                Feedback::Ok(_) => {}
                 result => warn!(?result, %commitment, "unable to enqueue leader shard"),
             }
         }
@@ -841,14 +844,14 @@ where
     }
 
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
-    fn broadcast_shard<Sr: commonware_p2p::MailboxSender<PublicKey = P>>(
+    fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &WrappedMailboxSender<Sr, Shard<C, H>>,
+        sender: &WrappedSender<Sr, Shard<C, H>>,
         shard: Shard<C, H>,
     ) {
         let commitment = shard.commitment();
-        match sender.send(Recipients::All, shard, true) {
-            Feedback::Ok | Feedback::Backoff => {
+        match sender.send_lossy(Recipients::All, shard, true).0 {
+            Feedback::Ok(_) => {
                 debug!(?commitment, "enqueued shard broadcast");
             }
             result => warn!(?result, ?commitment, "unable to enqueue shard broadcast"),
@@ -858,9 +861,9 @@ where
     /// Broadcasts any pending validated shard for the given commitment and attempts
     /// reconstruction. If reconstruction succeeds or fails, the state is cleaned
     /// up and subscribers are notified.
-    fn try_advance<Sr: commonware_p2p::MailboxSender<PublicKey = P>>(
+    fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &WrappedMailboxSender<Sr, Shard<C, H>>,
+        sender: &WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
@@ -1534,7 +1537,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Control, Link, Oracle},
-        Manager as _, Sender as _, TrackedPeers,
+        Manager as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Quota, Runner, Supervisor as _};

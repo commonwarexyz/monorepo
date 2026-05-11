@@ -186,7 +186,7 @@ mod tests {
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
             self.activities.lock().push(activity);
-            Feedback::Ok
+            Feedback::Ok(false)
         }
     }
 

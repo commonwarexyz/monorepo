@@ -12,11 +12,11 @@ use crate::{
     Epochable, Viewable,
 };
 use bytes::Bytes;
-use commonware_codec::{Decode, Encode};
 use commonware_actor::mailbox;
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::StaticProvider, Blocker, MailboxSender, Receiver, Sender};
+use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
@@ -83,7 +83,7 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
+        sender: impl Sender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, sender, receiver))
@@ -92,7 +92,7 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = S::PublicKey> + MailboxSender<PublicKey = S::PublicKey>,
+        sender: impl Sender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         let participants = self.scheme.participants().clone();

@@ -1,8 +1,8 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
 use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
-use commonware_codec::{Codec, Error};
 use commonware_actor::Feedback;
+use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
@@ -37,36 +37,6 @@ pub struct WrappedSender<S: Sender, V: Codec> {
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-/// Wrapper around a [MailboxSender] that encodes messages using a [Codec].
-#[derive(Clone)]
-pub struct WrappedMailboxSender<S: crate::MailboxSender, V: Codec> {
-    pool: BufferPool,
-    sender: S,
-    _phantom_v: std::marker::PhantomData<V>,
-}
-
-impl<S: crate::MailboxSender, V: Codec> WrappedMailboxSender<S, V> {
-    /// Create a new [WrappedMailboxSender] with the given [MailboxSender] and [BufferPool].
-    pub const fn new(pool: BufferPool, sender: S) -> Self {
-        Self {
-            pool,
-            sender,
-            _phantom_v: std::marker::PhantomData,
-        }
-    }
-
-    /// Submit a message to a set of recipients.
-    pub fn send(
-        &self,
-        recipients: Recipients<S::PublicKey>,
-        message: V,
-        priority: bool,
-    ) -> Feedback {
-        let encoded = message.encode_with_pool(&self.pool);
-        self.sender.send(recipients, encoded, priority)
-    }
-}
-
 impl<S: Sender, V: Codec> WrappedSender<S, V> {
     /// Create a new [WrappedSender] with the given [Sender] and [BufferPool] for encoding.
     pub const fn new(pool: BufferPool, sender: S) -> Self {
@@ -86,6 +56,17 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority).await
+    }
+
+    /// Submit a message to a set of recipients without waiting on p2p delivery.
+    pub fn send_lossy(
+        &self,
+        recipients: Recipients<S::PublicKey>,
+        message: V,
+        priority: bool,
+    ) -> (Feedback, Vec<S::PublicKey>) {
+        let encoded = message.encode_with_pool(&self.pool);
+        self.sender.send_lossy(recipients, encoded, priority)
     }
 
     /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]

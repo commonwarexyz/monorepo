@@ -218,7 +218,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let (response, receiver) = oneshot::channel();
         if !matches!(
             self.sender.enqueue(make(response)),
-            Feedback::Ok | Feedback::Backoff
+            Feedback::Ok(_)
         ) {
             return None;
         }

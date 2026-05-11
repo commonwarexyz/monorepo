@@ -117,7 +117,7 @@ impl<P: PublicKey> Messenger<P> {
             priority,
             success: None,
         }) {
-            Ok(()) => Feedback::Ok,
+            Ok(()) => Feedback::Ok(false),
             Err(TrySendError::Full(_)) => Feedback::Dropped,
             Err(TrySendError::Closed(_)) => Feedback::Closed,
         }

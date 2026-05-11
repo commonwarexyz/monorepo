@@ -19,7 +19,6 @@ use crate::{
     types::{Epoch, EpochDelta, Height, HeightDelta},
     Automaton, Monitor, Relay, Reporter,
 };
-use commonware_actor::Feedback;
 use commonware_codec::Encode;
 use commonware_cryptography::{
     certificate::{Provider, Scheme},
@@ -27,8 +26,8 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{WrappedMailboxSender, WrappedReceiver},
-    MailboxSender, Receiver, Recipients,
+    utils::codec::{WrappedReceiver, WrappedSender},
+    Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -261,11 +260,11 @@ impl<
     pub fn start(
         mut self,
         chunk_network: (
-            impl MailboxSender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         ack_network: (
-            impl MailboxSender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -276,17 +275,17 @@ impl<
     async fn run(
         mut self,
         chunk_network: (
-            impl MailboxSender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         ack_network: (
-            impl MailboxSender<PublicKey = C::PublicKey>,
+            impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
         let node_sender = chunk_network.0;
         let mut node_receiver = chunk_network.1;
-        let ack_sender = WrappedMailboxSender::<_, Ack<C::PublicKey, P::Scheme, D>>::new(
+        let ack_sender = WrappedSender::<_, Ack<C::PublicKey, P::Scheme, D>>::new(
             self.context.network_buffer_pool().clone(),
             ack_network.0,
         );
@@ -512,8 +511,8 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &WrappedMailboxSender<
-            impl MailboxSender<PublicKey = C::PublicKey>,
+        ack_sender: &WrappedSender<
+            impl Sender<PublicKey = C::PublicKey>,
             Ack<C::PublicKey, P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -568,8 +567,9 @@ impl<
         self.handle_ack(&ack)?;
 
         // Send the ack to the network
-        let result = ack_sender.send(Recipients::Some(recipients), ack, self.priority_acks);
-        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+        let (result, _) =
+            ack_sender.send_lossy(Recipients::Some(recipients), ack, self.priority_acks);
+        if !result.accepted() {
             warn!(?result, "failed to enqueue ack");
             return Err(Error::UnableToSendMessage);
         }
@@ -719,7 +719,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
+        node_sender: &impl Sender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let signer = self
@@ -792,7 +792,7 @@ impl<
     /// - this instance has not yet collected the certificate for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
+        node_sender: &impl Sender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -837,7 +837,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
-        node_sender: &impl MailboxSender<PublicKey = C::PublicKey>,
+        node_sender: &impl Sender<PublicKey = C::PublicKey>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
@@ -850,12 +850,12 @@ impl<
         self.relay.broadcast(node.chunk.payload, ()).await;
 
         // Send the node to all validators
-        let result = node_sender.send(
+        let (result, _) = node_sender.send_lossy(
             Recipients::Some(validators.iter().cloned().collect()),
             node.encode(),
             self.priority_proposals,
         );
-        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+        if !result.accepted() {
             warn!(?result, "failed to enqueue node");
             return Err(Error::BroadcastFailed);
         }

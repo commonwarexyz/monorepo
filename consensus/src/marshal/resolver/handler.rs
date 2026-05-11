@@ -76,7 +76,7 @@ impl<D: Digest> Consumer for Handler<D> {
                 value,
                 response,
             }),
-            Feedback::Ok | Feedback::Backoff
+            Feedback::Ok(_)
         ) {
             error!("failed to enqueue deliver message to actor");
             return false;
@@ -92,7 +92,7 @@ impl<D: Digest> Producer for Handler<D> {
         let (response, receiver) = oneshot::channel();
         if !matches!(
             self.sender.enqueue(Message::Produce { key, response }),
-            Feedback::Ok | Feedback::Backoff
+            Feedback::Ok(_)
         ) {
             error!("failed to enqueue produce message to actor");
         }

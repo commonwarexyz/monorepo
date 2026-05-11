@@ -155,6 +155,18 @@ stability_scope!(BETA {
 
     /// Interface for sending messages to a set of recipients.
     pub trait Sender: LimitedSender {
+        /// Submit a message to a set of recipients without waiting on p2p delivery.
+        ///
+        /// Returns feedback from enqueueing the work and the recipients that passed local
+        /// filtering. Returned recipients are peers submitted to the p2p actor, not peers that
+        /// eventually received the message.
+        fn send_lossy(
+            &self,
+            recipients: Recipients<Self::PublicKey>,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> (Feedback, Vec<Self::PublicKey>);
+
         /// Sends a message to a set of recipients.
         ///
         /// # Offline Recipients
@@ -199,26 +211,6 @@ stability_scope!(BETA {
                 }
             }
         }
-    }
-
-    // Blanket implementation of `Sender` for all `LimitedSender`s.
-    impl<S: LimitedSender> Sender for S {}
-
-    /// Interface for enqueueing messages to a set of recipients without waiting on p2p delivery.
-    pub trait MailboxSender: Clone + Send + Sync + 'static {
-        /// Public key type used to identify recipients.
-        type PublicKey: PublicKey;
-
-        /// Submit a message to a set of recipients.
-        ///
-        /// This method only reports whether the p2p actor accepted the work. It
-        /// does not report which peers eventually received the message.
-        fn send(
-            &self,
-            recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufs> + Send,
-            priority: bool,
-        ) -> Feedback;
     }
 
     /// Interface for receiving messages from arbitrary recipients.

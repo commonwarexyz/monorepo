@@ -3,7 +3,7 @@
 use crate::marshal::resolver::handler;
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_p2p::{Blocker, MailboxSender, Provider, Receiver, Sender};
+use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
 use rand::Rng;
@@ -60,7 +60,7 @@ where
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    S: Sender<PublicKey = P> + MailboxSender<PublicKey = P>,
+    S: Sender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {

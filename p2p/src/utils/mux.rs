@@ -8,9 +8,7 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 
-use crate::{
-    Channel, CheckedSender, LimitedSender, MailboxSender, Message, Receiver, Recipients, Sender,
-};
+use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_actor::Feedback;
 use commonware_macros::select_loop;
@@ -248,22 +246,17 @@ impl<S: Sender> LimitedSender for SubSender<S> {
     }
 }
 
-impl<S> MailboxSender for SubSender<S>
-where
-    S: Sender + MailboxSender<PublicKey = <S as LimitedSender>::PublicKey>,
-{
-    type PublicKey = <S as LimitedSender>::PublicKey;
-
-    fn send(
+impl<S: Sender> Sender for SubSender<S> {
+    fn send_lossy(
         &self,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Feedback {
+    ) -> (Feedback, Vec<Self::PublicKey>) {
         let subchannel = UInt(self.subchannel);
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
-        <S as MailboxSender>::send(&self.inner.inner, recipients, message, priority)
+        self.inner.inner.send_lossy(recipients, message, priority)
     }
 }
 

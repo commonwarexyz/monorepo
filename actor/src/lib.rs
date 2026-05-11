@@ -13,14 +13,26 @@ commonware_macros::stability_scope!(ALPHA {
     /// Feedback from submitting work to a bounded endpoint.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Feedback {
-        /// The work was accepted within the configured capacity.
-        Ok,
-        /// The submission was handled but requests sender backoff.
-        Backoff,
+        /// The work was accepted.
+        ///
+        /// The boolean indicates whether the endpoint requests sender backoff.
+        Ok(bool),
         /// The work was dropped.
         Dropped,
         /// The endpoint is closed.
         Closed,
+    }
+
+    impl Feedback {
+        /// Returns `true` if work was accepted by the endpoint.
+        pub const fn accepted(self) -> bool {
+            matches!(self, Self::Ok(_))
+        }
+
+        /// Returns `true` if the endpoint accepted the work but requests sender backoff.
+        pub const fn backoff(self) -> bool {
+            matches!(self, Self::Ok(true))
+        }
     }
 
     pub mod mailbox;

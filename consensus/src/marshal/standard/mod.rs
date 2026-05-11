@@ -1706,30 +1706,30 @@ mod tests {
         type PublicKey = PublicKey;
 
         fn fetch(&mut self, _key: Self::Key) -> Feedback {
-            Feedback::Ok
+            Feedback::Ok(false)
         }
         fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
-            Feedback::Ok
+            Feedback::Ok(false)
         }
         fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) -> Feedback {
             self.targeted.lock().push((key, targets));
-            Feedback::Ok
+            Feedback::Ok(false)
         }
         fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback {
             self.targeted.lock().extend(requests);
-            Feedback::Ok
+            Feedback::Ok(false)
         }
         fn cancel(&mut self, _key: Self::Key) -> Feedback {
-            Feedback::Ok
+            Feedback::Ok(false)
         }
         fn clear(&mut self) -> Feedback {
-            Feedback::Ok
+            Feedback::Ok(false)
         }
         fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
-            Feedback::Ok
+            Feedback::Ok(false)
         }
     }
 
@@ -1785,7 +1785,7 @@ mod tests {
                 }
                 Update::Tip(_, _, _) => {}
             }
-            commonware_actor::Feedback::Ok
+            commonware_actor::Feedback::Ok(false)
         }
     }
 
@@ -2010,7 +2010,7 @@ mod tests {
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 }),
-                Feedback::Ok | Feedback::Backoff
+                Feedback::Ok(_)
             ));
             assert!(response_rx.await.unwrap());
 
@@ -2024,7 +2024,7 @@ mod tests {
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 }),
-                Feedback::Ok | Feedback::Backoff
+                Feedback::Ok(_)
             ));
             assert!(response_rx.await.unwrap());
         });

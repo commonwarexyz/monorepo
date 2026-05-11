@@ -146,6 +146,44 @@ where
             sender: &mut self.sender,
         })
     }
+
+    /// Check recipients against the local rate limiter without waiting for peer updates.
+    ///
+    /// [`Recipients::All`] is filtered when this clone has a local peer snapshot. Otherwise it is
+    /// returned unchanged so callers can still enqueue a broadcast.
+    pub fn check_lossy(
+        &self,
+        recipients: Recipients<S::PublicKey>,
+    ) -> Result<Recipients<S::PublicKey>, SystemTime> {
+        let rate_limit = self.rate_limit.lock();
+
+        match recipients {
+            Recipients::One(ref peer) => match rate_limit.check_key(peer) {
+                Ok(()) => Ok(recipients),
+                Err(not_until) => Err(not_until.earliest_possible()),
+            },
+            Recipients::Some(ref peers) => {
+                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &rate_limit);
+                if allowed.is_empty() {
+                    max_retry.map_or_else(|| Ok(recipients), Err)
+                } else {
+                    Ok(Recipients::Some(allowed))
+                }
+            }
+            Recipients::All => {
+                if self.known_peers.is_empty() {
+                    return Ok(Recipients::All);
+                }
+                let (allowed, max_retry) =
+                    filter_rate_limited(self.known_peers.iter(), &rate_limit);
+                if allowed.is_empty() {
+                    max_retry.map_or_else(|| Ok(Recipients::Some(Vec::new())), Err)
+                } else {
+                    Ok(Recipients::Some(allowed))
+                }
+            }
+        }
+    }
 }
 
 /// Filters peers by rate limit, returning those that pass and the latest retry

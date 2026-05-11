@@ -164,7 +164,7 @@ impl Consumer for Handler {
             data: value,
             response,
         });
-        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+        if !result.accepted() {
             return false;
         }
         receiver.await.unwrap_or(false)
@@ -181,7 +181,7 @@ impl Producer for Handler {
             view: View::new(key.into()),
             response,
         });
-        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+        if !result.accepted() {
             return receiver;
         }
         receiver

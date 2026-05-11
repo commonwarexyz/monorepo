@@ -22,9 +22,7 @@ use commonware_codec::Read;
 use commonware_actor::{mailbox, Feedback};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{
-    utils::codec::WrappedMailboxSender, Blocker, MailboxSender, Recipients,
-};
+use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
@@ -251,9 +249,9 @@ impl<
     }
 
     /// Send a vote to every peer.
-    fn broadcast_vote<T: MailboxSender<PublicKey = S::PublicKey>>(
+    fn broadcast_vote<T: Sender<PublicKey = S::PublicKey>>(
         &mut self,
-        sender: &WrappedMailboxSender<T, Vote<S, D>>,
+        sender: &WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
         // Update outbound metrics
@@ -265,8 +263,8 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast vote
-        match sender.send(Recipients::All, vote.clone(), true) {
-            Feedback::Ok | Feedback::Backoff => {}
+        match sender.send_lossy(Recipients::All, vote.clone(), true).0 {
+            Feedback::Ok(_) => {}
             result => {
                 warn!(?result, "unable to enqueue p2p vote");
                 self.schedule_p2p_retry(Message::RetryVote(vote));
@@ -275,9 +273,9 @@ impl<
     }
 
     /// Send a certificate to every peer.
-    fn broadcast_certificate<T: MailboxSender<PublicKey = S::PublicKey>>(
+    fn broadcast_certificate<T: Sender<PublicKey = S::PublicKey>>(
         &mut self,
-        sender: &WrappedMailboxSender<T, Certificate<S, D>>,
+        sender: &WrappedSender<T, Certificate<S, D>>,
         certificate: Certificate<S, D>,
     ) {
         // Update outbound metrics
@@ -289,8 +287,11 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast certificate
-        match sender.send(Recipients::All, certificate.clone(), true) {
-            Feedback::Ok | Feedback::Backoff => {}
+        match sender
+            .send_lossy(Recipients::All, certificate.clone(), true)
+            .0
+        {
+            Feedback::Ok(_) => {}
             result => {
                 warn!(?result, "unable to enqueue p2p certificate");
                 self.schedule_p2p_retry(Message::RetryCertificate(certificate));
@@ -304,7 +305,7 @@ impl<
         self.context.child("p2p_retry").spawn(move |context| async move {
             context.sleep(delay).await;
             let result = sender.enqueue(message);
-            if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+            if !result.accepted() {
                 warn!(?result, "unable to enqueue p2p retry");
             }
         });
@@ -350,10 +351,10 @@ impl<
     }
 
     /// Emits a nullify vote (and persists it if it is a first attempt).
-    async fn broadcast_nullify<Sp: MailboxSender<PublicKey = S::PublicKey>>(
+    async fn broadcast_nullify<Sp: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &WrappedMailboxSender<Sp, Vote<S, D>>,
+        vote_sender: &WrappedSender<Sp, Vote<S, D>>,
         retry: bool,
         nullify: Nullify<S>,
     ) {
@@ -373,13 +374,13 @@ impl<
 
     /// Handle a timeout.
     async fn timeout<
-        Sp: MailboxSender<PublicKey = S::PublicKey>,
-        Sr: MailboxSender<PublicKey = S::PublicKey>,
+        Sp: Sender<PublicKey = S::PublicKey>,
+        Sr: Sender<PublicKey = S::PublicKey>,
     >(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &WrappedMailboxSender<Sp, Vote<S, D>>,
-        certificate_sender: &WrappedMailboxSender<Sr, Certificate<S, D>>,
+        vote_sender: &WrappedSender<Sp, Vote<S, D>>,
+        certificate_sender: &WrappedSender<Sr, Certificate<S, D>>,
     ) {
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
@@ -486,10 +487,10 @@ impl<
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
-    async fn try_broadcast_notarize<Sp: MailboxSender<PublicKey = S::PublicKey>>(
+    async fn try_broadcast_notarize<Sp: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &WrappedMailboxSender<Sp, Vote<S, D>>,
+        vote_sender: &WrappedSender<Sp, Vote<S, D>>,
         view: View,
     ) {
         // Construct a notarize vote
@@ -513,10 +514,10 @@ impl<
     }
 
     /// Share a notarization certificate once we can assemble it locally.
-    async fn try_broadcast_notarization<Sr: MailboxSender<PublicKey = S::PublicKey>>(
+    async fn try_broadcast_notarization<Sr: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &WrappedMailboxSender<Sr, Certificate<S, D>>,
+        certificate_sender: &WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -550,10 +551,10 @@ impl<
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
-    async fn try_broadcast_nullify<Sp: MailboxSender<PublicKey = S::PublicKey>>(
+    async fn try_broadcast_nullify<Sp: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &WrappedMailboxSender<Sp, Vote<S, D>>,
+        vote_sender: &WrappedSender<Sp, Vote<S, D>>,
         view: View,
     ) -> Option<bool> {
         let (was_retry, nullify) = self.state.construct_nullify(view)?;
@@ -563,10 +564,10 @@ impl<
     }
 
     /// Broadcast a nullification certificate if the round provides a candidate.
-    async fn try_broadcast_nullification<Sr: MailboxSender<PublicKey = S::PublicKey>>(
+    async fn try_broadcast_nullification<Sr: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &WrappedMailboxSender<Sr, Certificate<S, D>>,
+        certificate_sender: &WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -598,10 +599,10 @@ impl<
     }
 
     /// Broadcast a finalize vote if the round provides a candidate.
-    async fn try_broadcast_finalize<Sp: MailboxSender<PublicKey = S::PublicKey>>(
+    async fn try_broadcast_finalize<Sp: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &WrappedMailboxSender<Sp, Vote<S, D>>,
+        vote_sender: &WrappedSender<Sp, Vote<S, D>>,
         view: View,
     ) {
         // Construct the finalize vote.
@@ -625,10 +626,10 @@ impl<
     }
 
     /// Share a finalization certificate and notify observers of the new height.
-    async fn try_broadcast_finalization<Sr: MailboxSender<PublicKey = S::PublicKey>>(
+    async fn try_broadcast_finalization<Sr: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &WrappedMailboxSender<Sr, Certificate<S, D>>,
+        certificate_sender: &WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -666,14 +667,14 @@ impl<
     /// We don't need to iterate over all views to check for new actions because messages we receive
     /// only affect a single view.
     async fn notify<
-        Sp: MailboxSender<PublicKey = S::PublicKey>,
-        Sr: MailboxSender<PublicKey = S::PublicKey>,
+        Sp: Sender<PublicKey = S::PublicKey>,
+        Sr: Sender<PublicKey = S::PublicKey>,
     >(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
-        vote_sender: &WrappedMailboxSender<Sp, Vote<S, D>>,
-        certificate_sender: &WrappedMailboxSender<Sr, Certificate<S, D>>,
+        vote_sender: &WrappedSender<Sp, Vote<S, D>>,
+        certificate_sender: &WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -695,8 +696,8 @@ impl<
         mut self,
         batcher: batcher::Mailbox<S, D>,
         resolver: resolver::Mailbox<S, D>,
-        vote_sender: impl MailboxSender<PublicKey = S::PublicKey>,
-        certificate_sender: impl MailboxSender<PublicKey = S::PublicKey>,
+        vote_sender: impl Sender<PublicKey = S::PublicKey>,
+        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -709,12 +710,12 @@ impl<
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
         mut resolver: resolver::Mailbox<S, D>,
-        vote_sender: impl MailboxSender<PublicKey = S::PublicKey>,
-        certificate_sender: impl MailboxSender<PublicKey = S::PublicKey>,
+        vote_sender: impl Sender<PublicKey = S::PublicKey>,
+        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) {
         let pool = self.context.network_buffer_pool().clone();
-        let vote_sender = WrappedMailboxSender::new(pool.clone(), vote_sender);
-        let certificate_sender = WrappedMailboxSender::new(pool, certificate_sender);
+        let vote_sender = WrappedSender::new(pool.clone(), vote_sender);
+        let certificate_sender = WrappedSender::new(pool, certificate_sender);
 
         // Add initial view
         //

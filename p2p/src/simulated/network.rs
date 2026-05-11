@@ -895,10 +895,8 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     }
 }
 
-impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
-    type PublicKey = P;
-
-    fn send(
+impl<P: PublicKey> UnlimitedSender<P> {
+    fn send_lossy(
         &self,
         recipients: Recipients<P>,
         message: impl Into<IoBufs> + Send,
@@ -917,7 +915,7 @@ impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
         {
             return Feedback::Closed;
         }
-        Feedback::Ok
+        Feedback::Ok(false)
     }
 }
 
@@ -1025,24 +1023,6 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> crate::MailboxSender for Sender<P, E> {
-    type PublicKey = P;
-
-    fn send(
-        &self,
-        recipients: Recipients<Self::PublicKey>,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Feedback {
-        <UnlimitedSender<P> as crate::MailboxSender>::send(
-            &self.mailbox_sender,
-            recipients,
-            message,
-            priority,
-        )
-    }
-}
-
 impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
     type PublicKey = P;
     type Checked<'a>
@@ -1055,6 +1035,30 @@ impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients).await
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::Sender for Sender<P, E> {
+    fn send_lossy(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> (Feedback, Vec<Self::PublicKey>) {
+        let message = message.into();
+        if message.len() > self.mailbox_sender.max_size as usize {
+            return (Feedback::Dropped, Vec::new());
+        }
+        let Ok(recipients) = self.limited_sender.check_lossy(recipients) else {
+            return (Feedback::Dropped, Vec::new());
+        };
+        let accepted = accepted_recipients(&recipients);
+        let feedback = self.mailbox_sender.send_lossy(recipients, message, priority);
+        if feedback.accepted() {
+            (feedback, accepted)
+        } else {
+            (feedback, Vec::new())
+        }
     }
 }
 
@@ -1105,25 +1109,31 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
     }
 }
 
-impl<P, E, F> crate::MailboxSender for SplitSender<P, E, F>
+impl<P, E, F> crate::Sender for SplitSender<P, E, F>
 where
     P: PublicKey,
     E: Clock,
     F: SplitForwarder<P>,
 {
-    type PublicKey = P;
-
-    fn send(
+    fn send_lossy(
         &self,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Feedback {
+    ) -> (Feedback, Vec<Self::PublicKey>) {
         let message = message.into().coalesce();
         let Some(recipients) = (self.forwarder)(self.replica, &recipients, &message) else {
-            return Feedback::Dropped;
+            return (Feedback::Dropped, Vec::new());
         };
-        <Sender<P, E> as crate::MailboxSender>::send(&self.inner, recipients, message, priority)
+        self.inner.send_lossy(recipients, message, priority)
+    }
+}
+
+fn accepted_recipients<P: PublicKey>(recipients: &Recipients<P>) -> Vec<P> {
+    match recipients {
+        Recipients::One(peer) => vec![peer.clone()],
+        Recipients::Some(peers) => peers.clone(),
+        Recipients::All => Vec::new(),
     }
 }
 

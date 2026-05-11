@@ -11,15 +11,14 @@ use crate::{
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
     Automaton, Monitor, Reporter,
 };
-use commonware_actor::Feedback;
 use commonware_cryptography::{
     certificate::{Provider, Scheme},
     Digest,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{WrappedMailboxSender, WrappedReceiver},
-    Blocker, MailboxSender, Receiver, Recipients,
+    utils::codec::{WrappedReceiver, WrappedSender},
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -216,7 +215,7 @@ impl<
     pub fn start(
         mut self,
         network: (
-            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) -> Handle<()> {
@@ -227,11 +226,11 @@ impl<
     async fn run(
         mut self,
         network: (
-            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) {
-        let sender = WrappedMailboxSender::<_, TipAck<P::Scheme, D>>::new(
+        let sender = WrappedSender::<_, TipAck<P::Scheme, D>>::new(
             self.context.network_buffer_pool().clone(),
             network.0,
         );
@@ -437,8 +436,8 @@ impl<
         &mut self,
         height: Height,
         digest: D,
-        sender: &WrappedMailboxSender<
-            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        sender: &WrappedSender<
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -573,8 +572,8 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         height: Height,
-        sender: &WrappedMailboxSender<
-            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        sender: &WrappedSender<
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -727,17 +726,17 @@ impl<
     fn broadcast(
         &mut self,
         ack: Ack<P::Scheme, D>,
-        sender: &WrappedMailboxSender<
-            impl MailboxSender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        sender: &WrappedSender<
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
-        let result = sender.send(
+        let (result, _) = sender.send_lossy(
             Recipients::All,
             TipAck { ack, tip: self.tip },
             self.priority_acks,
         );
-        if !matches!(result, Feedback::Ok | Feedback::Backoff) {
+        if !result.accepted() {
             warn!(?result, "failed to enqueue ack");
             return Err(Error::UnableToSendMessage);
         }

@@ -1,6 +1,6 @@
 //! Mock implementations for testing.
 
-use crate::{CheckedSender, LimitedSender, MailboxSender, Receiver, Recipients};
+use crate::{CheckedSender, LimitedSender, Receiver, Recipients, Sender};
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{IoBuf, IoBufs};
@@ -62,16 +62,19 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
     }
 }
 
-impl<P: PublicKey> MailboxSender for InertSender<P> {
-    type PublicKey = P;
-
-    fn send(
+impl<P: PublicKey> Sender for InertSender<P> {
+    fn send_lossy(
         &self,
-        _: Recipients<Self::PublicKey>,
+        recipients: Recipients<Self::PublicKey>,
         _: impl Into<IoBufs> + Send,
         _: bool,
-    ) -> Feedback {
-        Feedback::Ok
+    ) -> (Feedback, Vec<Self::PublicKey>) {
+        let recipients = match recipients {
+            Recipients::All => self.peers.iter().cloned().collect(),
+            Recipients::Some(recipients) => recipients,
+            Recipients::One(recipient) => vec![recipient],
+        };
+        (Feedback::Ok(false), recipients)
     }
 }
 

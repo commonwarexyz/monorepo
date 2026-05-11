@@ -204,7 +204,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
             Activity::Lock(lock) => Message::Locked(lock),
         };
         match self.sender.try_send(message) {
-            Ok(()) => Feedback::Ok,
+            Ok(()) => Feedback::Ok(false),
             Err(mpsc::error::TrySendError::Full(_)) => Feedback::Dropped,
             Err(mpsc::error::TrySendError::Closed(_)) => Feedback::Closed,
         }

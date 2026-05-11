@@ -1,7 +1,7 @@
 use crate::p2p::wire;
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{utils::codec::WrappedMailboxSender, MailboxSender, Recipients};
+use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
     telemetry::metrics::{
         histogram::Buckets,
@@ -82,7 +82,7 @@ where
     E: Clock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: MailboxSender<PublicKey = P>,
+    NetS: Sender<PublicKey = P>,
 {
     context: E,
 
@@ -154,7 +154,7 @@ where
     E: Clock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: MailboxSender<PublicKey = P>,
+    NetS: Sender<PublicKey = P>,
 {
     /// Creates a new fetcher.
     pub fn new(context: E, config: Config<P>) -> Self {
@@ -248,7 +248,7 @@ where
     /// - Rate limit expiry time if any peer was rate-limited
     /// - `retry_timeout` if peers exist but all sends failed
     /// - `Duration::MAX` if no eligible peers (wait for external changes)
-    pub fn fetch(&mut self, sender: &WrappedMailboxSender<NetS, wire::Message<Key>>) {
+    pub fn fetch(&mut self, sender: &WrappedSender<NetS, wire::Message<Key>>) {
         self.waiter = None;
 
         // Collect keys to try (need to clone since we mutate self during iteration)
@@ -280,8 +280,10 @@ where
                     id,
                     payload: wire::Payload::Request(key.clone()),
                 };
-                match sender.send(Recipients::One(peer.clone()), message, self.priority_requests) {
-                    Feedback::Ok | Feedback::Backoff => {
+                let (result, recipients) =
+                    sender.send_lossy(Recipients::One(peer.clone()), message, self.priority_requests);
+                match result {
+                    Feedback::Ok(_) if recipients.contains(&peer) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -549,7 +551,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_p2p::{LimitedSender, MailboxSender, Recipients, UnlimitedSender};
+    use commonware_p2p::{LimitedSender, Sender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{self, Context, Runner},
         BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
@@ -624,16 +626,14 @@ mod tests {
         }
     }
 
-    impl MailboxSender for FailMockSender {
-        type PublicKey = PublicKey;
-
-        fn send(
+    impl Sender for FailMockSender {
+        fn send_lossy(
             &self,
             _: Recipients<Self::PublicKey>,
             _: impl Into<IoBufs> + Send,
             _: bool,
-        ) -> Feedback {
-            Feedback::Dropped
+        ) -> (Feedback, Vec<Self::PublicKey>) {
+            (Feedback::Dropped, Vec::new())
         }
     }
 
@@ -677,17 +677,15 @@ mod tests {
         }
     }
 
-    impl MailboxSender for SuccessMockSender {
-        type PublicKey = PublicKey;
-
-        fn send(
+    impl Sender for SuccessMockSender {
+        fn send_lossy(
             &self,
             recipients: Recipients<Self::PublicKey>,
             _: impl Into<IoBufs> + Send,
             _: bool,
-        ) -> Feedback {
+        ) -> (Feedback, Vec<Self::PublicKey>) {
             match recipients {
-                Recipients::One(_) => Feedback::Ok,
+                Recipients::One(peer) => (Feedback::Ok(false), vec![peer]),
                 _ => unimplemented!(),
             }
         }
@@ -746,15 +744,13 @@ mod tests {
         }
     }
 
-    impl<E: Clock> MailboxSender for LimitedMockSender<E> {
-        type PublicKey = PublicKey;
-
-        fn send(
+    impl<E: Clock> Sender for LimitedMockSender<E> {
+        fn send_lossy(
             &self,
             recipients: Recipients<Self::PublicKey>,
             _: impl Into<IoBufs> + Send,
             _: bool,
-        ) -> Feedback {
+        ) -> (Feedback, Vec<Self::PublicKey>) {
             let peer = match &recipients {
                 Recipients::One(p) => p,
                 _ => unimplemented!(),
@@ -762,13 +758,13 @@ mod tests {
 
             let rate_limiter = self.rate_limiter.write();
             if rate_limiter.check_key(peer).is_err() {
-                return Feedback::Dropped;
+                return (Feedback::Dropped, Vec::new());
             }
-            Feedback::Ok
+            (Feedback::Ok(false), vec![peer.clone()])
         }
     }
 
-    fn create_test_fetcher<S: MailboxSender<PublicKey = PublicKey>>(
+    fn create_test_fetcher<S: Sender<PublicKey = PublicKey>>(
         context: Context,
     ) -> Fetcher<Context, PublicKey, MockKey, S> {
         let public_key = PrivateKey::from_seed(0).public_key();
@@ -784,7 +780,7 @@ mod tests {
     }
 
     /// Helper to add an active request directly for testing
-    fn add_test_active<S: MailboxSender<PublicKey = PublicKey>>(
+    fn add_test_active<S: Sender<PublicKey = PublicKey>>(
         fetcher: &mut Fetcher<Context, PublicKey, MockKey, S>,
         id: ID,
         key: MockKey,
@@ -1326,7 +1322,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, other_public_key]);
-            let sender = WrappedMailboxSender::new(
+            let sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
@@ -1375,7 +1371,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone()]);
-            let sender = WrappedMailboxSender::new(
+            let sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
@@ -1433,7 +1429,7 @@ mod tests {
                 Fetcher::new(context.child("fetcher"), config);
             // Add peers (FailMockSender doesn't rate limit, just fails sends)
             fetcher.reconcile(&[public_key, peer1, peer2]);
-            let sender = WrappedMailboxSender::new(
+            let sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
@@ -1627,7 +1623,7 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
             let peer3 = PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3]);
-            let sender = WrappedMailboxSender::new(
+            let sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
             );
@@ -1652,7 +1648,7 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let sender = WrappedMailboxSender::new(
+            let sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 SuccessMockSender::default(),
             );
@@ -1710,7 +1706,7 @@ mod tests {
             fetcher.add_ready(MockKey(1));
 
             // Fetch should not fallback to any peer - it should wait for targets
-            let sender = WrappedMailboxSender::new(
+            let sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 SuccessMockSender::default(),
             );
@@ -1776,7 +1772,7 @@ mod tests {
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let quota = Quota::per_second(NZU32!(1));
-            let sender = WrappedMailboxSender::new(
+            let sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 LimitedMockSender::new(quota, context.child("rate_limiter")),
             );

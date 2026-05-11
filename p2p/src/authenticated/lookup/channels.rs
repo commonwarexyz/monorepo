@@ -42,12 +42,10 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     }
 }
 
-impl<P: PublicKey> crate::MailboxSender for UnlimitedSender<P> {
-    type PublicKey = P;
-
-    fn send(
+impl<P: PublicKey> UnlimitedSender<P> {
+    fn send_lossy(
         &self,
-        recipients: Recipients<Self::PublicKey>,
+        recipients: Recipients<P>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Feedback {
@@ -97,24 +95,6 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
     }
 }
 
-impl<P: PublicKey, C: Clock> crate::MailboxSender for Sender<P, C> {
-    type PublicKey = P;
-
-    fn send(
-        &self,
-        recipients: Recipients<Self::PublicKey>,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Feedback {
-        <UnlimitedSender<P> as crate::MailboxSender>::send(
-            &self.mailbox_sender,
-            recipients,
-            message,
-            priority,
-        )
-    }
-}
-
 impl<P, C> crate::LimitedSender for Sender<P, C>
 where
     P: PublicKey,
@@ -131,6 +111,42 @@ where
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients).await
+    }
+}
+
+impl<P, C> crate::Sender for Sender<P, C>
+where
+    P: PublicKey,
+    C: Clock + Send + 'static,
+{
+    fn send_lossy(
+        &self,
+        recipients: Recipients<Self::PublicKey>,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> (Feedback, Vec<Self::PublicKey>) {
+        let message = message.into();
+        if message.len() > self.mailbox_sender.max_size as usize {
+            return (Feedback::Dropped, Vec::new());
+        }
+        let Ok(recipients) = self.limited_sender.check_lossy(recipients) else {
+            return (Feedback::Dropped, Vec::new());
+        };
+        let accepted = accepted_recipients(&recipients);
+        let feedback = self.mailbox_sender.send_lossy(recipients, message, priority);
+        if feedback.accepted() {
+            (feedback, accepted)
+        } else {
+            (feedback, Vec::new())
+        }
+    }
+}
+
+fn accepted_recipients<P: PublicKey>(recipients: &Recipients<P>) -> Vec<P> {
+    match recipients {
+        Recipients::One(peer) => vec![peer.clone()],
+        Recipients::Some(peers) => peers.clone(),
+        Recipients::All => Vec::new(),
     }
 }
 
