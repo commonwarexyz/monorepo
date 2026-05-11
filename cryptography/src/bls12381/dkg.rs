@@ -660,7 +660,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 }
             }
         }
-        if !ack_batch.verify(&mut *rng) {
+        if !ack_batch.verify(&mut *rng, strategy) {
             return false;
         }
         let lhs = log.pub_msg.commitment.lin_comb_eval(

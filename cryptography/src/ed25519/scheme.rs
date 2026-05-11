@@ -8,6 +8,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{union_unique, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -364,8 +365,8 @@ impl BatchVerifier for Batch {
         self.add_inner(Some(namespace), message, public_key, signature)
     }
 
-    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
-        self.verifier.verify(rng).is_ok()
+    fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+        self.verifier.verify(rng, strategy).is_ok()
     }
 }
 
@@ -397,6 +398,7 @@ mod tests {
     use crate::{ed25519, Signer as _};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
 
     fn test_sign_and_verify(
@@ -736,7 +738,7 @@ mod tests {
         let mut batch = ed25519::Batch::new();
         assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
-        assert!(batch.verify(&mut test_rng()));
+        assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]
@@ -754,13 +756,13 @@ mod tests {
             &v2.1,
             &Signature::decode(bad_signature.as_ref()).unwrap()
         ));
-        assert!(!batch.verify(&mut test_rng()));
+        assert!(!batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]
     fn batch_verify_empty() {
         let batch = Batch::new();
-        assert!(batch.verify(&mut test_rng()));
+        assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]
