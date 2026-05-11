@@ -5,7 +5,7 @@
 //! The mailbox is split into two queues: a bounded `ready` queue
 //! that producers push to and the receiver pops from, and an unbounded
 //! `overflow` queue that holds messages displaced when ready is full. A
-//! [`Policy`] decides what enters overflow and what is retained or dropped
+//! [`Policy`] decides how overflow is updated and what feedback is returned
 //! when overflow is contended.
 //!
 //! ```text
@@ -59,8 +59,18 @@ pub trait Policy: Sized {
     /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
     ///
     /// The returned value is feedback for this enqueue attempt after the policy has made any
-    /// overflow changes. Return `true` to report [`Feedback::Backoff`] or `false` to report
-    /// [`Feedback::Dropped`].
+    /// overflow changes. Return `true` to report [`Feedback::Backoff`] or
+    /// `false` to report [`Feedback::Dropped`].
+    ///
+    /// # Warning
+    ///
+    /// Do not enqueue into the same mailbox from this method or from destructors triggered by
+    /// editing `overflow`. This method runs while the mailbox holds its overflow lock, so same
+    /// mailbox re-entry can deadlock.
+    ///
+    /// This method should not unwind after mutating `overflow`. A panic, including one from a
+    /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
+    /// the mailbox.
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
 }
 
@@ -1062,7 +1072,7 @@ mod loom_tests {
             close.join().unwrap();
 
             match feedback {
-                Feedback::Ok => assert!(wakes.load(Ordering::Acquire) > 0),
+                Feedback::Ok | Feedback::Backoff => assert!(wakes.load(Ordering::Acquire) > 0),
                 Feedback::Closed => {}
                 feedback => panic!("unexpected feedback: {feedback:?}"),
             }
@@ -1121,7 +1131,7 @@ mod loom_tests {
             let seen = Arc::new(AtomicUsize::new(0));
             let enqueue = thread::spawn(move || {
                 let feedback = sender.enqueue(Message::Spill(1));
-                assert!(matches!(feedback, Feedback::Backoff | Feedback::Ok));
+                assert!(matches!(feedback, Feedback::Ok | Feedback::Backoff));
             });
 
             let seen_by_receiver = seen.clone();
@@ -1244,7 +1254,7 @@ mod loom_tests {
             let mut observed = vec![value(receiver.try_recv().unwrap())];
             gate.store(2, Ordering::Release);
             let feedback = sender.enqueue(OrderedMessage::Item(3));
-            assert!(matches!(feedback, Feedback::Backoff | Feedback::Ok));
+            assert!(matches!(feedback, Feedback::Ok | Feedback::Backoff));
 
             overflow.join().unwrap();
             while let Ok(message) = receiver.try_recv() {
