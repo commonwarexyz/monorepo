@@ -1,9 +1,12 @@
 //! Bounded ready queues with policy-managed overflow.
 //!
-//! The receiver drains the ready queue first and then overflow from front to
-//! back. Policies decide which overflow messages are retained and in what
-//! order. Concurrent enqueue calls, including calls from cloned senders, are not
-//! globally ordered and may be observed in any interleaving.
+//! The receiver always pops from the ready queue first. After each ready pop, it
+//! eagerly refills ready from published overflow so senders can return to the
+//! ready fast path without waiting for ready to drain completely. Overflow is
+//! refilled from front to back, but policies decide which overflow messages are
+//! retained and in what order. Concurrent enqueue calls, including calls from
+//! cloned senders, are not globally ordered and may be observed in any
+//! interleaving.
 
 use crate::Feedback;
 #[cfg(not(feature = "loom"))]
@@ -36,17 +39,21 @@ cfg_if::cfg_if! {
 const OVERFLOW_HAS_MESSAGES: usize = 1;
 const OVERFLOW_MUTATION: usize = 2;
 
+// `activity` tracks both published overflow messages and in-flight overflow
+// mutation. The ready fast path is safe only when activity is zero. Receiver
+// refill is useful only when messages are published and no mutation is active.
+
 /// Overflow behavior for actor messages when an inbox is full.
 pub trait Policy: Sized {
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
     /// Messages already in the ready queue are not provided here; policy changes only apply to
-    /// overflow retained beyond ready capacity. The receiver drains overflow from front to back.
-    /// Policies may append, remove, replace, reorder, or clear overflow, and are responsible for
-    /// bounding it when a hard memory limit is required. The returned value is feedback for this
-    /// enqueue attempt after the policy has made any overflow changes; it does not guarantee that
-    /// `message` or any existing overflow item was retained. Return `true` to report
-    /// [`Feedback::Backoff`] or `false` to report [`Feedback::Dropped`].
+    /// overflow retained beyond ready capacity. The receiver eagerly refills ready from overflow
+    /// after ready pops. Policies may append, remove, replace, reorder, or clear overflow, and are
+    /// responsible for bounding it when a hard memory limit is required. The returned value is
+    /// feedback for this enqueue attempt after the policy has made any overflow changes; it does
+    /// not guarantee that `message` or any existing overflow item was retained. Return `true` to
+    /// report [`Feedback::Backoff`] or `false` to report [`Feedback::Dropped`].
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
 }
 
@@ -113,15 +120,6 @@ impl<T> ReadyQueue<T> {
         self.capacity
     }
 
-    fn len(&self) -> usize {
-        let state = lock(&self.state);
-        state.published.len() + state.reserved
-    }
-
-    fn has_message(&self) -> bool {
-        !lock(&self.state).published.is_empty()
-    }
-
     fn push(&self, message: T) -> Result<(), T> {
         {
             let mut state = lock(&self.state);
@@ -171,14 +169,6 @@ impl<T> ReadyQueue<T> {
         self.queue.capacity()
     }
 
-    fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    fn has_message(&self) -> bool {
-        !self.queue.is_empty()
-    }
-
     fn push(&self, message: T) -> Result<(), T> {
         self.queue.push(message)
     }
@@ -206,6 +196,10 @@ impl<T> OverflowState<T> {
         self.activity.load(Ordering::SeqCst) != 0
     }
 
+    fn has_refillable_messages(&self) -> bool {
+        self.activity.load(Ordering::SeqCst) == OVERFLOW_HAS_MESSAGES
+    }
+
     fn try_push_ready(&self, ready: &ReadyQueue<T>, message: T) -> Result<(), T> {
         if self.is_active() {
             return Err(message);
@@ -213,55 +207,42 @@ impl<T> OverflowState<T> {
         ready.push(message)
     }
 
-    fn enqueue(
-        &self,
-        ready: &ReadyQueue<T>,
-        message: T,
-        is_closed: impl Fn() -> bool,
-    ) -> (Feedback, bool)
+    fn enqueue(&self, ready: &ReadyQueue<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback
     where
         T: Policy,
     {
-        let _mutation = self.begin_mutation();
+        let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
         if is_closed() {
-            self.publish_activity(&queue);
-            return (Feedback::Closed, false);
+            mutation.publish(&queue);
+            return Feedback::Closed;
         }
 
-        let message = match Self::try_ready_if_overflow_empty_locked(&queue, ready, message) {
+        let message = match Self::try_ready_if_overflow_empty(&queue, ready, message) {
             Ok(()) => {
-                self.publish_activity(&queue);
-                return (Feedback::Ok, true);
+                mutation.publish(&queue);
+                return Feedback::Ok;
             }
             Err(message) => message,
         };
 
-        let feedback = Self::apply_policy_locked(&mut queue, message);
-        let wake = !queue.is_empty() || ready.has_message();
-        self.publish_activity(&queue);
-        (feedback, wake)
+        let feedback = Self::apply_policy(&mut queue, message);
+        mutation.publish(&queue);
+        feedback
     }
 
-    fn refill_ready(&self, ready: &ReadyQueue<T>) {
-        if !self.is_active() {
+    fn refill(&self, ready: &ReadyQueue<T>) {
+        if !self.has_refillable_messages() {
             return;
         }
 
-        let _mutation = self.begin_mutation();
+        let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
-        Self::refill_ready_locked(&mut queue, ready);
-        self.publish_activity(&queue);
+        Self::refill_ready(&mut queue, ready);
+        mutation.publish(&queue);
     }
 
-    fn begin_mutation(&self) -> Mutation<'_> {
-        self.activity.fetch_add(OVERFLOW_MUTATION, Ordering::SeqCst);
-        Mutation {
-            activity: &self.activity,
-        }
-    }
-
-    fn try_ready_if_overflow_empty_locked(
+    fn try_ready_if_overflow_empty(
         queue: &VecDeque<T>,
         ready: &ReadyQueue<T>,
         message: T,
@@ -277,7 +258,7 @@ impl<T> OverflowState<T> {
         }
     }
 
-    fn apply_policy_locked(queue: &mut VecDeque<T>, message: T) -> Feedback
+    fn apply_policy(queue: &mut VecDeque<T>, message: T) -> Feedback
     where
         T: Policy,
     {
@@ -288,7 +269,7 @@ impl<T> OverflowState<T> {
         }
     }
 
-    fn refill_ready_locked(queue: &mut VecDeque<T>, ready: &ReadyQueue<T>) {
+    fn refill_ready(queue: &mut VecDeque<T>, ready: &ReadyQueue<T>) {
         while let Some(message) = queue.pop_front() {
             match ready.push(message) {
                 Ok(()) => {}
@@ -299,8 +280,19 @@ impl<T> OverflowState<T> {
             }
         }
     }
+}
 
-    fn publish_activity(&self, queue: &VecDeque<T>) {
+struct Mutation<'a> {
+    activity: &'a AtomicUsize,
+}
+
+impl<'a> Mutation<'a> {
+    fn begin(activity: &'a AtomicUsize) -> Self {
+        activity.fetch_add(OVERFLOW_MUTATION, Ordering::SeqCst);
+        Self { activity }
+    }
+
+    fn publish<T>(&self, queue: &VecDeque<T>) {
         if queue.is_empty() {
             self.activity
                 .fetch_and(!OVERFLOW_HAS_MESSAGES, Ordering::SeqCst);
@@ -309,10 +301,6 @@ impl<T> OverflowState<T> {
                 .fetch_or(OVERFLOW_HAS_MESSAGES, Ordering::SeqCst);
         }
     }
-}
-
-struct Mutation<'a> {
-    activity: &'a AtomicUsize,
 }
 
 impl Drop for Mutation<'_> {
@@ -383,10 +371,12 @@ impl<T: Policy> Sender<T> {
             Err(message) => message,
         };
 
-        let (feedback, wake) = self.state.overflow.enqueue(&self.state.ready, message, || {
+        let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
             self.state.closed.load(Ordering::Acquire)
         });
-        if wake {
+        // Policy feedback does not indicate whether overflow retained work, so
+        // wake on any handled enqueue. Spurious wakes are acceptable.
+        if feedback != Feedback::Closed {
             self.state.waker.wake();
         }
         feedback
@@ -439,15 +429,15 @@ impl<T> Receiver<T> {
 
     fn pop(&mut self) -> Option<T> {
         if let Some(message) = self.state.ready.pop() {
-            if self.state.overflow.is_active() && self.state.ready.len() == 0 {
-                self.state.overflow.refill_ready(&self.state.ready);
+            if self.state.overflow.has_refillable_messages() {
+                self.state.overflow.refill(&self.state.ready);
             }
             return Some(message);
         }
 
-        // Empty ready may race with stale activity, so let `refill_ready`
+        // Empty ready may race with stale activity, so let `refill`
         // decide whether overflow is worth locking.
-        self.state.overflow.refill_ready(&self.state.ready);
+        self.state.overflow.refill(&self.state.ready);
         self.state.ready.pop()
     }
 
@@ -620,6 +610,23 @@ mod tests {
         assert_eq!(sender.enqueue(Message::Vote(4)), Feedback::Ok);
         assert_eq!(receiver.try_recv(), Ok(Message::Required(3)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(4)));
+    }
+
+    #[test]
+    fn receiver_refills_overflow_after_partial_drain() {
+        let (sender, mut receiver) = new(NZUsize!(3));
+        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Vote(3)), Feedback::Ok);
+        assert_eq!(sender.enqueue(Message::Required(4)), Feedback::Backoff);
+
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(2)));
+
+        assert_eq!(sender.enqueue(Message::Vote(5)), Feedback::Ok);
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(3)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Required(4)));
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(5)));
     }
 
     #[test_async]
