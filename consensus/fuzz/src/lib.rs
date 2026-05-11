@@ -151,6 +151,10 @@ pub struct FuzzInput {
     /// `rate%` honest-message drop while the reference reporter is in `view`;
     /// the rate reverts to 0 outside scheduled views.
     pub messaging_faults: Vec<(View, u8)>,
+    /// Per-iteration forwarding policy threaded into every engine the harness
+    /// spawns. Sampling lets the fuzzer drive coverage of all three arms of
+    /// `batcher::forward_targets` instead of pinning to `Disabled`.
+    pub forwarding: ForwardingPolicy,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -203,6 +207,16 @@ impl Arbitrary<'_> for FuzzInput {
             },
         };
 
+        // Forwarding policy distribution:
+        //   33%  Disabled       - matches prior fuzz behavior; covers the no-op path
+        //   33%  SilentVoters   - exercises `forward_targets` -> `missing_voters`
+        //   34%  SilentLeader   - exercises `forward_targets` -> leader-only branch
+        let forwarding = match u.int_in_range(0..=2)? {
+            0 => ForwardingPolicy::Disabled,
+            1 => ForwardingPolicy::SilentVoters,
+            _ => ForwardingPolicy::SilentLeader,
+        };
+
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -219,11 +233,21 @@ impl Arbitrary<'_> for FuzzInput {
             required_containers,
             strategy,
             messaging_faults: Vec::new(),
+            forwarding,
         })
     }
 }
 
 pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
+
+type ReporterOf<P> = reporter::Reporter<
+    deterministic::Context,
+    <P as simplex::Simplex>::Scheme,
+    <P as simplex::Simplex>::Elector,
+    Sha256Digest,
+>;
+
+type ReporterEntry<P> = (PublicKeyOf<P>, ReporterOf<P>);
 
 type NetworkChannels<P> = (
     (
@@ -381,6 +405,7 @@ pub(crate) fn spawn_honest_validator<
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    forwarding: ForwardingPolicy,
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
@@ -440,7 +465,7 @@ where
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
-        forwarding: ForwardingPolicy::Disabled,
+        forwarding,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     engine.start(
@@ -463,6 +488,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     relay: Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     leader_timeout: Duration,
     certification_timeout: Duration,
+    forwarding: ForwardingPolicy,
     channels: NetworkChannels<PublicKeyOf<P>>,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
@@ -502,6 +528,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         relay,
         leader_timeout,
         certification_timeout,
+        forwarding,
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
         (resolver_sender, resolver_receiver),
@@ -521,10 +548,7 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
-    reporters: &mut [(
-        PublicKeyOf<P>,
-        reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
-    )],
+    reporters: &mut [ReporterEntry<P>],
     partition: Partition,
     required_containers: u64,
 ) {
@@ -594,10 +618,7 @@ fn initial_drop_rate(schedule: &[(View, u8)]) -> u8 {
 /// `finalized_view = 0` therefore covers view 1.
 async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
-    reporters: &mut [(
-        PublicKeyOf<P>,
-        reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
-    )],
+    reporters: &mut [ReporterEntry<P>],
     schedule: Vec<(View, u8)>,
     required_containers: u64,
     drop_rate: network::DropRateCell,
@@ -734,6 +755,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
+                input.forwarding,
                 pending,
                 recovered,
                 resolver,
@@ -854,6 +876,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_secs(2),
+                input.forwarding,
                 channels,
             );
             reporters.push((validator, reporter));
@@ -995,7 +1018,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
         // primary (legitimate engine) + secondary (Disrupter).
         for idx in case.compromised.iter().copied() {
             let validator = participants[idx].clone();
-            let context = context.child("twin").with_attribute("index", &idx);
+            let context = context.child("twin").with_attribute("index", idx);
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
                 .remove(&validator)
@@ -1125,7 +1148,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
-                forwarding: ForwardingPolicy::Disabled,
+                forwarding: input.forwarding,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);
             engine.start(
@@ -1211,7 +1234,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                             PAGE_CACHE_SIZE,
                         ),
                         strategy: Sequential,
-                        forwarding: ForwardingPolicy::Disabled,
+                        forwarding: input.forwarding,
                     };
                     let secondary_engine =
                         Engine::new(secondary_context.child("engine"), secondary_engine_cfg);
@@ -1235,7 +1258,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             if compromised.contains(&idx) {
                 continue;
             }
-            let ctx = context.child("honest").with_attribute("index", &idx);
+            let ctx = context.child("honest").with_attribute("index", idx);
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
@@ -1249,6 +1272,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 relay.clone(),
                 Duration::from_secs(1),
                 Duration::from_millis(1_500),
+                input.forwarding,
                 pending,
                 recovered,
                 resolver,
@@ -1269,23 +1293,20 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         let (mut latest, mut monitor): (View, Receiver<View>) =
                             reporter.subscribe().await;
                         finalizers.push(
-                            context
-                                .child("finalizer")
-                                .with_attribute("index", &i)
-                                .spawn(move |_| async move {
+                            context.child("finalizer").with_attribute("index", i).spawn(
+                                move |_| async move {
                                     while latest.get() < required {
                                         latest = monitor.recv().await.expect("event missing");
                                     }
-                                }),
+                                },
+                            ),
                         );
                     }
                     TwinsRole::Campaign => {
                         let (_latest, mut monitor) = reporter.subscribe().await;
                         finalizers.push(
-                            context
-                                .child("finalizer")
-                                .with_attribute("index", &i)
-                                .spawn(move |_| async move {
+                            context.child("finalizer").with_attribute("index", i).spawn(
+                                move |_| async move {
                                     let mut count = 0u64;
                                     while count < required {
                                         let view = monitor.recv().await.expect("event missing");
@@ -1293,7 +1314,8 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                                             count += 1;
                                         }
                                     }
-                                }),
+                                },
+                            ),
                         );
                     }
                 }
@@ -1326,6 +1348,7 @@ where
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
+    let forwarding = input.forwarding;
 
     match M::MODE {
         simplex_node::NodeMode::WithoutRecovery => {
@@ -1338,7 +1361,7 @@ where
                 executor.start_and_recover(|mut context| async move {
                     simplex_node::run::<P>(&mut context, &input).await
                 });
-            simplex_node::run_recovery::<P>(checkpoint, participants, schemes);
+            simplex_node::run_recovery::<P>(checkpoint, participants, schemes, forwarding);
         }
     }
 }
@@ -1352,7 +1375,6 @@ pub enum Mode {
     FaultyMessaging,
     FaultyNet,
     Byzzfuzz,
-    ByzzfuzzLiveness,
 }
 
 pub trait FuzzMode {
@@ -1432,22 +1454,24 @@ impl FuzzMode for FaultyNet {
     const MODE: Mode = Mode::FaultyNet;
 }
 
-/// **Byzzfuzz mode** - safety fuzzing under sampled network and process faults.
+/// **Byzzfuzz mode** - sampled network and process faults checked against
+/// safety *and* liveness on every run.
 ///
-/// Runs four honest engines and applies sampled faults for the entire run:
+/// Runs four honest engines plus a per-message intercept layer. Faults are
+/// sampled per iteration:
 /// - **Network faults**: a schedule of `(view, partition)` entries. At a
 ///   scheduled view, traffic across partition blocks is dropped on every
 ///   channel (vote, certificate, resolver, even undecodable bytes); outside
 ///   scheduled views the topology is fully connected.
-/// - **Process faults**: a fixed byzantine identity, whose outgoing
-///   protocol messages are intercepted per a schedule of
-///   `(view, receivers, omit, scope)` entries. `scope` optionally
-///   narrows a fault to a specific channel + message kind (e.g. only
-///   Notarize votes); `Any` matches every byzantine outgoing message at
-///   the view. Vote process faults semantically mutate the intercepted
-///   vote and re-sign it under the byzantine identity. Certificate and
-///   resolver process faults are **omit-only**: the forwarder drops the
-///   original to the targeted recipients and the injector emits nothing.
+/// - **Process faults**: a fixed byzantine identity (always at index 0),
+///   whose outgoing protocol messages are intercepted per a schedule of
+///   `(view, receivers, omit, scope)` entries. `scope` optionally narrows
+///   a fault to a specific channel + message kind (e.g. only Notarize
+///   votes); `Any` matches every byzantine outgoing message at the view.
+///   Vote process faults semantically mutate the intercepted vote and
+///   re-sign it under the byzantine identity. Certificate and resolver
+///   process faults are **omit-only**: the forwarder drops the original
+///   to the targeted recipients and the injector emits nothing.
 ///
 /// Round attribution uses each message sender's current protocol round
 /// (the maximum view that sender has sent or received): network faults
@@ -1455,26 +1479,19 @@ impl FuzzMode for FaultyNet {
 /// Retransmissions of an old view at a later round therefore inherit the
 /// later round's fault window.
 ///
-/// Finalization timeout is not a failure; only invariant violations panic.
+/// Network faults apply during a bounded fault phase. After the phase
+/// elapses (or all non-byzantine reporters reach `required_containers`,
+/// whichever comes first), the shared fault gate reaches GST: partitions
+/// pass through, but the byzantine sender keeps mutating/omitting its own
+/// messages under the same `(view, receivers, scope)` schedule (extended
+/// at GST with a fresh post-GST view budget so byzantine activity does not
+/// silently disappear). Each non-byzantine reporter must then finalize at
+/// least one new view within a fixed post-GST window; failure to advance
+/// panics with a liveness violation. Safety invariants run after the
+/// post-GST check on every successful path. See [`byzzfuzz::run`].
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;
-}
-
-/// **ByzzfuzzLiveness mode** - liveness variant of the ByzzFuzz harness.
-///
-/// Same fault model as `Byzzfuzz`, but applies faults only during a bounded
-/// fault phase. After the phase elapses (or all non-byzantine reporters
-/// reach `required_containers`, whichever comes first), the shared fault
-/// gate reaches GST: forwarders pass partition decisions through and the
-/// injector drops queued intercepts. Each non-byzantine reporter (every
-/// index except `BYZANTINE_IDX = 0`) must then finalize at least one new
-/// view within a fixed post-GST window; failure to advance panics with a
-/// liveness violation. Safety invariants run after the post-GST check on
-/// every successful path.
-pub struct ByzzfuzzLiveness;
-impl FuzzMode for ByzzfuzzLiveness {
-    const MODE: Mode = Mode::ByzzfuzzLiveness;
 }
 
 /// Install (once per process) a panic-hook chain that drains and prints the
@@ -1509,8 +1526,12 @@ fn install_byzzfuzz_panic_hook() {
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
+    // TODO: enabled it again after the application mock support forwarding policies
+    // or remove this mode entirely from fuzzing
+    input.forwarding = ForwardingPolicy::Disabled;
+
     let raw_bytes = input.raw_bytes.clone();
-    if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
+    if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
     }
     let run_result = match M::MODE {
@@ -1533,15 +1554,12 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
         Mode::Byzzfuzz => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
-        Mode::ByzzfuzzLiveness => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            byzzfuzz::run_liveness::<P>(input)
-        })),
     };
     match run_result {
         Ok(()) => {
             // Drain the byzzfuzz log on success too so a *next* run (Byzzfuzz
             // or otherwise) starts clean. This is cheap when the log is empty.
-            if matches!(M::MODE, Mode::Byzzfuzz | Mode::ByzzfuzzLiveness) {
+            if matches!(M::MODE, Mode::Byzzfuzz) {
                 let _ = byzzfuzz::log::take();
             }
         }
@@ -1556,7 +1574,11 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     }
 }
 
-pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
+pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(mut input: NodeFuzzInput) {
+    // TODO: enabled it again after the application mock support forwarding policies
+    // or remove this mode entirely from fuzzing
+    input.forwarding = ForwardingPolicy::Disabled;
+
     let raw_bytes_for_panic = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));
     if let Err(payload) = run_result {

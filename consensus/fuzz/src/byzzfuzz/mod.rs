@@ -13,13 +13,12 @@
 //! certificate, and resolver traffic all participate in this tracking.
 //!
 //! Public surface used from `lib.rs`:
-//! - [`run`] is the `Mode::Byzzfuzz` (safety) entry point;
-//! - [`run_liveness`] is the `Mode::ByzzfuzzLiveness` entry point: applies
-//!   network faults during a bounded fault phase, reaches GST on the shared
-//!   fault gate, then requires every non-byzantine reporter to make at least
-//!   one new finalization within a fixed post-GST window while Byzantine
-//!   process faults are scheduled across the post-GST window. After GST,
-//!   correct senders cannot omit messages, and the network cannot drop
+//! - [`run`] is the `Mode::Byzzfuzz` entry point:
+//!   applies network faults during a bounded fault phase, reaches GST on the
+//!   shared fault gate, then requires every non-byzantine reporter to make
+//!   at least one new finalization within a fixed post-GST window while
+//!   Byzantine process faults are scheduled across the post-GST window. After
+//!   GST, correct senders cannot omit messages, and the network cannot drop
 //!   messages, but the Byzantine sender can still omit or mutate its own
 //!   messages to the correct recipients;
 //! - [`log`] stores the bounded decision trace drained on panic.
@@ -35,7 +34,7 @@ mod runner;
 mod sampling;
 mod scope;
 
-pub use runner::{run, run_liveness};
+pub use runner::run;
 pub(crate) use sampling::ByzzFuzz;
 
 /// Byzantine index in `participants`. Single source of truth for the
