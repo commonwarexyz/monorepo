@@ -755,9 +755,7 @@ mod loom_tests {
                 Self::FillReady => false,
                 Self::Replace(_) => {
                     overflow
-                        .replace_last(message, |pending| {
-                            matches!(pending, Self::Replace(_))
-                        })
+                        .replace_last(message, |pending| matches!(pending, Self::Replace(_)))
                         .unwrap_or_else(|message| {
                             overflow.spill(message);
                         });
@@ -892,11 +890,13 @@ mod loom_tests {
             let (sender, mut receiver) = new::<ReplacingMessage>(NZUsize!(1));
             let idle_sender = sender.clone();
             assert_eq!(sender.enqueue(ReplacingMessage::FillReady), Feedback::Ok);
-            assert_eq!(sender.enqueue(ReplacingMessage::Replace(1)), Feedback::Backoff);
+            assert_eq!(
+                sender.enqueue(ReplacingMessage::Replace(1)),
+                Feedback::Backoff
+            );
 
             let sender_1 = sender.clone();
-            let replace_1 =
-                thread::spawn(move || sender_1.enqueue(ReplacingMessage::Replace(2)));
+            let replace_1 = thread::spawn(move || sender_1.enqueue(ReplacingMessage::Replace(2)));
             let replace_2 = thread::spawn(move || sender.enqueue(ReplacingMessage::Replace(3)));
 
             assert_eq!(replace_1.join().unwrap(), Feedback::Backoff);
