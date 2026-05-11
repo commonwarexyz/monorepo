@@ -3,6 +3,7 @@ use commonware_utils::NZUsize;
 use criterion::{criterion_group, BatchSize, Criterion, Throughput};
 use futures::pin_mut;
 use std::{
+    collections::VecDeque,
     future::{poll_fn, Future},
     hint::black_box,
     task::Poll,
@@ -47,19 +48,23 @@ impl Message {
 }
 
 impl mailbox::Policy for Message {
-    fn handle(overflow: &mut mailbox::Overflow<'_, Self>, message: Self) -> bool {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match message.policy {
             Policy::Drop => false,
             Policy::Spill => {
-                overflow.spill(message);
+                overflow.push_back(message);
                 true
             }
             Policy::Replace => {
-                overflow
-                    .replace_last(message, |pending| pending.policy == Policy::Replace)
-                    .unwrap_or_else(|message| {
-                        overflow.spill(message);
-                    });
+                if let Some(pending) = overflow
+                    .iter_mut()
+                    .rev()
+                    .find(|pending| pending.policy == Policy::Replace)
+                {
+                    *pending = message;
+                } else {
+                    overflow.push_back(message);
+                }
                 true
             }
         }
