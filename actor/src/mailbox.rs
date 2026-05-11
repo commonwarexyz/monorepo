@@ -235,8 +235,7 @@ impl<T> Overflow<T> {
     }
 
     fn try_ready(&self, ready: &Ready<T>, message: T) -> Result<(), T> {
-        // If a racing sender begins overflow mutation after this load, both sends
-        // are concurrent and may be observed in either order
+        // Avoid ready while overflow is retained or changing.
         if self.activity.load(Ordering::Relaxed) != 0 {
             return Err(message);
         }
@@ -247,6 +246,7 @@ impl<T> Overflow<T> {
     where
         T: Policy,
     {
+        // Mark overflow active so racing senders stay off the ready fast path.
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
         if is_closed() {
@@ -269,6 +269,7 @@ impl<T> Overflow<T> {
             message
         };
 
+        // Preserve overflow order, or handle a still-full ready queue.
         let feedback = if T::handle(&mut queue, message) {
             Feedback::Backoff
         } else {
@@ -279,6 +280,7 @@ impl<T> Overflow<T> {
     }
 
     fn refill(&self, ready: &Ready<T>) {
+        // Skip the overflow lock unless non-empty overflow was published.
         if self.activity.load(Ordering::Relaxed) != OVERFLOW_HAS_MESSAGES {
             return;
         }
@@ -343,6 +345,7 @@ pub struct Sender<T: Policy> {
 
 impl<T: Policy> Clone for Sender<T> {
     fn clone(&self) -> Self {
+        // Live sender count drives receiver disconnect detection.
         self.state.senders.fetch_add(1, Ordering::Relaxed);
         Self {
             state: self.state.clone(),
@@ -354,6 +357,7 @@ impl<T: Policy> Drop for Sender<T> {
     fn drop(&mut self) {
         let previous = self.state.senders.fetch_sub(1, Ordering::AcqRel);
         assert!(previous > 0);
+        // Wake a receiver that is parked waiting for data or disconnect.
         if previous == 1 {
             self.state.waker.wake();
         }
@@ -373,10 +377,12 @@ impl<T: Policy> Sender<T> {
     /// Submit a message without waiting for inbox capacity.
     #[must_use = "caller must handle enqueue feedback"]
     pub fn enqueue(&self, message: T) -> Feedback {
+        // Receiver closure makes new sends fail immediately.
         if self.state.closed.load(Ordering::Acquire) {
             return Feedback::Closed;
         }
 
+        // Common case: publish directly to ready without taking overflow lock.
         let message = match self.state.overflow.try_ready(&self.state.ready, message) {
             Ok(()) => {
                 self.state.waker.wake();
@@ -385,6 +391,7 @@ impl<T: Policy> Sender<T> {
             Err(message) => message,
         };
 
+        // Slow path: serialize through overflow and apply the policy.
         let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
             self.state.closed.load(Ordering::Acquire)
         });
@@ -412,6 +419,7 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        // Fast path avoids waker churn when a message is already ready.
         if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
         }
@@ -437,12 +445,13 @@ impl<T> Receiver<T> {
 
     fn pop(&mut self) -> Option<T> {
         if let Some(message) = self.state.ready.pop() {
+            // A freed ready slot may let the oldest overflow message advance.
             self.state.overflow.refill(&self.state.ready);
             return Some(message);
         }
 
         // Empty ready may race with stale activity, so let `refill`
-        // decide whether overflow is worth locking
+        // decide whether overflow is worth locking.
         self.state.overflow.refill(&self.state.ready);
         self.state.ready.pop()
     }
@@ -470,6 +479,7 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
+        // Publish closure so future sends stop accepting messages.
         self.state.closed.store(true, Ordering::Release);
     }
 }
