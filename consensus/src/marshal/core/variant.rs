@@ -60,7 +60,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns the parent commitment referenced by `block`.
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
-    /// Returns the codec configuration used to decode a resolver-delivered [`Self::Block`].
+    /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
     /// The returned configuration may bind `expected_commitment` so that decoding rejects
     /// blocks that do not match the expected commitment.
