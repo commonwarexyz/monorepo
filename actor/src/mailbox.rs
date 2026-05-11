@@ -234,14 +234,10 @@ impl<T> Overflow<T> {
         }
     }
 
-    fn is_active(&self) -> bool {
-        self.activity.load(Ordering::Relaxed) != 0
-    }
-
     fn try_ready(&self, ready: &Ready<T>, message: T) -> Result<(), T> {
         // If a racing sender begins overflow mutation after this load, both sends
         // are concurrent and may be observed in either order
-        if self.is_active() {
+        if self.activity.load(Ordering::Relaxed) != 0 {
             return Err(message);
         }
         ready.push(message)
@@ -426,6 +422,8 @@ impl<T> Receiver<T> {
 
         self.state.waker.register(cx.waker());
 
+        // A sender can enqueue and wake after the first pop but before this
+        // waker is installed. Re-check before sleeping so the wake is not lost.
         if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
         }
