@@ -178,12 +178,10 @@ where
         pins
     };
 
-    // Build grafted tree. Snapshot ops_leaves once and thread it through every derivation
-    // that depends on the active-chunks boundary (build_grafted_tree, compute_grafted_root,
-    // pending_chunk).
+    // Build grafted tree.
     let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
-    let ops_leaves = *Location::<F>::try_from(ops_size)?;
+    let ops_leaves = Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),

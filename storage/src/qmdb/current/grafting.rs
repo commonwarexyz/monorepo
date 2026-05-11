@@ -4,17 +4,14 @@
 //!
 //! An operations tree is built over a log of operations, and a bitmap tracks the activity
 //! status of each operation. To authenticate both structures efficiently, we combine them: each
-//! _active_ chunk of the bitmap is hashed together with the corresponding subtree root from the
+//! _graftable_ chunk of the bitmap is hashed together with the corresponding subtree root from the
 //! ops tree to produce a single "grafted leaf" digest. These digests, along with their ancestor
 //! nodes, are stored in an in-memory Merkle structure (using grafted-space positions internally,
 //! with ops-space positions in hash pre-images via [GraftedHasher]).
 //!
-//! A chunk is _active_ once its height-`G` ancestor exists in the ops tree as a single node. In
-//! MMR every complete chunk is immediately active. MMB's delayed merges allow at most one chunk
-//! per database to be bit-complete but not yet active ("pending"); the pending chunk's bytes
-//! ride in the canonical-root trailer until the merge happens, then the chunk migrates into the
-//! grafted tree. See [`ops_active_chunks`] and the [`crate::qmdb::current`] module docs for the
-//! full picture.
+//! A chunk is _graftable_ once its height-`G` ancestor exists in the ops tree as a single node. In
+//! MMR every complete chunk is immediately graftable. MMB's delayed merges allow at most one chunk
+//! per database to be bit-complete but not yet graftable ("pending").
 //!
 //! ```text
 //!   Why MMB has a pending state, illustrated at G = 2 (chunk size = 4 leaves):
@@ -27,9 +24,9 @@
 //!     MMB:  N = 4 has no h=2 node yet. Chunk 0's leaves are split across
 //!           several h<2 peaks; there is no single ops node to graft onto.
 //!           The h=2 ancestor is not born until N reaches birth_chunk_0 = 5
-//!           (= 3 * 2^(G-1) - 1 for MMB at G=2). Until then, chunk 0 sits
-//!           in the canonical-root trailer; once the ancestor is born, the
-//!           chunk migrates into the grafted tree.
+//!           (= 3 * 2^(G-1) - 1 for MMB at G=2). Until then, chunk 0's digest
+//!           is hashed directly into the canonical root; once the ancestor is
+//!           born, the chunk migrates into the grafted tree.
 //! ```
 //!
 //! This is more efficient than maintaining two independent authenticated structures. An inclusion
@@ -78,28 +75,15 @@ pub(crate) const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
-/// Return the number of bitmap chunks whose height-G ancestor has been born in the ops tree.
+/// Return the number of bitmap chunks that have a corresponding height-G ancestor in the ops tree.
 ///
-/// Only chunks with a single h=G ancestor in the ops tree are committed by the grafted tree.
-/// The remaining "completed but ungraftable" chunk (at most one; the most recently completed
-/// one if MMB hasn't yet performed the merge) lives in the trailer alongside any partial
-/// trailing chunk.
-///
-/// Derived from `F::peak_birth_size(F::subtree_root_position(0, G), G)`, which gives the leaf
-/// count at which chunk 0's h=G ancestor is born. For chunk i it's `i * 2^G + birth_chunk_0`.
-///
-/// Equivalences (verified by property test in this module):
-/// - For MMR-shaped families, `birth_chunk_0 == 2^G`, so `active = ops_leaves >> G`. There is no
-///   pending state in MMR.
-/// - For MMB, `birth_chunk_0 == 3 * 2^(G-1) - 1`, so `active = (ops_leaves + 1 - 2^(G-1)) >> G`
-///   when the input is at least `birth_chunk_0`, else 0. The pending window has width `2^(G-1) - 1`
-///   ops per chunk, strictly less than the chunk stride `2^G`, so at most one chunk is ever pending.
+/// - For MMR, this is always the same as the number of complete_chunks.
+/// - For MMB, this is either complete_chunks or complete_chunks - 1.
 ///
 /// # Panics
 ///
-/// Panics if `grafting_height == 0`. Grafting at height 0 (one leaf per chunk) is structurally
-/// meaningless for QMDB's design and is rejected here to keep the active-chunk arithmetic simple.
-pub(super) fn ops_active_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
+/// Panics if `grafting_height == 0`.
+pub(super) fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
     assert!(grafting_height >= 1, "grafting_height must be >= 1");
     let pos = F::subtree_root_position(Location::<F>::new(0), grafting_height);
     let birth_chunk_0 = F::peak_birth_size(pos, grafting_height);
@@ -115,7 +99,7 @@ pub(super) fn ops_active_chunks<F: Graftable>(ops_leaves: u64, grafting_height: 
 ///
 /// Current grafted roots treat bitmap chunks as the atomic grafting unit. If the exact inactivity
 /// floor falls inside a root peak or inside a multi-peak chunk group, the partially covered chunk
-/// stays in the active region and the inactive peak count is rounded down to the latest chunk
+/// stays in the graftable region and the inactive peak count is rounded down to the latest chunk
 /// boundary expressible by whole root peaks.
 pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
     leaves: Location<F>,
@@ -262,10 +246,8 @@ pub(super) struct Verifier<'a, F: Graftable, H: CHasher> {
     /// The chunk index of `chunks[0]`.
     start_chunk_index: u64,
 
-    /// Number of chunks committed by the grafted tree. Chunks at index `>= active_chunks`
-    /// are pending: their bytes ride in the canonical-root trailer rather than being combined
-    /// with the ops subtree root at h=G during reconstruction.
-    active_chunks: u64,
+    /// Number of chunks with a corresponding height-G ancestor in the ops tree.
+    graftable_chunks: u64,
 
     _ops_family: PhantomData<F>,
 }
@@ -274,14 +256,14 @@ impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
     /// Create a new Verifier whose internal hasher uses the supplied bagging policy.
     ///
     /// `start_chunk_index` is the chunk index corresponding to `chunks[0]`.
-    /// `active_chunks` is the number of chunks committed by the grafted tree; any chunk index
+    /// `graftable_chunks` is the number of chunks committed by the grafted tree; any chunk index
     /// in `chunks` at or beyond this boundary is treated as pending and **not** combined with
     /// the ops subtree root at the grafting height.
     pub(super) const fn new(
         grafting_height: u32,
         start_chunk_index: u64,
         chunks: Vec<&'a [u8]>,
-        active_chunks: u64,
+        graftable_chunks: u64,
         bagging: merkle::Bagging,
     ) -> Self {
         Self {
@@ -289,7 +271,7 @@ impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
             grafting_height,
             chunks,
             start_chunk_index,
-            active_chunks,
+            graftable_chunks,
             _ops_family: PhantomData,
         }
     }
@@ -325,9 +307,10 @@ impl<F: Graftable, H: CHasher> HasherTrait<F> for Verifier<'_, F, H> {
                 let loc = F::leftmost_leaf(pos, self.grafting_height);
                 let chunk_idx = *loc >> self.grafting_height;
 
-                // Pending chunks (at index >= active_chunks) are NOT combined here. Their
-                // bytes are committed via the canonical-root trailer, not via grafting.
-                if chunk_idx >= self.active_chunks {
+                // Skip pending chunks. These will be incorporated in the root via the pending_chunk
+                // digest field.
+                if chunk_idx >= self.graftable_chunks {
+                    debug!(?chunk_idx, "skipping pending chunk");
                     return ops_subtree_root;
                 }
 
@@ -477,14 +460,14 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
-    /// MMR has no pending state, so every supplied chunk should be treated as active during
+    /// MMR has no pending state, so every supplied chunk should be treated as graftable during
     /// verification. Tests use this sentinel to avoid threading the actual chunk count through
     /// every call site.
-    const ALL_CHUNKS_ACTIVE: u64 = u64::MAX;
+    const ALL_CHUNKS_GRAFTABLE: u64 = u64::MAX;
 
     /// Count chunks of `2^G` leaves in `0..ops_leaves` that have a single covering peak at height G.
     ///
-    /// Used as the oracle for `ops_active_chunks` property tests.
+    /// Used as the oracle for `graftable_chunks` property tests.
     fn count_single_peak_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
         let chunk_size = 1u64 << grafting_height;
         let total_complete = ops_leaves / chunk_size;
@@ -504,53 +487,53 @@ mod tests {
         count
     }
 
-    fn ops_active_chunks_matches_oracle<F: Graftable>() {
+    fn graftable_chunks_matches_oracle<F: Graftable>() {
         for grafting_height in 1u32..=8 {
             let chunk_size = 1u64 << grafting_height;
             let n_max = (chunk_size * 80).min(2000);
             for ops_leaves in 0u64..=n_max {
-                let active = ops_active_chunks::<F>(ops_leaves, grafting_height);
+                let graftable = graftable_chunks::<F>(ops_leaves, grafting_height);
                 let oracle = count_single_peak_chunks::<F>(ops_leaves, grafting_height);
                 assert_eq!(
-                    active, oracle,
-                    "mismatch: family active={active}, oracle={oracle}, ops_leaves={ops_leaves}, G={grafting_height}"
+                    graftable, oracle,
+                    "mismatch: family graftable={graftable}, oracle={oracle}, ops_leaves={ops_leaves}, G={grafting_height}"
                 );
 
                 let complete = ops_leaves / chunk_size;
                 assert!(
-                    active <= complete,
-                    "active {active} exceeded complete {complete} (ops_leaves={ops_leaves}, G={grafting_height})"
+                    graftable <= complete,
+                    "graftable {graftable} exceeded complete {complete} (ops_leaves={ops_leaves}, G={grafting_height})"
                 );
                 assert!(
-                    complete - active <= 1,
-                    "complete-active gap > 1: complete={complete}, active={active}, ops_leaves={ops_leaves}, G={grafting_height}"
+                    complete - graftable <= 1,
+                    "complete-graftable gap > 1: complete={complete}, graftable={graftable}, ops_leaves={ops_leaves}, G={grafting_height}"
                 );
             }
         }
     }
 
     #[test]
-    fn test_ops_active_chunks_mmr_matches_chunk_peaks() {
-        ops_active_chunks_matches_oracle::<mmr::Family>();
+    fn test_graftable_chunks_mmr_matches_chunk_peaks() {
+        graftable_chunks_matches_oracle::<mmr::Family>();
     }
 
     #[test]
-    fn test_ops_active_chunks_mmb_matches_chunk_peaks() {
-        ops_active_chunks_matches_oracle::<mmb::Family>();
+    fn test_graftable_chunks_mmb_matches_chunk_peaks() {
+        graftable_chunks_matches_oracle::<mmb::Family>();
     }
 
-    /// MMR has no pending state: active_chunks always equals complete_chunks.
+    /// MMR has no pending state: graftable_chunks always equals complete_chunks.
     #[test]
-    fn test_ops_active_chunks_mmr_no_pending() {
+    fn test_graftable_chunks_mmr_no_pending() {
         for grafting_height in 1u32..=8 {
             let chunk_size = 1u64 << grafting_height;
             let n_max = (chunk_size * 80).min(2000);
             for ops_leaves in 0u64..=n_max {
-                let active = ops_active_chunks::<mmr::Family>(ops_leaves, grafting_height);
+                let graftable = graftable_chunks::<mmr::Family>(ops_leaves, grafting_height);
                 let complete = ops_leaves / chunk_size;
                 assert_eq!(
-                    active, complete,
-                    "MMR has unexpected pending state: ops_leaves={ops_leaves}, G={grafting_height}, active={active}, complete={complete}"
+                    graftable, complete,
+                    "MMR has unexpected pending state: ops_leaves={ops_leaves}, G={grafting_height}, graftable={graftable}, complete={complete}"
                 );
             }
         }
@@ -559,14 +542,14 @@ mod tests {
     /// Sanity check: the MMB pending window has width `2^(G-1) - 1` per chunk, strictly less than
     /// `2^G`, so at most one chunk is pending at any moment.
     #[test]
-    fn test_ops_active_chunks_mmb_at_most_one_pending() {
+    fn test_graftable_chunks_mmb_at_most_one_pending() {
         for grafting_height in 1u32..=8 {
             let chunk_size = 1u64 << grafting_height;
             let n_max = (chunk_size * 80).min(2000);
             for ops_leaves in 0u64..=n_max {
-                let active = ops_active_chunks::<mmb::Family>(ops_leaves, grafting_height);
+                let graftable = graftable_chunks::<mmb::Family>(ops_leaves, grafting_height);
                 let complete = ops_leaves / chunk_size;
-                let pending = complete.saturating_sub(active);
+                let pending = complete.saturating_sub(graftable);
                 assert!(
                     pending <= 1,
                     "MMB has {pending} pending chunks (ops_leaves={ops_leaves}, G={grafting_height}); should be <= 1"
@@ -577,22 +560,22 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "grafting_height must be >= 1")]
-    fn test_ops_active_chunks_rejects_height_zero() {
-        let _ = ops_active_chunks::<mmr::Family>(100, 0);
+    fn test_graftable_chunks_rejects_height_zero() {
+        let _ = graftable_chunks::<mmr::Family>(100, 0);
     }
 
-    /// When `active_chunks: 0` is passed to a `Verifier`, every chunk index is treated as
+    /// When `graftable_chunks: 0` is passed to a `Verifier`, every chunk index is treated as
     /// pending, so `node_digest` at height G returns the raw ops subtree root, never the
-    /// chunk-combined digest. This is the boundary case for the active/pending check.
+    /// chunk-combined digest. This is the boundary case for the graftable/pending check.
     #[test]
-    fn test_verifier_active_chunks_zero_skips_chunk_combine() {
+    fn test_verifier_graftable_chunks_zero_skips_chunk_combine() {
         const GH: u32 = 1;
         let chunk: [u8; 1] = [0xAB];
         let left = Sha256::fill(0x01);
         let right = Sha256::fill(0x02);
 
-        // Position at h=G with chunk_idx 0; with active_chunks=0 the verifier must NOT
-        // combine the chunk (chunk_idx >= active_chunks).
+        // Position at h=G with chunk_idx 0; with graftable_chunks=0 the verifier must NOT
+        // combine the chunk (chunk_idx >= graftable_chunks).
         let pos_at_g = mmr::Family::subtree_root_position(Location::new(0), GH);
 
         let standard: StandardHasher<Sha256> = StandardHasher::new(ForwardFold);
@@ -606,16 +589,19 @@ mod tests {
         );
         assert_eq!(
             got, expected_no_combine,
-            "active_chunks=0 must skip chunk combination at the grafting height"
+            "graftable_chunks=0 must skip chunk combination at the grafting height"
         );
 
-        // Sanity: with active_chunks=1 the chunk IS combined, so the digest differs.
-        let v_active = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1, ForwardFold);
-        let got_active =
+        // Sanity: with graftable_chunks=1 the chunk IS combined, so the digest differs.
+        let v_graftable = Verifier::<mmr::Family, Sha256>::new(GH, 0, vec![&chunk], 1, ForwardFold);
+        let got_graftable =
             <Verifier<'_, mmr::Family, Sha256> as HasherTrait<mmr::Family>>::node_digest(
-                &v_active, pos_at_g, &left, &right,
+                &v_graftable,
+                pos_at_g,
+                &left,
+                &right,
             );
-        assert_ne!(got, got_active);
+        assert_ne!(got, got_graftable);
     }
 
     /// Convert an ops-tree position at the grafting height back to its chunk index.
@@ -915,7 +901,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1],
-                        ALL_CHUNKS_ACTIVE,
+                        ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
@@ -934,7 +920,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         1,
                         vec![&c2],
-                        ALL_CHUNKS_ACTIVE,
+                        ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
@@ -956,7 +942,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         1,
                         vec![&c2],
-                        ALL_CHUNKS_ACTIVE,
+                        ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
                     assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
@@ -980,7 +966,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1],
-                        ALL_CHUNKS_ACTIVE,
+                        ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
                     assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
@@ -990,7 +976,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         2,
                         vec![&c2],
-                        ALL_CHUNKS_ACTIVE,
+                        ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
                     assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
@@ -1011,7 +997,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1, &c2],
-                        ALL_CHUNKS_ACTIVE,
+                        ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
                     assert!(proof.verify_range_inclusion(
@@ -1026,7 +1012,7 @@ mod tests {
                         GRAFTING_HEIGHT,
                         0,
                         vec![&c1],
-                        ALL_CHUNKS_ACTIVE,
+                        ALL_CHUNKS_GRAFTABLE,
                         ForwardFold,
                     );
                     assert!(!proof.verify_range_inclusion(
@@ -1080,7 +1066,7 @@ mod tests {
                 GRAFTING_HEIGHT,
                 0,
                 vec![&c1],
-                ALL_CHUNKS_ACTIVE,
+                ALL_CHUNKS_GRAFTABLE,
                 ForwardFold,
             );
             assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
@@ -1089,7 +1075,7 @@ mod tests {
                 GRAFTING_HEIGHT,
                 0,
                 vec![],
-                ALL_CHUNKS_ACTIVE,
+                ALL_CHUNKS_GRAFTABLE,
                 ForwardFold,
             );
             let loc = Location::new(4);
@@ -1166,13 +1152,13 @@ mod tests {
         assert_eq!(grafted.get_node(gp4), Some(d4));
     }
 
-    /// For every `(leaf_count, chunk_idx)` with `chunk_idx < ops_active_chunks(leaf_count, G)`,
+    /// For every `(leaf_count, chunk_idx)` with `chunk_idx < graftable_chunks(leaf_count, G)`,
     /// the chunk has exactly one h=G peak in the ops MMB. The pending chunk (at index
-    /// `active_chunks`, if present) is the only chunk that may have multi-peak structure;
-    /// its bytes ride in the canonical-root trailer rather than being folded into the
+    /// `graftable_chunks`, if present) is the only chunk that may have multi-peak structure;
+    /// its digest is hashed directly into the canonical root rather than being folded into the
     /// grafted root.
     #[test_traced]
-    fn test_active_chunks_always_single_peak() {
+    fn test_graftable_chunks_always_single_peak() {
         type F = mmb::Family;
         let grafting_height = 2u32;
         let mut exercised = 0usize;
@@ -1180,13 +1166,13 @@ mod tests {
         for leaf_count in 1..=200u64 {
             let size = F::location_to_position(mmb::Location::new(leaf_count));
             let complete_chunks = leaf_count / (1u64 << grafting_height);
-            let active_chunks =
-                ops_active_chunks::<F>(leaf_count, grafting_height).min(complete_chunks);
-            for chunk_idx in 0..active_chunks {
+            let graftable_chunks =
+                graftable_chunks::<F>(leaf_count, grafting_height).min(complete_chunks);
+            for chunk_idx in 0..graftable_chunks {
                 let count = F::chunk_peaks(size, chunk_idx, grafting_height).count();
                 assert_eq!(
                     count, 1,
-                    "active chunk {chunk_idx} has {count} peaks (leaf_count={leaf_count}, active={active_chunks}, complete={complete_chunks})"
+                    "graftable chunk {chunk_idx} has {count} peaks (leaf_count={leaf_count}, graftable={graftable_chunks}, complete={complete_chunks})"
                 );
                 exercised += 1;
             }
@@ -1196,7 +1182,7 @@ mod tests {
 
     /// At every MMB size, the chunk index `complete_chunks - 1` (the most recently completed
     /// chunk) is multi-peak iff it is also the pending chunk, i.e. iff
-    /// `active_chunks < complete_chunks`. Earlier chunks are always single-peak (active) and
+    /// `graftable_chunks < complete_chunks`. Earlier chunks are always single-peak (graftable) and
     /// never appear in a multi-peak state.
     #[test_traced]
     fn test_only_pending_chunk_can_be_multi_peak() {
@@ -1207,18 +1193,18 @@ mod tests {
         for leaf_count in 1..=200u64 {
             let size = F::location_to_position(mmb::Location::new(leaf_count));
             let complete_chunks = leaf_count / (1u64 << grafting_height);
-            let active_chunks =
-                ops_active_chunks::<F>(leaf_count, grafting_height).min(complete_chunks);
+            let graftable_chunks =
+                graftable_chunks::<F>(leaf_count, grafting_height).min(complete_chunks);
             for chunk_idx in 0..complete_chunks {
                 let count = F::chunk_peaks(size, chunk_idx, grafting_height).count();
-                if chunk_idx < active_chunks {
+                if chunk_idx < graftable_chunks {
                     assert_eq!(
                         count, 1,
-                        "active chunk {chunk_idx} has {count} peaks (leaf_count={leaf_count})"
+                        "graftable chunk {chunk_idx} has {count} peaks (leaf_count={leaf_count})"
                     );
                 } else {
                     // chunk_idx is the pending chunk; multi-peak is allowed (and expected
-                    // when this branch is taken, since active < complete).
+                    // when this branch is taken, since graftable < complete).
                     assert!(
                         count >= 1,
                         "pending chunk {chunk_idx} has {count} peaks (leaf_count={leaf_count})"

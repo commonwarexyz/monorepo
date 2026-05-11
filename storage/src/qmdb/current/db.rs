@@ -277,7 +277,7 @@ where
         // Snapshot ops_leaves once and thread it through both root computation and the
         // pending/partial chunk derivation so they observe the same `(ops, bitmap)` state.
         let ops_size = storage.size().await;
-        let ops_leaves = *Location::<F>::try_from(ops_size)?;
+        let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
             hasher,
             self.any.bitmap.as_ref(),
@@ -666,16 +666,14 @@ where
             Vec::new()
         };
 
-        // `any.rewind` rewinds the log and patches the shared bitmap (truncate + restore active
+        // `any.rewind` rewinds the log and patches the shared bitmap (truncate + restore graftable
         // bits + set the rewound tail's CommitFloor). Live pre-rewind batches must be dropped by
         // the caller; reads through them now return inconsistent data.
         self.any.rewind(size).await?;
 
         let hasher = qmdb::hasher::<H>();
-        // Snapshot ops_leaves once and thread through both grafted-tree construction and root
-        // computation so the active-chunks boundary is consistent.
         let ops_size = self.any.log.merkle.size();
-        let ops_leaves = *Location::<F>::try_from(ops_size)?;
+        let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_tree = build_grafted_tree::<F, H, S, N>(
             &hasher,
             self.any.bitmap.as_ref(),
@@ -851,60 +849,69 @@ pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     }
 }
 
-/// Return complete and active chunk counts, enforcing the pending and pruning invariants.
+/// Return complete and graftable chunk counts, enforcing the pending and pruning invariants.
 ///
 /// Returns [`Error::DataCorrupted`] if `bitmap` and `ops_leaves` imply more than one
-/// pending chunk, or if pruning has advanced past the active chunk boundary.
-fn active_chunk_window<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
+/// pending chunk, or if pruning has advanced past the graftable chunk boundary.
+fn graftable_chunk_window<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
-    ops_leaves: u64,
+    ops_leaves: Location<F>,
     grafting_height: u32,
 ) -> Result<(u64, u64), Error<F>> {
     let complete = bitmap.complete_chunks() as u64;
-    let active = grafting::ops_active_chunks::<F>(ops_leaves, grafting_height).min(complete);
-    let pending = complete - active;
+    let graftable = grafting::graftable_chunks::<F>(*ops_leaves, grafting_height).min(complete);
+    let pending = complete - graftable;
     if pending > 1 {
         return Err(Error::DataCorrupted("multiple pending bitmap chunks"));
     }
 
     let pruned = bitmap.pruned_chunks() as u64;
-    if pruned > active {
-        return Err(Error::DataCorrupted("pruned chunks exceed active chunks"));
+    if pruned > graftable {
+        return Err(Error::DataCorrupted(
+            "pruned chunks exceed graftable chunks",
+        ));
     }
 
-    Ok((complete, active))
+    Ok((complete, graftable))
 }
 
 /// Returns the bytes of the "pending" chunk if the bitmap currently has one, else `None`.
 ///
 /// A chunk is pending when its bits are fully written to the bitmap but its h=G ancestor
 /// has not yet been born in the ops tree. At most one chunk is ever in this state (the most
-/// recently completed one); see [`super::grafting::ops_active_chunks`] for the structural
+/// recently completed one); see [`super::grafting::graftable_chunks`] for the structural
 /// argument.
 ///
 /// The caller must pass a consistent snapshot of `ops_leaves` (the ops tree's leaf count)
-/// and the bitmap state. Both inputs are used to derive `active_chunks`; deriving them from
+/// and the bitmap state. Both inputs are used to derive `graftable_chunks`; deriving them from
 /// independent snapshots can violate the pending-window or pruning invariants.
 ///
 /// Returns [`Error::DataCorrupted`] when those invariants are violated.
 pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const N: usize>(
     bitmap: &B,
-    ops_leaves: u64,
+    ops_leaves: Location<F>,
     grafting_height: u32,
 ) -> Result<Option<[u8; N]>, Error<F>> {
-    let (complete, active) = active_chunk_window::<F, B, N>(bitmap, ops_leaves, grafting_height)?;
-    if complete - active != 1 {
+    let (complete, graftable) =
+        graftable_chunk_window::<F, B, N>(bitmap, ops_leaves, grafting_height)?;
+    if complete - graftable != 1 {
         return Ok(None);
     }
-    Ok(Some(bitmap.get_chunk(active as usize)))
+    Ok(Some(bitmap.get_chunk(graftable as usize)))
 }
 
 /// Compute the canonical root from the ops root, grafted tree root, and optional pending /
-/// partial trailing chunk digests.
+/// partial chunk digests.
 ///
 /// See [Canonical root structure](super::proof#canonical-root-structure) for the full layout.
-/// The pending and partial slots are independent: either, both, or neither may be set, and
+/// The pending and partial inputs are independent: either, both, or neither may be set, and
 /// pending precedes partial in hash order when both are present.
+///
+/// # Collision resistance
+///
+/// `pending` contributes `D` bytes when present; `partial` contributes `D + 8` bytes (`D` =
+/// digest size). Different fixed lengths, so the two cannot produce the same input bytes —
+/// even when their digests are identical. Collisions reduce to H.
 pub(super) fn combine_roots<H: Hasher>(
     hasher: &StandardHasher<H>,
     ops_root: &H::Digest,
@@ -943,7 +950,7 @@ pub(super) fn combine_roots<H: Hasher>(
 ///
 /// `ops_leaves` must be a single consistent snapshot of the ops tree's leaf count, taken
 /// in the same logical instant as the bitmap state passed via `status`. Both the pending
-/// chunk derivation and `compute_grafted_root` use this value to compute `active_chunks`;
+/// chunk derivation and `compute_grafted_root` use this value to compute `graftable_chunks`;
 /// deriving them from independent snapshots risks the inconsistent state where a chunk is
 /// counted in one path but not the other.
 #[allow(clippy::too_many_arguments)]
@@ -957,7 +964,7 @@ pub(super) async fn compute_db_root<
     hasher: &StandardHasher<H>,
     status: &B,
     storage: &S,
-    ops_leaves: u64,
+    ops_leaves: Location<F>,
     partial_chunk: Option<([u8; N], u64)>,
     inactivity_floor: Location<F>,
     ops_root: &H::Digest,
@@ -981,13 +988,13 @@ pub(super) async fn compute_db_root<
 
 /// Compute the root of the grafted structure represented by `storage`.
 ///
-/// Only **active** chunks (those whose h=G ancestor has been born in the ops tree) are
+/// Only **graftable** chunks (those whose h=G ancestor has been born in the ops tree) are
 /// committed by the grafted tree. The most recently completed but ungraftable chunk, if
-/// any, lives in the trailer and is hashed into the canonical root by [`combine_roots`],
-/// not by this function.
+/// any, is hashed into the canonical root directly by [`combine_roots`] as the pending
+/// chunk, not by this function.
 ///
 /// `ops_leaves` must come from the same single snapshot as `status` to preserve the
-/// `pruned_chunks <= active_chunks <= complete_chunks` invariant.
+/// `pruned_chunks <= graftable_chunks <= complete_chunks` invariant.
 pub(super) async fn compute_grafted_root<
     F: merkle::Graftable,
     H: Hasher,
@@ -998,7 +1005,7 @@ pub(super) async fn compute_grafted_root<
     hasher: &StandardHasher<H>,
     status: &B,
     storage: &S,
-    ops_leaves: u64,
+    ops_leaves: Location<F>,
     inactivity_floor: Location<F>,
 ) -> Result<H::Digest, Error<F>> {
     let size = storage.size().await;
@@ -1015,24 +1022,24 @@ pub(super) async fn compute_grafted_root<
     }
 
     let grafting_height = grafting::height::<N>();
-    let (_complete_chunks, _active_chunks) =
-        active_chunk_window::<F, B, N>(status, ops_leaves, grafting_height)?;
+    let (_complete_chunks, _graftable_chunks) =
+        graftable_chunk_window::<F, B, N>(status, ops_leaves, grafting_height)?;
 
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
 
-    // Every peak the storage layer surfaces is either a grafted-tree node (active chunks
+    // Every peak the storage layer surfaces is either a grafted-tree node (graftable chunks
     // already incorporate `hash(chunk || h_G_node)`), an ops node above G (hashed
-    // normally), or an ops node below G (raw, because its chunk is pending and the bytes
-    // ride in the trailer rather than in the tree). Bagging is a straight fold; no
-    // per-chunk transformation is needed.
+    // normally), or an ops node below G (raw, because its chunk is pending and its digest
+    // is hashed directly into the canonical root rather than through the tree). Bagging is
+    // a straight fold; no per-chunk transformation is needed.
     Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
 }
 
 /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
 ///
-/// Callers must pass only **active** chunks (those whose h=G ancestor has already been born
-/// in the ops tree). Each active chunk has exactly one covering ops node at height G,
+/// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born
+/// in the ops tree). Each graftable chunk has exactly one covering ops node at height G,
 /// looked up via [`merkle::Graftable::subtree_root_position`]. The grafted leaf digest is
 /// `hash(chunk || ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest
 /// directly (zero-chunk identity).
@@ -1051,7 +1058,7 @@ pub(super) async fn compute_grafted_leaves<
 ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
     let grafting_height = grafting::height::<N>();
 
-    // Each active chunk has a single h=G ancestor at the deterministic
+    // Each graftable chunk has a single h=G ancestor at the deterministic
     // `subtree_root_position(chunk_idx << G, G)`. Look it up directly.
     let inputs = try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| async move {
         let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
@@ -1085,14 +1092,15 @@ pub(super) async fn compute_grafted_leaves<
 
 /// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree.
 ///
-/// For each non-pruned **active** chunk (index in `pruned_chunks..active_chunks`), reads the
+/// For each non-pruned **graftable** chunk (index in `pruned_chunks..graftable_chunks`), reads the
 /// ops tree node at the grafting height to compute the grafted leaf (see the
 /// [grafted leaf formula](super) in the module documentation).
 ///
-/// The most recently completed chunk may not yet be active (its h=G ancestor not yet born);
-/// that chunk is **excluded** from the grafted tree and its bytes ride in the trailer. The
-/// caller must ensure that all ops tree nodes for chunks `>= pruned_chunks` are still
-/// accessible in the ops tree (i.e., not pruned from the journal).
+/// The most recently completed chunk may not yet be graftable (its h=G ancestor not yet born);
+/// that chunk is **excluded** from the grafted tree and its digest is hashed directly into
+/// the canonical root as the pending chunk. The caller must ensure that all ops tree nodes
+/// for chunks `>= pruned_chunks` are still accessible in the ops tree (i.e., not pruned from
+/// the journal).
 ///
 /// `ops_leaves` must be a single consistent snapshot of `ops_tree.size()` taken in the same
 /// instant as the bitmap state.
@@ -1106,25 +1114,26 @@ pub(super) async fn build_grafted_tree<
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
-    ops_leaves: u64,
+    ops_leaves: Location<F>,
     strategy: &S,
 ) -> Result<Mem<F, H::Digest>, Error<F>> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
-    let active_chunks = grafting::ops_active_chunks::<F>(ops_leaves, grafting_height)
+    let graftable_chunks = grafting::graftable_chunks::<F>(*ops_leaves, grafting_height)
         .min(complete_chunks as u64) as usize;
     debug_assert!(
-        pruned_chunks <= active_chunks && active_chunks <= complete_chunks,
-        "invariant violated: pruned={pruned_chunks} active={active_chunks} complete={complete_chunks}"
+        pruned_chunks <= graftable_chunks && graftable_chunks <= complete_chunks,
+        "invariant violated: pruned={pruned_chunks} graftable={graftable_chunks} complete={complete_chunks}"
     );
 
-    // Compute grafted leaves for each unpruned active chunk. The pending chunk (if any)
-    // sits at index `active_chunks` and is excluded; its bytes ride in the trailer.
+    // Compute grafted leaves for each unpruned graftable chunk. The pending chunk (if any)
+    // sits at index `graftable_chunks` and is excluded; its digest is hashed directly into
+    // the canonical root.
     let leaves = compute_grafted_leaves::<F, H, S, N>(
         hasher,
         ops_tree,
-        (pruned_chunks..active_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
+        (pruned_chunks..graftable_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
         strategy,
     )
     .await?;
@@ -1158,7 +1167,7 @@ pub(super) async fn build_grafted_tree<
 ///
 /// The metadata store holds two kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
-///   pruned. This tells us where the active portion of the bitmap begins.
+///   pruned. This tells us where the graftable portion of the bitmap begins.
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
 ///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
@@ -1347,7 +1356,7 @@ mod tests {
         let partial = Sha256::hash(b"partial");
         let next_bit: u64 = 0x1122_3344_5566_7788;
 
-        // Empty trailer.
+        // Neither pending nor partial.
         assert_eq!(
             combine_roots(&hasher, &ops, &grafted, None, None),
             hasher.hash([ops.as_ref(), grafted.as_ref()])
