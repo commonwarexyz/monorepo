@@ -261,6 +261,9 @@ impl<T> OverflowState<T> {
         ready: &ReadyQueue<T>,
         message: T,
     ) -> Result<(), T> {
+        // The fast-path push may have observed stale ready fullness. Once the
+        // sender reaches the overflow lock, retry ready before applying policy
+        // if there is no retained overflow to preserve ahead of this message.
         // Once a sender reaches the overflow path, the overflow lock preserves
         // its order relative to existing overflow. Concurrent direct ready
         // sends may still interleave because the mailbox does not provide
