@@ -242,14 +242,29 @@ impl<T> OverflowState<T> {
         self.activity.load(Ordering::Relaxed) == OVERFLOW_HAS_MESSAGES
     }
 
-    fn try_push_ready(&self, ready: &ReadyQueue<T>, message: T) -> Result<(), T> {
-        // This is an opportunistic fast path, not a global ordering point. If a
-        // racing sender begins overflow mutation after this load, both sends
+    fn try_ready(&self, ready: &ReadyQueue<T>, message: T) -> Result<(), T> {
+        // If a racing sender begins overflow mutation after this load, both sends
         // are concurrent and may be observed in either order.
         if self.is_active() {
             return Err(message);
         }
         ready.push(message)
+    }
+
+    #[inline(always)]
+    fn try_ready_if_overflow_empty(
+        queue: &VecDeque<T>,
+        ready: &ReadyQueue<T>,
+        message: T,
+    ) -> Result<(), T> {
+        // The fast-path push may have observed stale ready fullness. Retry
+        // ready under the overflow lock before applying policy, but only when
+        // there is no retained overflow that must stay ahead of this message.
+        if queue.is_empty() {
+            ready.push(message)
+        } else {
+            Err(message)
+        }
     }
 
     fn enqueue(&self, ready: &ReadyQueue<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback
@@ -276,6 +291,18 @@ impl<T> OverflowState<T> {
         feedback
     }
 
+    fn refill_ready(queue: &mut VecDeque<T>, ready: &ReadyQueue<T>) {
+        while let Some(message) = queue.pop_front() {
+            match ready.push(message) {
+                Ok(()) => {}
+                Err(message) => {
+                    queue.push_front(message);
+                    break;
+                }
+            }
+        }
+    }
+
     fn refill(&self, ready: &ReadyQueue<T>) {
         if !self.has_refillable_messages() {
             return;
@@ -287,21 +314,6 @@ impl<T> OverflowState<T> {
         mutation.publish(&queue);
     }
 
-    fn try_ready_if_overflow_empty(
-        queue: &VecDeque<T>,
-        ready: &ReadyQueue<T>,
-        message: T,
-    ) -> Result<(), T> {
-        // The fast-path push may have observed stale ready fullness. Retry
-        // ready under the overflow lock before applying policy, but only when
-        // there is no retained overflow that must stay ahead of this message.
-        if queue.is_empty() {
-            ready.push(message)
-        } else {
-            Err(message)
-        }
-    }
-
     fn apply_policy(queue: &mut VecDeque<T>, message: T) -> Feedback
     where
         T: Policy,
@@ -310,18 +322,6 @@ impl<T> OverflowState<T> {
             Feedback::Backoff
         } else {
             Feedback::Dropped
-        }
-    }
-
-    fn refill_ready(queue: &mut VecDeque<T>, ready: &ReadyQueue<T>) {
-        while let Some(message) = queue.pop_front() {
-            match ready.push(message) {
-                Ok(()) => {}
-                Err(message) => {
-                    queue.push_front(message);
-                    break;
-                }
-            }
         }
     }
 }
@@ -405,11 +405,7 @@ impl<T: Policy> Sender<T> {
             return Feedback::Closed;
         }
 
-        let message = match self
-            .state
-            .overflow
-            .try_push_ready(&self.state.ready, message)
-        {
+        let message = match self.state.overflow.try_ready(&self.state.ready, message) {
             Ok(()) => {
                 self.state.waker.wake();
                 return Feedback::Ok;
