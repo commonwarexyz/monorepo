@@ -218,7 +218,7 @@ where
         (next_bit, digest)
     });
     let pending_digest =
-        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())
+        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
             .map(|chunk| hasher.digest(&chunk));
     let root = db::combine_roots(
         &hasher,
