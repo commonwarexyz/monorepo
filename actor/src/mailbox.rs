@@ -251,32 +251,6 @@ impl<T> Overflow<T> {
         ready.push(message)
     }
 
-    fn try_ready_if_overflow_empty(
-        queue: &VecDeque<T>,
-        ready: &Ready<T>,
-        message: T,
-    ) -> Result<(), T> {
-        // The fast-path push may have observed stale ready fullness. Retry
-        // ready under the overflow lock before applying policy, but only when
-        // there is no retained overflow that must stay ahead of this message.
-        if queue.is_empty() {
-            ready.push(message)
-        } else {
-            Err(message)
-        }
-    }
-
-    fn apply_policy(queue: &mut VecDeque<T>, message: T) -> Feedback
-    where
-        T: Policy,
-    {
-        if T::handle(queue, message) {
-            Feedback::Backoff
-        } else {
-            Feedback::Dropped
-        }
-    }
-
     fn enqueue(&self, ready: &Ready<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback
     where
         T: Policy,
@@ -288,29 +262,28 @@ impl<T> Overflow<T> {
             return Feedback::Closed;
         }
 
-        let message = match Self::try_ready_if_overflow_empty(&queue, ready, message) {
-            Ok(()) => {
-                mutation.publish(&queue);
-                return Feedback::Ok;
+        // The fast-path push may have observed stale ready fullness. Retry
+        // ready under the overflow lock before applying policy, but only when
+        // there is no retained overflow that must stay ahead of this message.
+        let message = if queue.is_empty() {
+            match ready.push(message) {
+                Ok(()) => {
+                    mutation.publish(&queue);
+                    return Feedback::Ok;
+                }
+                Err(message) => message,
             }
-            Err(message) => message,
+        } else {
+            message
         };
 
-        let feedback = Self::apply_policy(&mut queue, message);
+        let feedback = if T::handle(&mut queue, message) {
+            Feedback::Backoff
+        } else {
+            Feedback::Dropped
+        };
         mutation.publish(&queue);
         feedback
-    }
-
-    fn refill_ready(queue: &mut VecDeque<T>, ready: &Ready<T>) {
-        while let Some(message) = queue.pop_front() {
-            match ready.push(message) {
-                Ok(()) => {}
-                Err(message) => {
-                    queue.push_front(message);
-                    break;
-                }
-            }
-        }
     }
 
     fn refill(&self, ready: &Ready<T>) {
@@ -320,7 +293,15 @@ impl<T> Overflow<T> {
 
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
-        Self::refill_ready(&mut queue, ready);
+        while let Some(message) = queue.pop_front() {
+            match ready.push(message) {
+                Ok(()) => {}
+                Err(message) => {
+                    queue.push_front(message);
+                    break;
+                }
+            }
+        }
         mutation.publish(&queue);
     }
 }
