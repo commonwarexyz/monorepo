@@ -215,7 +215,7 @@ pub trait PendingChunk<D: Digest>:
 impl<D: Digest> PendingChunk<D> for Option<D> {
     #[inline]
     fn as_ref(&self) -> Option<&D> {
-        Option::as_ref(self)
+        Self::as_ref(self)
     }
 }
 
