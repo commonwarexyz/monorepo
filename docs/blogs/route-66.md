@@ -12,8 +12,6 @@ image: "https://commonware.xyz/imgs/route-66.png"
 
 Today, we're announcing *Route 66*, a new initiative we're co-leading with Coinbase to make it faster and cheaper to connect to [specialized blockchains](/blogs/commonware-the-anti-framework), and a strategic investment from Coinbase Ventures.
 
----
-
 Blockchains look and feel less like blockchains each month ([and that's a good thing](/blogs/introducing-commonware)).
 
 To better compete with the web services people use every day, the latest cohort of onchain products is increasingly blurring the line between blockchain and blockchain application. Whether it be offering cheaper and faster payments with stablecoins and dedicated blockspace, tighter spreads with custom execution rules and encrypted mempools, or provably fair games with secure randomness, applications are [twisting and tweaking the blockchains they run on](/blogs/commonware-the-anti-framework) more than ever.
