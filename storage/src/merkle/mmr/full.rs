@@ -66,7 +66,7 @@ mod tests {
             let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root(&hasher, 0).unwrap();
 
-            let mut mmr = Mmr::init(
+            let mmr = Mmr::init(
                 context.child("storage"),
                 &Standard::<Sha256>::new(ForwardFold),
                 test_config(&context),
@@ -240,7 +240,7 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             // Build base full MMR with 10 elements.
-            let mut mmr = Mmr::init(
+            let mmr = Mmr::init(
                 context.child("storage"),
                 &Standard::<Sha256>::new(ForwardFold),
                 test_config(&context),
@@ -303,7 +303,7 @@ mod tests {
             let hasher = Standard::<Sha256>::new(ForwardFold);
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
-            let mut mmr = Mmr::<_, Digest, Sequential>::init(
+            let mmr = Mmr::<_, Digest, Sequential>::init(
                 context.child("init"),
                 &hasher,
                 test_config(&context),
@@ -329,7 +329,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let mut ref_mmr =
+            let ref_mmr =
                 Mmr::<_, Digest, Sequential>::init(context.child("ref"), &hasher, ref_cfg)
                     .await
                     .unwrap();
@@ -354,7 +354,7 @@ mod tests {
                 range: non_empty_range!(Location::new(100), Location::new(200)),
                 pinned_nodes: Some(pinned),
             };
-            let mut sync_mmr = Mmr::init_sync(context.child("sync"), sync_cfg)
+            let sync_mmr = Mmr::init_sync(context.child("sync"), sync_cfg)
                 .await
                 .unwrap();
 
