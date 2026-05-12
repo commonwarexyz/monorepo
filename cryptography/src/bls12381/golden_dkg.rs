@@ -454,7 +454,10 @@ fn select<M: Faults>(
     // by one, because of strategically placed invalid dealings.
     let required = info.required_commitments::<M>() as usize;
     let (first_required, rest) = {
-        let mut head = logs.into_iter().collect::<Vec<_>>();
+        let mut head = logs
+            .into_iter()
+            .filter(|(dealer, _)| info.dealers.position(dealer).is_some())
+            .collect::<Vec<_>>();
         if head.len() < required {
             return Err(Error::DkgFailed);
         }
