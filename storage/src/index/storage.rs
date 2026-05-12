@@ -18,6 +18,14 @@ pub(super) struct Record<V: Eq + Send + Sync> {
     pub(super) next: Option<Box<Self>>,
 }
 
+pub(super) fn insert_front<V: Eq + Send + Sync>(record: &mut Record<V>, mut value: V) {
+    std::mem::swap(&mut record.value, &mut value);
+    record.next = Some(Box::new(Record {
+        value,
+        next: record.next.take(),
+    }));
+}
+
 pub(super) trait IndexEntry<V: Eq + Send + Sync>: Send + Sync {
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
@@ -167,6 +175,7 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
                 let entry_record = self.entry.as_mut().unwrap().get_mut();
                 entry_record.value = v;
                 entry_record.next = None;
+                self.prev = None;
                 self.current = Some(Self::record_ptr(entry_record));
                 self.state = State::Done;
             }
@@ -182,6 +191,7 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
                     }));
                     Self::record_ptr(last_record.next.as_deref_mut().unwrap())
                 };
+                self.prev = last;
                 self.current = Some(inserted);
                 self.state = State::Done;
             }
