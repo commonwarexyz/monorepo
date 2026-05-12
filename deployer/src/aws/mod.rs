@@ -481,6 +481,12 @@ cfg_if::cfg_if! {
             Reqwest(#[from] reqwest::Error),
             #[error("SSH failed")]
             SshFailed,
+            #[error("command timeout({ip}): {program} after {seconds}s")]
+            CommandTimeout {
+                program: String,
+                ip: String,
+                seconds: u64,
+            },
             #[error("keygen failed")]
             KeygenFailed,
             #[error("service timeout({0}): {1}")]
