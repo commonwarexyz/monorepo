@@ -33,7 +33,7 @@ use crate::{
         self,
         hasher::{Hasher, Standard as StandardHasher},
         storage::Storage,
-        Family, Graftable, Location, Proof,
+        Family, Graftable, Location, PendingChunkTrait, Proof,
     },
     qmdb::{
         self,
@@ -57,20 +57,20 @@ use tracing::debug;
 /// See the [Canonical root structure](self#canonical-root-structure) section in the module
 /// documentation for the full layout.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct OpsRootWitness<D: Digest> {
+pub struct OpsRootWitness<F: Graftable, D: Digest> {
     /// The grafted-tree root committed by the canonical root.
     pub grafted_root: D,
 
-    /// `H(pending_chunk_bytes)` when the bitmap has a chunk whose bits are complete but
-    /// whose h=G ancestor has not yet been born in the ops tree; `None` otherwise.
-    pub pending_chunk_digest: Option<D>,
+    /// The pending-chunk contribution. For families that support pending chunks (MMB), this
+    /// is `Option<D>`; for families that don't (MMR), this is `()`.
+    pub pending_chunk_digest: F::PendingChunk<D>,
 
     /// The trailing partial chunk contribution, if the bitmap length is not chunk-aligned:
     /// `(next_bit, partial_chunk_digest)`.
     pub partial_chunk: Option<(u64, D)>,
 }
 
-impl<D: Digest> OpsRootWitness<D> {
+impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
     /// Return true if this witness proves that `canonical_root` commits to `ops_root`.
     pub fn verify<H: CHasher<Digest = D>>(
         &self,
@@ -83,19 +83,16 @@ impl<D: Digest> OpsRootWitness<D> {
             hasher,
             ops_root,
             &self.grafted_root,
-            self.pending_chunk_digest.as_ref(),
+            self.pending_chunk_digest.as_option(),
             partial,
         ) == *canonical_root
     }
 }
 
-impl<D: Digest> Write for OpsRootWitness<D> {
+impl<F: Graftable, D: Digest> Write for OpsRootWitness<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.grafted_root.write(buf);
-        self.pending_chunk_digest.is_some().write(buf);
-        if let Some(digest) = &self.pending_chunk_digest {
-            digest.write(buf);
-        }
+        self.pending_chunk_digest.write(buf);
         self.partial_chunk.is_some().write(buf);
         if let Some((next_bit, digest)) = &self.partial_chunk {
             UInt(*next_bit).write(buf);
@@ -104,13 +101,10 @@ impl<D: Digest> Write for OpsRootWitness<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for OpsRootWitness<D> {
+impl<F: Graftable, D: Digest> EncodeSize for OpsRootWitness<F, D> {
     fn encode_size(&self) -> usize {
         self.grafted_root.encode_size()
-            + self
-                .pending_chunk_digest
-                .as_ref()
-                .map_or(1, |d| 1 + d.encode_size())
+            + self.pending_chunk_digest.encode_size()
             + self
                 .partial_chunk
                 .as_ref()
@@ -118,16 +112,12 @@ impl<D: Digest> EncodeSize for OpsRootWitness<D> {
     }
 }
 
-impl<D: Digest> Read for OpsRootWitness<D> {
+impl<F: Graftable, D: Digest> Read for OpsRootWitness<F, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let grafted_root = D::read(buf)?;
-        let pending_chunk_digest = if bool::read(buf)? {
-            Some(D::read(buf)?)
-        } else {
-            None
-        };
+        let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
         let partial_chunk = if bool::read(buf)? {
             let next_bit = UInt::<u64>::read(buf)?.into();
             let digest = D::read(buf)?;
@@ -144,9 +134,10 @@ impl<D: Digest> Read for OpsRootWitness<D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for OpsRootWitness<D>
+impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for OpsRootWitness<F, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -159,12 +150,13 @@ where
 
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct RangeProof<F: Family, D: Digest> {
+pub struct RangeProof<F: Graftable, D: Digest> {
     /// The Merkle digest material required to verify the proof.
     pub proof: Proof<F, D>,
 
-    /// Digest of the bitmap chunk that's complete but not yet graftable, if any.
-    pub pending_chunk_digest: Option<D>,
+    /// The pending-chunk contribution. For families that support pending chunks (MMB), this
+    /// is `Option<D>`; for families that don't (MMR), this is `()`.
+    pub pending_chunk_digest: F::PendingChunk<D>,
 
     /// Digest of the bitmap's trailing partial chunk, if any.
     pub partial_chunk_digest: Option<D>,
@@ -221,8 +213,11 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let partial_chunk_digest =
             partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(&chunk));
 
-        let pending_chunk_digest = pending_chunk::<_, _, N>(status, ops_leaves, grafting_height)?
-            .map(|chunk| hasher.digest(&chunk));
+        let pending_chunk_digest = F::PendingChunk::from_option(
+            pending_chunk::<_, _, N>(status, ops_leaves, grafting_height)?
+                .map(|chunk| hasher.digest(&chunk)),
+        )
+        .expect("pending_chunk must be consistent with family");
 
         Ok(Self {
             proof,
@@ -364,9 +359,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             qmdb::ROOT_BAGGING,
         );
 
-        if self.pending_chunk_digest.is_some() != has_pending_chunk {
+        if self.pending_chunk_digest.as_option().is_some() != has_pending_chunk {
             debug!(
-                pending_in_proof = self.pending_chunk_digest.is_some(),
+                pending_in_proof = self.pending_chunk_digest.as_option().is_some(),
                 expected = has_pending_chunk,
                 "pending_chunk_digest presence does not match bitmap state"
             );
@@ -397,7 +392,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         // For a pending chunk, validate the supplied chunk bytes against the digest in the proof
         // when the verifier's range includes the pending chunk's index. The pending chunk is at
         // index `graftable_chunks` (== `complete_chunks - 1` when present).
-        if let Some(pending_digest) = self.pending_chunk_digest {
+        if let Some(pending_digest) = self.pending_chunk_digest.as_option() {
             let pending_idx = graftable_chunks;
             if pending_idx >= start_chunk && pending_idx <= end_chunk {
                 let local = (pending_idx - start_chunk) as usize;
@@ -412,7 +407,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                     );
                     return false;
                 };
-                if pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
+                if *pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
                     debug!("pending chunk digest does not match expected value");
                     return false;
                 }
@@ -437,13 +432,13 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             root_hasher,
             &self.ops_root,
             &merkle_root,
-            self.pending_chunk_digest.as_ref(),
+            self.pending_chunk_digest.as_option(),
             partial,
         ) == *root
     }
 }
 
-impl<F: Family, D: Digest> Write for RangeProof<F, D> {
+impl<F: Graftable, D: Digest> Write for RangeProof<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
         self.pending_chunk_digest.write(buf);
@@ -452,7 +447,7 @@ impl<F: Family, D: Digest> Write for RangeProof<F, D> {
     }
 }
 
-impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
+impl<F: Graftable, D: Digest> EncodeSize for RangeProof<F, D> {
     fn encode_size(&self) -> usize {
         self.proof.encode_size()
             + self.pending_chunk_digest.encode_size()
@@ -470,13 +465,7 @@ impl<F: Graftable, D: Digest> Read for RangeProof<F, D> {
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let pending_chunk_digest = Option::<D>::read(buf)?;
-        if pending_chunk_digest.is_some() && !F::HAS_PENDING_CHUNKS {
-            return Err(commonware_codec::Error::Invalid(
-                "RangeProof",
-                "pending_chunk_digest present for family without pending chunks",
-            ));
-        }
+        let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
         let partial_chunk_digest = Option::<D>::read(buf)?;
         let ops_root = D::read(buf)?;
         Ok(Self {
@@ -489,9 +478,10 @@ impl<F: Graftable, D: Digest> Read for RangeProof<F, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for RangeProof<F, D>
+impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for RangeProof<F, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -505,7 +495,7 @@ where
 
 /// A proof that a specific operation is currently active in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct OperationProof<F: Family, D: Digest, const N: usize> {
+pub struct OperationProof<F: Graftable, D: Digest, const N: usize> {
     /// The location of the operation in the db.
     pub loc: Location<F>,
 
@@ -577,7 +567,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     }
 }
 
-impl<F: Family, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
+impl<F: Graftable, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.loc.write(buf);
         self.chunk.write(buf);
@@ -585,7 +575,7 @@ impl<F: Family, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
     }
 }
 
-impl<F: Family, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N> {
+impl<F: Graftable, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N> {
     fn encode_size(&self) -> usize {
         self.loc.encode_size() + self.chunk.encode_size() + self.range_proof.encode_size()
     }
@@ -611,9 +601,10 @@ impl<F: Graftable, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: Family, D: Digest, const N: usize> arbitrary::Arbitrary<'_> for OperationProof<F, D, N>
+impl<F: Graftable, D: Digest, const N: usize> arbitrary::Arbitrary<'_> for OperationProof<F, D, N>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -641,24 +632,25 @@ mod tests {
 
     #[test]
     fn test_ops_root_witness_codec_roundtrip() {
+        type F = mmb::Family;
         for partial_chunk in [
             None,
             Some((0u64, Sha256::hash(b"partial-zero"))),
             Some((123u64, Sha256::hash(b"partial-nonzero"))),
         ] {
-            let witness = OpsRootWitness {
+            let witness: OpsRootWitness<F, _> = OpsRootWitness {
                 grafted_root: Sha256::hash(b"grafted"),
                 pending_chunk_digest: None,
                 partial_chunk,
             };
             let encoded = witness.encode();
             assert_eq!(encoded.len(), witness.encode_size());
-            let decoded = OpsRootWitness::<sha256::Digest>::decode(encoded).unwrap();
+            let decoded = OpsRootWitness::<F, sha256::Digest>::decode(encoded).unwrap();
             assert_eq!(decoded, witness);
         }
     }
 
-    fn range_proof_digest_count<F: Family, D: Digest>(proof: &RangeProof<F, D>) -> usize {
+    fn range_proof_digest_count<F: Graftable, D: Digest>(proof: &RangeProof<F, D>) -> usize {
         proof.proof.digests.len()
     }
 
@@ -1532,7 +1524,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let witness = OpsRootWitness {
+                let witness: OpsRootWitness<F, _> = OpsRootWitness {
                     grafted_root,
                     pending_chunk_digest,
                     partial_chunk: partial_digest,
@@ -1845,105 +1837,6 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_mmr_range_proof_rejects_pending_chunk_digest() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            type F = crate::merkle::mmr::Family;
-            const N: usize = 1;
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let grafting_height = grafting::height::<N>();
-            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-
-            let leaf_count = chunk_bits * 2;
-            let mut status = BitMap::<N>::new();
-            for _ in 0..leaf_count {
-                status.push(true);
-            }
-            let ops = build_test_mem(&hasher, crate::merkle::mmr::mem::Mmr::new(), leaf_count);
-            let ops_root = ops.root(&hasher, 0).unwrap();
-
-            let graftable = grafting::graftable_chunks::<F>(
-                *Location::<F>::try_from(ops.size()).unwrap(),
-                grafting_height,
-            )
-            .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
-                as usize;
-            let chunk_inputs: Vec<_> = (0..graftable)
-                .map(|idx| {
-                    (
-                        idx,
-                        <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, idx),
-                    )
-                })
-                .collect();
-            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
-            leaf_digests.sort_by_key(|(idx, _)| *idx);
-
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-            let mut grafted = Mem::<F, sha256::Digest>::new();
-            let merkleized = {
-                let mut batch = grafted.new_batch();
-                for (_, digest) in leaf_digests {
-                    batch = batch.add_leaf_digest(digest);
-                }
-                batch.merkleize(&grafted, &grafted_hasher)
-            };
-            grafted.apply_batch(&merkleized).unwrap();
-
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let ops_leaves = Location::<F>::try_from(ops.size()).unwrap();
-            let root = db::compute_db_root::<F, Sha256, _, _, N>(
-                &hasher,
-                &status,
-                &storage,
-                ops_leaves,
-                None,
-                Location::new(0),
-                &ops_root,
-            )
-            .await
-            .unwrap();
-
-            let loc = crate::merkle::mmr::Location::new(0);
-            let proof = RangeProof::new(
-                &hasher,
-                &status,
-                &storage,
-                Location::new(0),
-                loc..loc + 1,
-                ops_root,
-            )
-            .await
-            .unwrap();
-
-            assert!(
-                proof.pending_chunk_digest.is_none(),
-                "MMR should never produce a pending chunk"
-            );
-
-            let element = hasher.digest(&0u64.to_be_bytes());
-            let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
-
-            // Inject a fake pending_chunk_digest and confirm verification rejects it.
-            let mut tampered = proof;
-            tampered.pending_chunk_digest = Some(hasher.digest(b"fake pending"));
-            assert!(
-                !tampered.verify(&hasher, loc, &[element], &[chunk], &root),
-                "MMR proof with pending_chunk_digest should not verify"
-            );
-        });
-    }
-
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::super::{OperationProof, OpsRootWitness, RangeProof};
@@ -1952,7 +1845,8 @@ mod tests {
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<OpsRootWitness<Sha256Digest>>,
+            CodecConformance<OpsRootWitness<mmr::Family, Sha256Digest>>,
+            CodecConformance<OpsRootWitness<mmb::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmr::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmb::Family, Sha256Digest>>,
             CodecConformance<OperationProof<mmr::Family, Sha256Digest, 32>>,

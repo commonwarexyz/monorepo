@@ -13,7 +13,7 @@ use crate::{
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
         mem::Mem,
         storage::Storage as MerkleStorage,
-        Location, Position,
+        Location, PendingChunkTrait as _, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -272,7 +272,7 @@ where
     pub async fn ops_root_witness(
         &self,
         hasher: &StandardHasher<H>,
-    ) -> Result<OpsRootWitness<H::Digest>, Error<F>> {
+    ) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
         // Snapshot ops_leaves once and thread it through both root computation and the
         // pending/partial chunk derivation so they observe the same `(ops, bitmap)` state.
@@ -288,12 +288,15 @@ where
         .await?;
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
             .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
-        let pending_chunk_digest = pending_chunk::<F, _, N>(
-            self.any.bitmap.as_ref(),
-            ops_leaves,
-            grafting::height::<N>(),
-        )?
-        .map(|chunk| hasher.digest(&chunk));
+        let pending_chunk_digest = F::PendingChunk::from_option(
+            pending_chunk::<F, _, N>(
+                self.any.bitmap.as_ref(),
+                ops_leaves,
+                grafting::height::<N>(),
+            )?
+            .map(|chunk| hasher.digest(&chunk)),
+        )
+        .expect("pending_chunk must be consistent with family");
         Ok(OpsRootWitness {
             grafted_root,
             pending_chunk_digest,

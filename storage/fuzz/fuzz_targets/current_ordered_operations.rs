@@ -6,7 +6,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location, PendingChunkTrait as _},
     qmdb::{
         self,
         current::{ordered::fixed::Db as CurrentDb, FixedConfig as Config},
@@ -350,17 +350,19 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }
 
                         let bad_pending_digest = (*bad_pending_digest).map(Digest::from);
-                        if range_proof.pending_chunk_digest != bad_pending_digest {
-                            let mut bad_pending_proof = range_proof.clone();
-                            bad_pending_proof.pending_chunk_digest = bad_pending_digest;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &hasher,
-                                &bad_pending_proof,
-                                start_loc,
-                                &ops,
-                                &chunks,
-                                &root
-                            ), "proof with bad pending chunk digest should not verify");
+                        if let Ok(bad_pending) = F::PendingChunk::from_option(bad_pending_digest) {
+                            if range_proof.pending_chunk_digest != bad_pending {
+                                let mut bad_pending_proof = range_proof.clone();
+                                bad_pending_proof.pending_chunk_digest = bad_pending;
+                                assert!(!Db::<F>::verify_range_proof(
+                                    &hasher,
+                                    &bad_pending_proof,
+                                    start_loc,
+                                    &ops,
+                                    &chunks,
+                                    &root
+                                ), "proof with bad pending chunk digest should not verify");
+                            }
                         }
 
                         let bad_partial_digest = (*bad_partial_digest).map(Digest::from);

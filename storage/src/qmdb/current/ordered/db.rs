@@ -26,19 +26,19 @@ use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<F: merkle::Family, K: Key, D: Digest, const N: usize> {
+pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize> {
     pub proof: OperationProof<F, D, N>,
     pub next_key: K,
 }
 
-impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
         self.next_key.write(buf);
     }
 }
 
-impl<F: merkle::Family, K: Key, D: Digest, const N: usize> EncodeSize
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> EncodeSize
     for KeyValueProof<F, K, D, N>
 {
     fn encode_size(&self) -> usize {
@@ -62,11 +62,12 @@ impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueP
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: merkle::Family, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
     for KeyValueProof<F, K, D, N>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {

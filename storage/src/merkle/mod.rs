@@ -27,6 +27,8 @@ pub mod storage;
 pub mod verification;
 
 use alloc::vec::Vec;
+use commonware_codec::{EncodeSize, Read, Write};
+use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
@@ -144,17 +146,61 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     fn pos_to_height(pos: Position<Self>) -> u32;
 }
 
+/// Represents the pending-chunk slot in proof and witness types.
+///
+/// For families that support pending chunks (MMB), the concrete type is `Option<D>`.
+/// For families that don't (MMR), the concrete type is `()`, which is zero-sized and
+/// occupies no bytes on the wire.
+pub trait PendingChunkTrait<D: Digest>:
+    Clone + Debug + Eq + Write + EncodeSize + Read<Cfg = ()> + Send + Sync
+{
+    /// View the slot as an `Option<&D>`.
+    fn as_option(&self) -> Option<&D>;
+
+    /// Construct from an `Option<D>`, returning an error if the slot cannot hold a `Some` value.
+    fn from_option(opt: Option<D>) -> Result<Self, commonware_codec::Error>;
+}
+
+impl<D: Digest> PendingChunkTrait<D> for Option<D> {
+    #[inline]
+    fn as_option(&self) -> Option<&D> {
+        self.as_ref()
+    }
+
+    #[inline]
+    fn from_option(opt: Self) -> Result<Self, commonware_codec::Error> {
+        Ok(opt)
+    }
+}
+
+impl<D: Digest> PendingChunkTrait<D> for () {
+    #[inline]
+    fn as_option(&self) -> Option<&D> {
+        None
+    }
+
+    fn from_option(opt: Option<D>) -> Result<Self, commonware_codec::Error> {
+        match opt {
+            None => Ok(()),
+            Some(_) => Err(commonware_codec::Error::Invalid(
+                "PendingChunk",
+                "pending chunk present for family without pending chunks",
+            )),
+        }
+    }
+}
+
 /// Extension of [`Family`] with methods needed for grafting bitmap chunks onto a Merkle structure.
 /// Grafting combines an activity bitmap with an ops Merkle structure by hashing bitmap chunks
 /// together with ops subtree roots. These methods provide the coordinate conversions and
 /// chunk-to-peak mappings required by that process.
 pub trait Graftable: Family {
-    /// Whether this family can have pending bitmap chunks (bit-complete but not yet graftable).
+    /// The pending-chunk slot type for this family's proofs and witnesses.
     ///
-    /// MMR never has pending chunks because a chunk's height-`gh` ancestor is born the moment
-    /// the chunk is bit-complete. MMB has a delayed-merge gap that allows at most one pending
-    /// chunk at a time.
-    const HAS_PENDING_CHUNKS: bool;
+    /// MMR uses `()` because a chunk's height-`gh` ancestor is born the moment the chunk
+    /// is bit-complete, so there is never a pending chunk. MMB uses `Option<D>` because its
+    /// delayed-merge gap can leave at most one pending chunk at a time.
+    type PendingChunk<D: Digest>: PendingChunkTrait<D>;
 
     /// Return the nodes that collectively cover the leaf range of a bitmap chunk in a structure of
     /// the given `size`.

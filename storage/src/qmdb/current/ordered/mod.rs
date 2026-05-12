@@ -132,6 +132,7 @@ where
     K: for<'a> arbitrary::Arbitrary<'a>,
     V::Value: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let op_proof = u.arbitrary()?;
@@ -151,7 +152,7 @@ pub mod tests {
     use crate::{
         index::ordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
-        merkle::{Graftable, Location, Proof},
+        merkle::{Graftable, Location, PendingChunkTrait as _, Proof},
         mmb,
         qmdb::{
             any::{
@@ -474,7 +475,7 @@ pub mod tests {
             // Empty range proof should not crash or verify, since even an empty db has a single
             let proof = RangeProof {
                 proof: Proof::default(),
-                pending_chunk_digest: None,
+                pending_chunk_digest: F::PendingChunk::from_option(None).unwrap(),
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };

@@ -82,6 +82,7 @@ pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle::{self, Family as _, Graftable};
 pub use crate::merkle::{hasher, Readable};
 pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
+use commonware_cryptography::Digest;
 
 /// MMR-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
@@ -215,7 +216,7 @@ impl merkle::Family for Family {
 }
 
 impl Graftable for Family {
-    const HAS_PENDING_CHUNKS: bool = false;
+    type PendingChunk<D: Digest> = ();
 
     fn chunk_peaks(
         size: Position,
