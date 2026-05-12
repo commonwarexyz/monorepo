@@ -4,7 +4,7 @@
 
 use crate::{
     index::{
-        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
+        storage::{insert_front, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
         Cursor as CursorTrait, Unordered,
     },
     translator::Translator,
@@ -165,16 +165,11 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert(&mut self, key: &[u8], mut v: V) {
+    fn insert(&mut self, key: &[u8], v: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                let record = entry.get_mut();
-                std::mem::swap(&mut record.value, &mut v);
-                record.next = Some(Box::new(Record {
-                    value: v,
-                    next: record.next.take(),
-                }));
+                insert_front(entry.get_mut(), v);
                 self.items.inc();
             }
             Entry::Vacant(entry) => {
