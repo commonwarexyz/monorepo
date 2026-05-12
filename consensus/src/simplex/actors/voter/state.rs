@@ -1,4 +1,4 @@
-use super::round::Round;
+use super::round::{Certify, Round};
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
@@ -413,7 +413,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the proposal for `view` if it is eligible for forwarding.
     pub fn forwardable_proposal(&self, view: View) -> Option<Proposal<D>> {
         let round = self.views.get(&view)?;
-        if round.finalization().is_some() || round.is_certified() {
+        if round.finalization().is_some() || matches!(round.certify(), Certify::Decided(true)) {
             return round.proposal().cloned();
         }
         None
@@ -603,10 +603,22 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Marks proposal certification as complete and returns the notarization.
     ///
-    /// Returns `None` if the view was already pruned. Otherwise returns the notarization
-    /// regardless of success/failure.
+    /// Returns `None` if the view was already pruned or already concluded (so callers do
+    /// not re-journal or re-emit). Panics on a conflicting outcome.
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
+        match round.certify() {
+            Certify::Open => {}
+            Certify::Decided(previous) => {
+                assert_eq!(
+                    previous, is_success,
+                    "certification should not conflict: view {view}"
+                );
+                return None;
+            }
+            Certify::Aborted => return None,
+        }
+
         round.certified(is_success);
         if is_success {
             // Clear deadlines if the certification was successful
@@ -631,6 +643,65 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         Some(notarization)
     }
 
+    /// Returns views whose certifications can be inferred from `view`'s notarization.
+    ///
+    /// An honest voter only signs a notarize for a view after certifying its parent, so a
+    /// notarization for `view` proves f+1 peers already certified `view.parent`. Walks
+    /// `proposal.parent` pointers backward and also includes `view` itself if a notarized
+    /// descendant already points at it (out-of-order arrival).
+    pub fn infer_certifications(&self, view: View) -> Vec<View> {
+        let mut inferred = Vec::new();
+
+        // Infer `view` itself when a notarized descendant already points at it as parent.
+        if self.views.get(&view).is_some_and(|round| {
+            matches!(round.certify(), Certify::Open) && round.notarization().is_some()
+        }) && self.has_notarized_child_with_parent(view)
+        {
+            inferred.push(view);
+        }
+
+        let Some(notarization) = self.notarization(view) else {
+            return inferred;
+        };
+        let mut cursor = notarization.proposal.parent;
+        loop {
+            if cursor <= self.last_finalized {
+                break;
+            }
+            let Some(round) = self.views.get(&cursor) else {
+                break;
+            };
+            let Some(notarization) = round.notarization() else {
+                break;
+            };
+            if !matches!(round.certify(), Certify::Open) {
+                break;
+            }
+            inferred.push(cursor);
+            cursor = notarization.proposal.parent;
+        }
+
+        inferred
+    }
+
+    /// Returns true if any tracked view greater than `view` has a notarization whose
+    /// proposal.parent equals `view`.
+    fn has_notarized_child_with_parent(&self, view: View) -> bool {
+        self.views.range(view.next()..).any(|(_, round)| {
+            round
+                .notarization()
+                .is_some_and(|n| n.proposal.parent == view)
+        })
+    }
+
+    /// Iterates views that currently hold a notarization, from highest to lowest.
+    pub fn notarized_views_desc(&self) -> impl Iterator<Item = View> + '_ {
+        self.views
+            .iter()
+            .rev()
+            .filter_map(|(view, round)| round.notarization().map(|_| *view))
+    }
+
     /// Drops any views that fall below the activity horizon and returns them for logging.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
@@ -651,7 +722,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         // Check for explicit certification
         let round = self.views.get(&view)?;
-        if round.finalization().is_some() || round.is_certified() {
+        if round.finalization().is_some() || matches!(round.certify(), Certify::Decided(true)) {
             return Some(&round.proposal().expect("proposal must exist").payload);
         }
         None
@@ -676,7 +747,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn is_certify_aborted(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .is_some_and(|round| round.is_certify_aborted())
+            .is_some_and(|round| matches!(round.certify(), Certify::Aborted))
     }
 
     /// Finds the parent payload for a given view by walking backwards through
@@ -779,6 +850,62 @@ mod tests {
 
     fn test_genesis() -> Sha256Digest {
         Sha256Digest::from([0u8; 32])
+    }
+
+    fn make_state(
+        context: deterministic::Context,
+        verifier: ed25519::Scheme,
+    ) -> State<deterministic::Context, ed25519::Scheme, RoundRobin, Sha256Digest> {
+        let mut state = State::new(
+            context,
+            Config {
+                scheme: verifier,
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(20),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            },
+        );
+        state.set_genesis(test_genesis());
+        state
+    }
+
+    fn make_notarization(
+        schemes: &[ed25519::Scheme],
+        verifier: &ed25519::Scheme,
+        view: View,
+        parent: View,
+    ) -> Notarization<ed25519::Scheme, Sha256Digest> {
+        let proposal = Proposal::new(
+            Rnd::new(Epoch::new(1), view),
+            parent,
+            Sha256Digest::from([view.get() as u8; 32]),
+        );
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
+            .collect();
+        Notarization::from_notarizes(verifier, votes.iter(), &Sequential).unwrap()
+    }
+
+    fn make_finalization(
+        schemes: &[ed25519::Scheme],
+        verifier: &ed25519::Scheme,
+        view: View,
+        parent: View,
+    ) -> Finalization<ed25519::Scheme, Sha256Digest> {
+        let proposal = Proposal::new(
+            Rnd::new(Epoch::new(1), view),
+            parent,
+            Sha256Digest::from([view.get() as u8; 32]),
+        );
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|s| Finalize::sign(s, proposal.clone()).unwrap())
+            .collect();
+        Finalization::from_finalizes(verifier, votes.iter(), &Sequential).unwrap()
     }
 
     #[test]
@@ -1980,39 +2107,16 @@ mod tests {
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
-            // Helper to create notarization for a view
-            let make_notarization = |view: View| {
-                let proposal = Proposal::new(
-                    Rnd::new(Epoch::new(1), view),
-                    GENESIS_VIEW,
-                    Sha256Digest::from([view.get() as u8; 32]),
-                );
-                let votes: Vec<_> = schemes
-                    .iter()
-                    .map(|s| Notarize::sign(s, proposal.clone()).unwrap())
-                    .collect();
-                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap()
-            };
-
-            // Helper to create finalization for a view
-            let make_finalization = |view: View| {
-                let proposal = Proposal::new(
-                    Rnd::new(Epoch::new(1), view),
-                    GENESIS_VIEW,
-                    Sha256Digest::from([view.get() as u8; 32]),
-                );
-                let votes: Vec<_> = schemes
-                    .iter()
-                    .map(|s| Finalize::sign(s, proposal.clone()).unwrap())
-                    .collect();
-                Finalization::from_finalizes(&verifier, votes.iter(), &Sequential).unwrap()
-            };
-
             let mut pool = AbortablePool::<()>::default();
 
             // Add notarizations for views 3-8
             for i in 3..=8u64 {
-                state.add_notarization(make_notarization(View::new(i)));
+                state.add_notarization(make_notarization(
+                    &schemes,
+                    &verifier,
+                    View::new(i),
+                    GENESIS_VIEW,
+                ));
             }
 
             // All 6 views should be candidates
@@ -2037,7 +2141,12 @@ mod tests {
             assert!(!state.is_certify_aborted(View::new(7)));
 
             // Add finalization for view 5 - aborts handles for views 3, 4, 5
-            state.add_finalization(make_finalization(View::new(5)));
+            state.add_finalization(make_finalization(
+                &schemes,
+                &verifier,
+                View::new(5),
+                GENESIS_VIEW,
+            ));
 
             // Verify views 3, 4, 5 had their certification aborted
             assert!(state.is_certify_aborted(View::new(3)));
@@ -2055,7 +2164,12 @@ mod tests {
             assert!(state.certify_candidates().is_empty());
 
             // Add view 9, should be returned as candidate
-            state.add_notarization(make_notarization(View::new(9)));
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(9),
+                GENESIS_VIEW,
+            ));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), View::new(9));
@@ -2064,7 +2178,12 @@ mod tests {
             // Set handle for view 9, add view 10
             let handle9 = pool.push(futures::future::pending());
             state.set_certify_handle(View::new(9), handle9);
-            state.add_notarization(make_notarization(View::new(10)));
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(10),
+                GENESIS_VIEW,
+            ));
 
             // View 10 returned (view 9 has handle)
             let candidates = state.certify_candidates();
@@ -2073,11 +2192,21 @@ mod tests {
             assert!(!candidates[0].1);
 
             // Finalize view 9 - aborts view 9's handle
-            state.add_finalization(make_finalization(View::new(9)));
+            state.add_finalization(make_finalization(
+                &schemes,
+                &verifier,
+                View::new(9),
+                GENESIS_VIEW,
+            ));
             assert!(state.is_certify_aborted(View::new(9)));
 
             // Add view 11, should be returned
-            state.add_notarization(make_notarization(View::new(11)));
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(11),
+                GENESIS_VIEW,
+            ));
             let candidates = state.certify_candidates();
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].0.round.view(), View::new(11));
@@ -2106,38 +2235,27 @@ mod tests {
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
-            let make_notarization = |view: View| {
-                let proposal = Proposal::new(
-                    Rnd::new(Epoch::new(1), view),
-                    GENESIS_VIEW,
-                    Sha256Digest::from([view.get() as u8; 32]),
-                );
-                let votes: Vec<_> = schemes
-                    .iter()
-                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-                    .collect();
-                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap()
-            };
-
-            let make_finalization = |view: View| {
-                let proposal = Proposal::new(
-                    Rnd::new(Epoch::new(1), view),
-                    GENESIS_VIEW,
-                    Sha256Digest::from([view.get() as u8; 32]),
-                );
-                let votes: Vec<_> = schemes
-                    .iter()
-                    .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
-                    .collect();
-                Finalization::from_finalizes(&verifier, votes.iter(), &Sequential).unwrap()
-            };
-
             let stale_view = View::new(2);
             let live_view = View::new(3);
 
-            state.add_notarization(make_notarization(stale_view));
-            state.add_notarization(make_notarization(live_view));
-            state.add_finalization(make_finalization(stale_view));
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                stale_view,
+                GENESIS_VIEW,
+            ));
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                live_view,
+                GENESIS_VIEW,
+            ));
+            state.add_finalization(make_finalization(
+                &schemes,
+                &verifier,
+                stale_view,
+                GENESIS_VIEW,
+            ));
 
             // Reinsert a stale candidate to exercise the defensive finalized-view guard.
             state.certification_candidates.insert(stale_view);
@@ -2552,4 +2670,250 @@ mod tests {
             assert!(state.construct_notarize(view).is_none());
         });
     }
+
+    fn apply_inferred_certifications(
+        state: &mut State<deterministic::Context, ed25519::Scheme, RoundRobin, Sha256Digest>,
+        view: View,
+    ) -> Vec<View> {
+        let inferred = state.infer_certifications(view);
+        for inferred_view in &inferred {
+            assert!(
+                state.certified(*inferred_view, true).is_some(),
+                "expected inferred certification for view {inferred_view}"
+            );
+        }
+        inferred
+    }
+
+    #[test]
+    fn infer_certifications_marks_parent_certified() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            // Parent view v has a notarization but is uncertified.
+            let parent_view = View::new(1);
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                parent_view,
+                GENESIS_VIEW,
+            ));
+
+            // Child view v+1 arrives with proposal.parent == v.
+            let child_view = View::new(2);
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                child_view,
+                parent_view,
+            ));
+
+            let inferred = apply_inferred_certifications(&mut state, child_view);
+            assert_eq!(inferred, vec![parent_view]);
+            assert!(matches!(state.views.get(&parent_view).unwrap().certify(), Certify::Decided(true)));
+        });
+    }
+
+    #[test]
+    fn infer_certifications_walks_full_ancestry() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            // Chain: v1 -> v2 -> v3 -> v4.
+            let mut parent = GENESIS_VIEW;
+            for raw in 1u64..=4 {
+                let view = View::new(raw);
+                state.add_notarization(make_notarization(&schemes, &verifier, view, parent));
+                parent = view;
+            }
+
+            // Inference from v4 should certify v3, v2, v1 (v4 itself has no child yet).
+            let inferred = apply_inferred_certifications(&mut state, View::new(4));
+            assert_eq!(inferred, vec![View::new(3), View::new(2), View::new(1)]);
+            for raw in 1u64..=3 {
+                assert!(matches!(state.views.get(&View::new(raw)).unwrap().certify(), Certify::Decided(true)));
+            }
+            assert!(!matches!(state.views.get(&View::new(4)).unwrap().certify(), Certify::Decided(true)));
+        });
+    }
+
+    #[test]
+    fn infer_certifications_stops_at_last_finalized() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            // Chain of notarizations v1..=v5.
+            let mut parent = GENESIS_VIEW;
+            for raw in 1u64..=5 {
+                let view = View::new(raw);
+                state.add_notarization(make_notarization(&schemes, &verifier, view, parent));
+                parent = view;
+            }
+
+            // Finalizing v2 promotes last_finalized and should block inference for v1 and v2.
+            state.add_finalization(make_finalization(
+                &schemes,
+                &verifier,
+                View::new(2),
+                View::new(1),
+            ));
+
+            let inferred = state.infer_certifications(View::new(5));
+            assert_eq!(inferred, vec![View::new(4), View::new(3)]);
+        });
+    }
+
+    #[test]
+    fn infer_certifications_stops_at_missing_notarization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            // v1 notarized; v2 missing; v3 notarized with parent v2.
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(1),
+                GENESIS_VIEW,
+            ));
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(3),
+                View::new(2),
+            ));
+
+            let inferred = state.infer_certifications(View::new(3));
+            assert!(inferred.is_empty());
+            assert!(!matches!(state.views.get(&View::new(1)).unwrap().certify(), Certify::Decided(true)));
+        });
+    }
+
+    #[test]
+    fn infer_certifications_skips_already_certified_ancestor() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            // Chain v1 -> v2 -> v3.
+            let mut parent = GENESIS_VIEW;
+            for raw in 1u64..=3 {
+                let view = View::new(raw);
+                state.add_notarization(make_notarization(&schemes, &verifier, view, parent));
+                parent = view;
+            }
+
+            // Mark v2 as explicitly certified first; walk should stop there.
+            assert!(state.certified(View::new(2), true).is_some());
+
+            let inferred = state.infer_certifications(View::new(3));
+            assert!(inferred.is_empty());
+            assert!(!matches!(state.views.get(&View::new(1)).unwrap().certify(), Certify::Decided(true)));
+        });
+    }
+
+    #[test]
+    fn infer_certifications_infers_view_from_notarized_child() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            // v2 arrives first, pointing back to v1 as parent.
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(2),
+                View::new(1),
+            ));
+
+            // Only now does v1's notarization arrive.
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(1),
+                GENESIS_VIEW,
+            ));
+
+            // Inference triggered by v1's arrival should certify v1 via v2's evidence.
+            let inferred = apply_inferred_certifications(&mut state, View::new(1));
+            assert_eq!(inferred, vec![View::new(1)]);
+            assert!(matches!(state.views.get(&View::new(1)).unwrap().certify(), Certify::Decided(true)));
+        });
+    }
+
+    #[test]
+    fn certified_is_idempotent_after_decision() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(1),
+                GENESIS_VIEW,
+            ));
+
+            // First decision returns the notarization.
+            assert!(state.certified(View::new(1), true).is_some());
+            // Repeating with the same outcome returns None so callers don't re-emit.
+            assert!(state.certified(View::new(1), true).is_none());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "certification should not conflict")]
+    fn certified_conflicting_outcome_panics() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = make_state(context, verifier.clone());
+
+            state.add_notarization(make_notarization(
+                &schemes,
+                &verifier,
+                View::new(1),
+                GENESIS_VIEW,
+            ));
+            assert!(state.certified(View::new(1), false).is_some());
+
+            // Contradicting a failed certification signals a protocol/automaton fault.
+            let _ = state.certified(View::new(1), true);
+        });
+    }
+
 }

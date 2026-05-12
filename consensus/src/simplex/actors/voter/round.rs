@@ -33,6 +33,17 @@ enum CertifyState {
     Aborted,
 }
 
+/// Public view of a round's certification state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Certify {
+    /// No decision yet; inference or an automaton response can still resolve the round.
+    Open,
+    /// Certification concluded with the given outcome (`true` = certified, `false` = declined).
+    Decided(bool),
+    /// Certification was abandoned because a finalization superseded the view.
+    Aborted,
+}
+
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
@@ -218,15 +229,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.finalization.as_ref()
     }
 
-    /// Returns true if we have explicitly certified the proposal.
-    pub const fn is_certified(&self) -> bool {
-        matches!(self.certify, CertifyState::Certified(true))
-    }
-
-    /// Returns true if certification was aborted due to finalization.
-    #[cfg(test)]
-    pub const fn is_certify_aborted(&self) -> bool {
-        matches!(self.certify, CertifyState::Aborted)
+    /// Returns a snapshot of the round's certification state.
+    pub const fn certify(&self) -> Certify {
+        match self.certify {
+            CertifyState::Ready | CertifyState::Outstanding(_) => Certify::Open,
+            CertifyState::Certified(result) => Certify::Decided(result),
+            CertifyState::Aborted => Certify::Aborted,
+        }
     }
 
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
@@ -521,7 +530,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // If we haven't certified the proposal, return None.
         //
         // Note, this does not require verification.
-        if !self.is_certified() {
+        if !matches!(self.certify(), Certify::Decided(true)) {
             return None;
         }
 
@@ -581,9 +590,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Artifact::Finalization(_) => {
                 self.broadcast_finalization = true;
             }
-            Artifact::Certification(_, success) => {
-                self.certified(*success);
-            }
+            // Certification transitions happen through state.certified during replay, so
+            // that the view advances and timeouts fire; those side effects cannot be
+            // expressed at the per-round level.
+            Artifact::Certification(_, _) => {}
         }
     }
 }
