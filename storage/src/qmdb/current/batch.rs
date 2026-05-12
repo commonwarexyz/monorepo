@@ -17,6 +17,7 @@ use crate::{
             operation::{update, Operation},
             ValueEncoding,
         },
+        batch_chain::Bounds,
         bitmap::Shared,
         current::{
             db::{compute_db_root, compute_grafted_leaves},
@@ -807,6 +808,11 @@ where
     /// Return the QMDB ops-only root.
     pub fn ops_root(&self) -> D {
         self.inner.root()
+    }
+
+    /// Return the [`Bounds`] of the batch.
+    pub fn bounds(&self) -> &Bounds<F> {
+        self.inner.bounds()
     }
 }
 

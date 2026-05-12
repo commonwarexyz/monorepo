@@ -4,7 +4,11 @@ use super::{operation::Operation, Keyless};
 use crate::{
     journal::{authenticated, contiguous::Mutable, Error as JournalError},
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, batch_chain, Error},
+    qmdb::{
+        any::value::ValueEncoding,
+        batch_chain::{self, Bounds},
+        Error,
+    },
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
@@ -310,6 +314,11 @@ where
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.root
+    }
+
+    /// Return the [`Bounds`] of the batch.
+    pub const fn bounds(&self) -> &Bounds<F> {
+        &self.bounds
     }
 
     /// Read a value at `loc`.
