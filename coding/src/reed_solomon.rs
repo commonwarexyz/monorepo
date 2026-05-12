@@ -4,7 +4,7 @@ use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, 
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
-use commonware_utils::{bitmap::BitMap, Cached};
+use commonware_utils::Cached;
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -86,24 +86,36 @@ impl<D: Digest> Chunk<D> {
             .verify_element_inclusion(&mut hasher, &shard_digest, self.index as u32, root)
             .ok()?;
 
-        Some(CheckedChunk::new(*root, self.shard.clone(), self.index))
+        Some(CheckedChunk::new(
+            *root,
+            self.shard.clone(),
+            self.index,
+            shard_digest,
+        ))
     }
 }
 
 /// A shard that has been checked against a commitment.
 ///
-/// This stores the commitment root that [`Chunk::verify`] checked against.
-/// The root is checked at decode time to prevent cross-commitment shard mixing.
+/// This stores the shard digest computed during [`Chunk::verify`] and the
+/// commitment root it was verified against. The root is checked at decode
+/// time to prevent cross-commitment shard mixing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedChunk<D: Digest> {
     root: D,
     shard: Bytes,
     index: u16,
+    digest: D,
 }
 
 impl<D: Digest> CheckedChunk<D> {
-    const fn new(root: D, shard: Bytes, index: u16) -> Self {
-        Self { root, shard, index }
+    const fn new(root: D, shard: Bytes, index: u16, digest: D) -> Self {
+        Self {
+            root,
+            shard,
+            index,
+            digest,
+        }
     }
 }
 
@@ -401,7 +413,8 @@ fn decode<'a, H: Hasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = first.shard.len();
-    let mut seen_shards: BitMap = BitMap::zeroes(n as u64);
+    let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
+    let mut provided_shards: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     let mut provided = 0usize;
@@ -415,12 +428,14 @@ fn decode<'a, H: Hasher, S: Strategy>(
         if index >= total {
             return Err(Error::InvalidIndex(index));
         }
-        if seen_shards.get(index as u64) {
+        let digest_slot = &mut shard_digests[index as usize];
+        if digest_slot.is_some() {
             return Err(Error::DuplicateIndex(index));
         }
 
-        // Add to provided shards.
-        seen_shards.set(index as u64, true);
+        // Add to provided shards and retain the checked digest for this index.
+        *digest_slot = Some(chunk.digest);
+        provided_shards.push((index as usize, chunk.shard.as_ref()));
         if index < min {
             provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
@@ -475,15 +490,35 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
     shards.extend(encoding.recovery_iter());
 
-    // Build Merkle tree from the canonical codeword
-    let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.map_init_collect_vec(&shards, H::new, |hasher, shard| {
-        hasher.update(shard);
-        hasher.finalize()
-    });
-    for hash in &shard_hashes {
-        builder.add(hash);
+    // Confirm all checked shards match the canonical codeword before reusing their digests.
+    for (idx, shard) in provided_shards {
+        if shard != shards[idx] {
+            return Err(Error::Inconsistent);
+        }
     }
+
+    // Build Merkle tree from the canonical codeword.
+    for (i, digest) in strategy.map_init_collect_vec(
+        shard_digests
+            .iter()
+            .enumerate()
+            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
+        H::new,
+        |hasher, i| {
+            hasher.update(shards[i]);
+            (i, hasher.finalize())
+        },
+    ) {
+        shard_digests[i] = Some(digest);
+    }
+
+    let mut builder = Builder::<H>::new(n);
+    shard_digests
+        .into_iter()
+        .map(|digest| digest.expect("digest must be present for every shard"))
+        .for_each(|digest| {
+            builder.add(&digest);
+        });
     let tree = builder.build();
 
     // Confirm root is consistent
@@ -665,7 +700,8 @@ mod tests {
         chunk: Chunk<<Sha256 as Hasher>::Digest>,
     ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
         let Chunk { shard, index, .. } = chunk;
-        CheckedChunk::new(root, shard, index)
+        let digest = Sha256::hash(&shard);
+        CheckedChunk::new(root, shard, index, digest)
     }
 
     fn build_chunks(
