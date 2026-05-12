@@ -338,6 +338,151 @@ mod tests {
         payload
     }
 
+    #[test_traced]
+    fn overflow_newer_finalization_prunes_timeout_and_older_finalization() {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"voter_overflow_policy".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: signing.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.child("app"), application_cfg);
+            actor.start();
+
+            let voter_cfg = Config {
+                scheme: signing,
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition: "overflow_finalization_policy".to_string(),
+                epoch: Epoch::new(333),
+                mailbox_size: NZUsize!(1),
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_secs(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut voter_mailbox) = Actor::new(context.child("actor"), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mailbox::new(NZUsize!(16));
+            let resolver = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(NZUsize!(16));
+            let batcher = batcher::Mailbox::new(batcher_sender);
+
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) =
+                oracle.control(me).register(1, TEST_QUOTA).await.unwrap();
+
+            // Fill ready with a message the actor will ignore, then queue multiple
+            // overflow messages that should be collapsed before the actor sees them.
+            let ignored = Proposal::new(
+                Round::new(Epoch::new(333), View::new(50)),
+                View::zero(),
+                Sha256::hash(b"ignored-future-proposal"),
+            );
+            voter_mailbox.proposal(ignored);
+            voter_mailbox.timeout(View::new(1), TimeoutReason::LeaderTimeout);
+
+            // This finalization should prune the pending timeout, but it should itself
+            // be pruned by the newer finalization below.
+            let older_finalized = Proposal::new(
+                Round::new(Epoch::new(333), View::new(2)),
+                View::zero(),
+                Sha256::hash(b"older-finalized"),
+            );
+            let (_, older_finalization) = build_finalization(&schemes, &older_finalized, quorum);
+            voter_mailbox.resolved(Certificate::Finalization(older_finalization));
+
+            let finalized = Proposal::new(
+                Round::new(Epoch::new(333), View::new(3)),
+                View::zero(),
+                Sha256::hash(b"finalized"),
+            );
+            let (_, finalization) = build_finalization(&schemes, &finalized, quorum);
+            voter_mailbox.resolved(Certificate::Finalization(finalization));
+
+            voter.start(batcher, resolver, vote_sender, certificate_sender);
+
+            match batcher_receiver
+                .recv()
+                .await
+                .expect("missing initial update")
+            {
+                batcher::Message::Update {
+                    current, finalized, ..
+                } => {
+                    assert_eq!(current, View::new(1));
+                    assert_eq!(finalized, View::zero());
+                }
+                batcher::Message::Constructed(vote) => {
+                    panic!("unexpected constructed vote before finalization: {vote:?}");
+                }
+            }
+
+            let message = select! {
+                message = batcher_receiver.recv() => {
+                    message.expect("batcher mailbox closed")
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("timed out waiting for finalization update");
+                },
+            };
+            match message {
+                batcher::Message::Update {
+                    current, finalized, ..
+                } => {
+                    // If the older finalization was not pruned, the actor would first
+                    // update to view 3 finalized at view 2.
+                    assert_eq!(current, View::new(4));
+                    assert_eq!(finalized, View::new(3));
+                }
+                batcher::Message::Constructed(vote) => {
+                    panic!("pending timeout was not pruned: {vote:?}");
+                }
+            }
+        });
+    }
+
     /// Trigger processing of an uninteresting view from the resolver after
     /// jumping ahead to a new finalize view:
     ///
