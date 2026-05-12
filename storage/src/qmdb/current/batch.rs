@@ -661,7 +661,7 @@ where
         grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
     // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
-    // from `graftable_overlay` (the grafted-tree boundary). At G >= 3, partial and pending can
+    // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
     // coexist; this branch only handles partial. The pending chunk (when present) is read
     // from the bitmap inside `compute_db_root` via `pending_chunk()`.
     let partial = {

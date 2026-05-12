@@ -17,15 +17,15 @@
 //! ```
 //!
 //! - `ops_root` is the root of the operations tree (MMR or MMB).
-//! - `grafted_root` commits to the activity bitmap's **graftable** chunks (chunks whose
-//!   height-G ancestor has been born in the ops tree).
-//! - `pending_chunk_digest` is `H(pending_bytes)` if a chunk is bit-complete in the bitmap
-//!   but its h=G ancestor has not yet been born; absent otherwise.
-//! - `(next_bit_be, partial_chunk_digest)` covers the trailing partial chunk when the
-//!   bitmap length is not chunk-aligned; both elements are absent when it is.
+//! - `grafted_root` commits to the activity bitmap's **graftable** chunks (chunks whose height-G
+//!   ancestor has been born in the ops tree).
+//! - `pending_chunk_digest` is `H(pending_bytes)` if a chunk is bit-complete in the bitmap but its
+//!   h=G ancestor has not yet been born; absent otherwise.
+//! - `(next_bit_be, partial_chunk_digest)` covers the trailing partial chunk when the bitmap length
+//!   is not chunk-aligned; both elements are absent when it is.
 //!
-//! Pending and partial slots are independent: at G >= 3 they can coexist. When both are
-//! present, pending hashes in before partial.
+//! Pending and partial slots are independent: at gh >= 3 they can coexist. When both are present,
+//! pending hashes in before partial.
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
