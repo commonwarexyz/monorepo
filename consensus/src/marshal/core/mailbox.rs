@@ -14,7 +14,7 @@ use commonware_actor::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
-use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
+use commonware_utils::channel::oneshot;
 use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 
 /// Messages sent to the marshal [Actor](super::Actor).
@@ -48,6 +48,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
     },
+    /// A request to retrieve the latest processed height acknowledged by the application.
+    GetProcessedHeight {
+        /// A channel to send the latest processed height.
+        response: oneshot::Sender<Height>,
+    },
     /// A hint that a finalized block may be available at a given height.
     ///
     /// This triggers a network fetch if the finalization is not available locally.
@@ -65,8 +70,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     HintFinalized {
         /// The height of the finalization to fetch.
         height: Height,
-        /// Target peers to fetch from. Added to any existing targets for this height.
-        targets: NonEmptyVec<S::PublicKey>,
+        /// Target peers to fetch from. Added to any existing targets for this
+        /// height.
+        targets: Recipients<S::PublicKey>,
     },
     /// A request to subscribe to a block by its digest.
     SubscribeByDigest {
@@ -134,7 +140,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// the floor is pruned when `prune_archives` is `true`.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Message::Prune] instead.
@@ -143,6 +149,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     SetFloor {
         /// The candidate floor height.
         height: Height,
+
+        /// Whether to prune finalized archives below the new floor.
+        prune_archives: bool,
     },
     /// Prunes finalized blocks and certificates below the given height.
     ///
@@ -191,7 +200,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             } => false,
-            Self::SubscribeByDigest { .. }
+            Self::GetProcessedHeight { .. }
+            | Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
@@ -211,6 +221,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
+            Self::GetProcessedHeight { response } => response.is_closed(),
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
@@ -225,9 +236,9 @@ impl<S: Scheme, V: Variant> Message<S, V> {
 }
 
 pub(crate) struct Pending<S: Scheme, V: Variant> {
-    floor: Option<Height>,
+    floor: Option<(Height, bool)>,
     prune: Option<Height>,
-    hints: BTreeMap<Height, NonEmptyVec<S::PublicKey>>,
+    hints: BTreeMap<Height, Recipients<S::PublicKey>>,
     messages: VecDeque<PendingMessage<S, V>>,
 }
 
@@ -250,7 +261,11 @@ impl<S: Scheme, V: Variant> Default for Pending<S, V> {
 impl<S: Scheme, V: Variant> Pending<S, V> {
     // The effective floor for staleness checks is the max of both pending advances
     fn height(&self) -> Option<Height> {
-        self.floor.into_iter().chain(self.prune).max()
+        self.floor
+            .map(|(height, _)| height)
+            .into_iter()
+            .chain(self.prune)
+            .max()
     }
 
     fn retain(&mut self) {
@@ -266,14 +281,18 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         });
     }
 
-    fn set_floor(&mut self, height: Height) {
+    fn set_floor(&mut self, height: Height, prune_archives: bool) {
         let current = self.height();
-        let floor = Some(height);
-        if self.floor >= floor {
-            return;
+        match &mut self.floor {
+            Some((pending, pending_prune)) if *pending > height => return,
+            Some((pending, pending_prune)) if *pending == height => {
+                *pending_prune |= prune_archives;
+            }
+            floor => {
+                *floor = Some((height, prune_archives));
+            }
         }
 
-        self.floor = self.floor.max(floor);
         if self.height() > current {
             self.retain();
         }
@@ -293,17 +312,46 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     }
 
     fn extend_hint_targets(
-        pending: &mut NonEmptyVec<S::PublicKey>,
-        targets: NonEmptyVec<S::PublicKey>,
+        pending: &mut Recipients<S::PublicKey>,
+        targets: Recipients<S::PublicKey>,
     ) {
-        for target in targets {
-            if !pending.contains(&target) {
-                pending.push(target);
+        match targets {
+            Recipients::All => {
+                *pending = Recipients::All;
             }
+            Recipients::One(target) => match pending {
+                Recipients::All => {}
+                Recipients::One(pending_target) => {
+                    if pending_target != &target {
+                        *pending = Recipients::Some(vec![pending_target.clone(), target]);
+                    }
+                }
+                Recipients::Some(pending_set) => {
+                    if !pending_set.contains(&target) {
+                        pending_set.push(target);
+                    }
+                }
+            },
+            Recipients::Some(mut targets_set) => match pending {
+                Recipients::All => {}
+                Recipients::One(pending_target) => {
+                    if !targets_set.contains(pending_target) {
+                        targets_set.push(pending_target.clone());
+                    }
+                    *pending = Recipients::Some(targets_set);
+                }
+                Recipients::Some(pending_set) => {
+                    for target in targets_set {
+                        if !pending_set.contains(&target) {
+                            pending_set.push(target);
+                        }
+                    }
+                }
+            },
         }
     }
 
-    fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+    fn hint_finalized(&mut self, height: Height, targets: Recipients<S::PublicKey>) {
         // Hint is already covered by floor/prune
         let current = self.height();
         if current.is_some_and(|current| height <= current) {
@@ -322,7 +370,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         }
     }
 
-    fn restore_hint(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+    fn restore_hint(&mut self, height: Height, targets: Recipients<S::PublicKey>) {
         match self.hints.entry(height) {
             Entry::Vacant(entry) => {
                 entry.insert(targets);
@@ -346,7 +394,10 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
 
         // Receiver rejected; restore so the next drain retries from the same point
         match message {
-            Message::SetFloor { height } => self.set_floor(height),
+            Message::SetFloor {
+                height,
+                prune_archives,
+            } => self.set_floor(height, prune_archives),
             Message::Prune { height } => self.prune(height),
             Message::HintFinalized { height, targets } => self.restore_hint(height, targets),
             message => self.messages.push_front(PendingMessage::Message(message)),
@@ -369,8 +420,14 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     {
         // Drain floor and prune first so the actor advances its floor before
         // it sees the height-bounded reads that follow
-        if let Some(height) = self.floor.take() {
-            if !self.drain_one(Message::SetFloor { height }, &mut push) {
+        if let Some((height, prune_archives)) = self.floor.take() {
+            if !self.drain_one(
+                Message::SetFloor {
+                    height,
+                    prune_archives,
+                },
+                &mut push,
+            ) {
                 return;
             }
         }
@@ -422,8 +479,11 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
                 overflow.hint_finalized(height, targets);
             }
             // Floor and prune collapse to the highest height seen
-            Self::SetFloor { height } => {
-                overflow.set_floor(height);
+            Self::SetFloor {
+                height,
+                prune_archives,
+            } => {
+                overflow.set_floor(height, prune_archives);
             }
             Self::Prune { height } => {
                 overflow.prune(height);
@@ -492,15 +552,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
+    /// Retrieve the latest processed height acknowledged by the application.
+    pub async fn get_processed_height(&self) -> Option<Height> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .enqueue(Message::GetProcessedHeight { response });
+        receiver.await.ok()
+    }
+
     /// Hints that a finalized block may be available at the given height.
     ///
     /// This method will request the finalization from the network via the resolver
     /// if it is not available locally.
-    ///
-    /// Targets are required because this is typically called when a peer claims to be
-    /// ahead. By targeting only those peers, we limit who we ask. If a target returns
-    /// invalid data, they will be blocked by the resolver. If targets don't respond
-    /// or return "no data", they effectively rate-limit themselves.
     ///
     /// Calling this multiple times for the same height with different targets will
     /// add to the target set if there is an ongoing fetch, allowing more peers to be tried.
@@ -511,7 +575,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The height must be covered by both the epocher and the provider. If the
     /// epocher cannot map the height to an epoch, or the provider cannot supply
     /// a scheme for that epoch, the hint is silently dropped.
-    pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+    pub fn hint_finalized(&self, height: Height, targets: Recipients<S::PublicKey>) {
         let _ = self
             .sender
             .enqueue(Message::HintFinalized { height, targets });
@@ -632,14 +696,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Sets the sync starting point (advances if higher than current).
     ///
     /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// the floor is pruned when `prune_archives` is `true`.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Self::prune] instead.
     ///
     /// The default floor is 0.
-    pub fn set_floor(&self, height: Height) {
-        let _ = self.sender.enqueue(Message::SetFloor { height });
+    pub fn set_floor(&self, height: Height, prune_archives: bool) {
+        let _ = self.sender.enqueue(Message::SetFloor {
+            height,
+            prune_archives,
+        });
     }
 
     /// Prunes finalized blocks and certificates below the given height.
@@ -817,13 +884,14 @@ mod tests {
     fn hint_finalized(height: u64, target: harness::K) -> TestMessage {
         TestMessage::HintFinalized {
             height: Height::new(height),
-            targets: NonEmptyVec::new(target),
+            targets: Recipients::One(target),
         }
     }
 
     fn set_floor(height: u64) -> TestMessage {
         TestMessage::SetFloor {
             height: Height::new(height),
+            prune_archives: false,
         }
     }
 
@@ -884,7 +952,7 @@ mod tests {
         })
     }
 
-    fn hint_targets(overflow: &TestPending, height: u64) -> Option<&NonEmptyVec<harness::K>> {
+    fn hint_targets(overflow: &TestPending, height: u64) -> Option<&Recipients<harness::K>> {
         overflow.hints.get(&Height::new(height))
     }
 
@@ -936,7 +1004,10 @@ mod tests {
 
         assert_eq!(overflow.messages.len(), 1);
         let targets = hint_targets(&overflow, 10).expect("expected hint");
-        assert_eq!(targets.len().get(), 2);
+        let Recipients::Some(targets) = targets else {
+            panic!("expected target set");
+        };
+        assert_eq!(targets.len(), 2);
         assert!(targets.contains(&first));
         assert!(targets.contains(&second));
     }
@@ -1059,7 +1130,10 @@ mod tests {
             panic!("expected hint");
         };
         assert_eq!(*height, Height::new(10));
-        assert_eq!(targets.len().get(), 2);
+        let Recipients::Some(targets) = targets else {
+            panic!("expected target set");
+        };
+        assert_eq!(targets.len(), 2);
         assert!(targets.contains(&first));
         assert!(targets.contains(&second));
     }
@@ -1075,7 +1149,7 @@ mod tests {
         <TestMessage as Policy>::handle(&mut overflow, prune(2));
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
 
-        assert_eq!(overflow.floor, Some(Height::new(8)));
+        assert_eq!(overflow.floor, Some((Height::new(8), false)));
         assert_eq!(overflow.prune, Some(Height::new(7)));
         assert!(overflow.messages.is_empty());
 
@@ -1083,7 +1157,7 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert!(matches!(
             &drained[0],
-            TestMessage::SetFloor { height } if *height == Height::new(8)
+            TestMessage::SetFloor { height, .. } if *height == Height::new(8)
         ));
         assert!(matches!(
             &drained[1],
@@ -1095,7 +1169,7 @@ mod tests {
     fn policy_replaces_floor_and_prune_and_drops_stale_pending_on_drain() {
         let mut overflow = pending();
 
-        overflow.floor = Some(Height::new(5));
+        overflow.floor = Some((Height::new(5), false));
         let (get_info_4, _get_info_4_rx) = get_info(4);
         let (get_block_7, _get_block_7_rx) = get_block(7);
         let (get_block_8, _get_block_8_rx) = get_block(8);
@@ -1105,12 +1179,12 @@ mod tests {
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_7));
-        overflow.hint_finalized(Height::new(8), NonEmptyVec::new(public_key(1)));
+        overflow.hint_finalized(Height::new(8), Recipients::One(public_key(1)));
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_8));
         <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
-        assert_eq!(overflow.floor, Some(Height::new(8)));
+        assert_eq!(overflow.floor, Some((Height::new(8), false)));
         assert_eq!(overflow.messages.len(), 1);
         assert!(!has_get_info(&overflow, 4));
         assert!(!has_get_block(&overflow, 7));
@@ -1120,7 +1194,7 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert!(matches!(
             &drained[0],
-            TestMessage::SetFloor { height } if *height == Height::new(8)
+            TestMessage::SetFloor { height, .. } if *height == Height::new(8)
         ));
         assert!(matches!(
             &drained[1],
@@ -1141,7 +1215,7 @@ mod tests {
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_6));
-        overflow.hint_finalized(Height::new(6), NonEmptyVec::new(public_key(2)));
+        overflow.hint_finalized(Height::new(6), Recipients::One(public_key(2)));
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_7));
@@ -1263,7 +1337,7 @@ mod tests {
         assert_eq!(drained.len(), 4);
         assert!(matches!(
             &drained[0],
-            TestMessage::SetFloor { height } if *height == Height::new(5)
+            TestMessage::SetFloor { height, .. } if *height == Height::new(5)
         ));
         assert!(matches!(
             &drained[1],

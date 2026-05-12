@@ -17,7 +17,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, Receiver, Sender,
+    Blocker, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -26,7 +26,7 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
@@ -232,7 +232,8 @@ where
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
                 self.marshal
-                    .hint_finalized(boundary_height, NonEmptyVec::new(from));
+                    .hint_finalized(boundary_height, Recipients::One(from))
+                    .await;
             },
             Some(transition) = self.mailbox.recv() else {
                 warn!("mailbox closed, shutting down orchestrator");

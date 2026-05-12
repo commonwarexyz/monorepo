@@ -1,4 +1,3 @@
-//! Test harness for marshal variants.
 //!
 //! This module provides a trait-based abstraction that allows writing tests once
 //! and running them against both the standard and coding marshal variants.
@@ -33,7 +32,10 @@ use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
-use commonware_p2p::simulated::{self, Link, Network, Oracle};
+use commonware_p2p::{
+    simulated::{self, Link, Network, Oracle},
+    Recipients,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, Quota, Runner, Supervisor as _,
@@ -42,7 +44,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -3236,7 +3238,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             .await
             .unwrap();
 
-        mailbox.set_floor(Height::new(NEW_SYNC_FLOOR));
+        mailbox.set_floor(Height::new(NEW_SYNC_FLOOR), true);
         H::report_finalization(&mut mailbox, latest_finalization).await;
 
         let mut finished = false;
@@ -3443,6 +3445,107 @@ pub fn prune_finalized_archives<H: TestHarness>() {
     })
 }
 
+/// Test that floor advancement can skip finalized archive pruning.
+pub fn set_floor_without_pruning_preserves_archives<H: TestHarness>() {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let oracle = setup_network_with_participants(
+            context.child("network_setup"),
+            NZUsize!(3),
+            participants.clone(),
+        )
+        .await;
+
+        let validator = participants[0].clone();
+        let partition_prefix = format!("set-floor-no-prune-test-{}", validator.clone());
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let (mut mailbox, extra, application) = H::setup_prunable_validator(
+            context.child("validator"),
+            &oracle,
+            validator,
+            &schemes,
+            &partition_prefix,
+            page_cache,
+        )
+        .await;
+        let _ = extra; // Used by CodingHarness, silence warning for StandardHarness.
+
+        let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+        for i in 1..=20u64 {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
+            let commitment = H::commitment(&block);
+            parent = H::digest(&block);
+            parent_commitment = commitment;
+            let bounds = epocher.containing(Height::new(i)).unwrap();
+            let round = Round::new(bounds.epoch(), View::new(i));
+
+            let mut handle = ValidatorHandle {
+                mailbox: mailbox.clone(),
+                extra: extra.clone(),
+            };
+            H::verify_for_prune(&mut handle, round, &block).await;
+            context.sleep(LINK.latency).await;
+
+            let proposal = Proposal {
+                round,
+                parent: View::new(i - 1),
+                payload: commitment,
+            };
+            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            H::report_finalization(&mut mailbox, finalization).await;
+        }
+
+        while application.blocks().len() < 20 {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+
+        for i in 1..=20u64 {
+            assert!(
+                mailbox.get_block(Height::new(i)).await.is_some(),
+                "block {i} should exist before floor advancement"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(i)).await.is_some(),
+                "finalization {i} should exist before floor advancement"
+            );
+        }
+
+        let floor = Height::new(25);
+        mailbox.set_floor(floor, false);
+        assert_eq!(
+            mailbox.get_processed_height().await,
+            Some(floor),
+            "processed height should advance to new floor",
+        );
+
+        for i in 1..=20u64 {
+            assert!(
+                mailbox.get_block(Height::new(i)).await.is_some(),
+                "block {i} should still exist when pruning is disabled"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(i)).await.is_some(),
+                "finalization {i} should still exist when pruning is disabled"
+            );
+        }
+    })
+}
+
 /// Regression test: delayed block backfill delivered after floor advancement must not crash.
 ///
 /// This models a resolver peer that responds to `Request::Block` only after the
@@ -3535,7 +3638,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
         // Advance floor beyond the stale block and prune.
         let floor = Height::new(10);
-        victim_mailbox.set_floor(floor);
+        victim_mailbox.set_floor(floor, true);
         // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
         // has been processed before we re-enable the delayed delivery path.
         let _ = victim_mailbox.get_finalization(floor).await;
@@ -4519,7 +4622,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1
             .mailbox
-            .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()));
+            .hint_finalized(Height::new(5), Recipients::One(participants[0].clone()));
 
         // Wait for the fetch to complete
         while handle1
