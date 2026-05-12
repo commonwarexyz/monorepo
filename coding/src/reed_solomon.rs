@@ -210,7 +210,7 @@ const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
 /// This function copies only the data bytes while validating trailing zero
 /// padding directly from the shard slices.
-fn extract_data(shards: &[&[u8]], k: usize, shard_len: usize) -> Result<Vec<u8>, Error> {
+fn extract_data(shards: &[&[u8]], k: usize, expected_shard_len: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
     let data_len = read_data_len(shards)?;
     let mut data = Vec::with_capacity(data_len);
@@ -244,7 +244,7 @@ fn extract_data(shards: &[&[u8]], k: usize, shard_len: usize) -> Result<Vec<u8>,
     }
 
     // Validate that the original shards use the canonical shard width.
-    if canonical_shard_len(data.len(), k) != shard_len {
+    if canonical_shard_len(data.len(), k) != expected_shard_len {
         return Err(Error::Inconsistent);
     }
     Ok(data)
