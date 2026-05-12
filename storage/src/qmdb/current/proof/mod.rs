@@ -33,7 +33,7 @@ use crate::{
         self,
         hasher::{Hasher, Standard as StandardHasher},
         storage::Storage,
-        Family, Graftable, Location, PendingChunkTrait, Proof,
+        Family, Graftable, Location, PendingChunk, Proof,
     },
     qmdb::{
         self,
@@ -82,7 +82,7 @@ impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
             hasher,
             ops_root,
             &self.grafted_root,
-            self.pending_chunk_digest.as_option(),
+            self.pending_chunk_digest.as_ref(),
             partial,
         ) == *canonical_root
     }
@@ -211,11 +211,11 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let partial_chunk_digest =
             partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(&chunk));
 
-        let pending_chunk_digest = F::PendingChunk::from_option(
+        let pending_chunk_digest: F::PendingChunk<D> =
             pending_chunk::<_, _, N>(status, ops_leaves, grafting_height)?
-                .map(|chunk| hasher.digest(&chunk)),
-        )
-        .expect("pending_chunk must be consistent with family");
+                .map(|chunk| hasher.digest(&chunk))
+                .try_into()
+                .expect("pending_chunk must be consistent with family");
 
         Ok(Self {
             proof,
@@ -357,9 +357,9 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             qmdb::ROOT_BAGGING,
         );
 
-        if self.pending_chunk_digest.as_option().is_some() != has_pending_chunk {
+        if self.pending_chunk_digest.as_ref().is_some() != has_pending_chunk {
             debug!(
-                pending_in_proof = self.pending_chunk_digest.as_option().is_some(),
+                pending_in_proof = self.pending_chunk_digest.as_ref().is_some(),
                 expected = has_pending_chunk,
                 "pending_chunk_digest presence does not match bitmap state"
             );
@@ -390,7 +390,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         // For a pending chunk, validate the supplied chunk bytes against the digest in the proof
         // when the verifier's range includes the pending chunk's index. The pending chunk is at
         // index `graftable_chunks` (== `complete_chunks - 1` when present).
-        if let Some(pending_digest) = self.pending_chunk_digest.as_option() {
+        if let Some(pending_digest) = self.pending_chunk_digest.as_ref() {
             let pending_idx = graftable_chunks;
             if pending_idx >= start_chunk && pending_idx <= end_chunk {
                 let local = (pending_idx - start_chunk) as usize;
@@ -430,7 +430,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             root_hasher,
             &self.ops_root,
             &merkle_root,
-            self.pending_chunk_digest.as_option(),
+            self.pending_chunk_digest.as_ref(),
             partial,
         ) == *root
     }

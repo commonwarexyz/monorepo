@@ -27,6 +27,7 @@ pub mod storage;
 pub mod verification;
 
 use alloc::vec::Vec;
+use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use core::fmt::Debug;
@@ -146,43 +147,83 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     fn pos_to_height(pos: Position<Self>) -> u32;
 }
 
-/// Represents the pending-chunk slot in proof and witness types.
-pub trait PendingChunkTrait<D: Digest>:
-    Clone + Debug + Eq + Write + EncodeSize + Read<Cfg = ()> + Send + Sync
-{
-    /// View the slot as an `Option<&D>`.
-    fn as_option(&self) -> Option<&D>;
+/// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
+///
+/// A local zero-sized type whose `TryFrom<Option<D>>` impl rejects `Some` values. The
+/// orphan rule forbids writing the same impl for `()`.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Unused;
 
-    /// Construct from an `Option<D>`, returning an error if the slot cannot hold a `Some` value.
-    fn from_option(opt: Option<D>) -> Result<Self, commonware_codec::Error>;
+impl Write for Unused {
+    #[inline]
+    fn write(&self, _: &mut impl BufMut) {}
 }
 
-impl<D: Digest> PendingChunkTrait<D> for Option<D> {
+impl EncodeSize for Unused {
     #[inline]
-    fn as_option(&self) -> Option<&D> {
-        self.as_ref()
-    }
-
-    #[inline]
-    fn from_option(opt: Self) -> Result<Self, commonware_codec::Error> {
-        Ok(opt)
+    fn encode_size(&self) -> usize {
+        0
     }
 }
 
-impl<D: Digest> PendingChunkTrait<D> for () {
-    #[inline]
-    fn as_option(&self) -> Option<&D> {
-        None
-    }
+impl Read for Unused {
+    type Cfg = ();
 
-    fn from_option(opt: Option<D>) -> Result<Self, commonware_codec::Error> {
-        match opt {
-            None => Ok(()),
+    #[inline]
+    fn read_cfg(_: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self)
+    }
+}
+
+impl<D: Digest> TryFrom<Option<D>> for Unused {
+    type Error = commonware_codec::Error;
+
+    #[inline]
+    fn try_from(value: Option<D>) -> Result<Self, Self::Error> {
+        match value {
+            None => Ok(Self),
             Some(_) => Err(commonware_codec::Error::Invalid(
                 "PendingChunk",
                 "pending chunk present for family without pending chunks",
             )),
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Unused {
+    fn arbitrary(_: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// The pending-chunk slot carried by a [Graftable] family's proof and witness types.
+pub trait PendingChunk<D: Digest>:
+    Clone
+    + Debug
+    + Eq
+    + Write
+    + EncodeSize
+    + Read<Cfg = ()>
+    + Send
+    + Sync
+    + TryFrom<Option<D>, Error: Debug>
+{
+    /// View the slot as an `Option<&D>`.
+    fn as_ref(&self) -> Option<&D>;
+}
+
+impl<D: Digest> PendingChunk<D> for Option<D> {
+    #[inline]
+    fn as_ref(&self) -> Option<&D> {
+        Self::as_ref(self)
+    }
+}
+
+impl<D: Digest> PendingChunk<D> for Unused {
+    #[inline]
+    fn as_ref(&self) -> Option<&D> {
+        None
     }
 }
 
@@ -192,7 +233,7 @@ impl<D: Digest> PendingChunkTrait<D> for () {
 /// chunk-to-peak mappings required by that process.
 pub trait Graftable: Family {
     /// The pending-chunk slot type for this family's proofs and witnesses.
-    type PendingChunk<D: Digest>: PendingChunkTrait<D>;
+    type PendingChunk<D: Digest>: PendingChunk<D>;
 
     /// Return the nodes that collectively cover the leaf range of a bitmap chunk in a structure of
     /// the given `size`.

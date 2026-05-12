@@ -6,7 +6,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location, PendingChunkTrait as _},
+    merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
     qmdb::{
         self,
         current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
@@ -321,7 +321,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         }
 
                         let bad_pending_digest = (*bad_pending_digest).map(Digest::from);
-                        if let Ok(bad_pending) = F::PendingChunk::from_option(bad_pending_digest) {
+                        if let Ok(bad_pending) = <F::PendingChunk<Digest>>::try_from(bad_pending_digest) {
                             if range_proof.pending_chunk_digest != bad_pending {
                                 let mut bad_pending_proof = range_proof.clone();
                                 bad_pending_proof.pending_chunk_digest = bad_pending;
