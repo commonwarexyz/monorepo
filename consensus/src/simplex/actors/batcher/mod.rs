@@ -3,6 +3,8 @@ mod ingress;
 mod round;
 mod verifier;
 
+use std::num::NonZeroUsize;
+
 use crate::{
     simplex::config::ForwardingPolicy,
     types::{Epoch, ViewDelta},
@@ -29,7 +31,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     pub activity_timeout: ViewDelta,
     pub skip_timeout: ViewDelta,
     pub epoch: Epoch,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub forwarding: ForwardingPolicy,
 }
 

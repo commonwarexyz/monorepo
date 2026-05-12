@@ -12,6 +12,7 @@ use crate::{
     types::{Epoch, Participant, View, ViewDelta},
     Epochable, Relay, Reporter, Viewable,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipients};
@@ -24,10 +25,7 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc},
-    ordered::{Quorum, Set},
-};
+use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
 use tracing::{debug, trace};
@@ -65,7 +63,7 @@ where
     forwarding: ForwardingPolicy,
     epoch: Epoch,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
     added: Counter,
     verified: Counter,
@@ -113,7 +111,7 @@ where
             "certificate recover latency",
             Buckets::CRYPTOGRAPHY,
         );
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -291,7 +289,6 @@ where
                     leader,
                     finalized: new_finalized,
                     forwardable_proposal,
-                    response,
                 } => {
                     let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                     current = Current {
@@ -321,10 +318,10 @@ where
                                 .then_some(TimeoutReason::Inactivity)
                         }
                     };
-                    if timeout_reason.is_some() {
+                    if let Some(timeout_reason) = timeout_reason {
                         current.timed_out = true;
+                        voter.timeout(current.view, timeout_reason);
                     }
-                    response.send_lossy(timeout_reason);
 
                     // Forward the proposal, if enabled and we have something to forward
                     if let Some((proposal, round)) = forwardable_proposal
@@ -411,8 +408,7 @@ where
                             .or_insert_with(|| self.new_round())
                             .set_notarization(notarization.clone());
                         voter
-                            .recovered(Certificate::Notarization(notarization))
-                            .await;
+                            .recovered(Certificate::Notarization(notarization));
                     }
                     Certificate::Nullification(nullification) => {
                         // Skip if we already have a nullification for this view
@@ -436,8 +432,7 @@ where
                             .or_insert_with(|| self.new_round())
                             .set_nullification(nullification.clone());
                         voter
-                            .recovered(Certificate::Nullification(nullification))
-                            .await;
+                            .recovered(Certificate::Nullification(nullification));
                     }
                     Certificate::Finalization(finalization) => {
                         // Skip if we already have a finalization for this view
@@ -458,8 +453,7 @@ where
                             .or_insert_with(|| self.new_round())
                             .set_finalization(finalization.clone());
                         voter
-                            .recovered(Certificate::Finalization(finalization))
-                            .await;
+                            .recovered(Certificate::Finalization(finalization));
                     }
                 }
 
@@ -516,8 +510,7 @@ where
                     if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
                         voter
-                            .timeout(current.view, TimeoutReason::LeaderNullify)
-                            .await;
+                            .timeout(current.view, TimeoutReason::LeaderNullify);
                     }
                 }
                 updated_view = view;
@@ -532,7 +525,7 @@ where
                 if let Some(round) = work.get_mut(&current.view) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
-                            voter.proposal(proposal).await;
+                            voter.proposal(proposal);
                         }
                     }
                 }
@@ -606,8 +599,7 @@ where
 
                     // Forward notarization to voter
                     voter
-                        .recovered(Certificate::Notarization(notarization))
-                        .await;
+                        .recovered(Certificate::Notarization(notarization));
                 }
                 if let Some(nullification) =
                     self.recover_latency.time_some(self.context.as_ref(), || {
@@ -616,8 +608,7 @@ where
                 {
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     voter
-                        .recovered(Certificate::Nullification(nullification))
-                        .await;
+                        .recovered(Certificate::Nullification(nullification));
                 }
                 if let Some(finalization) =
                     self.recover_latency.time_some(self.context.as_ref(), || {
@@ -626,8 +617,7 @@ where
                 {
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter
-                        .recovered(Certificate::Finalization(finalization))
-                        .await;
+                        .recovered(Certificate::Finalization(finalization));
                 }
 
                 // Drop any rounds that are no longer interesting

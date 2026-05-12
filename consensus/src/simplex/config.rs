@@ -97,7 +97,7 @@ where
 
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
