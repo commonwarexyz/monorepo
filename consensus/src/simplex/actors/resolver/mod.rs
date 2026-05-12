@@ -10,7 +10,7 @@ use commonware_parallel::Strategy;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub scheme: S,
@@ -21,7 +21,7 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub strategy: T,
 
     pub epoch: Epoch,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub fetch_concurrent: usize,
     pub fetch_timeout: Duration,
 }
