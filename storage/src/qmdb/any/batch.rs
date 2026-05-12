@@ -14,7 +14,7 @@ use crate::{
             ordered::{find_next_key, find_prev_key},
             ValueEncoding,
         },
-        batch_chain,
+        batch_chain::{self, Bounds},
         bitmap::Shared,
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
@@ -1510,6 +1510,11 @@ where
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.root
+    }
+
+    /// Return the [`Bounds`] of the batch.
+    pub const fn bounds(&self) -> &Bounds<F> {
+        &self.bounds
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a

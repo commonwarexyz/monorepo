@@ -6,7 +6,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
-        batch_chain,
+        batch_chain::{self, Bounds},
         immutable::operation::Operation,
         operation::Key,
         Error,
@@ -311,6 +311,11 @@ where
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.root
+    }
+
+    /// Return the [`Bounds`] of the batch.
+    pub const fn bounds(&self) -> &Bounds<F> {
+        &self.bounds
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
