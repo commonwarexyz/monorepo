@@ -808,7 +808,7 @@ where
                 return;
             };
             match sender.send_lossy(Recipients::One(peer.clone()), shard, true).0 {
-                Feedback::Ok(_) => {}
+                Feedback::Ok | Feedback::Backoff => {}
                 result => warn!(?result, ?peer, %commitment, "unable to enqueue shard"),
             }
         }
@@ -825,7 +825,7 @@ where
                 .send_lossy(Recipients::Some(non_participants), leader_shard, true)
                 .0
             {
-                Feedback::Ok(_) => {}
+                Feedback::Ok | Feedback::Backoff => {}
                 result => warn!(?result, %commitment, "unable to enqueue leader shard"),
             }
         }
@@ -848,7 +848,7 @@ where
     ) {
         let commitment = shard.commitment();
         match sender.send_lossy(Recipients::All, shard, true).0 {
-            Feedback::Ok(_) => {
+            Feedback::Ok | Feedback::Backoff => {
                 debug!(?commitment, "enqueued shard broadcast");
             }
             result => warn!(?result, ?commitment, "unable to enqueue shard broadcast"),

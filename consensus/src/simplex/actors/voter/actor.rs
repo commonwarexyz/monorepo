@@ -264,7 +264,7 @@ impl<
 
         // Broadcast vote
         match sender.send_lossy(Recipients::All, vote.clone(), true).0 {
-            Feedback::Ok(_) => {}
+            Feedback::Ok | Feedback::Backoff => {}
             result => {
                 warn!(?result, "unable to enqueue p2p vote");
                 self.schedule_p2p_retry(Message::RetryVote(vote));
@@ -291,7 +291,7 @@ impl<
             .send_lossy(Recipients::All, certificate.clone(), true)
             .0
         {
-            Feedback::Ok(_) => {}
+            Feedback::Ok | Feedback::Backoff => {}
             result => {
                 warn!(?result, "unable to enqueue p2p certificate");
                 self.schedule_p2p_retry(Message::RetryCertificate(certificate));
@@ -305,7 +305,7 @@ impl<
         self.context.child("p2p_retry").spawn(move |context| async move {
             context.sleep(delay).await;
             let result = sender.enqueue(message);
-            if !result.accepted() {
+            if !matches!(result, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff) {
                 warn!(?result, "unable to enqueue p2p retry");
             }
         });

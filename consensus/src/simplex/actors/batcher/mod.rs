@@ -288,7 +288,7 @@ mod tests {
             // Initialize batcher
             let view = View::new(1);
             let nullify = batcher_mailbox.update(view, Participant::new(0), View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Build certificates
             let round = Round::new(epoch, view);
@@ -460,7 +460,7 @@ mod tests {
             let target_view = View::new(1);
             let nullify = batcher_mailbox
                 .update(target_view, Participant::new(0), View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Build certificates for the same target view.
             let round = Round::new(epoch, target_view);
@@ -487,7 +487,7 @@ mod tests {
             // Simulate voter-driven view advance after nullification to V+1.
             let nullify = batcher_mailbox
                 .update(target_view.next(), Participant::new(1), View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Send old notarization for V after moving current view forward.
             injector_sender
@@ -617,7 +617,7 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Build proposal and votes
             let round = Round::new(epoch, view);
@@ -2045,7 +2045,7 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
@@ -2224,7 +2224,7 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Build TWO different proposals for the same view
             let round = Round::new(epoch, view);
@@ -2426,7 +2426,7 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Give time for update to process
             context.sleep(Duration::from_millis(10)).await;
@@ -2569,7 +2569,7 @@ mod tests {
             // Now set the leader - this should cause the proposal to be forwarded
             let leader = Participant::new(1);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Give time for batcher to process
             context.sleep(Duration::from_millis(50)).await;
@@ -2682,14 +2682,14 @@ mod tests {
             for v in 1..skip_timeout {
                 let view = View::new(v);
                 let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-                assert!(nullify.accepted(), "view {v} should be active (before skip_timeout)");
+                assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff), "view {v} should be active (before skip_timeout)");
             }
 
             // Test 2: At view skip_timeout, the leader has been silent for
             // skip_timeout tracked views and should be marked inactive.
             let view = View::new(skip_timeout);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
             let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Timeout(timeout_view, TimeoutReason::Inactivity) if timeout_view == view),
@@ -2732,7 +2732,7 @@ mod tests {
             let view = View::new(skip_timeout + 1);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
             assert!(
-                nullify.accepted(),
+                matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff),
                 "view {} should be active (leader voted in view {})",
                 skip_timeout + 1,
                 skip_timeout
@@ -2752,7 +2752,7 @@ mod tests {
             // skip window, so the leader becomes inactive again.
             let view = View::new(100);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
             loop {
                 select! {
                     output = voter_receiver.recv() => {
@@ -2776,7 +2776,7 @@ mod tests {
             let nullify = batcher_mailbox
                 .update(view, self_leader, View::zero(), None);
             assert!(
-                nullify.accepted(),
+                matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff),
                 "local leader inactivity should be suppressed"
             );
         });
@@ -2898,7 +2898,7 @@ mod tests {
             let nullify = batcher_mailbox
                 .update(next_view, leader, View::zero(), None);
             assert!(
-                nullify.accepted(),
+                matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff),
                 "leader should remain active with nullify activity"
             );
         });
@@ -3004,14 +3004,14 @@ mod tests {
             for v in 1..skip_timeout {
                 let view = View::new(v);
                 let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-                assert!(nullify.accepted(), "view {v} should be active before skip_timeout");
+                assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff), "view {v} should be active before skip_timeout");
             }
 
             // Enter the threshold view with no activity and confirm that we fast-timeout.
             let active_view = View::new(skip_timeout);
             let nullify = batcher_mailbox
                 .update(active_view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
             let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Timeout(timeout_view, TimeoutReason::Inactivity) if timeout_view == active_view),
@@ -3044,7 +3044,7 @@ mod tests {
             let nullify = batcher_mailbox
                 .update(next_view, leader, View::zero(), None);
             assert!(
-                nullify.accepted(),
+                matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff),
                 "leader should remain active after relaying a certificate"
             );
         });
@@ -3170,7 +3170,7 @@ mod tests {
             // a fast-path timeout hint to the voter.
             let nullify = batcher_mailbox
                 .update(buffered_view, leader_idx, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
             let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Timeout(timeout_view, TimeoutReason::LeaderNullify) if timeout_view == buffered_view),
@@ -3414,7 +3414,7 @@ mod tests {
 
             let nullify = batcher_mailbox
                 .update(view1, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Part 1: Send NOTARIZE votes for view 1 (above finalized=0, should succeed)
             let round1 = Round::new(epoch, view1);
@@ -3459,7 +3459,7 @@ mod tests {
             // Now test NOTARIZE votes for view 2 which should NOT be processed (at finalized=2)
             let view3 = View::new(3);
             let nullify = batcher_mailbox.update(view3, leader, view2, None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Send NOTARIZE votes for view 2 (now at finalized=2, should NOT succeed)
             let round2 = Round::new(epoch, view2);
@@ -3637,7 +3637,7 @@ mod tests {
             // Initialize batcher with view 5, participant 1 as leader
             let view = View::new(5);
             let nullify = batcher_mailbox.update(view, leader, View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             // Build proposal and send enough votes to reach quorum
             let round = Round::new(epoch, view);
@@ -3841,7 +3841,7 @@ mod tests {
             let view = View::new(1);
             let nullify = batcher_mailbox
                 .update(view, Participant::new(1), View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
@@ -4052,7 +4052,7 @@ mod tests {
             let view = View::new(1);
             let nullify = batcher_mailbox
                 .update(view, Participant::new(1), View::zero(), None);
-            assert!(nullify.accepted());
+            assert!(matches!(nullify, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff));
 
             let round = Round::new(epoch, view);
             let proposal1 = Proposal::new(round, View::zero(), Sha256::hash(b"payload1"));

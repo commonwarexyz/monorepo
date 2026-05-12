@@ -164,7 +164,7 @@ impl Consumer for Handler {
             data: value,
             response,
         });
-        if !result.accepted() {
+        if !matches!(result, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff) {
             return false;
         }
         receiver.await.unwrap_or(false)
@@ -181,7 +181,7 @@ impl Producer for Handler {
             view: View::new(key.into()),
             response,
         });
-        if !result.accepted() {
+        if !matches!(result, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff) {
             return receiver;
         }
         receiver

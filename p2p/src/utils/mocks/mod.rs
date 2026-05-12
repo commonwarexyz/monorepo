@@ -74,7 +74,7 @@ impl<P: PublicKey> Sender for InertSender<P> {
             Recipients::Some(recipients) => recipients,
             Recipients::One(recipient) => vec![recipient],
         };
-        (Feedback::Ok(false), recipients)
+        (Feedback::Ok, recipients)
     }
 }
 

@@ -365,7 +365,7 @@ impl<
 
         // Log result, but do not handle errors
         match result {
-            Feedback::Ok(_) => trace!(?peer, ?id, "serve sent"),
+            Feedback::Ok | Feedback::Backoff => trace!(?peer, ?id, "serve sent"),
             result => warn!(?peer, ?id, ?result, "serve send failed"),
         };
     }

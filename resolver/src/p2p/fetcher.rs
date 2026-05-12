@@ -283,7 +283,7 @@ where
                 let (result, recipients) =
                     sender.send_lossy(Recipients::One(peer.clone()), message, self.priority_requests);
                 match result {
-                    Feedback::Ok(_) if recipients.contains(&peer) => {
+                    Feedback::Ok | Feedback::Backoff if recipients.contains(&peer) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -685,7 +685,7 @@ mod tests {
             _: bool,
         ) -> (Feedback, Vec<Self::PublicKey>) {
             match recipients {
-                Recipients::One(peer) => (Feedback::Ok(false), vec![peer]),
+                Recipients::One(peer) => (Feedback::Ok, vec![peer]),
                 _ => unimplemented!(),
             }
         }
@@ -760,7 +760,7 @@ mod tests {
             if rate_limiter.check_key(peer).is_err() {
                 return (Feedback::Dropped, Vec::new());
             }
-            (Feedback::Ok(false), vec![peer.clone()])
+            (Feedback::Ok, vec![peer.clone()])
         }
     }
 

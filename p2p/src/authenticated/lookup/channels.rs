@@ -134,7 +134,7 @@ where
         };
         let accepted = accepted_recipients(&recipients);
         let feedback = self.mailbox_sender.send_lossy(recipients, message, priority);
-        if feedback.accepted() {
+        if matches!(feedback, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff) {
             (feedback, accepted)
         } else {
             (feedback, Vec::new())

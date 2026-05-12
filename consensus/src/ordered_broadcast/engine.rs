@@ -569,7 +569,7 @@ impl<
         // Send the ack to the network
         let (result, _) =
             ack_sender.send_lossy(Recipients::Some(recipients), ack, self.priority_acks);
-        if !result.accepted() {
+        if !matches!(result, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff) {
             warn!(?result, "failed to enqueue ack");
             return Err(Error::UnableToSendMessage);
         }
@@ -855,7 +855,7 @@ impl<
             node.encode(),
             self.priority_proposals,
         );
-        if !result.accepted() {
+        if !matches!(result, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff) {
             warn!(?result, "failed to enqueue node");
             return Err(Error::BroadcastFailed);
         }

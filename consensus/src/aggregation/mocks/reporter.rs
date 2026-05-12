@@ -181,7 +181,7 @@ where
             Activity::Tip(height) => Message::Tip(height),
         };
         match self.sender.try_send(message) {
-            Ok(()) => Feedback::Ok(false),
+            Ok(()) => Feedback::Ok,
             Err(mpsc::error::TrySendError::Full(_)) => Feedback::Dropped,
             Err(mpsc::error::TrySendError::Closed(_)) => Feedback::Closed,
         }

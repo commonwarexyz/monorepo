@@ -333,7 +333,7 @@ where
                     .insert(activity);
             }
         }
-        Feedback::Ok(false)
+        Feedback::Ok
     }
 }
 

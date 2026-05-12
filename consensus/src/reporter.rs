@@ -50,7 +50,8 @@ const fn combine(left: Feedback, right: Feedback) -> Feedback {
     match (left, right) {
         (Feedback::Closed, _) | (_, Feedback::Closed) => Feedback::Closed,
         (Feedback::Dropped, _) | (_, Feedback::Dropped) => Feedback::Dropped,
-        (Feedback::Ok(left), Feedback::Ok(right)) => Feedback::Ok(left || right),
+        (Feedback::Backoff, _) | (_, Feedback::Backoff) => Feedback::Backoff,
+        (Feedback::Ok, Feedback::Ok) => Feedback::Ok,
     }
 }
 
@@ -109,7 +110,7 @@ mod tests {
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
             activity.acknowledge();
-            Feedback::Ok(false)
+            Feedback::Ok
         }
     }
 
@@ -121,7 +122,7 @@ mod tests {
         ));
 
         let (ack, waiter) = Exact::handle();
-        assert_eq!(reporters.report(ack), Feedback::Ok(false));
+        assert_eq!(reporters.report(ack), Feedback::Ok);
 
         assert!(
             waiter.now_or_never().unwrap().is_ok(),

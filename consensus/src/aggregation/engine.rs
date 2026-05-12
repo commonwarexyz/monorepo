@@ -736,7 +736,7 @@ impl<
             TipAck { ack, tip: self.tip },
             self.priority_acks,
         );
-        if !result.accepted() {
+        if !matches!(result, commonware_actor::Feedback::Ok | commonware_actor::Feedback::Backoff) {
             warn!(?result, "failed to enqueue ack");
             return Err(Error::UnableToSendMessage);
         }

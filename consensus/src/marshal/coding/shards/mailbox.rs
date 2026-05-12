@@ -140,7 +140,7 @@ where
         let (response, receiver) = oneshot::channel();
         if !matches!(
             self.sender.enqueue(make(response)),
-            Feedback::Ok(_)
+            Feedback::Ok | Feedback::Backoff
         ) {
             return None;
         }

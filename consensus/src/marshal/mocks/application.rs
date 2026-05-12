@@ -98,6 +98,6 @@ impl<B: Block> Reporter for Application<B> {
                 *self.tip.lock() = Some((height, digest));
             }
         }
-        Feedback::Ok(false)
+        Feedback::Ok
     }
 }
