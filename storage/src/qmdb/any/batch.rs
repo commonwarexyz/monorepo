@@ -25,7 +25,7 @@ use crate::{
 use ahash::AHashSet;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::ops::Range;
 use std::{
@@ -100,7 +100,7 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
 }
 
 /// Where this batch's inherited state comes from.
-enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy = Sequential>
+enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
 where
     Operation<F, U>: Send + Sync,
 {
@@ -167,7 +167,7 @@ where
 ///
 /// Methods that need the committed DB (e.g. `get`, `merkleize`) accept it as a
 /// parameter, so the batch is lifetime-free and can be stored independently of the DB.
-pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy = Sequential>
+pub struct UnmerkleizedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
@@ -206,12 +206,8 @@ where
 /// ```
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
-pub struct MerkleizedBatch<
-    F: Family,
-    D: Digest,
-    U: update::Update + Send + Sync,
-    S: Strategy = Sequential,
-> where
+pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
+where
     Operation<F, U>: Send + Sync,
 {
     /// Merkleized authenticated journal batch (provides the speculative Merkle root).
@@ -248,7 +244,7 @@ type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 /// from the resolution/merkleization machinery. Helpers that need access to the parent
 /// chain, DB snapshot, or operation log are methods on this struct, eliminating parameter
 /// threading.
-struct Merkleizer<F: Family, H, U, S: Strategy = Sequential>
+struct Merkleizer<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
     H: Hasher,
@@ -985,6 +981,16 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb::any::batch::merkleize",
+        level = "info",
+        skip_all,
+        fields(
+            variant = "unordered",
+            mutations = self.mutations.len() as u64,
+        ),
+    )]
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -1147,6 +1153,16 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb::any::batch::merkleize",
+        level = "info",
+        skip_all,
+        fields(
+            variant = "ordered",
+            mutations = self.mutations.len() as u64,
+        ),
+    )]
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
@@ -1512,6 +1528,17 @@ where
     /// All uncommitted ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
+    #[tracing::instrument(
+        name = "qmdb::any::batch::new",
+        level = "debug",
+        skip_all,
+        fields(
+            source = "batch",
+            base_size = self.bounds.base_size,
+            total_size = self.bounds.total_size,
+            ancestor_batches = self.ancestor_diffs.len() as u64,
+        ),
+    )]
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, S>
     where
         H: Hasher<Digest = D>,
@@ -1620,6 +1647,17 @@ where
     Operation<F, U>: Codec,
 {
     /// Create a new speculative batch of operations with this database as its parent.
+    #[tracing::instrument(
+        name = "qmdb::any::batch::new",
+        level = "debug",
+        skip_all,
+        fields(
+            source = "db",
+            base_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U, S> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
@@ -1655,6 +1693,17 @@ where
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
     /// guarantee durability.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::apply_batch",
+        level = "info",
+        skip_all,
+        fields(
+            batch_total_size = batch.bounds.total_size,
+            batch_base_size = batch.bounds.base_size,
+            db_size = *self.last_commit_loc + 1,
+            ancestor_batches = batch.ancestor_diffs.len() as u64,
+        ),
+    )]
     pub async fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
@@ -1746,6 +1795,16 @@ where
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
     ///
     /// This is the starting point for building owned batch chains.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::to_batch",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
@@ -1943,6 +2002,7 @@ mod tests {
         translator::OneCap,
     };
     use commonware_cryptography::{sha256, Sha256};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _};
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -2201,6 +2261,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
@@ -2294,6 +2355,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
@@ -2410,6 +2472,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
@@ -2491,6 +2554,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
@@ -2569,6 +2633,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
@@ -2637,6 +2702,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
@@ -2710,6 +2776,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
@@ -2790,6 +2857,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("ff-cross", &context);
@@ -2858,6 +2926,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
@@ -2930,6 +2999,7 @@ mod tests {
                 sha256::Digest,
                 Sha256,
                 OneCap,
+                Sequential,
             >;
 
             let config = fixed_db_config::<OneCap>("get-many-basic", &context);

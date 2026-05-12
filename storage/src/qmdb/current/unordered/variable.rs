@@ -21,10 +21,10 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
-pub type Db<F, E, K, V, H, T, const N: usize, S = Sequential> = super::db::Db<
+pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
     E,
     Journal<E, Operation<F, K, V>>,
@@ -71,7 +71,7 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize, S = Sequential> =
+    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize, S> =
         crate::qmdb::current::unordered::db::Db<
             F,
             E,
@@ -122,7 +122,16 @@ mod test {
     use commonware_runtime::deterministic;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest = Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
+    type CurrentTest = Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {

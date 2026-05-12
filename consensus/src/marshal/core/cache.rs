@@ -96,7 +96,7 @@ where
     cfg: Config,
 
     /// Codec configuration for block type
-    block_codec_config: <V::Block as Read>::Cfg,
+    block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
     /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
@@ -116,7 +116,7 @@ where
     pub(crate) async fn init(
         context: R,
         cfg: Config,
-        block_codec_config: <V::Block as Read>::Cfg,
+        block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     ) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(

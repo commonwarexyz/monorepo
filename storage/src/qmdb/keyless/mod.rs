@@ -60,7 +60,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -100,7 +100,7 @@ pub use operation::Operation;
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
-pub struct Config<J, S: Strategy = Sequential> {
+pub struct Config<J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle: MerkleConfig<S>,
 
@@ -109,7 +109,7 @@ pub struct Config<J, S: Strategy = Sequential> {
 }
 
 /// A keyless authenticated database.
-pub struct Keyless<F, E, V, C, H, S = Sequential>
+pub struct Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
@@ -560,12 +560,15 @@ pub(crate) mod tests {
         Persistable,
     };
     use commonware_cryptography::Sha256;
+    use commonware_parallel::Strategy;
     use commonware_runtime::{deterministic, Supervisor as _};
     use commonware_utils::NZU64;
     use std::{future::Future, pin::Pin};
 
     pub(crate) type Reopen<D> =
         Box<dyn Fn(deterministic::Context) -> Pin<Box<dyn Future<Output = D> + Send>>>;
+
+    type TestKeyless<F, V, C, H, S> = Keyless<F, deterministic::Context, V, C, H, S>;
 
     /// Test value factory: creates distinct values from an index.
     pub(crate) trait TestValue: Clone + PartialEq + std::fmt::Debug + Send + Sync {
@@ -584,10 +587,10 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) async fn test_keyless_db_empty<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_empty<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -638,10 +641,10 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_build_basic<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_build_basic<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -688,10 +691,10 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_recovery<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -762,8 +765,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_proof<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_db_proof<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -800,8 +803,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_metadata<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_metadata<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -826,8 +829,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_pruning<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_pruning<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -878,10 +881,10 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_empty_db_recovery<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_empty_db_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -954,10 +957,16 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_replay_with_trailing_appends<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_replay_with_trailing_appends<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1053,8 +1062,8 @@ pub(crate) mod tests {
 
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns
     /// results consistent with individual `get` calls.
-    pub(crate) async fn test_keyless_get_many<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_get_many<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1102,8 +1111,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_chained<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_batch_chained<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1137,8 +1146,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_batch<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_stale_batch<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1164,8 +1173,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1201,8 +1210,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_to_batch<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_to_batch<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1231,10 +1240,10 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_non_empty_recovery<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_non_empty_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1322,8 +1331,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_proof_comprehensive<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_db_proof_comprehensive<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1396,10 +1405,10 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_proof_with_pruning<F: Family, V, C>(
+    pub(crate) async fn test_keyless_db_proof_with_pruning<F: Family, V, C, S: Strategy>(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, Sha256>>,
+        mut db: TestKeyless<F, V, C, Sha256, S>,
+        reopen: Reopen<TestKeyless<F, V, C, Sha256, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1478,8 +1487,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_get_out_of_bounds<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_get_out_of_bounds<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1509,8 +1518,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_get<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_batch_get<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1551,8 +1560,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_stacked_get<F: Family, V, C>(
-        db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_batch_stacked_get<F: Family, V, C, S: Strategy>(
+        db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1577,8 +1586,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_speculative_root<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_batch_speculative_root<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1606,8 +1615,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_merkleized_batch_get<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_merkleized_batch_get<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1639,8 +1648,14 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_chained_apply_sequential<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_batch_chained_apply_sequential<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1672,8 +1687,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_many_sequential<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_batch_many_sequential<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1711,8 +1726,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_empty<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_batch_empty<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1741,8 +1756,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_chained_merkleized_get<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_batch_chained_merkleized_get<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1782,8 +1797,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_batch_large<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_batch_large<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1816,8 +1831,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_batch_chained<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_stale_batch_chained<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1846,8 +1861,13 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_sequential_commit_parent_then_child<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_sequential_commit_parent_then_child<
+        F: Family,
+        V,
+        C,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1869,8 +1889,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family, V, C, S: Strategy>(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1895,8 +1915,13 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_child_root_matches_pending_and_committed<F: Family, V, C>(
-        mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
+    pub(crate) async fn test_keyless_child_root_matches_pending_and_committed<
+        F: Family,
+        V,
+        C,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -1929,8 +1954,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    async fn commit_appends<F: Family, V, C, H>(
-        db: &mut Keyless<F, deterministic::Context, V, C, H>,
+    async fn commit_appends<F: Family, V, C, H, S: Strategy>(
+        db: &mut TestKeyless<F, V, C, H, S>,
         values: impl IntoIterator<Item = V::Value>,
         metadata: Option<V::Value>,
     ) -> core::ops::Range<Location<F>>
@@ -1958,10 +1983,10 @@ pub(crate) mod tests {
         range
     }
 
-    pub(crate) async fn test_keyless_db_rewind_recovery<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_rewind_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2058,8 +2083,14 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_rewind_pruned_target_errors<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_rewind_pruned_target_errors<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2108,10 +2139,10 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_floor_tracking<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_floor_tracking<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2157,8 +2188,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_floor_regression_rejected<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_floor_regression_rejected<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2195,8 +2226,14 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2232,8 +2269,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_db_rewind_restores_floor<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_rewind_restores_floor<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2279,9 +2316,9 @@ pub(crate) mod tests {
 
     /// Floor is embedded in the Commit operation and therefore in the Merkle root: two databases
     /// with identical appends but different floors must produce different roots.
-    pub(crate) async fn test_keyless_db_floor_changes_root<F: Family, V, C, H>(
-        mut db_a: Keyless<F, deterministic::Context, V, C, H>,
-        mut db_b: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_floor_changes_root<F: Family, V, C, H, S: Strategy>(
+        mut db_a: TestKeyless<F, V, C, H, S>,
+        mut db_b: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2315,8 +2352,14 @@ pub(crate) mod tests {
     }
 
     /// A floor equal to the commit operation's location is on the tight boundary of acceptance.
-    pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<F: Family, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2340,10 +2383,16 @@ pub(crate) mod tests {
     }
 
     /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
-    pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
@@ -2398,8 +2447,14 @@ pub(crate) mod tests {
     /// be rejected — the parent's `Commit` is written to the journal by the same
     /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
     /// invariant.
-    pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<F, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<
+        F,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
@@ -2439,8 +2494,14 @@ pub(crate) mod tests {
 
     /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
     /// rejected — identifying the ancestor's bound, not the tip's.
-    pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<F, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<
+        F,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
@@ -2475,10 +2536,10 @@ pub(crate) mod tests {
     /// achievable under the per-commit bound. The DB must remain fully usable: the commit is
     /// readable, the root is preserved, reopen recovers `inactivity_floor_loc` from the sole
     /// remaining op, and a follow-on batch applies cleanly on top.
-    pub(crate) async fn test_keyless_db_single_commit_live_set<F, V, C, H>(
+    pub(crate) async fn test_keyless_db_single_commit_live_set<F, V, C, H, S: Strategy>(
         context: deterministic::Context,
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
-        reopen: Reopen<Keyless<F, deterministic::Context, V, C, H>>,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
@@ -2569,8 +2630,14 @@ pub(crate) mod tests {
     }
 
     /// A multi-level chain with strictly-monotonic, within-bounds floors applies cleanly.
-    pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<F, V, C, H>(
-        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<
+        F,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        mut db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,

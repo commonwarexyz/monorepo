@@ -26,7 +26,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::{
     bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
     sequence::prefixed_u64::U64,
@@ -83,11 +83,10 @@ impl private::Sealed for Unmerkleized {}
 impl<D: Digest> State<D> for Unmerkleized {}
 
 /// A merkleized bitmap whose root digest has been computed and cached.
-pub type MerkleizedBitMap<E, D, const N: usize, S = Sequential> = BitMap<E, D, N, Merkleized<D>, S>;
+pub type MerkleizedBitMap<E, D, const N: usize, S> = BitMap<E, D, N, Merkleized<D>, S>;
 
 /// An unmerkleized bitmap whose root digest has not been computed.
-pub type UnmerkleizedBitMap<E, D, const N: usize, S = Sequential> =
-    BitMap<E, D, N, Unmerkleized, S>;
+pub type UnmerkleizedBitMap<E, D, const N: usize, S> = BitMap<E, D, N, Unmerkleized, S>;
 
 /// A bitmap supporting inclusion proofs through Merkleization.
 ///
@@ -106,13 +105,7 @@ pub type UnmerkleizedBitMap<E, D, const N: usize, S = Sequential> =
 ///
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
-pub struct BitMap<
-    E: Context,
-    D: Digest,
-    const N: usize,
-    M: State<D> = Merkleized<D>,
-    S: Strategy = Sequential,
-> {
+pub struct BitMap<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
 
@@ -648,15 +641,17 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_macros::test_traced;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use mmr::StandardHasher;
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
 
     type TestContext = deterministic::Context;
-    type TestMerkleizedBitMap<const N: usize> = MerkleizedBitMap<TestContext, sha256::Digest, N>;
+    type TestMerkleizedBitMap<const N: usize> =
+        MerkleizedBitMap<TestContext, sha256::Digest, N, Sequential>;
 
-    impl<E: Context, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
+    impl<E: Context, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N, Sequential> {
         // Add a byte's worth of bits to the bitmap.
         //
         // # Warning
@@ -1107,7 +1102,7 @@ mod tests {
         executor.start(|context| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-            let bitmap: MerkleizedBitMap<TestContext, sha256::Digest, N> =
+            let bitmap: MerkleizedBitMap<TestContext, sha256::Digest, N, Sequential> =
                 MerkleizedBitMap::init(context.child("bitmap"), "test", Sequential, &hasher)
                     .await
                     .unwrap();
@@ -1136,7 +1131,7 @@ mod tests {
 
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
-                        MerkleizedBitMap::<TestContext, _, N>::verify_bit_inclusion(
+                        MerkleizedBitMap::<TestContext, _, N, Sequential>::verify_bit_inclusion(
                             &hasher, &proof, &chunk, i, &root
                         ),
                         "failed to prove bit {i}",
@@ -1145,7 +1140,7 @@ mod tests {
                     // Flip the bit in the chunk and make sure the proof fails.
                     let corrupted = flip_bit(i, &chunk);
                     assert!(
-                        !MerkleizedBitMap::<TestContext, _, N>::verify_bit_inclusion(
+                        !MerkleizedBitMap::<TestContext, _, N, Sequential>::verify_bit_inclusion(
                             &hasher, &proof, &corrupted, i, &root
                         ),
                         "proving bit {i} after flipping should have failed",

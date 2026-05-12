@@ -39,7 +39,7 @@ use crate::{
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use core::marker::PhantomData;
 use std::{
     collections::BTreeMap,
@@ -48,7 +48,7 @@ use std::{
 
 /// Configuration for a compact immutable authenticated db.
 #[derive(Clone)]
-pub struct Config<C, S: Strategy = Sequential> {
+pub struct Config<C, S: Strategy> {
     /// Configuration for the backing compact Merkle structure.
     pub merkle: compact_merkle::Config<S>,
 
@@ -57,7 +57,7 @@ pub struct Config<C, S: Strategy = Sequential> {
 }
 
 /// An immutable authenticated db that does not retain historical operations after sync.
-pub struct Db<F, E, K, V, H, C = (), S: Strategy = Sequential>
+pub struct Db<F, E, K, V, H, C, S: Strategy>
 where
     F: Family,
     E: Context,
@@ -87,7 +87,7 @@ type CompactStateResult<F, K, V, D> =
 
 /// A speculative batch for a compact immutable db.
 #[allow(clippy::type_complexity)]
-pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy = Sequential>
+pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
 where
     F: Family,
     K: Key,
@@ -104,7 +104,7 @@ where
 
 /// A merkleized batch for a compact immutable db.
 #[derive(Clone)]
-pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy = Sequential>
+pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy>
 where
     Operation<F, K, V>: EncodeShared,
 {
@@ -593,7 +593,8 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
     use commonware_utils::sequence::prefixed_u64::U64 as MetadataKey;
 
-    type TestDb<F> = Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256>;
+    type TestDb<F> =
+        Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256, (), Sequential>;
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
         let merkle = crate::merkle::compact::Merkle::init(
@@ -960,7 +961,7 @@ mod tests {
             )
             .await;
 
-            let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _> =
+            let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _, Sequential> =
                 crate::merkle::compact::Merkle::init(
                     context.child("reopen"),
                     crate::merkle::compact::Config {
@@ -1004,7 +1005,7 @@ mod tests {
             )
             .await;
 
-            let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _> =
+            let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _, Sequential> =
                 crate::merkle::compact::Merkle::init(
                     context.child("reopen"),
                     crate::merkle::compact::Config {

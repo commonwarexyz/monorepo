@@ -97,7 +97,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use std::{collections::HashSet, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -138,7 +138,7 @@ pub use operation::Operation;
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy = Sequential> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
@@ -166,7 +166,7 @@ pub struct Immutable<
     C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
     H: CHasher,
     T: Translator,
-    S: Strategy = Sequential,
+    S: Strategy,
 > where
     C::Item: EncodeShared,
 {
@@ -747,7 +747,16 @@ pub(super) mod test {
 
     const ITEMS_PER_SECTION: u64 = 5;
 
-    type TestDb<F, V, C> = Immutable<F, deterministic::Context, Digest, V, C, Sha256, TwoCap>;
+    type TestDb<F, V, C> = Immutable<
+        F,
+        deterministic::Context,
+        Digest,
+        V,
+        C,
+        Sha256,
+        TwoCap,
+        commonware_parallel::Sequential,
+    >;
 
     pub(crate) async fn test_immutable_empty<F: Family, V, C>(
         context: deterministic::Context,

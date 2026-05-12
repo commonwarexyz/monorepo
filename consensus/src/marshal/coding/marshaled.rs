@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`Marshaled`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
+//! [`Marshaled`] is an adapter that wraps any [`Application`] implementation to handle
 //! epoch transitions and erasure coded broadcast automatically. It intercepts consensus
 //! operations (propose, verify, certify) and ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -34,7 +34,7 @@
 //!
 //! # Usage
 //!
-//! Wrap your [`VerifyingApplication`] implementation with [`Marshaled::new`] and provide it to your
+//! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
 //! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
@@ -96,7 +96,7 @@ use crate::{
     simplex::{scheme::Scheme, types::Context, Plan},
     types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
-    Relay, Reporter, VerifyingApplication,
+    Relay, Reporter,
 };
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
@@ -225,7 +225,7 @@ where
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: VerifyingApplication<
+    A: Application<
         E,
         Block = B,
         SigningScheme = Z::Scheme,
@@ -464,7 +464,7 @@ where
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: VerifyingApplication<
+    A: Application<
         E,
         Block = B,
         SigningScheme = Z::Scheme,
@@ -894,7 +894,7 @@ where
 impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: VerifyingApplication<
+    A: Application<
         E,
         Block = B,
         SigningScheme = Z::Scheme,

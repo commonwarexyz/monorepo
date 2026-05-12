@@ -16,27 +16,27 @@ use crate::{
     },
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for fixed-size values.
 pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
 
 /// A keyless authenticated database for fixed-size data.
-pub type Db<F, E, V, H, S = Sequential> =
+pub type Db<F, E, V, H, S> =
     super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for fixed-size data.
-pub type CompactDb<F, E, V, H, S = Sequential> = super::CompactDb<F, E, FixedEncoding<V>, H, (), S>;
+pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, (), S>;
 
 type Journal<F, E, V, H, S> =
     authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// Configuration for a fixed-size [keyless](super) authenticated db.
-pub type Config<S = Sequential> = super::Config<JournalConfig, S>;
+pub type Config<S> = super::Config<JournalConfig, S>;
 
 /// Configuration for a fixed-size [keyless](super) compact db.
-pub type CompactConfig<S = Sequential> = super::CompactConfig<(), S>;
+pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
 impl<F: Family, E: Storage + Clock + Metrics, V: FixedValue, H: Hasher, S: Strategy>
     Db<F, E, V, H, S>
@@ -75,7 +75,7 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
     };
@@ -85,7 +85,7 @@ mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config {
+    fn db_config<S: Strategy>(suffix: &str, pooler: &impl BufferPooler, strategy: S) -> Config<S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::full::Config {
@@ -93,7 +93,7 @@ mod test {
                 metadata_partition: format!("fixed-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                strategy: Sequential,
+                strategy,
                 page_cache: page_cache.clone(),
             },
             log: JournalConfig {
@@ -105,9 +105,12 @@ mod test {
         }
     }
 
-    type TestDb<F> = Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
+    type TestDb<F> =
+        Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Sequential>;
+    type TestRayonDb<F> =
+        Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Rayon>;
     type TestCompactDb<F> =
-        CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256>;
+        CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Sequential>;
 
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
@@ -117,8 +120,13 @@ mod test {
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
-        let cfg = db_config(suffix, &context);
+        let cfg = db_config(suffix, &context, Sequential);
         TestDb::init(context, cfg).await.unwrap()
+    }
+
+    async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
+        let cfg = db_config("rayon", &context, Rayon::new(NZUsize!(2)).unwrap());
+        TestRayonDb::init(context, cfg).await.unwrap()
     }
 
     async fn open_compact<F: crate::merkle::Family>(
@@ -270,6 +278,14 @@ mod test {
     fn test_keyless_fixed_metadata() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
+            tests::test_keyless_db_metadata(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_shared_helper_accepts_rayon_strategy() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_rayon_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_metadata(db).await;
         });
     }
@@ -926,7 +942,7 @@ mod test {
         use std::sync::Arc;
 
         deterministic::Runner::default().start(|ctx| async move {
-            let target_config = db_config("sync-target", &ctx);
+            let target_config = db_config("sync-target", &ctx, Sequential);
             let mut target_db: TestDb<mmr::Family> =
                 TestDb::init(ctx.child("target"), target_config)
                     .await
@@ -945,7 +961,7 @@ mod test {
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
 
-            let client_config = db_config("sync-client", &ctx);
+            let client_config = db_config("sync-client", &ctx, Sequential);
             let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: client_config,

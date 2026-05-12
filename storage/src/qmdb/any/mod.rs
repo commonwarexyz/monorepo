@@ -81,7 +81,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -100,7 +100,7 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy = Sequential> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
@@ -112,10 +112,10 @@ pub struct Config<T: Translator, J, S: Strategy = Sequential> {
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
+pub type FixedConfig<T, S> = Config<T, FConfig, S>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
+pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
 pub async fn init<F, E, U, H, T, I, J, S>(
@@ -213,7 +213,7 @@ pub(crate) mod test {
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> FixedConfig<T> {
+    ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -237,7 +237,7 @@ pub(crate) mod test {
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> VariableConfig<T, ((), ())> {
+    ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
@@ -281,7 +281,7 @@ pub(crate) mod test {
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
-    impl<E, U, C, I, H> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U>
+    impl<E, U, C, I, H, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
     where
         E: crate::Context,
         U: UpdateTrait,
@@ -289,6 +289,7 @@ pub(crate) mod test {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         AnyOperation<mmr::Family, U>: Codec,
+        S: Strategy,
     {
         async fn rewind_to_size(&mut self, size: Location) -> Result<(), Error> {
             self.rewind(size).await?;
@@ -1091,16 +1092,28 @@ pub(crate) mod test {
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
     use commonware_macros::{test_group, test_traced};
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{deterministic, Runner as _};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
-    type UnorderedFixed = UnorderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedFixed =
+        UnorderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
     type UnorderedVariable =
-        UnorderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedFixed = OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedVariable = OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
-    type UnorderedFixedP1 =
-        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
+        UnorderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
+    type OrderedFixed =
+        OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
+    type OrderedVariable =
+        OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
+    type UnorderedFixedP1 = unordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        Sequential,
+    >;
     type UnorderedVariableP1 = unordered::variable::partitioned::Db<
         mmr::Family,
         Context,
@@ -1109,13 +1122,38 @@ pub(crate) mod test {
         Sha256,
         OneCap,
         1,
+        Sequential,
     >;
-    type OrderedFixedP1 =
-        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
-    type OrderedVariableP1 =
-        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
-    type UnorderedFixedP2 =
-        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
+    type OrderedFixedP1 = ordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        Sequential,
+    >;
+    type OrderedVariableP1 = ordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        Sequential,
+    >;
+    type UnorderedFixedP2 = unordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        Sequential,
+    >;
     type UnorderedVariableP2 = unordered::variable::partitioned::Db<
         mmr::Family,
         Context,
@@ -1124,11 +1162,28 @@ pub(crate) mod test {
         Sha256,
         OneCap,
         2,
+        Sequential,
     >;
-    type OrderedFixedP2 =
-        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
-    type OrderedVariableP2 =
-        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
+    type OrderedFixedP2 = ordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        Sequential,
+    >;
+    type OrderedVariableP2 = ordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        Sequential,
+    >;
 
     // MMB type aliases for with_all_variants.
     mod mmb_types {
@@ -1155,6 +1210,8 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, FixedEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
 
         pub type MmbUnorderedVariable = super::super::db::Db<
@@ -1167,6 +1224,8 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, VariableEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
 
         pub type MmbOrderedFixed = super::super::db::Db<
@@ -1179,6 +1238,8 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, FixedEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
 
         pub type MmbOrderedVariable = super::super::db::Db<
@@ -1191,6 +1252,8 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, VariableEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
     }
     use mmb_types::*;
@@ -2353,6 +2416,8 @@ pub(crate) mod test {
         crate::index::unordered::Index<OneCap, crate::merkle::Location<crate::merkle::mmb::Family>>,
         Sha256,
         super::operation::update::Unordered<Digest, super::value::VariableEncoding<Digest>>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+        Sequential,
     >;
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {

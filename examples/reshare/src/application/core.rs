@@ -8,7 +8,7 @@ use commonware_consensus::{
     marshal::ancestry::{AncestorStream, BlockProvider},
     simplex::types::Context,
     types::{Epoch, Round, View},
-    Heightable, VerifyingApplication,
+    Heightable,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Digest, Hasher,
@@ -110,16 +110,7 @@ where
             reshare,
         ))
     }
-}
 
-impl<E, S, H, C, V> VerifyingApplication<E> for Application<E, S, H, C, V>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _: (E, Self::Context),

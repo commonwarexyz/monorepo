@@ -5,6 +5,7 @@ use commonware_cryptography::{
     bls12381::{self, Batch},
     BatchVerifier, Signer, Verifier,
 };
+use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -122,6 +123,6 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let result = state.batch.verify(&mut rng);
+    let result = state.batch.verify(&mut rng, &Sequential);
     assert_eq!(result, state.expected_result, "Batch verification failed");
 });

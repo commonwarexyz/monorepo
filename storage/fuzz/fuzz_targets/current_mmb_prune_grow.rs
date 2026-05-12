@@ -33,7 +33,8 @@ type Key = FixedBytes<1>;
 type Value = FixedBytes<32>;
 type LogicalKey = u8;
 type RawValue = [u8; 32];
-type Db = CurrentDb<mmb::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db =
+    CurrentDb<mmb::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32, Sequential>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
@@ -145,7 +146,7 @@ const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
-fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap> {
+fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-journal"),
@@ -225,7 +226,7 @@ async fn prune_to_floor(db: &mut Db, reference_db: &Db, context: &str) {
 async fn reopen_pruned_db(
     db: Db,
     context: &deterministic::Context,
-    config: &Config<TwoCap>,
+    config: &Config<TwoCap, Sequential>,
     reference_db: &Db,
     reopen_count: usize,
 ) -> Db {
@@ -301,7 +302,7 @@ async fn bootstrap_pruned_state(
 
 struct ReopenEnv<'a> {
     context: &'a deterministic::Context,
-    config: &'a Config<TwoCap>,
+    config: &'a Config<TwoCap, Sequential>,
     count: &'a mut usize,
 }
 

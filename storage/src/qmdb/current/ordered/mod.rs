@@ -185,8 +185,17 @@ pub mod tests {
 
     /// Concrete db type used in the shared proof tests, generic over journal (`C`) and value
     /// encoding (`V`).
-    type TestDb<F, C, V> =
-        db::Db<F, deterministic::Context, C, Digest, V, Index<OneCap, Location<F>>, Sha256, 32>;
+    type TestDb<F, C, V> = db::Db<
+        F,
+        deterministic::Context,
+        C,
+        Digest,
+        V,
+        Index<OneCap, Location<F>>,
+        Sha256,
+        32,
+        commonware_parallel::Sequential,
+    >;
 
     /// Run `test_current_db_build_small_close_reopen` against an ordered database factory.
     ///

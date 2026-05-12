@@ -31,7 +31,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
     histogram::{duration_histogram, ScopedTimer, Timed},
     Counter, Gauge, GaugeExt as _, MetricsExt as _,
@@ -134,7 +134,7 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
-    S: Strategy = Sequential,
+    S: Strategy,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
@@ -1221,6 +1221,7 @@ mod tests {
         Sha256,
         OneCap,
         32,
+        commonware_parallel::Sequential,
     >;
     type MmbDb = fixed::Db<
         mmb::Family,
@@ -1230,6 +1231,7 @@ mod tests {
         Sha256,
         OneCap,
         32,
+        commonware_parallel::Sequential,
     >;
 
     async fn populate_fixed_db<F, DB>(db: &mut DB, start: u64, count: u64)

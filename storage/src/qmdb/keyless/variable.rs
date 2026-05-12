@@ -17,28 +17,27 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for variable-length values.
 pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
 
 /// A keyless authenticated database for variable-length data.
-pub type Db<F, E, V, H, S = Sequential> =
+pub type Db<F, E, V, H, S> =
     super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
-pub type CompactDb<F, E, V, H, C, S = Sequential> =
-    super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, V, H, C, S> = super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
 
 type Journal<F, E, V, H, S> =
     authenticated::Journal<F, E, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// Configuration for a variable-size [keyless](super) authenticated db.
-pub type Config<C, S = Sequential> = super::Config<JournalConfig<C>, S>;
+pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
 
 /// Configuration for a variable-size [keyless](super) compact db.
-pub type CompactConfig<C, S = Sequential> = super::CompactConfig<C, S>;
+pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
 impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
     Db<F, E, V, H, S>
@@ -102,7 +101,7 @@ mod test {
     fn db_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+    ) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::full::Config {
@@ -124,13 +123,14 @@ mod test {
         }
     }
 
-    type TestDb<F> = Db<F, deterministic::Context, Vec<u8>, Sha256>;
+    type TestDb<F> = Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type TestCompactDb<F> = CompactDb<
         F,
         deterministic::Context,
         Vec<u8>,
         Sha256,
         (commonware_codec::RangeCfg<usize>, ()),
+        Sequential,
     >;
 
     /// Return a [Db] database initialized with a fixed config.

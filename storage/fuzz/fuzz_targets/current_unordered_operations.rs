@@ -24,7 +24,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
-type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32, Sequential>;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {

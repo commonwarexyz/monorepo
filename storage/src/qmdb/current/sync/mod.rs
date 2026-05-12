@@ -381,8 +381,8 @@ impl_current_sync_database!(
 
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
-            for std::sync::Arc<$db<F, E, K, V, H, T, N>>
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
+            for std::sync::Arc<$db<F, E, K, V, H, T, N, S>>
         where
             F: Graftable,
             E: Context,
@@ -391,6 +391,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
@@ -423,10 +424,10 @@ macro_rules! impl_current_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    $db<F, E, K, V, H, T, N>,
+                    $db<F, E, K, V, H, T, N, S>,
                 >,
             >
         where
@@ -437,6 +438,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
@@ -470,10 +472,10 @@ macro_rules! impl_current_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    Option<$db<F, E, K, V, H, T, N>>,
+                    Option<$db<F, E, K, V, H, T, N, S>>,
                 >,
             >
         where
@@ -484,6 +486,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;

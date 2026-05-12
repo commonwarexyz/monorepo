@@ -24,7 +24,7 @@ use std::{num::NonZeroU16, sync::Arc};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type FixedDb<F> = Db<F, deterministic::Context, Key, Value, Sha256, TwoCap>;
+type FixedDb<F> = Db<F, deterministic::Context, Key, Value, Sha256, TwoCap, Sequential>;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -93,7 +93,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {

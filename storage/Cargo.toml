@@ -58,6 +58,7 @@ std = [
 	"commonware-utils/std",
 	"futures",
 	"futures-util",
+	"futures-util/std",
 	"thiserror/std",
 	"tracing",
 	"zstd",

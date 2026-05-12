@@ -7,7 +7,7 @@
 use crate::merkle::{batch, mmr::Family};
 
 /// A batch whose root digest has not been computed.
-pub type UnmerkleizedBatch<D> = batch::UnmerkleizedBatch<Family, D>;
+pub type UnmerkleizedBatch<D, S> = batch::UnmerkleizedBatch<Family, D, S>;
 
 /// A batch whose root digest has been computed.
-pub type MerkleizedBatch<D> = batch::MerkleizedBatch<Family, D>;
+pub type MerkleizedBatch<D, S> = batch::MerkleizedBatch<Family, D, S>;

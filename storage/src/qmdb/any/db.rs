@@ -2,10 +2,7 @@
 //!
 //! The impl blocks in this file define shared functionality across all Any QMDB variants.
 
-use super::{
-    operation::{update::Update, Operation},
-    BITMAP_CHUNK_BYTES,
-};
+use super::operation::{update::Update, Operation};
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
@@ -25,7 +22,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
@@ -53,8 +50,7 @@ impl<E: Context> Metrics<E> {
 }
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<F, E, C, H, S = Sequential> =
-    authenticated::Journal<F, E, C, H, S>;
+pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
 
 /// Snapshot mutation needed to undo one operation while rewinding.
 enum SnapshotUndo<F: Family, K> {
@@ -89,8 +85,8 @@ pub struct Db<
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Send + Sync,
-    const N: usize = BITMAP_CHUNK_BYTES,
-    S: Strategy = Sequential,
+    const N: usize,
+    S: Strategy,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -360,6 +356,15 @@ where
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::prune",
+        level = "info",
+        skip_all,
+        fields(
+            requested_loc = *prune_loc,
+            inactivity_floor = *self.inactivity_floor_loc,
+        ),
+    )]
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
         let _timer = self.metrics.operations.prune_timer();
         self.metrics.operations.prune_calls.inc();
@@ -382,6 +387,17 @@ where
     /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
     /// but is not a commit op, either because the caller passed a non-commit-boundary size or
     /// because pruning removed the commit that would have governed it.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb::any::Db::historical_proof",
+        level = "info",
+        skip_all,
+        fields(
+            historical_size = *historical_size,
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
     pub async fn historical_proof(
         &self,
         historical_size: Location<F>,
@@ -436,6 +452,15 @@ where
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
+    #[tracing::instrument(
+        name = "qmdb::any::Db::rewind",
+        level = "info",
+        skip_all,
+        fields(
+            target_size = *size,
+            prev_size = *self.last_commit_loc + 1,
+        ),
+    )]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
@@ -711,6 +736,16 @@ where
     }
 
     /// Sync all database state to disk.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::sync",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
     pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
         let _timer = self.metrics.operations.sync_timer();
         self.metrics.operations.sync_calls.inc();
@@ -720,6 +755,16 @@ where
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::commit",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.last_commit_loc + 1,
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
     pub async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
         let _timer = self.metrics.operations.commit_timer();
         self.metrics.operations.commit_calls.inc();
