@@ -63,7 +63,8 @@ impl AlignedBuffer {
     #[inline]
     pub fn new(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
-        let layout = Layout::from_size_align(capacity, alignment).expect("valid layout");
+        let layout =
+            Layout::from_size_align(capacity, alignment).expect("alignment is a power of two");
         // SAFETY: layout is valid and non-zero sized.
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
@@ -80,11 +81,8 @@ impl AlignedBuffer {
     #[inline]
     pub(crate) fn new_zeroed(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
-        let layout = Layout::from_size_align(capacity, alignment).expect("valid layout");
+        let layout =
+            Layout::from_size_align(capacity, alignment).expect("alignment is a power of two");
         // SAFETY: layout is valid and non-zero sized.
         let ptr = unsafe { alloc_zeroed(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));

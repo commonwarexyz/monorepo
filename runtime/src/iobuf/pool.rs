@@ -497,7 +497,7 @@ impl SizeClass {
         thread_cache_capacity: usize,
         prefill: bool,
     ) -> Self {
-        let layout = Layout::from_size_align(size, alignment).expect("valid layout");
+        let layout = Layout::from_size_align(size, alignment).expect("alignment is a power of two");
         let freelist = Freelist::new(max, parallelism, layout, prefill);
         Self {
             class_id,
