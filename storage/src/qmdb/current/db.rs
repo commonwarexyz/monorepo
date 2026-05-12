@@ -274,8 +274,6 @@ where
         hasher: &StandardHasher<H>,
     ) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
-        // Snapshot ops_leaves once and thread it through both root computation and the
-        // pending/partial chunk derivation so they observe the same `(ops, bitmap)` state.
         let ops_size = storage.size().await;
         let ops_leaves = Location::<F>::try_from(ops_size)?;
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
@@ -669,7 +667,7 @@ where
             Vec::new()
         };
 
-        // `any.rewind` rewinds the log and patches the shared bitmap (truncate + restore graftable
+        // `any.rewind` rewinds the log and patches the shared bitmap (truncate + restore active
         // bits + set the rewound tail's CommitFloor). Live pre-rewind batches must be dropped by
         // the caller; reads through them now return inconsistent data.
         self.any.rewind(size).await?;
@@ -1024,6 +1022,7 @@ pub(super) async fn compute_grafted_root<
         peaks.push(digest);
     }
 
+    // Validate bitmap invariants (pending <= 1, pruned <= graftable).
     let grafting_height = grafting::height::<N>();
     let (_complete_chunks, _graftable_chunks) =
         graftable_chunk_window::<F, B, N>(status, ops_leaves, grafting_height)?;
@@ -1031,21 +1030,21 @@ pub(super) async fn compute_grafted_root<
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;
 
-    // Every peak the storage layer surfaces is either a grafted-tree node (graftable chunks
-    // already incorporate `hash(chunk || h_G_node)`), an ops node above G (hashed
-    // normally), or an ops node below G (raw, because its chunk is pending and its digest
-    // is hashed directly into the canonical root rather than through the tree). Bagging is
-    // a straight fold; no per-chunk transformation is needed.
+    // Every peak the storage layer surfaces is either a grafted-tree node (graftable chunks already
+    // incorporate `hash(chunk || h_G_node)`), an ops node above G (hashed normally), or an ops node
+    // below G (raw, because its chunk is pending and its digest is hashed directly into the
+    // canonical root rather than through the tree). Bagging is a straight fold; no per-chunk
+    // transformation is needed.
     Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
 }
 
 /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
 ///
-/// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born
-/// in the ops tree). Each graftable chunk has exactly one covering ops node at height G,
-/// looked up via [`merkle::Graftable::subtree_root_position`]. The grafted leaf digest is
-/// `hash(chunk || ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest
-/// directly (zero-chunk identity).
+/// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
+/// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
+/// [`merkle::Graftable::subtree_root_position`]. The grafted leaf digest is `hash(chunk ||
+/// ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest directly (zero-chunk
+/// identity).
 ///
 /// The provided strategy determines if or how to parallelize merkleization.
 pub(super) async fn compute_grafted_leaves<
@@ -1170,7 +1169,7 @@ pub(super) async fn build_grafted_tree<
 ///
 /// The metadata store holds two kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
-///   pruned. This tells us where the graftable portion of the bitmap begins.
+///   pruned. This tells us where the active portion of the bitmap begins.
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
 ///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
