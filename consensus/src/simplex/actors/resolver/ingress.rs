@@ -25,11 +25,11 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
         }
     }
 
-    fn is_finalization(&self) -> bool {
+    const fn is_finalization(&self) -> bool {
         matches!(self, Self::Certificate(Certificate::Finalization(_)))
     }
 
-    fn replaces(&self, pending: &Self) -> bool {
+    fn duplicates(&self, pending: &Self) -> bool {
         match (self, pending) {
             (
                 Self::Certificate(Certificate::Notarization(x)),
@@ -54,48 +54,30 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         let new_view = message.view();
         let new_is_finalization = message.is_finalization();
         let mut remove = Vec::new();
-        let mut absorb_idx = None;
-        for (index, p) in overflow.iter().enumerate() {
-            // A queued finalization is the resolver floor. Certificates and
-            // certification results at or below that view cannot alter
-            // resolver state after the finalization lands
-            if p.is_finalization() && p.view() >= new_view {
+
+        // Finalizations are the resolver mailbox's pruning floor. A queued
+        // finalization covers certificates and certification results at or
+        // below its view, but later views can still change resolver state.
+        for (index, pending) in overflow.iter().enumerate() {
+            let pending_view = pending.view();
+            if pending.is_finalization() && pending_view >= new_view {
                 return false;
             }
-            if new_is_finalization && p.view() <= new_view {
+            if new_is_finalization && pending_view <= new_view {
                 remove.push(index);
                 continue;
             }
-            if absorb_idx.is_none() && message.replaces(p) {
-                absorb_idx = Some(index);
+            if message.duplicates(pending) {
+                return true;
             }
         }
+
+        // Apply removals after the scan so pruning decisions are made against
+        // the same queue snapshot.
         for r in remove.into_iter().rev() {
             overflow.remove(r);
-            if let Some(idx) = absorb_idx {
-                if r < idx {
-                    absorb_idx = Some(idx - 1);
-                }
-            }
         }
-        if let Some(idx) = absorb_idx {
-            match message {
-                Self::Certificate(c) => {
-                    // Replace in place so a later Certified(success) callback
-                    // still observes the certificate before the callback runs
-                    overflow[idx] = Self::Certificate(c);
-                }
-                Self::Certified { view, success } => {
-                    // Certification should resolve once per view. Keep the
-                    // latest result and move it behind any earlier certificate
-                    // work
-                    overflow.remove(idx);
-                    overflow.push_back(Self::Certified { view, success });
-                }
-            }
-        } else {
-            overflow.push_back(message);
-        }
+        overflow.push_back(message);
         true
     }
 }
@@ -285,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn certified_result_replaces_same_view() {
+    fn duplicate_certified_result_is_ignored() {
         let mut overflow: VecDeque<MailboxMessage<TestScheme, Sha256Digest>> = VecDeque::new();
         assert!(MailboxMessage::handle(
             &mut overflow,
@@ -307,7 +289,7 @@ mod tests {
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
                 view,
-                success: true,
+                success: false,
             }) if view == View::new(4)
         ));
     }
@@ -381,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_certificate_replacement_preserves_order() {
+    fn duplicate_certificate_is_ignored() {
         let mut overflow = VecDeque::new();
         assert!(MailboxMessage::handle(
             &mut overflow,

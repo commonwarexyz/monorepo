@@ -32,11 +32,11 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         }
     }
 
-    fn is_finalization(&self) -> bool {
+    const fn is_finalization(&self) -> bool {
         matches!(self, Self::Verified(Certificate::Finalization(_), _))
     }
 
-    fn replaces(&self, pending: &Self) -> bool {
+    fn duplicates(&self, pending: &Self) -> bool {
         match (self, pending) {
             (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
             (Self::Timeout(x, _), Self::Timeout(y, _)) => x == y,
@@ -62,42 +62,30 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         let new_view = message.view();
         let new_is_finalization = message.is_finalization();
         let mut remove = Vec::new();
-        let mut absorb_idx = None;
-        for (index, p) in overflow.iter().enumerate() {
-            // A finalization advances the voter past all work at or below its
-            // view. Keeping older proposals, timeouts, or certificates would
-            // only make the actor discard them after processing the
-            // finalization
-            if p.is_finalization() && p.view() >= new_view {
+
+        // Finalizations are the voter mailbox's pruning floor. They make all
+        // work at or below their view stale, but work from higher views remains
+        // useful and must stay queued.
+        for (index, pending) in overflow.iter().enumerate() {
+            let pending_view = pending.view();
+            if pending.is_finalization() && pending_view >= new_view {
                 return false;
             }
-            if new_is_finalization && p.view() <= new_view {
+            if new_is_finalization && pending_view <= new_view {
                 remove.push(index);
                 continue;
             }
-            if absorb_idx.is_none() && message.replaces(p) {
-                absorb_idx = Some(index);
+            if message.duplicates(pending) {
+                return true;
             }
         }
+
+        // Apply removals after the scan so pruning decisions are made against
+        // the same queue snapshot.
         for r in remove.into_iter().rev() {
             overflow.remove(r);
-            if let Some(idx) = absorb_idx {
-                if r < idx {
-                    absorb_idx = Some(idx - 1);
-                }
-            }
         }
-        if let Some(idx) = absorb_idx {
-            // The certificate is already queued, but the resolver-origin
-            // marker affects whether the actor sends it back to resolver
-            if let (Self::Verified(_, pending_from_resolver), Self::Verified(_, true)) =
-                (&mut overflow[idx], &message)
-            {
-                *pending_from_resolver = true;
-            }
-        } else {
-            overflow.push_back(message);
-        }
+        overflow.push_back(message);
         true
     }
 }
@@ -227,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_certificate_keeps_resolver_origin() {
+    fn duplicate_certificate_is_ignored() {
         let mut overflow = VecDeque::new();
         let certificate = nullification(View::new(5));
         assert!(Message::handle(
@@ -242,7 +230,7 @@ mod tests {
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified(Certificate::Nullification(n), true))
+            Some(Message::Verified(Certificate::Nullification(n), false))
                 if n.view() == View::new(5)
         ));
     }

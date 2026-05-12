@@ -21,6 +21,13 @@ pub enum Message<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
+    fn duplicates(&self, pending: &Self) -> bool {
+        matches!(
+            (self, pending),
+            (Self::Update { current: x, .. }, Self::Update { current: y, .. }) if x == y
+        )
+    }
+
     // A queued update is a pruning floor for overflow. Returns true when this
     // update would drop `vote` once the batcher actor delivers the update.
     fn prunes(&self, vote: &Vote<S, D>) -> bool {
@@ -47,32 +54,31 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             Self::Update { current, .. } => {
                 let current = *current;
                 let mut remove = Vec::new();
-                let mut absorb_idx = None;
+
+                // Keep at most one useful pending update. A higher-view update
+                // already queued makes this one stale, while lower-view updates
+                // and votes pruned by this update can be removed.
                 for (index, p) in overflow.iter().enumerate() {
                     match p {
                         Self::Update { current: pc, .. } if *pc > current => return false,
-                        Self::Update { current: pc, .. } if *pc < current => remove.push(index),
-                        Self::Update { .. } => absorb_idx = Some(index),
+                        p if message.duplicates(p) => return true,
+                        Self::Update { .. } => remove.push(index),
                         Self::Constructed(vote) if message.prunes(vote) => remove.push(index),
                         Self::Constructed(_) => {}
                     }
                 }
+
+                // Remove from the back so indexes collected during the scan
+                // stay valid.
                 for r in remove.into_iter().rev() {
                     overflow.remove(r);
-                    if let Some(idx) = absorb_idx {
-                        if r < idx {
-                            absorb_idx = Some(idx - 1);
-                        }
-                    }
                 }
-                if let Some(idx) = absorb_idx {
-                    overflow[idx] = message;
-                } else {
-                    overflow.push_back(message);
-                }
+                overflow.push_back(message);
                 true
             }
             Self::Constructed(vote) => {
+                // If a pending update would make this vote stale, drop it now
+                // instead of delivering it after that update.
                 if overflow.iter().any(|p| p.prunes(vote)) {
                     return false;
                 }
@@ -255,6 +261,29 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(Message::Update { current, .. }) if current == View::new(5)
+        ));
+    }
+
+    #[test]
+    fn duplicate_update_is_ignored() {
+        let mut overflow = VecDeque::new();
+        assert!(Message::handle(
+            &mut overflow,
+            update(View::new(5), View::new(3))
+        ));
+        assert!(Message::handle(
+            &mut overflow,
+            update(View::new(5), View::new(4))
+        ));
+
+        assert_eq!(overflow.len(), 1);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Update {
+                current,
+                finalized,
+                ..
+            }) if current == View::new(5) && finalized == View::new(3)
         ));
     }
 
