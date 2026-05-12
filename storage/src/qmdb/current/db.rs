@@ -13,7 +13,7 @@ use crate::{
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
         mem::Mem,
         storage::Storage as MerkleStorage,
-        Location, PendingChunkTrait as _, Position,
+        Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -286,14 +286,13 @@ where
         .await?;
         let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
             .map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
-        let pending_chunk_digest = F::PendingChunk::from_option(
-            pending_chunk::<F, _, N>(
-                self.any.bitmap.as_ref(),
-                ops_leaves,
-                grafting::height::<N>(),
-            )?
-            .map(|chunk| hasher.digest(&chunk)),
-        )
+        let pending_chunk_digest: F::PendingChunk<H::Digest> = pending_chunk::<F, _, N>(
+            self.any.bitmap.as_ref(),
+            ops_leaves,
+            grafting::height::<N>(),
+        )?
+        .map(|chunk| hasher.digest(&chunk))
+        .try_into()
         .expect("pending_chunk must be consistent with family");
         Ok(OpsRootWitness {
             grafted_root,

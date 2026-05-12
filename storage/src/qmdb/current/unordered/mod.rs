@@ -21,7 +21,7 @@ pub mod tests {
     use crate::{
         index::unordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
-        merkle::{Graftable, Location, PendingChunkTrait as _, Proof},
+        merkle::{Graftable, Location, Proof},
         qmdb::{
             any::{
                 operation::update::Unordered as UnorderedUpdate,
@@ -326,7 +326,7 @@ pub mod tests {
             // commit op.
             let proof = RangeProof {
                 proof: Proof::default(),
-                pending_chunk_digest: F::PendingChunk::from_option(None).unwrap(),
+                pending_chunk_digest: None.try_into().unwrap(),
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };

@@ -216,7 +216,7 @@ impl merkle::Family for Family {
 }
 
 impl Graftable for Family {
-    type PendingChunk<D: Digest> = ();
+    type PendingChunk<D: Digest> = merkle::Unused;
 
     fn chunk_peaks(
         size: Position,

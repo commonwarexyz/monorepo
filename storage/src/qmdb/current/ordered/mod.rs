@@ -152,7 +152,7 @@ pub mod tests {
     use crate::{
         index::ordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
-        merkle::{Graftable, Location, PendingChunkTrait as _, Proof},
+        merkle::{Graftable, Location, Proof},
         mmb,
         qmdb::{
             any::{
@@ -475,7 +475,7 @@ pub mod tests {
             // Empty range proof should not crash or verify, since even an empty db has a single
             let proof = RangeProof {
                 proof: Proof::default(),
-                pending_chunk_digest: F::PendingChunk::from_option(None).unwrap(),
+                pending_chunk_digest: None.try_into().unwrap(),
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
