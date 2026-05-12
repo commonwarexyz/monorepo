@@ -18,11 +18,11 @@ Blockchains look and feel less like blockchains each month ([and that's a good t
 
 To better compete with the web services people use every day, the latest cohort of onchain products is increasingly blurring the line between blockchain and blockchain application. Whether it be offering cheaper and faster payments with stablecoins and dedicated blockspace, tighter spreads with custom execution rules and encrypted mempools, or provably fair games with secure randomness, applications are [twisting and tweaking the blockchains they run on](/blogs/commonware-the-anti-framework) more than ever.
 
-![New applications are often no longer distinguishable from the blockchains they run on.][/imgs/modern-blockchain-stack.png]
+![New applications are often no longer distinguishable from the blockchains they run on.](/imgs/modern-blockchain-stack.png)
 
 A dream coming true for users is a brewing nightmare for wallets, exchanges, custodians, and data providers. With frequent hard forks to add new features, novel cryptography that rarely runs in HSMs, complex transactions that touch indecipherable precompiles, and sub-second blocks carrying tens of thousands of transactions per second, these new stacks are time-consuming to integrate and expensive to maintain.
 
-![The cost and complexity of supporting each new blockchain can be overwhelming.][/imgs/many-blockchain-stacks.png]
+![The cost and complexity of supporting each new blockchain can be overwhelming.](/imgs/many-blockchain-stacks.png)
 
 The result? Only a handful of new blockchains are widely integrated each year, often with only minimal support (just transfers). At Commonware, we believe this is a "dollars and sense" problem. Make novel blockchains cheaper to integrate and we'll see more of them. Lower the barrier to experiment and we’ll see more exciting uses of blockspace. Fortunately, Coinbase sees things the same way.
 
