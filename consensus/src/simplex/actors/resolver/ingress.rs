@@ -17,114 +17,84 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
     Certified { view: View, success: bool },
 }
 
-impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
-    const fn is_finalization(certificate: &Certificate<S, D>) -> bool {
-        matches!(certificate, Certificate::Finalization(_))
-    }
-
-    const fn same_certificate_variant(
-        first: &Certificate<S, D>,
-        second: &Certificate<S, D>,
-    ) -> bool {
-        matches!(
-            (first, second),
-            (Certificate::Notarization(_), Certificate::Notarization(_))
-                | (Certificate::Nullification(_), Certificate::Nullification(_))
-                | (Certificate::Finalization(_), Certificate::Finalization(_))
-        )
-    }
-
-    fn view(&self) -> View {
-        match self {
-            Self::Certificate(certificate) => certificate.view(),
+impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        let new_view = match &message {
+            Self::Certificate(c) => c.view(),
             Self::Certified { view, .. } => *view,
+        };
+        let new_is_finalization =
+            matches!(&message, Self::Certificate(Certificate::Finalization(_)));
+        let mut remove = Vec::new();
+        let mut absorb_idx = None;
+        for (index, p) in overflow.iter().enumerate() {
+            let p_view = match p {
+                Self::Certificate(c) => c.view(),
+                Self::Certified { view, .. } => *view,
+            };
+            // A queued finalization is the resolver floor. Certificates and
+            // certification results at or below that view cannot alter
+            // resolver state after the finalization lands
+            if matches!(p, Self::Certificate(Certificate::Finalization(_))) && p_view >= new_view {
+                return false;
+            }
+            if new_is_finalization && p_view <= new_view {
+                remove.push(index);
+                continue;
+            }
+            if absorb_idx.is_none() && same_queue(p, &message) {
+                absorb_idx = Some(index);
+            }
         }
-    }
-
-    fn pruned_by_finalization(&self, finalized: View) -> bool {
-        self.view() <= finalized
-    }
-
-    fn finalization_floor(&self) -> Option<View> {
-        match self {
-            Self::Certificate(certificate) if Self::is_finalization(certificate) => {
-                Some(certificate.view())
+        for r in remove.into_iter().rev() {
+            overflow.remove(r);
+            if let Some(idx) = absorb_idx {
+                if r < idx {
+                    absorb_idx = Some(idx - 1);
+                }
             }
-            _ => None,
         }
-    }
-
-    fn same_queue_effect(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Certificate(a), Self::Certificate(b)) => {
-                Self::same_certificate_variant(a, b) && a.view() == b.view()
+        if let Some(idx) = absorb_idx {
+            match message {
+                Self::Certificate(c) => {
+                    // Replace in place so a later Certified(success) callback
+                    // still observes the certificate before the callback runs
+                    overflow[idx] = Self::Certificate(c);
+                }
+                Self::Certified { view, success } => {
+                    // Certification should resolve once per view. Keep the
+                    // latest result and move it behind any earlier certificate
+                    // work
+                    overflow.remove(idx);
+                    overflow.push_back(Self::Certified { view, success });
+                }
             }
-            (Self::Certified { view: a, .. }, Self::Certified { view: b, .. }) => a == b,
-            _ => false,
-        }
-    }
-
-    fn replace_same_effect(overflow: &mut VecDeque<Self>, index: usize, message: Self) -> bool {
-        match message {
-            Self::Certificate(certificate) => {
-                // Replace in place so a later Certified(success) callback still observes
-                // the certificate before the callback is processed.
-                overflow[index] = Self::Certificate(certificate);
-            }
-            Self::Certified { view, success } => {
-                // Certification should resolve once per view; keep only the latest result
-                // if duplicate callbacks race into overflow.
-                overflow.remove(index);
-                overflow.push_back(Self::Certified { view, success });
-            }
+        } else {
+            overflow.push_back(message);
         }
         true
     }
 }
 
-impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        if let Some(floor) = message.finalization_floor() {
-            // Keep the highest queued finalization as the resolver floor.
-            // Older certificates and certified results cannot change state once it lands.
-            let mut useless = false;
-            overflow.retain(|pending| {
-                if pending
-                    .finalization_floor()
-                    .is_some_and(|pending_floor| pending_floor >= floor)
-                {
-                    useless = true;
-                    return true;
-                }
-                !pending.pruned_by_finalization(floor)
-            });
-            if useless {
-                return false;
-            }
-            overflow.push_back(message);
-            return true;
-        }
-
-        let mut same_effect = None;
-        for (index, pending) in overflow.iter().enumerate() {
-            // Any queued finalization at this view or higher already satisfies this message.
-            if pending
-                .finalization_floor()
-                .is_some_and(|floor| floor >= message.view())
-            {
-                return false;
-            }
-            if same_effect.is_none() && pending.same_queue_effect(&message) {
-                same_effect = Some(index);
-            }
-        }
-
-        if let Some(index) = same_effect {
-            return Self::replace_same_effect(overflow, index, message);
-        }
-
-        overflow.push_back(message);
-        true
+fn same_queue<S: Scheme, D: Digest>(a: &MailboxMessage<S, D>, b: &MailboxMessage<S, D>) -> bool {
+    match (a, b) {
+        (
+            MailboxMessage::Certificate(Certificate::Notarization(x)),
+            MailboxMessage::Certificate(Certificate::Notarization(y)),
+        ) => x.view() == y.view(),
+        (
+            MailboxMessage::Certificate(Certificate::Nullification(x)),
+            MailboxMessage::Certificate(Certificate::Nullification(y)),
+        ) => x.view() == y.view(),
+        (
+            MailboxMessage::Certificate(Certificate::Finalization(x)),
+            MailboxMessage::Certificate(Certificate::Finalization(y)),
+        ) => x.view() == y.view(),
+        (
+            MailboxMessage::Certified { view: x, .. },
+            MailboxMessage::Certified { view: y, .. },
+        ) => x == y,
+        _ => false,
     }
 }
 
@@ -221,9 +191,11 @@ mod tests {
         },
         types::{Epoch, Round},
     };
+    use commonware_actor::mailbox::Policy;
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+    use std::collections::VecDeque;
 
     type TestScheme = ed25519::Scheme;
     const EPOCH: Epoch = Epoch::new(1);

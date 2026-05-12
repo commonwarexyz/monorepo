@@ -23,114 +23,80 @@ pub enum Message<S: Scheme, D: Digest> {
     Verified(Certificate<S, D>, bool),
 }
 
-impl<S: Scheme, D: Digest> Message<S, D> {
-    const fn is_finalization(certificate: &Certificate<S, D>) -> bool {
-        matches!(certificate, Certificate::Finalization(_))
-    }
-
-    const fn same_certificate_variant(
-        first: &Certificate<S, D>,
-        second: &Certificate<S, D>,
-    ) -> bool {
-        matches!(
-            (first, second),
-            (Certificate::Notarization(_), Certificate::Notarization(_))
-                | (Certificate::Nullification(_), Certificate::Nullification(_))
-                | (Certificate::Finalization(_), Certificate::Finalization(_))
-        )
-    }
-
-    fn view(&self) -> View {
-        match self {
-            Self::Proposal(proposal) => proposal.view(),
-            Self::Timeout(view, _) => *view,
-            Self::Verified(certificate, _) => certificate.view(),
-        }
-    }
-
-    fn finalization_floor(&self) -> Option<View> {
-        match self {
-            Self::Verified(certificate, _) if Self::is_finalization(certificate) => {
-                Some(certificate.view())
+impl<S: Scheme, D: Digest> Policy for Message<S, D> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        let new_view = match &message {
+            Self::Proposal(p) => p.view(),
+            Self::Timeout(v, _) => *v,
+            Self::Verified(c, _) => c.view(),
+        };
+        let new_is_finalization = matches!(
+            &message,
+            Self::Verified(Certificate::Finalization(_), _)
+        );
+        let mut remove = Vec::new();
+        let mut absorb_idx = None;
+        for (index, p) in overflow.iter().enumerate() {
+            let p_view = match p {
+                Self::Proposal(pr) => pr.view(),
+                Self::Timeout(v, _) => *v,
+                Self::Verified(c, _) => c.view(),
+            };
+            // A finalization advances the voter past all work at or below its
+            // view. Keeping older proposals, timeouts, or certificates would
+            // only make the actor discard them after processing the
+            // finalization
+            if matches!(p, Self::Verified(Certificate::Finalization(_), _)) && p_view >= new_view {
+                return false;
             }
-            _ => None,
-        }
-    }
-
-    fn pruned_by_finalization(&self, finalized: View) -> bool {
-        self.view() <= finalized
-    }
-
-    fn same_queue_effect(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Proposal(a), Self::Proposal(b)) => a.view() == b.view(),
-            (Self::Timeout(a, _), Self::Timeout(b, _)) => a == b,
-            (Self::Verified(a, _), Self::Verified(b, _)) => {
-                Self::same_certificate_variant(a, b) && a.view() == b.view()
+            if new_is_finalization && p_view <= new_view {
+                remove.push(index);
+                continue;
             }
-            _ => false,
+            if absorb_idx.is_none() && same_queue(p, &message) {
+                absorb_idx = Some(index);
+            }
         }
-    }
-
-    const fn merge_same_effect(&mut self, incoming: &Self) -> bool {
-        match (self, incoming) {
-            (Self::Verified(_, pending_from_resolver), Self::Verified(_, true))
-                if !*pending_from_resolver =>
+        for r in remove.into_iter().rev() {
+            overflow.remove(r);
+            if let Some(idx) = absorb_idx {
+                if r < idx {
+                    absorb_idx = Some(idx - 1);
+                }
+            }
+        }
+        if let Some(idx) = absorb_idx {
+            // The certificate is already queued, but the resolver-origin
+            // marker affects whether the actor sends it back to resolver
+            if let (Self::Verified(_, pending_from_resolver), Self::Verified(_, true)) =
+                (&mut overflow[idx], &message)
             {
                 *pending_from_resolver = true;
-                true
             }
-            _ => false,
+        } else {
+            overflow.push_back(message);
         }
+        true
     }
 }
 
-impl<S: Scheme, D: Digest> Policy for Message<S, D> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        if let Some(floor) = message.finalization_floor() {
-            // Keep the highest queued finalization as the pruning floor.
-            // Lower finalizations cannot advance the voter any further.
-            let mut useless = false;
-            // A finalization conclusively advances past all work at or below its view.
-            overflow.retain(|pending| {
-                if pending
-                    .finalization_floor()
-                    .is_some_and(|pending_floor| pending_floor >= floor)
-                {
-                    useless = true;
-                    return true;
-                }
-                !pending.pruned_by_finalization(floor)
-            });
-            if useless {
-                return false;
-            }
-            overflow.push_back(message);
-            return true;
-        }
-
-        let mut same_effect = None;
-        for (index, pending) in overflow.iter().enumerate() {
-            // A queued finalization at this view or higher makes this message redundant.
-            if pending
-                .finalization_floor()
-                .is_some_and(|floor| floor >= message.view())
-            {
-                return false;
-            }
-            if same_effect.is_none() && pending.same_queue_effect(&message) {
-                same_effect = Some(index);
-            }
-        }
-
-        if let Some(index) = same_effect {
-            // One queued proposal/timeout/certificate for a given effect is enough.
-            // Resolver-origin certificates can upgrade the pending item in place.
-            return overflow[index].merge_same_effect(&message);
-        }
-
-        overflow.push_back(message);
-        true
+fn same_queue<S: Scheme, D: Digest>(a: &Message<S, D>, b: &Message<S, D>) -> bool {
+    match (a, b) {
+        (Message::Proposal(x), Message::Proposal(y)) => x.view() == y.view(),
+        (Message::Timeout(x, _), Message::Timeout(y, _)) => x == y,
+        (
+            Message::Verified(Certificate::Notarization(x), _),
+            Message::Verified(Certificate::Notarization(y), _),
+        ) => x.view() == y.view(),
+        (
+            Message::Verified(Certificate::Nullification(x), _),
+            Message::Verified(Certificate::Nullification(y), _),
+        ) => x.view() == y.view(),
+        (
+            Message::Verified(Certificate::Finalization(x), _),
+            Message::Verified(Certificate::Finalization(y), _),
+        ) => x.view() == y.view(),
+        _ => false,
     }
 }
 
@@ -176,9 +142,11 @@ mod tests {
         },
         types::{Epoch, Round},
     };
+    use commonware_actor::mailbox::Policy;
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+    use std::collections::VecDeque;
 
     type TestScheme = ed25519::Scheme;
     const EPOCH: Epoch = Epoch::new(1);
@@ -340,13 +308,13 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_proposals_and_timeouts_are_dropped() {
+    fn duplicate_proposals_and_timeouts_are_deduplicated() {
         let mut overflow: VecDeque<Message<TestScheme, Sha256Digest>> = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
             Message::Proposal(proposal(View::new(4)))
         ));
-        assert!(!Message::handle(
+        assert!(Message::handle(
             &mut overflow,
             Message::Proposal(proposal(View::new(4)))
         ));
@@ -354,7 +322,7 @@ mod tests {
             &mut overflow,
             Message::Timeout(View::new(4), TimeoutReason::LeaderTimeout)
         ));
-        assert!(!Message::handle(
+        assert!(Message::handle(
             &mut overflow,
             Message::Timeout(View::new(4), TimeoutReason::Inactivity)
         ));
