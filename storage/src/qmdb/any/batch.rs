@@ -314,25 +314,80 @@ impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
             cursors: streams.into_iter().map(|s| (s, 0)).collect(),
         }
     }
+
+    fn peek_key(cursor: &(&'a DiffSlice<K, F, V>, usize)) -> Option<&'a K> {
+        cursor.0.get(cursor.1).map(|(k, _)| k)
+    }
 }
 
 impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     type Item = (&'a K, &'a DiffEntry<F, V>);
 
     fn next(&mut self) -> Option<Self::Item> {
+        match self.cursors.len() {
+            0 => None,
+            1 => {
+                let (slice, pos) = &mut self.cursors[0];
+                let (k, entry) = slice.get(*pos)?;
+                *pos += 1;
+                Some((k, entry))
+            }
+            2 => {
+                let ka = Self::peek_key(&self.cursors[0]);
+                let kb = Self::peek_key(&self.cursors[1]);
+                match (ka, kb) {
+                    (Some(a), Some(b)) => match a.cmp(b) {
+                        core::cmp::Ordering::Less => {
+                            let (slice, pos) = &mut self.cursors[0];
+                            let item = &slice[*pos];
+                            *pos += 1;
+                            Some((&item.0, &item.1))
+                        }
+                        core::cmp::Ordering::Greater => {
+                            let (slice, pos) = &mut self.cursors[1];
+                            let item = &slice[*pos];
+                            *pos += 1;
+                            Some((&item.0, &item.1))
+                        }
+                        core::cmp::Ordering::Equal => {
+                            let (slice, pos) = &mut self.cursors[0];
+                            let item = &slice[*pos];
+                            *pos += 1;
+                            self.cursors[1].1 += 1;
+                            Some((&item.0, &item.1))
+                        }
+                    },
+                    (Some(_), None) => {
+                        let (slice, pos) = &mut self.cursors[0];
+                        let item = &slice[*pos];
+                        *pos += 1;
+                        Some((&item.0, &item.1))
+                    }
+                    (None, Some(_)) => {
+                        let (slice, pos) = &mut self.cursors[1];
+                        let item = &slice[*pos];
+                        *pos += 1;
+                        Some((&item.0, &item.1))
+                    }
+                    (None, None) => None,
+                }
+            }
+            _ => self.next_general(),
+        }
+    }
+}
+
+impl<'a, K: Ord, F: Family, V> DiffMerge<'a, K, F, V> {
+    fn next_general(&mut self) -> Option<(&'a K, &'a DiffEntry<F, V>)> {
         let n = self.cursors.len();
         let mut winner: Option<usize> = None;
         for level in 0..n {
-            let (slice, pos) = self.cursors[level];
-            let Some((k, _)) = slice.get(pos) else {
+            let Some(k) = Self::peek_key(&self.cursors[level]) else {
                 continue;
             };
             let better = match winner {
                 None => true,
-                Some(w) => {
-                    let (ws, wpos) = self.cursors[w];
-                    *k < ws[wpos].0
-                }
+                Some(w) => *k < *Self::peek_key(&self.cursors[w]).unwrap(),
             };
             if better {
                 winner = Some(level);
@@ -340,10 +395,10 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
         }
         let level = winner?;
         let (slice, pos) = self.cursors[level];
-        for inner in 0..n {
-            let (s, p) = self.cursors[inner];
-            if s.get(p).is_some_and(|(k, _)| *k == slice[pos].0) {
-                self.cursors[inner].1 += 1;
+        let winning_key = &slice[pos].0;
+        for cursor in &mut self.cursors {
+            if Self::peek_key(cursor).is_some_and(|k| k == winning_key) {
+                cursor.1 += 1;
             }
         }
         Some((&slice[pos].0, &slice[pos].1))
