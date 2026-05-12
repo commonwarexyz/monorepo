@@ -6,14 +6,15 @@
 //!   deallocates directly on drop.
 //! - [`PooledBuffer`] is the raw pooled allocation handle: it carries only a
 //!   pointer and relies on pool-owned metadata to release it.
-//! - Pooled views pair that handle with its originating [`SizeClass`] so the
-//!   buffer is returned to the pool on drop.
+//! - Pooled views pair that handle with its originating
+//!   [`SizeClass`](super::pool::SizeClass) so the buffer is returned to the pool
+//!   on drop.
 //!
 //! The allocator-facing pool logic lives in `pool.rs`. This module only deals
 //! with backing ownership and view semantics.
 
 use super::IoBuf;
-use crate::iobuf::pool::{BufferPoolThreadCache, SizeClass};
+use crate::iobuf::pool::{BufferPoolThreadCache, SizeClassLease};
 use bytes::Bytes;
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
@@ -116,9 +117,9 @@ impl Drop for AlignedBuffer {
 /// does not need to move a per-buffer [`Layout`].
 ///
 /// `PooledBuffer` does not implement [`Drop`] and has no reference to its
-/// originating [`SizeClass`]. It must be paired with pool metadata that returns
-/// it to the size class, or explicitly deallocated with the exact layout used
-/// to create it.
+/// originating [`SizeClass`](super::pool::SizeClass). It must be paired with
+/// pool metadata that returns it to the size class, or explicitly deallocated
+/// with the exact layout used to create it.
 pub struct PooledBuffer {
     ptr: NonNull<u8>,
 }
@@ -194,8 +195,8 @@ impl PooledBuffer {
 /// [`Self::release`].
 ///
 /// [`AlignedBuffer`] is self-contained and releases directly. [`PooledBacking`]
-/// pairs a layoutless [`PooledBuffer`] with its [`SizeClass`] and slot id, so
-/// release returns the allocation to the pool.
+/// pairs a layoutless [`PooledBuffer`] with its [`SizeClassLease`] and slot id,
+/// so release returns the allocation to the pool.
 pub(crate) trait BufferBacking: Send + Sync + 'static {
     /// Returns the full allocation capacity, ignoring any view cursor/offset.
     fn capacity(&self) -> usize;
@@ -226,23 +227,20 @@ impl BufferBacking for AlignedBuffer {
 
 /// Pooled backing storage.
 ///
-/// This pairs a layoutless [`PooledBuffer`] with the metadata needed to return
-/// it to the pool. The [`Arc<SizeClass>`] keeps the originating size class, and
-/// therefore its freelist layout, alive while the buffer is checked out or
-/// shared through immutable views.
-///
-/// The `Arc<SizeClass>` is *moved* (not cloned) through the TLS cache on the
-/// steady-state alloc/free path, avoiding refcount traffic.
+/// This pairs a layoutless [`PooledBuffer`] with the lease needed to return it
+/// to the pool. The [`SizeClassLease`] points to the originating size class and
+/// owns that class reference while the buffer is checked out or shared through
+/// immutable views.
 pub(crate) struct PooledBacking {
     buffer: PooledBuffer,
-    class: Arc<SizeClass>,
+    lease: SizeClassLease,
     slot: u32,
 }
 
 impl BufferBacking for PooledBacking {
     #[inline(always)]
     fn capacity(&self) -> usize {
-        self.class.size()
+        self.lease.size()
     }
 
     #[inline(always)]
@@ -252,7 +250,7 @@ impl BufferBacking for PooledBacking {
 
     #[inline(always)]
     fn release(self) {
-        BufferPoolThreadCache::push(self.class, self.slot, self.buffer);
+        BufferPoolThreadCache::push(self.lease, self.slot, self.buffer);
     }
 }
 
@@ -713,8 +711,8 @@ pub(crate) type AlignedBuf = Buf<AlignedBuffer>;
 /// Immutable, reference-counted view over a pooled allocation.
 ///
 /// The final reference returns the underlying allocation to its originating
-/// [`SizeClass`]. See [`Buf`] for the shared immutable view layout and
-/// invariants.
+/// [`SizeClass`](super::pool::SizeClass). See [`Buf`] for the shared immutable
+/// view layout and invariants.
 pub(crate) type PooledBuf = Buf<PooledBacking>;
 
 /// Mutable view over an untracked aligned allocation.
@@ -726,7 +724,8 @@ pub(crate) type AlignedBufMut = BufMut<AlignedBuffer>;
 /// Mutable view over a pooled allocation.
 ///
 /// When dropped, the underlying allocation is returned to its originating
-/// [`SizeClass`]. See [`BufMut`] for the shared mutable layout and invariants.
+/// [`SizeClass`](super::pool::SizeClass). See [`BufMut`] for the shared mutable
+/// layout and invariants.
 pub(crate) type PooledBufMut = BufMut<PooledBacking>;
 
 impl std::fmt::Debug for Buf<AlignedBuffer> {
@@ -790,11 +789,11 @@ impl std::fmt::Debug for BufMut<PooledBacking> {
 
 impl BufMut<PooledBacking> {
     #[inline]
-    pub(crate) const fn new(buffer: PooledBuffer, class: Arc<SizeClass>, slot: u32) -> Self {
+    pub(crate) const fn new(buffer: PooledBuffer, lease: SizeClassLease, slot: u32) -> Self {
         Self {
             inner: ManuallyDrop::new(BufInner::new(PooledBacking {
                 buffer,
-                class,
+                lease,
                 slot,
             })),
             cursor: 0,

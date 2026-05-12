@@ -13,6 +13,11 @@
 //! [`Drop`] only release buffers currently parked here. **An outstanding buffer
 //! that is never returned will leak**.
 //!
+//! The buffer pool keeps this requirement by pairing every checked-out buffer
+//! with a size-class lease, and by banking one lease for every buffer held in a
+//! thread-local cache. Those leases keep the owning size class, and therefore
+//! this freelist, alive until the buffer returns here.
+//!
 //! This is intentionally narrower than a general multi-producer, multi-consumer
 //! queue:
 //!
@@ -144,8 +149,10 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 /// The freelist owns the [`Layout`] shared by every tracked buffer in the size
 /// class. Checked-out buffers and thread-local caches may temporarily hold
 /// [`PooledBuffer`] handles, but those handles must eventually return here so
-/// they can be released with the correct layout. Draining or dropping the
-/// freelist only deallocates buffers currently parked in it.
+/// they can be released with the correct layout. The buffer pool keeps the
+/// freelist alive for those outstanding handles with checked-out or banked
+/// size-class leases. Draining or dropping the freelist only deallocates
+/// buffers currently parked in it.
 ///
 /// The bitmap is intentionally striped over a power-of-two number of words.
 /// That makes the slot-to-word mapping cheap and keeps small freelists from
@@ -263,7 +270,7 @@ impl Freelist {
     /// The returned buffer does not deallocate itself. The `(slot, buffer)`
     /// pair must be returned to this same freelist before the freelist is
     /// finally dropped, otherwise the buffer leaks.
-    #[inline]
+    #[inline(always)]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
         let slot = self
             .created
