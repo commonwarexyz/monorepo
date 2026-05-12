@@ -9,6 +9,7 @@ mod hashmap_insert;
 mod hashmap_insert_fixed;
 mod hashmap_iteration;
 mod insert;
+mod insert_and_prune;
 mod lookup;
 mod lookup_miss;
 
@@ -51,6 +52,7 @@ criterion_main!(
     hashmap_insert_fixed::benches,
     hashmap_insert::benches,
     insert::benches,
+    insert_and_prune::benches,
     lookup::benches,
     lookup_miss::benches,
 );
