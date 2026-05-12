@@ -1,5 +1,8 @@
+use std::collections::VecDeque;
+
 use crate::{simplex::types::Certificate, types::View};
 use bytes::Bytes;
+use commonware_actor::mailbox::{Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
@@ -15,29 +18,44 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
     Certified { view: View, success: bool },
 }
 
+impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        match message {
+            Self::Certificate(_) => {
+                overflow.push_back(message);
+                true
+            }
+            Self::Certified { .. } => {
+                overflow.push_back(message);
+                true
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<MailboxMessage<S, D>>,
+    sender: Sender<MailboxMessage<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<MailboxMessage<S, D>>) -> Self {
+    pub const fn new(sender: Sender<MailboxMessage<S, D>>) -> Self {
         Self { sender }
     }
 
     /// Send a certificate.
-    pub async fn updated(&mut self, certificate: Certificate<S, D>) {
-        self.sender
-            .send_lossy(MailboxMessage::Certificate(certificate))
-            .await;
+    pub fn updated(&mut self, certificate: Certificate<S, D>) {
+        let _ = self
+            .sender
+            .enqueue(MailboxMessage::Certificate(certificate));
     }
 
     /// Notify the resolver of a certification result.
-    pub async fn certified(&mut self, view: View, success: bool) {
-        self.sender
-            .send_lossy(MailboxMessage::Certified { view, success })
-            .await;
+    pub fn certified(&mut self, view: View, success: bool) {
+        let _ = self
+            .sender
+            .enqueue(MailboxMessage::Certified { view, success });
     }
 }
 

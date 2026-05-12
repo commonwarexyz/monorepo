@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     simplex::{
         metrics::TimeoutReason,
@@ -5,8 +7,8 @@ use crate::{
     },
     types::View,
 };
+use commonware_actor::mailbox::{Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -21,38 +23,53 @@ pub enum Message<S: Scheme, D: Digest> {
     Verified(Certificate<S, D>, bool),
 }
 
+impl<S: Scheme, D: Digest> Policy for Message<S, D> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        match message {
+            Self::Proposal(_) => {
+                overflow.push_back(message);
+                true
+            }
+            Self::Timeout(_, _) => {
+                overflow.push_back(message);
+                true
+            }
+            Self::Verified(_, _) => {
+                overflow.push_back(message);
+                true
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<S, D>>,
+    sender: Sender<Message<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    pub const fn new(sender: Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
     /// Send a leader's proposal.
-    pub async fn proposal(&mut self, proposal: Proposal<D>) {
-        self.sender.send_lossy(Message::Proposal(proposal)).await;
+    pub fn proposal(&mut self, proposal: Proposal<D>) {
+        let _ = self.sender.enqueue(Message::Proposal(proposal));
     }
 
     /// Signal that the current view should timeout (if not already).
-    pub async fn timeout(&mut self, view: View, reason: TimeoutReason) {
-        self.sender.send_lossy(Message::Timeout(view, reason)).await;
+    pub fn timeout(&mut self, view: View, reason: TimeoutReason) {
+        let _ = self.sender.enqueue(Message::Timeout(view, reason));
     }
 
     /// Send a recovered certificate.
-    pub async fn recovered(&mut self, certificate: Certificate<S, D>) {
-        self.sender
-            .send_lossy(Message::Verified(certificate, false))
-            .await;
+    pub fn recovered(&mut self, certificate: Certificate<S, D>) {
+        let _ = self.sender.enqueue(Message::Verified(certificate, false));
     }
 
     /// Send a resolved certificate.
-    pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
-        self.sender
-            .send_lossy(Message::Verified(certificate, true))
-            .await;
+    pub fn resolved(&mut self, certificate: Certificate<S, D>) {
+        let _ = self.sender.enqueue(Message::Verified(certificate, true));
     }
 }

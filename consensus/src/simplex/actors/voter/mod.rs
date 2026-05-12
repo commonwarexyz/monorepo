@@ -36,7 +36,7 @@ pub struct Config<
 
     pub partition: String,
     pub epoch: Epoch,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
@@ -70,6 +70,7 @@ mod tests {
         types::{Participant, Round, View},
         Viewable,
     };
+    use commonware_actor::mailbox;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -261,7 +262,7 @@ mod tests {
             reporter: reporter.clone(),
             partition: format!("voter_test_{me}"),
             epoch: Epoch::new(333),
-            mailbox_size: 128,
+            mailbox_size: NZUsize!(128),
             leader_timeout,
             certification_timeout,
             timeout_retry,
@@ -272,8 +273,8 @@ mod tests {
         };
         let (voter, mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
-        let (resolver_sender, resolver_receiver) = mpsc::channel(8);
-        let (batcher_sender, batcher_receiver) = mpsc::channel(16);
+        let (resolver_sender, resolver_receiver) = mailbox::new(NZUsize!(8));
+        let (batcher_sender, batcher_receiver) = mailbox::new(NZUsize!(16));
 
         let (vote_sender, _) = oracle
             .control(me.clone())
