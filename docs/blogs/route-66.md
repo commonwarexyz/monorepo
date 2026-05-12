@@ -26,4 +26,4 @@ The result? Only a handful of new blockchains are widely integrated each year, o
 
 Today, Commonware and Coinbase are launching a new initiative to “pave the road” for a new era of onchain applications. Via standards, common libraries, and shared tools, we will lay a highway that new blockchains can leverage to reduce cost and time to market (regardless of their model and make). A blockchain *Route 66*.
 
-Want to get your blocks on Route 66? Help pave the road at [route66@commonware.xyz](mailto:route66@commonware.xyz)\!
+Want to get your blocks on *Route 66*? Help pave the road at [route66@commonware.xyz](mailto:route66@commonware.xyz)\!
