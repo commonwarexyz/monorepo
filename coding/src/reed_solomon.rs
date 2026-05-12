@@ -187,6 +187,7 @@ where
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
 fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
+    // Compute shard length
     let data_len = data.remaining();
     let shard_len = canonical_shard_len(data_len, k);
 
@@ -414,7 +415,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     // Process checked chunks
     let shard_len = first.shard.len();
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
-    let mut provided_shards: Vec<(usize, &[u8])> = Vec::new();
+    let mut provided_shards: Vec<(usize, &[u8])> = Vec::with_capacity(n);
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     let mut provided = 0usize;
