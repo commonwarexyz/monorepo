@@ -20,7 +20,7 @@ use crate::{
     simplex::Simplex,
     spawn_honest_validator,
     utils::Partition,
-    PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, N4F0C4,
+    CertifyChoice, PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, N4F0C4,
 };
 use bytes::Bytes;
 use commonware_codec::Encode;
@@ -47,6 +47,27 @@ const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(360);
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+
+/// Sample a per-iteration [`CertifyChoice`] for ByzzFuzz. `SingleCancel` and
+/// `SinglePending` always target [`BYZANTINE_IDX`]: ByzzFuzz keeps Byzantine
+/// process faults active after GST, so disabling a *correct* certifier on top
+/// of those faults would drop below the post-GST quorum of three. Targeting
+/// the byzantine validator overlaps the disabled certifier with the existing
+/// adversary instead of adding a new failure to the run.
+fn sample_byzzfuzz_certify(context: &mut deterministic::Context) -> CertifyChoice {
+    match context.gen_range(0..10u32) {
+        0..=5 => CertifyChoice::Always,
+        6..=7 => CertifyChoice::SometimesReject {
+            seed: context.gen::<u64>(),
+        },
+        8 => CertifyChoice::SingleCancel {
+            target_idx: BYZANTINE_IDX as u8,
+        },
+        _ => CertifyChoice::SinglePending {
+            target_idx: BYZANTINE_IDX as u8,
+        },
+    }
+}
 
 struct EngineSetup<P: Simplex> {
     reporters: Vec<ByzzReporter<P>>,
@@ -76,6 +97,17 @@ where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
         Clone + Send + Sync + 'static,
 {
+    // Override the harness-wide `input.certify` with ByzzFuzz-specific
+    // sampling. `FuzzInput::arbitrary` restricts to `Always` /
+    // `SometimesReject` because it must hold for every mode (Standard,
+    // FaultyMessaging, Twins on N4F1C3 cannot survive losing one of three
+    // honest certifiers). ByzzFuzz forces N4F0C4 *and* keeps Byzantine
+    // process faults active post-GST; `sample_byzzfuzz_certify` pins the
+    // single-target variants to the byzantine index so the disabled
+    // certifier coincides with the adversary rather than adding a new
+    // correct-validator failure.
+    input.certify = sample_byzzfuzz_certify(context);
+
     // Sample `(c, d, r)` here rather than threading it through `FuzzInput` type.
     let use_required_bound = context.gen_bool(0.5);
     let r_bound = if use_required_bound {
@@ -109,10 +141,11 @@ where
     let r_post_gst = context.gen_range(1..=r_max);
 
     log::push(format!(
-        "{log_label} schedule: byzantine_idx={} required_containers={} (c,d,r)={:?} network_faults={:?} proc_faults={:?}",
+        "{log_label} schedule: byzantine_idx={} required_containers={} (c,d,r)={:?} certify={:?} network_faults={:?} proc_faults={:?}",
         BYZANTINE_IDX,
         input.required_containers,
         byzz,
+        input.certify,
         network_schedule_vec,
         proc_faults,
     ));
@@ -240,6 +273,7 @@ where
             (vote_primary, vote_receiver),
             (cert_primary, cert_receiver),
             (resolver_primary, resolver_receiver),
+            input.certify,
         );
         reporters.push(reporter);
     }

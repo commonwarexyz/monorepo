@@ -32,7 +32,8 @@ use commonware_consensus::{
     Monitor, Viewable,
 };
 use commonware_cryptography::{
-    certificate::Scheme, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
+    certificate::Scheme, sha256::Digest as Sha256Digest, Hasher, PublicKey as CryptoPublicKey,
+    Sha256,
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
@@ -138,6 +139,69 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
     }
 }
 
+/// Per-iteration choice of `Application::certify` behavior. `Always` and
+/// `SometimesReject` apply uniformly to every honest validator a fuzz
+/// iteration spawns and produce identical decisions across honest validators
+/// for the same `(view, payload)` -- the Simplex protocol requires
+/// certification to be deterministic and consistent across honest
+/// participants (see `consensus/src/simplex/mod.rs`). `SingleCancel` and
+/// `SinglePending` apply their non-default certifier only to the validator at
+/// `target_idx` so quorum certification is still reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertifyChoice {
+    Always,
+    /// Reject a small fraction of `(view, payload)` pairs. `seed` makes the
+    /// predicate iteration-distinguishable; the decision does not depend on
+    /// validator identity so honest validators agree.
+    SometimesReject {
+        seed: u64,
+    },
+    SingleCancel {
+        target_idx: u8,
+    },
+    SinglePending {
+        target_idx: u8,
+    },
+}
+
+/// Per-(view, payload) reject rate, in percent (0..100), used by
+/// [`CertifyChoice::SometimesReject`]. Small so quorum certification remains
+/// reachable.
+const CERTIFY_REJECT_PCT: u8 = 3;
+
+impl CertifyChoice {
+    pub fn into_certifier(self, validator_idx: usize) -> application::Certifier<Sha256Digest> {
+        match self {
+            CertifyChoice::Always => application::Certifier::Always,
+            CertifyChoice::SometimesReject { seed } => {
+                application::Certifier::Custom(Box::new(move |round, payload| {
+                    let mut h = Sha256::default();
+                    h.update(b"SIMPLEX_FUZZ_CERTIFY_SEED");
+                    h.update(&seed.to_be_bytes());
+                    h.update(&round.view().get().to_be_bytes());
+                    h.update(payload.as_ref());
+                    let digest = h.finalize();
+                    digest.as_ref()[0] % 100 >= CERTIFY_REJECT_PCT
+                }))
+            }
+            CertifyChoice::SingleCancel { target_idx } => {
+                if validator_idx == target_idx as usize {
+                    application::Certifier::Cancel
+                } else {
+                    application::Certifier::Always
+                }
+            }
+            CertifyChoice::SinglePending { target_idx } => {
+                if validator_idx == target_idx as usize {
+                    application::Certifier::Pending
+                } else {
+                    application::Certifier::Always
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
@@ -155,6 +219,9 @@ pub struct FuzzInput {
     /// spawns. Sampling lets the fuzzer drive coverage of all three arms of
     /// `batcher::forward_targets` instead of pinning to `Disabled`.
     pub forwarding: ForwardingPolicy,
+    /// Per-iteration certify policy threaded into every honest validator
+    /// the harness spawns.
+    pub certify: CertifyChoice,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -217,6 +284,23 @@ impl Arbitrary<'_> for FuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
+        // Certify policy distribution (safe for every mode this `FuzzInput` is
+        // consumed by, including Standard/FaultyMessaging/Twins on N4F1C3
+        // where only three engines are honest certifiers). Variants that
+        // disable certification on a target validator (`SingleCancel`,
+        // `SinglePending`) are not sampled here because losing one of three
+        // certifiers drops below the n=4 quorum of three;
+        //   70%  Always           - matches prior fuzz behavior; covers the success path
+        //   30%  SometimesReject  - covers state.rs:122 certification-failure path;
+        //                           uniform across honest validators per the Simplex
+        //                           consensus contract
+        let certify = match u.int_in_range(0..=9)? {
+            0..=6 => CertifyChoice::Always,
+            _ => CertifyChoice::SometimesReject {
+                seed: u.arbitrary::<u64>()?,
+            },
+        };
+
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -234,6 +318,7 @@ impl Arbitrary<'_> for FuzzInput {
             strategy,
             messaging_faults: Vec::new(),
             forwarding,
+            certify,
         })
     }
 }
@@ -409,6 +494,7 @@ pub(crate) fn spawn_honest_validator<
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
+    certify: CertifyChoice,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
@@ -431,6 +517,10 @@ where
     let (certificate_sender, certificate_receiver) = recovered;
     let (resolver_sender, resolver_receiver) = resolver;
 
+    let validator_idx = participants
+        .iter()
+        .position(|p| p == &validator)
+        .expect("validator must be in participants");
     let app_cfg = application::Config {
         hasher: Sha256::default(),
         relay,
@@ -438,7 +528,7 @@ where
         propose_latency: (10.0, 5.0),
         verify_latency: (10.0, 5.0),
         certify_latency: (10.0, 5.0),
-        should_certify: application::Certifier::Always,
+        should_certify: certify.into_certifier(validator_idx),
     };
     let (actor, application) = application::Application::new(context.child("application"), app_cfg);
     actor.start();
@@ -490,6 +580,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     certification_timeout: Duration,
     forwarding: ForwardingPolicy,
     channels: NetworkChannels<PublicKeyOf<P>>,
+    certify: CertifyChoice,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;
@@ -532,6 +623,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         (vote_sender, vote_receiver),
         (certificate_sender, certificate_receiver),
         (resolver_sender, resolver_receiver),
+        certify,
     )
 }
 
@@ -759,6 +851,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
                 pending,
                 recovered,
                 resolver,
+                input.certify,
             );
             reporters.push((validator, reporter));
         }
@@ -878,6 +971,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 Duration::from_secs(2),
                 input.forwarding,
                 channels,
+                input.certify,
             );
             reporters.push((validator, reporter));
         }
@@ -1276,6 +1370,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 pending,
                 recovered,
                 resolver,
+                input.certify,
             );
             reporters.push(reporter);
         }
@@ -1349,6 +1444,7 @@ where
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
     let forwarding = input.forwarding;
+    let certify = input.certify;
 
     match M::MODE {
         simplex_node::NodeMode::WithoutRecovery => {
@@ -1361,7 +1457,7 @@ where
                 executor.start_and_recover(|mut context| async move {
                     simplex_node::run::<P>(&mut context, &input).await
                 });
-            simplex_node::run_recovery::<P>(checkpoint, participants, schemes, forwarding);
+            simplex_node::run_recovery::<P>(checkpoint, participants, schemes, forwarding, certify);
         }
     }
 }
