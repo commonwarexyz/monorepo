@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use crate::{
     simplex::{
         metrics::TimeoutReason,
@@ -9,6 +7,7 @@ use crate::{
 };
 use commonware_actor::mailbox::{Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use std::collections::VecDeque;
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {

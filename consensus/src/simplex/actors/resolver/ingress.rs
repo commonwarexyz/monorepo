@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use crate::{simplex::types::Certificate, types::View};
 use bytes::Bytes;
 use commonware_actor::mailbox::{Policy, Sender};
@@ -9,6 +7,7 @@ use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     sequence::U64,
 };
+use std::collections::VecDeque;
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
