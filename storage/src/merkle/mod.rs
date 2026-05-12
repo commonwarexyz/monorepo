@@ -207,22 +207,19 @@ pub trait PendingChunk<D: Digest>:
     + TryFrom<Option<D>, Error: Debug>
 {
     /// View the slot as an `Option<&D>`.
-    fn as_ref(&self) -> Option<&D>;
+    fn as_ref(&self) -> Option<&D> {
+        None
+    }
 }
 
 impl<D: Digest> PendingChunk<D> for Option<D> {
     #[inline]
     fn as_ref(&self) -> Option<&D> {
-        Self::as_ref(self)
+        Option::as_ref(self)
     }
 }
 
-impl<D: Digest> PendingChunk<D> for Unused {
-    #[inline]
-    fn as_ref(&self) -> Option<&D> {
-        None
-    }
-}
+impl<D: Digest> PendingChunk<D> for Unused {}
 
 /// Extension of [`Family`] with methods needed for grafting bitmap chunks onto a Merkle structure.
 /// Grafting combines an activity bitmap with an ops Merkle structure by hashing bitmap chunks
