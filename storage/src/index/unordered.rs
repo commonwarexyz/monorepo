@@ -25,9 +25,6 @@ const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
 impl<K: Send + Sync, V: Eq + Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
-    fn get(&self) -> &V {
-        &self.get().value
-    }
     fn get_mut(&mut self) -> &mut Record<V> {
         self.get_mut()
     }
@@ -168,14 +165,17 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert(&mut self, key: &[u8], v: V) {
+    fn insert(&mut self, key: &[u8], mut v: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-                cursor.next();
-                cursor.insert(v);
+            Entry::Occupied(mut entry) => {
+                let record = entry.get_mut();
+                std::mem::swap(&mut record.value, &mut v);
+                record.next = Some(Box::new(Record {
+                    value: v,
+                    next: record.next.take(),
+                }));
+                self.items.inc();
             }
             Entry::Vacant(entry) => {
                 Self::create(&self.keys, &self.items, entry, v);
@@ -187,10 +187,9 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
-                // Get entry
+                // Remove anything that is prunable.
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-
                 cursor.prune(&predicate);
 
                 // Add our new value (if not prunable).
@@ -199,29 +198,27 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
                 }
             }
             Entry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, value);
+                // Create the entry only if the new value is not prunable.
+                if !predicate(&value) {
+                    Self::create(&self.keys, &self.items, entry, value);
+                }
             }
-        }
-    }
-
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&V) -> bool) {
-        let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                // Get cursor
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-
-                cursor.prune(&predicate);
-            }
-            Entry::Vacant(_) => {}
         }
     }
 
     fn remove(&mut self, key: &[u8]) {
-        // To ensure metrics are accurate, we iterate over all conflicting values and remove them
-        // one-by-one (rather than just removing the entire entry).
-        self.prune(key, |_| true);
+        let k = self.translator.transform(key);
+        if let Some(mut record) = self.map.remove(&k) {
+            // To ensure metrics are accurate, account for all conflicting values in the chain.
+            self.keys.dec();
+            self.items.dec();
+            self.pruned.inc();
+            while let Some(next) = record.next.take() {
+                self.items.dec();
+                self.pruned.inc();
+                record = *next;
+            }
+        }
     }
 
     #[cfg(test)]

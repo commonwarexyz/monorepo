@@ -37,8 +37,8 @@ pub mod unordered;
 ///
 /// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
 /// - Once `next()` returns `None`, only `insert()` can be called.
-/// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached
-///   `next` nodes.
+/// - The cursor mutates the linked list in place. If the sole element is deleted, dropping the
+///   cursor removes the map entry.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
 /// `remove()` from [Unordered] instead._
@@ -53,8 +53,8 @@ pub trait Cursor: Send + Sync {
     /// If after `insert()`, the next active item is the item after the inserted item. If after
     /// `delete()`, the next active item is the item after the deleted item.
     ///
-    /// Handles transitions between phases and adjusts for deletions. Returns `None` when the list
-    /// is exhausted. It is safe to call `next()` even after it returns `None`.
+    /// Advances through cursor states and adjusts for deletions. Returns `None` when the list is
+    /// exhausted. It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> Option<&Self::Value>;
 
@@ -66,7 +66,7 @@ pub trait Cursor: Send + Sync {
 
     /// Updates the value at the current position in the iteration.
     ///
-    /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
+    /// Panics if called before `next()` or after iteration is complete.
     fn update(&mut self, value: Self::Value);
 
     /// Removes anything in the cursor that satisfies the predicate.
@@ -131,7 +131,7 @@ pub trait Unordered: Send + Sync {
         value: Self::Value,
     ) -> Option<Self::Cursor<'a>>;
 
-    /// Inserts a new value at the current position.
+    /// Inserts a new value for the translated key.
     fn insert(&mut self, key: &[u8], value: Self::Value);
 
     /// Insert a value at the given translated key, and prune any values that are no longer valid.
@@ -145,7 +145,11 @@ pub trait Unordered: Send + Sync {
     );
 
     /// Remove all values associated with a translated key that match `predicate`.
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&Self::Value) -> bool);
+    fn prune(&mut self, key: &[u8], predicate: impl Fn(&Self::Value) -> bool) {
+        if let Some(mut cursor) = self.get_mut(key) {
+            cursor.prune(&predicate);
+        }
+    }
 
     /// Remove all values associated with a translated key.
     fn remove(&mut self, key: &[u8]);
@@ -239,15 +243,15 @@ mod tests {
         index.insert(key, 3);
         assert_eq!(index.keys(), 1);
 
-        // Check that the values are in the correct order
-        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 3, 2]);
+        // Check that the values are in the expected newest-first order.
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![3, 2, 1]);
 
         // Ensure cursor terminates
         {
             let mut cursor = index.get_mut(key).unwrap();
-            assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 3);
             assert_eq!(*cursor.next().unwrap(), 2);
+            assert_eq!(*cursor.next().unwrap(), 1);
             assert!(cursor.next().is_none());
         }
 
@@ -255,7 +259,7 @@ mod tests {
         index.insert(key, 3);
         index.insert(key, 4);
         index.prune(key, |i| *i == 3);
-        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
+        assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![4, 2, 1]);
         index.prune(key, |_| true);
         // Try removing all of a keys values.
         assert_eq!(
@@ -477,16 +481,16 @@ mod tests {
         index.insert(b"ab", 2);
         index.insert(b"abc", 3);
 
-        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
-        assert_eq!(index.get(b"abc").copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![3, 2]);
+        assert_eq!(index.get(b"abc").copied().collect::<Vec<_>>(), vec![3, 2]);
 
         index.insert(b"ab", 4);
-        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 4, 3]);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![4, 3, 2]);
         assert_eq!(index.keys(), 2);
         assert_eq!(index.items(), 4);
 
         index.prune(b"ab", |v| *v == 4);
-        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![3, 2]);
         assert_eq!(index.keys(), 2);
         assert_eq!(index.items(), 3);
 
@@ -539,7 +543,7 @@ mod tests {
         index.insert(b"key", 3);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![1, 3, 2]
+            vec![3, 2, 1]
         );
     }
 
@@ -581,7 +585,7 @@ mod tests {
         index.insert(b"key", 2);
         index.insert(b"key", 3);
         index.prune(b"key", |v| *v == 2);
-        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3, 1]);
         index.prune(b"key", |v| *v == 1);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3]);
     }
@@ -685,7 +689,7 @@ mod tests {
         }
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![11, 13, 12]
+            vec![13, 12, 11]
         );
     }
 
@@ -729,18 +733,18 @@ mod tests {
         index.insert(b"key", 4);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![1, 4, 3, 2]
+            vec![4, 3, 2, 1]
         );
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 4);
+            assert_eq!(*cursor.next().unwrap(), 3);
             let _ = cursor.next().unwrap();
             cursor.update(99);
         }
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![1, 4, 99, 2]
+            vec![4, 3, 99, 1]
         );
     }
 
@@ -778,59 +782,59 @@ mod tests {
     }
 
     fn run_index_remove_through_iterator<I: Unordered<Value = u64>>(index: &mut I) {
-        index.insert(b"key", 1);
-        index.insert(b"key", 2);
-        index.insert(b"key", 3);
-        index.insert(b"key", 4);
+        index.insert(b"key", 10);
+        index.insert(b"key", 20);
+        index.insert(b"key", 30);
+        index.insert(b"key", 40);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![1, 4, 3, 2]
+            vec![40, 30, 20, 10]
         );
         assert_eq!(index.pruned(), 0);
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 1);
+            assert_eq!(*cursor.next().unwrap(), 40);
             cursor.delete();
         }
         assert_eq!(index.pruned(), 1);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 2]
+            vec![30, 20, 10]
         );
-        index.insert(b"key", 1);
+        index.insert(b"key", 50);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 1, 3, 2]
+            vec![50, 30, 20, 10]
         );
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 4);
-            assert_eq!(*cursor.next().unwrap(), 1);
-            assert_eq!(*cursor.next().unwrap(), 3);
+            assert_eq!(*cursor.next().unwrap(), 50);
+            assert_eq!(*cursor.next().unwrap(), 30);
+            assert_eq!(*cursor.next().unwrap(), 20);
             cursor.delete();
         }
         assert_eq!(index.pruned(), 2);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 1, 2]
+            vec![50, 30, 10]
         );
-        index.insert(b"key", 3);
+        index.insert(b"key", 60);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 1, 2]
+            vec![60, 50, 30, 10]
         );
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 4);
-            assert_eq!(*cursor.next().unwrap(), 3);
-            assert_eq!(*cursor.next().unwrap(), 1);
-            assert_eq!(*cursor.next().unwrap(), 2);
+            assert_eq!(*cursor.next().unwrap(), 60);
+            assert_eq!(*cursor.next().unwrap(), 50);
+            assert_eq!(*cursor.next().unwrap(), 30);
+            assert_eq!(*cursor.next().unwrap(), 10);
             cursor.delete();
         }
         assert_eq!(index.pruned(), 3);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![4, 3, 1]
+            vec![60, 50, 30]
         );
         index.remove(b"key");
         assert_eq!(index.keys(), 0);
@@ -897,8 +901,8 @@ mod tests {
         }
         index.insert(b"key", 100);
         let mut iter = index.get(b"key");
-        assert_eq!(*iter.next().unwrap(), 1);
         assert_eq!(*iter.next().unwrap(), 100);
+        assert_eq!(*iter.next().unwrap(), 1);
         assert_eq!(*iter.next().unwrap(), 42);
         assert_eq!(*iter.next().unwrap(), 3);
         assert!(iter.next().is_none());
@@ -987,13 +991,13 @@ mod tests {
         }
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 0);
-            cursor.delete();
             assert_eq!(*cursor.next().unwrap(), 3);
             cursor.delete();
             assert_eq!(*cursor.next().unwrap(), 2);
             cursor.delete();
             assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 0);
             cursor.delete();
             assert_eq!(cursor.next(), None);
             cursor.insert(4);
@@ -1117,6 +1121,50 @@ mod tests {
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
                 run_index_insert_and_prune_vacant(&mut index);
+            }
+        });
+    }
+
+    fn run_index_insert_and_prune_vacant_pruned<I: Unordered<Value = u64>>(index: &mut I) {
+        index.insert_and_prune(b"key", 1u64, |_| true);
+        assert_eq!(
+            index.get(b"key").copied().collect::<Vec<_>>(),
+            Vec::<u64>::new()
+        );
+        assert_eq!(index.items(), 0);
+        assert_eq!(index.keys(), 0);
+        assert_eq!(index.pruned(), 0);
+    }
+
+    #[test_traced]
+    fn test_hash_index_insert_and_prune_vacant_pruned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_prune_vacant_pruned(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_insert_and_prune_vacant_pruned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_insert_and_prune_vacant_pruned(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_partitioned_index_insert_and_prune_vacant_pruned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.child("unordered"));
+                run_index_insert_and_prune_vacant_pruned(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context.child("ordered"));
+                run_index_insert_and_prune_vacant_pruned(&mut index);
             }
         });
     }
@@ -1295,13 +1343,13 @@ mod tests {
         }
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 0);
             assert_eq!(*cursor.next().unwrap(), 3);
-            cursor.delete();
             assert_eq!(*cursor.next().unwrap(), 2);
             cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.delete();
         }
-        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3, 0]);
     }
 
     #[test_traced]
@@ -1343,13 +1391,13 @@ mod tests {
         }
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 0);
-            cursor.delete();
             assert_eq!(*cursor.next().unwrap(), 3);
             cursor.delete();
             assert_eq!(*cursor.next().unwrap(), 2);
             cursor.delete();
             assert_eq!(*cursor.next().unwrap(), 1);
+            cursor.delete();
+            assert_eq!(*cursor.next().unwrap(), 0);
             cursor.delete();
             assert_eq!(cursor.next(), None);
         }
@@ -1608,8 +1656,8 @@ mod tests {
         index.insert(b"key", 123);
         index.insert(b"key", 456);
         let mut cursor = index.get_mut(b"key").unwrap();
-        assert_eq!(*cursor.next().unwrap(), 123);
         assert_eq!(*cursor.next().unwrap(), 456);
+        assert_eq!(*cursor.next().unwrap(), 123);
         cursor.insert(789);
         assert_eq!(cursor.next(), None);
         cursor.insert(999);
@@ -1656,7 +1704,7 @@ mod tests {
         index.insert(b"key", 123);
         index.insert(b"key", 456);
         let mut cursor = index.get_mut(b"key").unwrap();
-        assert_eq!(*cursor.next().unwrap(), 123);
+        assert_eq!(*cursor.next().unwrap(), 456);
         cursor.delete();
         cursor.delete();
     }
@@ -1686,8 +1734,8 @@ mod tests {
         index.insert(b"key", 2);
         {
             let mut cursor = index.get_mut(b"key").unwrap();
-            assert_eq!(*cursor.next().unwrap(), 1);
             assert_eq!(*cursor.next().unwrap(), 2);
+            assert_eq!(*cursor.next().unwrap(), 1);
             cursor.delete();
             assert!(cursor.next().is_none());
             assert!(cursor.next().is_none());
@@ -1734,10 +1782,10 @@ mod tests {
         index.insert(b"key", 2);
         index.insert(b"key", 3);
         let mut cur = index.get_mut(b"key").unwrap();
-        assert_eq!(*cur.next().unwrap(), 1);
         assert_eq!(*cur.next().unwrap(), 3);
-        cur.delete();
         assert_eq!(*cur.next().unwrap(), 2);
+        cur.delete();
+        assert_eq!(*cur.next().unwrap(), 1);
         assert!(cur.next().is_none());
         assert!(cur.next().is_none());
     }
@@ -1766,14 +1814,14 @@ mod tests {
         index.insert(b"key", 3);
         {
             let mut cur = index.get_mut(b"key").unwrap();
-            assert_eq!(*cur.next().unwrap(), 1);
-            cur.delete();
             assert_eq!(*cur.next().unwrap(), 3);
+            cur.delete();
             assert_eq!(*cur.next().unwrap(), 2);
+            assert_eq!(*cur.next().unwrap(), 1);
             assert!(cur.next().is_none());
             assert!(cur.next().is_none());
         }
-        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3, 2]);
+        assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2, 1]);
     }
 
     #[test_traced]
@@ -1800,21 +1848,21 @@ mod tests {
         index.insert(b"key", 3);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![1, 3, 2]
+            vec![3, 2, 1]
         );
         {
             let mut cur = index.get_mut(b"key").unwrap();
-            assert_eq!(*cur.next().unwrap(), 1);
-            cur.delete();
             assert_eq!(*cur.next().unwrap(), 3);
-            cur.insert(4);
+            cur.delete();
             assert_eq!(*cur.next().unwrap(), 2);
+            cur.insert(4);
+            assert_eq!(*cur.next().unwrap(), 1);
             assert!(cur.next().is_none());
             assert!(cur.next().is_none());
         }
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<_>>(),
-            vec![3, 4, 2]
+            vec![2, 4, 1]
         );
     }
 
@@ -1855,9 +1903,9 @@ mod tests {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         let mut cur = index.get_mut(b"key").unwrap();
-        assert_eq!(*cur.next().unwrap(), 1);
-        cur.insert(99);
         assert_eq!(*cur.next().unwrap(), 2);
+        cur.insert(99);
+        assert_eq!(*cur.next().unwrap(), 1);
         assert!(cur.next().is_none());
     }
 
@@ -1898,7 +1946,7 @@ mod tests {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
-        assert_eq!(*cur.next().unwrap(), 10);
+        assert_eq!(*cur.next().unwrap(), 20);
         cur.insert(15);
         cur.delete();
     }
@@ -1943,8 +1991,8 @@ mod tests {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
-        assert_eq!(*cur.next().unwrap(), 10);
         assert_eq!(*cur.next().unwrap(), 20);
+        assert_eq!(*cur.next().unwrap(), 10);
         cur.delete();
         cur.insert(15);
     }
@@ -1989,7 +2037,7 @@ mod tests {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
-        assert_eq!(*cur.next().unwrap(), 10);
+        assert_eq!(*cur.next().unwrap(), 20);
         cur.insert(15);
         cur.insert(25);
     }
@@ -2080,7 +2128,7 @@ mod tests {
         });
     }
 
-    fn run_index_drop_mid_iteration_relinks<I: Unordered<Value = u64>>(index: &mut I) {
+    fn run_index_drop_mid_iteration_preserves_chain<I: Unordered<Value = u64>>(index: &mut I) {
         for i in 0..5 {
             index.insert(b"z", i);
         }
@@ -2091,39 +2139,39 @@ mod tests {
         }
         assert_eq!(
             index.get(b"z").copied().collect::<Vec<_>>(),
-            vec![0, 4, 3, 2, 1]
+            vec![4, 3, 2, 1, 0]
         );
     }
 
     #[test_traced]
-    fn test_hash_index_drop_mid_iteration_relinks() {
+    fn test_hash_index_drop_mid_iteration_preserves_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            run_index_drop_mid_iteration_relinks(&mut index);
+            run_index_drop_mid_iteration_preserves_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_ordered_index_drop_mid_iteration_relinks() {
+    fn test_ordered_index_drop_mid_iteration_preserves_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_ordered(context);
-            run_index_drop_mid_iteration_relinks(&mut index);
+            run_index_drop_mid_iteration_preserves_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_partitioned_index_drop_mid_iteration_relinks() {
+    fn test_partitioned_index_drop_mid_iteration_preserves_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
                 let mut index = new_partitioned_unordered(context.child("unordered"));
-                run_index_drop_mid_iteration_relinks(&mut index);
+                run_index_drop_mid_iteration_preserves_chain(&mut index);
             }
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
-                run_index_drop_mid_iteration_relinks(&mut index);
+                run_index_drop_mid_iteration_preserves_chain(&mut index);
             }
         });
     }
