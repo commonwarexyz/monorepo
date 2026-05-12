@@ -20,14 +20,32 @@ pub enum Message<S: Scheme, D: Digest> {
     Constructed(Vote<S, D>),
 }
 
+impl<S: Scheme, D: Digest> Message<S, D> {
+    // A queued update is a pruning floor for overflow. Returns true when this
+    // update would drop `vote` once the batcher actor delivers the update.
+    fn prunes(&self, vote: &Vote<S, D>) -> bool {
+        let Self::Update {
+            current, finalized, ..
+        } = self
+        else {
+            return false;
+        };
+        let view = vote.view();
+        match vote {
+            // Notarize votes are only useful for the current view
+            Vote::Notarize(_) => view < *current || view <= *finalized,
+            // Nullify and finalize votes for prior non-finalized views can
+            // still combine after the voter skips forward
+            Vote::Nullify(_) | Vote::Finalize(_) => view <= *finalized,
+        }
+    }
+}
+
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match &message {
-            Self::Update {
-                current, finalized, ..
-            } => {
+            Self::Update { current, .. } => {
                 let current = *current;
-                let finalized = *finalized;
                 let mut remove = Vec::new();
                 let mut absorb_idx = None;
                 for (index, p) in overflow.iter().enumerate() {
@@ -35,9 +53,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                         Self::Update { current: pc, .. } if *pc > current => return false,
                         Self::Update { current: pc, .. } if *pc < current => remove.push(index),
                         Self::Update { .. } => absorb_idx = Some(index),
-                        Self::Constructed(vote) if vote_pruned(vote, current, finalized) => {
-                            remove.push(index);
-                        }
+                        Self::Constructed(vote) if message.prunes(vote) => remove.push(index),
                         Self::Constructed(_) => {}
                     }
                 }
@@ -57,29 +73,13 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 true
             }
             Self::Constructed(vote) => {
-                if overflow.iter().any(|p| {
-                    matches!(p, Self::Update { current, finalized, .. }
-                        if vote_pruned(vote, *current, *finalized))
-                }) {
+                if overflow.iter().any(|p| p.prunes(vote)) {
                     return false;
                 }
                 overflow.push_back(message);
                 true
             }
         }
-    }
-}
-
-// A queued update is a pruning floor for overflow. It drops only constructed
-// votes that the batcher actor would discard once the update is delivered.
-fn vote_pruned<S: Scheme, D: Digest>(vote: &Vote<S, D>, current: View, finalized: View) -> bool {
-    let view = vote.view();
-    match vote {
-        // Notarize votes are only useful for the current view
-        Vote::Notarize(_) => view < current || view <= finalized,
-        // Nullify and finalize votes for prior non-finalized views can still
-        // combine after the voter skips forward
-        Vote::Nullify(_) | Vote::Finalize(_) => view <= finalized,
     }
 }
 

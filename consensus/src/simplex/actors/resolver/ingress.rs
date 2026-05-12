@@ -17,32 +17,56 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
     Certified { view: View, success: bool },
 }
 
-impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        let new_view = match &message {
+impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
+    fn view(&self) -> View {
+        match self {
             Self::Certificate(c) => c.view(),
             Self::Certified { view, .. } => *view,
-        };
-        let new_is_finalization =
-            matches!(&message, Self::Certificate(Certificate::Finalization(_)));
+        }
+    }
+
+    fn is_finalization(&self) -> bool {
+        matches!(self, Self::Certificate(Certificate::Finalization(_)))
+    }
+
+    fn replaces(&self, pending: &Self) -> bool {
+        match (self, pending) {
+            (
+                Self::Certificate(Certificate::Notarization(x)),
+                Self::Certificate(Certificate::Notarization(y)),
+            ) => x.view() == y.view(),
+            (
+                Self::Certificate(Certificate::Nullification(x)),
+                Self::Certificate(Certificate::Nullification(y)),
+            ) => x.view() == y.view(),
+            (
+                Self::Certificate(Certificate::Finalization(x)),
+                Self::Certificate(Certificate::Finalization(y)),
+            ) => x.view() == y.view(),
+            (Self::Certified { view: x, .. }, Self::Certified { view: y, .. }) => x == y,
+            _ => false,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        let new_view = message.view();
+        let new_is_finalization = message.is_finalization();
         let mut remove = Vec::new();
         let mut absorb_idx = None;
         for (index, p) in overflow.iter().enumerate() {
-            let p_view = match p {
-                Self::Certificate(c) => c.view(),
-                Self::Certified { view, .. } => *view,
-            };
             // A queued finalization is the resolver floor. Certificates and
             // certification results at or below that view cannot alter
             // resolver state after the finalization lands
-            if matches!(p, Self::Certificate(Certificate::Finalization(_))) && p_view >= new_view {
+            if p.is_finalization() && p.view() >= new_view {
                 return false;
             }
-            if new_is_finalization && p_view <= new_view {
+            if new_is_finalization && p.view() <= new_view {
                 remove.push(index);
                 continue;
             }
-            if absorb_idx.is_none() && same_queue(p, &message) {
+            if absorb_idx.is_none() && message.replaces(p) {
                 absorb_idx = Some(index);
             }
         }
@@ -73,28 +97,6 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             overflow.push_back(message);
         }
         true
-    }
-}
-
-fn same_queue<S: Scheme, D: Digest>(a: &MailboxMessage<S, D>, b: &MailboxMessage<S, D>) -> bool {
-    match (a, b) {
-        (
-            MailboxMessage::Certificate(Certificate::Notarization(x)),
-            MailboxMessage::Certificate(Certificate::Notarization(y)),
-        ) => x.view() == y.view(),
-        (
-            MailboxMessage::Certificate(Certificate::Nullification(x)),
-            MailboxMessage::Certificate(Certificate::Nullification(y)),
-        ) => x.view() == y.view(),
-        (
-            MailboxMessage::Certificate(Certificate::Finalization(x)),
-            MailboxMessage::Certificate(Certificate::Finalization(y)),
-        ) => x.view() == y.view(),
-        (
-            MailboxMessage::Certified { view: x, .. },
-            MailboxMessage::Certified { view: y, .. },
-        ) => x == y,
-        _ => false,
     }
 }
 

@@ -23,37 +23,59 @@ pub enum Message<S: Scheme, D: Digest> {
     Verified(Certificate<S, D>, bool),
 }
 
-impl<S: Scheme, D: Digest> Policy for Message<S, D> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        let new_view = match &message {
+impl<S: Scheme, D: Digest> Message<S, D> {
+    fn view(&self) -> View {
+        match self {
             Self::Proposal(p) => p.view(),
             Self::Timeout(v, _) => *v,
             Self::Verified(c, _) => c.view(),
-        };
-        let new_is_finalization = matches!(
-            &message,
-            Self::Verified(Certificate::Finalization(_), _)
-        );
+        }
+    }
+
+    fn is_finalization(&self) -> bool {
+        matches!(self, Self::Verified(Certificate::Finalization(_), _))
+    }
+
+    fn replaces(&self, pending: &Self) -> bool {
+        match (self, pending) {
+            (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
+            (Self::Timeout(x, _), Self::Timeout(y, _)) => x == y,
+            (
+                Self::Verified(Certificate::Notarization(x), _),
+                Self::Verified(Certificate::Notarization(y), _),
+            ) => x.view() == y.view(),
+            (
+                Self::Verified(Certificate::Nullification(x), _),
+                Self::Verified(Certificate::Nullification(y), _),
+            ) => x.view() == y.view(),
+            (
+                Self::Verified(Certificate::Finalization(x), _),
+                Self::Verified(Certificate::Finalization(y), _),
+            ) => x.view() == y.view(),
+            _ => false,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Policy for Message<S, D> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        let new_view = message.view();
+        let new_is_finalization = message.is_finalization();
         let mut remove = Vec::new();
         let mut absorb_idx = None;
         for (index, p) in overflow.iter().enumerate() {
-            let p_view = match p {
-                Self::Proposal(pr) => pr.view(),
-                Self::Timeout(v, _) => *v,
-                Self::Verified(c, _) => c.view(),
-            };
             // A finalization advances the voter past all work at or below its
             // view. Keeping older proposals, timeouts, or certificates would
             // only make the actor discard them after processing the
             // finalization
-            if matches!(p, Self::Verified(Certificate::Finalization(_), _)) && p_view >= new_view {
+            if p.is_finalization() && p.view() >= new_view {
                 return false;
             }
-            if new_is_finalization && p_view <= new_view {
+            if new_is_finalization && p.view() <= new_view {
                 remove.push(index);
                 continue;
             }
-            if absorb_idx.is_none() && same_queue(p, &message) {
+            if absorb_idx.is_none() && message.replaces(p) {
                 absorb_idx = Some(index);
             }
         }
@@ -77,26 +99,6 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             overflow.push_back(message);
         }
         true
-    }
-}
-
-fn same_queue<S: Scheme, D: Digest>(a: &Message<S, D>, b: &Message<S, D>) -> bool {
-    match (a, b) {
-        (Message::Proposal(x), Message::Proposal(y)) => x.view() == y.view(),
-        (Message::Timeout(x, _), Message::Timeout(y, _)) => x == y,
-        (
-            Message::Verified(Certificate::Notarization(x), _),
-            Message::Verified(Certificate::Notarization(y), _),
-        ) => x.view() == y.view(),
-        (
-            Message::Verified(Certificate::Nullification(x), _),
-            Message::Verified(Certificate::Nullification(y), _),
-        ) => x.view() == y.view(),
-        (
-            Message::Verified(Certificate::Finalization(x), _),
-            Message::Verified(Certificate::Finalization(y), _),
-        ) => x.view() == y.view(),
-        _ => false,
     }
 }
 
