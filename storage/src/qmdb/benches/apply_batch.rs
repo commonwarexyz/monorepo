@@ -1,6 +1,6 @@
 //! Benchmarks for applying already-merkleized QMDB batches.
 
-use crate::common::{any_fix_cfg, make_fixed_value, seed_db, AnyUFixDb, CHUNK_SIZE};
+use crate::common::{any_fix_cfg_with, make_fixed_value, seed_db, AnyUFixDb, CHUNK_SIZE};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -8,12 +8,17 @@ use commonware_runtime::{
     Supervisor,
 };
 use commonware_storage::{merkle::mmb::Family as Mmb, qmdb::any::traits::BatchableDb};
+use commonware_utils::NZU64;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroU64,
+    time::{Duration, Instant},
+};
 
 const NUM_KEYS: u64 = 65_536;
 const UPDATES: [u64; 1] = [16_384];
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 
 type Db = AnyUFixDb<Mmb>;
 
@@ -31,7 +36,7 @@ fn write_updates(
 }
 
 async fn open_db(ctx: &Context) -> Db {
-    Db::init(ctx.child("storage"), any_fix_cfg(ctx))
+    Db::init(ctx.child("storage"), any_fix_cfg_with(ctx, ITEMS_PER_BLOB))
         .await
         .unwrap()
 }
