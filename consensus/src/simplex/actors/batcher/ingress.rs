@@ -32,11 +32,11 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         };
         let view = vote.view();
         match vote {
-            // Notarize votes are only useful for the current view
-            Vote::Notarize(_) => view < *current || view <= *finalized,
-            // Nullify and finalize votes for prior non-finalized views can
-            // still combine after the voter skips forward
-            Vote::Nullify(_) | Vote::Finalize(_) => view <= *finalized,
+            // Notarize and nullify votes are only useful for the current view
+            Vote::Notarize(_) | Vote::Nullify(_) => view < *current || view <= *finalized,
+            // Finalize votes for prior non-finalized views can still combine
+            // after the voter skips forward
+            Vote::Finalize(_) => view <= *finalized,
         }
     }
 }
@@ -183,7 +183,7 @@ mod tests {
         ));
         assert!(Message::handle(
             &mut overflow,
-            update(View::new(3), View::new(2))
+            update(View::new(3), View::new(1))
         ));
 
         assert_eq!(overflow.len(), 1);
@@ -193,7 +193,7 @@ mod tests {
                 current,
                 finalized,
                 ..
-            }) if current == View::new(3) && finalized == View::new(2)
+            }) if current == View::new(3) && finalized == View::new(1)
         ));
     }
 
@@ -202,7 +202,7 @@ mod tests {
         let mut overflow = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
-            update(View::new(3), View::new(2))
+            update(View::new(3), View::new(1))
         ));
         assert!(!Message::handle(
             &mut overflow,
