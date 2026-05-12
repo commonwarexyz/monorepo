@@ -268,16 +268,32 @@ impl Simplex for SimplexSecp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        fuzz, strategy::StrategyChoice, utils::Partition, FaultyMessaging, FuzzInput, Standard,
-        TwinsMutator, N4F1C3,
+        fuzz, strategy::StrategyChoice, utils::Partition, CertifyChoice, FaultyMessaging,
+        FuzzInput, Standard, TwinsMutator, N4F1C3,
     };
-    use commonware_consensus::simplex::ForwardingPolicy;
+    use commonware_consensus::simplex::{mocks::application::Certifier, ForwardingPolicy};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
 
     const TEST_CONTAINERS: u64 = 1000;
     const PROPERTY_TEST_CONTAINERS: u64 = 30;
     const SEED: u64 = 0;
+
+    #[test]
+    fn certify_choice_single_cancel_targets_only_idx() {
+        let c0 = CertifyChoice::SingleCancel { target_idx: 1 }.into_certifier(1);
+        assert!(matches!(c0, Certifier::Cancel));
+        let c1 = CertifyChoice::SingleCancel { target_idx: 1 }.into_certifier(0);
+        assert!(matches!(c1, Certifier::Always));
+    }
+
+    #[test]
+    fn certify_choice_single_pending_targets_only_idx() {
+        let c0 = CertifyChoice::SinglePending { target_idx: 2 }.into_certifier(2);
+        assert!(matches!(c0, Certifier::Pending));
+        let c1 = CertifyChoice::SinglePending { target_idx: 2 }.into_certifier(3);
+        assert!(matches!(c1, Certifier::Always));
+    }
 
     fn test_input(seed: u64, containers: u64) -> FuzzInput {
         FuzzInput {
@@ -289,6 +305,7 @@ mod tests {
             strategy: StrategyChoice::AnyScope,
             messaging_faults: Vec::new(),
             forwarding: ForwardingPolicy::Disabled,
+            certify: CertifyChoice::Always,
         }
     }
 

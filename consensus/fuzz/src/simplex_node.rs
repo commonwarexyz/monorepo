@@ -67,6 +67,7 @@ pub struct NodeFuzzInput {
     pub raw_bytes: Vec<u8>,
     pub events: Vec<NodeEvent>,
     pub forwarding: ForwardingPolicy,
+    pub certify: crate::CertifyChoice,
 }
 
 impl Arbitrary<'_> for NodeFuzzInput {
@@ -84,6 +85,16 @@ impl Arbitrary<'_> for NodeFuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
+        // Single-target certify variants are not sampled: the node-fuzz
+        // harness runs only one honest engine, so disabling its certifier
+        // halts liveness.
+        let certify = match u.int_in_range(0..=9)? {
+            0..=6 => crate::CertifyChoice::Always,
+            _ => crate::CertifyChoice::SometimesReject {
+                seed: u.arbitrary::<u64>()?,
+            },
+        };
+
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
             vec![0]
@@ -95,6 +106,7 @@ impl Arbitrary<'_> for NodeFuzzInput {
             raw_bytes,
             events,
             forwarding,
+            certify,
         })
     }
 }
@@ -1489,6 +1501,7 @@ where
         },
         messaging_faults: Vec::new(),
         forwarding: input.forwarding,
+        certify: input.certify,
     };
 
     let (oracle, participants, schemes, mut registrations) =
@@ -1544,6 +1557,7 @@ where
         pending,
         recovered,
         resolver,
+        base.certify,
     );
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
     let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
@@ -1578,6 +1592,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
     participants: Vec<PublicKeyOf<P>>,
     schemes: Vec<P::Scheme>,
     forwarding: ForwardingPolicy,
+    certify: crate::CertifyChoice,
 ) where
     PublicKeyOf<P>: Send,
 {
@@ -1614,6 +1629,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             pending,
             recovered,
             resolver,
+            certify,
         );
 
         let _ = reporter.subscribe().await;
@@ -1647,6 +1663,7 @@ mod tests {
                 },
             ],
             forwarding: ForwardingPolicy::Disabled,
+            certify: crate::CertifyChoice::Always,
         };
         fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
     }
@@ -1671,6 +1688,7 @@ mod tests {
                 },
             ],
             forwarding: ForwardingPolicy::Disabled,
+            certify: crate::CertifyChoice::Always,
         };
         fuzz_node::<simplex::SimplexEd25519, WithRecovery>(input);
     }

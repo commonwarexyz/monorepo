@@ -14,6 +14,9 @@ This is the central catalog of ByzzFuzz invariants. Before changing code or spec
 - Forwarders run synchronously in simulated p2p split-sender plumbing.
 - The injector runs asynchronously and receives only `Intercept` work items.
 - The observed-value pool is shared by extractors and the vote mutator.
+- Every honest validator spawned in a ByzzFuzz iteration uses the same per-iteration certify policy; the policy is sampled before the run.
+- Certify-policy outcomes are deterministic across reruns.
+- The certify policy preserves quorum certification: variants that reject or withhold certification responses either do so with a small per-(view, payload) probability across validators, or target only the byzantine validator so the disabled certifier coincides with the existing adversary instead of removing a correct certifier.
 
 ## Fault Flow
 

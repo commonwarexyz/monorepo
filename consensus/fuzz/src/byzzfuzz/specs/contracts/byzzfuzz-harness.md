@@ -36,6 +36,7 @@ FuzzInput
     | raw_bytes -> FuzzRng
     | required_containers -> schedule bounds and phase 1 target
     | forwarding -> spawn_honest_validator, then currently disabled in fuzz()
+    | certify -> spawn_honest_validator, applied uniformly to every honest validator
     v
 byzzfuzz::run
     |
