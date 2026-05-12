@@ -189,13 +189,7 @@ where
 fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
     // Compute shard length
     let data_len = data.remaining();
-    let prefixed_len = u32::SIZE + data_len;
-    let mut shard_len = prefixed_len.div_ceil(k);
-
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
-    if !shard_len.is_multiple_of(2) {
-        shard_len += 1;
-    }
+    let shard_len = canonical_shard_len(data_len, k);
 
     // Prepare data
     let length_bytes = (data_len as u32).to_be_bytes();
@@ -206,12 +200,30 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
     (padded, shard_len)
 }
 
-/// Extract data from encoded shards.
+/// Return the canonical shard width for a payload and shard count.
+///
+/// Encoding prefixes the payload with its length, splits the result across
+/// `k` original shards, and rounds up to an even width required by
+/// `reed-solomon-simd`. Decode uses the same calculation to reject commitments
+/// that decode to the same payload with a non-canonical shard width.
+const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
+    let prefixed_len = u32::SIZE + data_len;
+    let mut shard_len = prefixed_len.div_ceil(k);
+
+    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
+    if !shard_len.is_multiple_of(2) {
+        shard_len += 1;
+    }
+
+    shard_len
+}
+
+/// Extract data from encoded shards and verify that original shards use the canonical width.
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
 /// This function copies only the data bytes while validating trailing zero
 /// padding directly from the shard slices.
-fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
+fn extract_data(shards: &[&[u8]], k: usize, expected_shard_len: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
     let data_len = read_data_len(shards)?;
     let mut data = Vec::with_capacity(data_len);
@@ -244,6 +256,10 @@ fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
         return Err(Error::Inconsistent);
     }
 
+    // Validate that the original shards use the canonical shard width.
+    if canonical_shard_len(data.len(), k) != expected_shard_len {
+        return Err(Error::Inconsistent);
+    }
     Ok(data)
 }
 
@@ -399,6 +415,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     // Process checked chunks
     let shard_len = first.shard.len();
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
+    let mut provided_shards: Vec<(usize, &[u8])> = Vec::with_capacity(n);
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     let mut provided = 0usize;
@@ -419,6 +436,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
 
         // Add to provided shards and retain the checked digest for this index.
         *digest_slot = Some(chunk.digest);
+        provided_shards.push((index as usize, chunk.shard.as_ref()));
         if index < min {
             provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
@@ -456,6 +474,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     {
         shards[idx] = shard;
     }
+    let data = extract_data(&shards, k, shard_len)?;
 
     // Re-encode recovered data to get recovery shards
     let mut encoder = Cached::take(
@@ -472,7 +491,14 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
     shards.extend(encoding.recovery_iter());
 
-    // Build Merkle tree
+    // Confirm all checked shards match the canonical codeword before reusing their digests.
+    for (idx, shard) in provided_shards {
+        if shard != shards[idx] {
+            return Err(Error::Inconsistent);
+        }
+    }
+
+    // Build Merkle tree from the canonical codeword.
     for (i, digest) in strategy.map_init_collect_vec(
         shard_digests
             .iter()
@@ -501,8 +527,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::Inconsistent);
     }
 
-    // Extract original data
-    extract_data(&shards, k)
+    Ok(data)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
@@ -659,12 +684,17 @@ mod tests {
     use super::*;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    use commonware_invariants::minifuzz;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
     use commonware_utils::NZU16;
 
     type RS = ReedSolomon<Sha256>;
     const STRATEGY: Sequential = Sequential;
+    const FUZZ_MAX_MIN_SHARDS: u16 = 8;
+    const FUZZ_MAX_EXTRA_SHARDS: u16 = 8;
+    const FUZZ_MAX_DATA_LEN: usize = 256;
+    const FUZZ_MAX_EXTRA_SHARD_WIDTH: usize = 16;
 
     fn checked(
         root: <Sha256 as Hasher>::Digest,
@@ -673,6 +703,139 @@ mod tests {
         let Chunk { shard, index, .. } = chunk;
         let digest = Sha256::hash(&shard);
         CheckedChunk::new(root, shard, index, digest)
+    }
+
+    fn build_chunks(
+        shards: &[Vec<u8>],
+    ) -> (
+        <Sha256 as Hasher>::Digest,
+        Vec<Chunk<<Sha256 as Hasher>::Digest>>,
+    ) {
+        let mut builder = Builder::<Sha256>::new(shards.len());
+        for shard in shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let root = tree.root();
+        let chunks = shards
+            .iter()
+            .enumerate()
+            .map(|(i, shard)| {
+                let proof = tree.proof(i as u32).unwrap();
+                Chunk::new(shard.clone().into(), i as u16, proof)
+            })
+            .collect();
+
+        (root, chunks)
+    }
+
+    fn selected_indices(
+        u: &mut arbitrary::Unstructured<'_>,
+        total: u16,
+        minimum: u16,
+    ) -> arbitrary::Result<Vec<u16>> {
+        let to_use = u.int_in_range(minimum..=total)?;
+        let mut selected = (0..total).collect::<Vec<_>>();
+        for i in 0..usize::from(to_use) {
+            let remaining = usize::from(total) - i;
+            let j = i + u.choose_index(remaining)?;
+            selected.swap(i, j);
+        }
+        selected.truncate(usize::from(to_use));
+        Ok(selected)
+    }
+
+    fn assert_decode_unique_commitment(
+        total: u16,
+        min: u16,
+        root: <Sha256 as Hasher>::Digest,
+        chunks: &[Chunk<<Sha256 as Hasher>::Digest>],
+        selected: &[u16],
+    ) {
+        let pieces = selected
+            .iter()
+            .map(|&i| chunks[usize::from(i)].verify::<Sha256>(i, &root).unwrap())
+            .collect::<Vec<_>>();
+
+        let Ok(decoded) = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY) else {
+            return;
+        };
+        let (canonical_root, _) =
+            encode::<Sha256, _>(total, min, decoded.as_slice(), &STRATEGY).unwrap();
+        assert_eq!(
+            root, canonical_root,
+            "decode accepted a root not produced by canonical encode"
+        );
+    }
+
+    fn fuzz_arbitrary_codeword(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<()> {
+        let min = u.int_in_range(1..=FUZZ_MAX_MIN_SHARDS)?;
+        let extra = u.int_in_range(1..=FUZZ_MAX_EXTRA_SHARDS)?;
+        let total = min + extra;
+        let k = usize::from(min);
+        let m = usize::from(extra);
+
+        let data_len = u.int_in_range(0..=FUZZ_MAX_DATA_LEN)?;
+        let data = u.bytes(data_len)?.to_vec();
+        let canonical = canonical_shard_len(data.len(), k);
+        let extra_width = u.int_in_range(0..=FUZZ_MAX_EXTRA_SHARD_WIDTH / 2)? * 2;
+        let shard_len = canonical + extra_width;
+
+        let mut padded = vec![0u8; k * shard_len];
+        padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
+        padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(&data);
+
+        let payload_end = u32::SIZE + data.len();
+        if payload_end < padded.len() && u.int_in_range(0..=3)? == 0 {
+            let offset = payload_end + u.choose_index(padded.len() - payload_end)?;
+            padded[offset] ^= u.arbitrary::<u8>()? | 1;
+        }
+
+        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        for shard in padded.chunks(shard_len) {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let recovery = encoder.encode().unwrap();
+
+        let mut shards = padded
+            .chunks(shard_len)
+            .map(|shard| shard.to_vec())
+            .collect::<Vec<_>>();
+        shards.extend(recovery.recovery_iter().map(|shard| shard.to_vec()));
+
+        let (root, chunks) = build_chunks(&shards);
+        let selected = selected_indices(u, total, min)?;
+        assert_decode_unique_commitment(total, min, root, &chunks, &selected);
+
+        Ok(())
+    }
+
+    fn fuzz_mixed_codeword(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<()> {
+        let min = u.int_in_range(1..=FUZZ_MAX_MIN_SHARDS)?;
+        let extra = u.int_in_range(1..=FUZZ_MAX_EXTRA_SHARDS)?;
+        let total = min + extra;
+
+        let data_len = u.int_in_range(0..=FUZZ_MAX_DATA_LEN)?;
+        let data = u.bytes(data_len)?.to_vec();
+        let (_canonical_root, chunks) =
+            encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        let mut shards = chunks
+            .iter()
+            .map(|chunk| chunk.shard.to_vec())
+            .collect::<Vec<_>>();
+
+        let mutated = usize::from(min + u.int_in_range(0..=extra - 1)?);
+        let offset = u.choose_index(shards[mutated].len())?;
+        shards[mutated][offset] ^= u.arbitrary::<u8>()? | 1;
+
+        let (root, chunks) = build_chunks(&shards);
+        let mut selected = (0..min).collect::<Vec<_>>();
+        selected.push(mutated as u16);
+        assert_decode_unique_commitment(total, min, root, &chunks, &selected);
+
+        Ok(())
     }
 
     #[test]
@@ -881,7 +1044,6 @@ mod tests {
             let mut shard = pieces[1].shard.to_vec();
             shard[0] ^= 0xFF; // Flip bits in first byte
             pieces[1].shard = shard.into();
-            pieces[1].digest = Sha256::hash(&pieces[1].shard);
         }
 
         // Try to decode with the tampered chunk
@@ -997,6 +1159,143 @@ mod tests {
         }
 
         let result = decode::<Sha256, _>(total, min, &non_canonical_root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn minifuzz_decode_unique_commitment() {
+        minifuzz::Builder::default()
+            .with_search_limit(2048)
+            .test(|u| {
+                fuzz_arbitrary_codeword(u)?;
+                fuzz_mixed_codeword(u)?;
+                Ok(())
+            });
+    }
+
+    #[test]
+    fn test_oversized_zero_padded_shards_rejected() {
+        let data = b"X";
+        let total = 6u16;
+        let min = 3u16;
+        let k = min as usize;
+        let m = total as usize - k;
+
+        let oversized_shard_len = 4usize;
+        let mut padded = vec![0u8; k * oversized_shard_len];
+        padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
+        padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(data);
+
+        let mut encoder = ReedSolomonEncoder::new(k, m, oversized_shard_len).unwrap();
+        for shard in padded.chunks(oversized_shard_len) {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let recovery = encoder.encode().unwrap();
+
+        let mut oversized_shards: Vec<Vec<u8>> = padded
+            .chunks(oversized_shard_len)
+            .map(|shard| shard.to_vec())
+            .collect();
+        oversized_shards.extend(recovery.recovery_iter().map(|shard| shard.to_vec()));
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &oversized_shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let oversized_tree = builder.build();
+        let oversized_root = oversized_tree.root();
+
+        let (canonical_root, _) =
+            encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        assert_ne!(oversized_root, canonical_root);
+
+        let pieces = [0u16, 1u16, 4u16]
+            .into_iter()
+            .map(|i| {
+                let proof = oversized_tree.proof(i as u32).unwrap();
+                checked(
+                    oversized_root,
+                    Chunk::new(oversized_shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &oversized_root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_extra_non_canonical_recovery_rejected() {
+        let data = b"canonical originals with bad recovery";
+        let total = 6u16;
+        let min = 3u16;
+
+        let (_root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        let mut shards = chunks
+            .iter()
+            .map(|chunk| chunk.shard.to_vec())
+            .collect::<Vec<_>>();
+        shards[min as usize][0] ^= 0xFF;
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        let pieces = (0u16..=3u16)
+            .map(|i| {
+                let proof = tree.proof(i as u32).unwrap();
+                checked(
+                    root,
+                    Chunk::new(shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_reconstructed_original_with_extra_non_canonical_recovery_rejected() {
+        let data = b"canonical reconstructed originals with bad extra recovery";
+        let total = 6u16;
+        let min = 3u16;
+
+        let (_root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
+        let mut shards = chunks
+            .iter()
+            .map(|chunk| chunk.shard.to_vec())
+            .collect::<Vec<_>>();
+        shards[4][0] ^= 0xFF;
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        let pieces = [0u16, 1u16, 3u16, 4u16]
+            .into_iter()
+            .map(|i| {
+                let proof = tree.proof(i as u32).unwrap();
+                checked(
+                    root,
+                    Chunk::new(shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
