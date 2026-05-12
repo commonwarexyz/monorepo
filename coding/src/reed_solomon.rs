@@ -4,7 +4,7 @@ use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, 
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
-use commonware_utils::Cached;
+use commonware_utils::{bitmap::BitMap, Cached};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -401,7 +401,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = first.shard.len();
-    let mut seen_shards = vec![false; n];
+    let mut seen_shards: BitMap = BitMap::zeroes(n as u64);
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
     let mut provided = 0usize;
@@ -415,13 +415,12 @@ fn decode<'a, H: Hasher, S: Strategy>(
         if index >= total {
             return Err(Error::InvalidIndex(index));
         }
-        let seen = &mut seen_shards[index as usize];
-        if *seen {
+        if seen_shards.get(index as u64) {
             return Err(Error::DuplicateIndex(index));
         }
 
         // Add to provided shards.
-        *seen = true;
+        seen_shards.set(index as u64, true);
         if index < min {
             provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
