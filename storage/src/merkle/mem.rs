@@ -348,7 +348,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Create a new speculative batch with this structure as its parent.
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, D> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, D, commonware_parallel::Sequential> {
         let root = batch::MerkleizedBatch::from_mem(self);
         root.new_batch()
     }

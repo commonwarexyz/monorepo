@@ -498,42 +498,41 @@ where
                         for (dealer, log) in storage.logs(epoch) {
                             logs.record(dealer, log);
                         }
-                        let (success, next_round, next_output, next_share) = if let Some(ps) =
-                            player_state.take()
-                        {
-                            match ps.finalize::<N3f1, Batch>(
-                                self.context.as_present_mut(),
-                                logs,
-                                &Sequential,
-                            ) {
-                                Ok((new_output, new_share)) => (
-                                    true,
-                                    epoch_state.round + 1,
-                                    Some(new_output),
-                                    Some(new_share),
-                                ),
-                                Err(_) => (
-                                    false,
-                                    epoch_state.round,
-                                    epoch_state.output.clone(),
-                                    epoch_state.share.clone(),
-                                ),
-                            }
-                        } else {
-                            match observe::<_, _, N3f1, Batch>(
-                                self.context.as_present_mut(),
-                                logs,
-                                &Sequential,
-                            ) {
-                                Ok(output) => (true, epoch_state.round + 1, Some(output), None),
-                                Err(_) => (
-                                    false,
-                                    epoch_state.round,
-                                    epoch_state.output.clone(),
-                                    epoch_state.share.clone(),
-                                ),
-                            }
-                        };
+                        let (success, next_round, next_output, next_share) =
+                            if let Some(ps) = player_state.take() {
+                                match ps.finalize::<N3f1, Batch>(
+                                    self.context.as_present_mut(),
+                                    logs,
+                                    &Sequential,
+                                ) {
+                                    Ok((new_output, new_share)) => (
+                                        true,
+                                        epoch_state.round + 1,
+                                        Some(new_output),
+                                        Some(new_share),
+                                    ),
+                                    Err(_) => (
+                                        false,
+                                        epoch_state.round,
+                                        epoch_state.output.clone(),
+                                        epoch_state.share.clone(),
+                                    ),
+                                }
+                            } else {
+                                match observe::<_, _, N3f1, Batch>(
+                                    self.context.as_present_mut(),
+                                    logs,
+                                    &Sequential,
+                                ) {
+                                    Ok(output) => (true, epoch_state.round + 1, Some(output), None),
+                                    Err(_) => (
+                                        false,
+                                        epoch_state.round,
+                                        epoch_state.output.clone(),
+                                        epoch_state.share.clone(),
+                                    ),
+                                }
+                            };
                         if success {
                             info!(?epoch, "epoch succeeded");
                             self.successful_epochs.inc();

@@ -6,7 +6,7 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous, Many, Mutable},
+        contiguous::{fixed, metrics::VariableMetrics as Metrics, Contiguous, Many, Mutable},
         segmented::variable,
         Error,
     },
@@ -232,6 +232,9 @@ pub struct Journal<E: Context, V: Codec> {
 
     /// Optional compression level when encoding items.
     compression: Option<u8>,
+
+    /// Metrics for monitoring journal state and activity.
+    metrics: Metrics<E>,
 }
 
 /// A reader guard that holds a consistent snapshot of the variable journal's bounds.
@@ -239,6 +242,7 @@ pub struct Reader<'a, E: Context, V: Codec> {
     guard: AsyncRwLockReadGuard<'a, Inner<E, V>>,
     offsets: fixed::Reader<'a, E, u64>,
     items_per_section: u64,
+    metrics: &'a Metrics<E>,
 }
 
 impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
@@ -249,19 +253,31 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
-        self.guard
+        let _timer = self.metrics.read_timer();
+        self.metrics.read_calls.inc();
+        let result = match self
+            .guard
             .read(position, self.items_per_section, &self.offsets)
             .await
+        {
+            Ok(item) => {
+                self.metrics.items_read.inc();
+                Ok(item)
+            }
+            Err(error) => Err(error),
+        };
+        result
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        // Sanity check the input.
         if positions.is_empty() {
             return Ok(Vec::new());
         }
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
         debug_assert!(
             positions.windows(2).all(|w| w[0] < w[1]),
-            "positions must be sorted and unique"
+            "positions must be strictly increasing"
         );
         if positions[0] < self.guard.pruning_boundary {
             return Err(Error::ItemPruned(positions[0]));
@@ -292,6 +308,7 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
         }
 
         if miss_positions.is_empty() {
+            self.metrics.items_read.inc_by(positions.len() as u64);
             return Ok(result.into_iter().map(|r| r.unwrap()).collect());
         }
 
@@ -342,12 +359,17 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
             group_start = group_end;
         }
 
+        self.metrics.items_read.inc_by(positions.len() as u64);
         Ok(result.into_iter().map(|r| r.unwrap()).collect())
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
-        self.guard
-            .try_read_sync(position, self.items_per_section, &self.offsets)
+        let item = self
+            .guard
+            .try_read_sync(position, self.items_per_section, &self.offsets)?;
+        self.metrics.try_read_sync_hits.inc();
+        self.metrics.items_read.inc();
+        Some(item)
     }
 
     async fn replay(
@@ -429,6 +451,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let (pruning_boundary, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
 
+        let metrics = Metrics::new(context);
+        metrics.update(size, pruning_boundary, items_per_section);
+
         Ok(Self {
             inner: UpgradableAsyncRwLock::new(Inner {
                 data,
@@ -438,6 +463,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             items_per_section,
             compression: cfg.compression,
+            metrics,
         })
     }
 
@@ -473,6 +499,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
+        let items_per_section = cfg.items_per_section.get();
+        let metrics = Metrics::new(context);
+        metrics.update(size, size, items_per_section);
+
         Ok(Self {
             inner: UpgradableAsyncRwLock::new(Inner {
                 data,
@@ -480,8 +510,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 pruning_boundary: size,
             }),
             offsets,
-            items_per_section: cfg.items_per_section.get(),
+            items_per_section,
             compression: cfg.compression,
+            metrics,
         })
     }
 
@@ -617,6 +648,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Update our size
         inner.size = size;
+        self.metrics
+            .update(inner.size, inner.pruning_boundary, self.items_per_section);
 
         Ok(())
     }
@@ -637,7 +670,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&self, item: &V) -> Result<u64, Error> {
-        self.append_many(Many::Flat(std::slice::from_ref(item)))
+        let _timer = self.metrics.append_timer();
+        self.metrics.append_calls.inc();
+        self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
             .await
     }
 
@@ -646,6 +681,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Acquires the write lock once for all items instead of per-item.
     /// Returns [Error::EmptyAppend] if items is empty.
     pub async fn append_many<'a>(&'a self, items: Many<'a, V>) -> Result<u64, Error> {
+        let _timer = self.metrics.append_many_timer();
+        self.metrics.append_many_calls.inc();
+        self.append_many_inner(items).await
+    }
+
+    async fn append_many_inner<'a>(&'a self, items: Many<'a, V>) -> Result<u64, Error> {
         if items.is_empty() {
             return Err(Error::EmptyAppend);
         }
@@ -720,12 +761,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 let inner_ref = inner.downgrade_to_upgradable();
                 futures::try_join!(inner_ref.data.sync(section), self.offsets.sync())?;
                 if written == items_count {
+                    self.metrics.update(
+                        inner_ref.size,
+                        inner_ref.pruning_boundary,
+                        self.items_per_section,
+                    );
                     return Ok(inner_ref.size - 1);
                 }
                 inner = inner_ref.upgrade().await;
             }
         }
 
+        self.metrics
+            .update(inner.size, inner.pruning_boundary, self.items_per_section);
         Ok(inner.size - 1)
     }
 
@@ -735,6 +783,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             guard: self.inner.read().await,
             offsets: self.offsets.reader().await,
             items_per_section: self.items_per_section,
+            metrics: &self.metrics,
         }
     }
 
@@ -772,6 +821,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let new_oldest = (min_section * self.items_per_section).max(inner.pruning_boundary);
             inner.pruning_boundary = new_oldest;
             self.offsets.prune(new_oldest).await?;
+            self.metrics
+                .update(inner.size, inner.pruning_boundary, self.items_per_section);
         }
         Ok(pruned)
     }
@@ -781,18 +832,23 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// This is faster than `sync()` but recovery will be required on startup if a crash occurs
     /// before the next call to `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
+        let _timer = self.metrics.commit_timer();
+        self.metrics.record_commit();
         // Serialize with append/prune/rewind so section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
         let section = position_to_section(inner.size, self.items_per_section);
-        inner.data.sync(section).await
+        inner.data.sync(section).await?;
+        Ok(())
     }
 
     /// Durably persist the journal and ensure recovery is not required on startup.
     ///
     /// This is slower than `commit()` but ensures the journal doesn't require recovery on startup.
     pub async fn sync(&self) -> Result<(), Error> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         // Serialize with append/prune/rewind so section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
@@ -829,6 +885,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.offsets.clear_to_size(new_size).await?;
         inner.size = new_size;
         inner.pruning_boundary = new_size;
+        self.metrics
+            .update(inner.size, inner.pruning_boundary, self.items_per_section);
         Ok(())
     }
 
@@ -1215,7 +1273,7 @@ mod tests {
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Runner, Storage, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Metrics as _, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
@@ -3416,6 +3474,72 @@ mod tests {
             assert_eq!(bounds.start, 100);
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_journal_metrics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "metrics".into(),
+                items_per_section: NZU64!(2),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, u64>::init(context.child("variable_metrics"), cfg)
+                .await
+                .unwrap();
+
+            let items = [0, 1, 2, 3, 4];
+            journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal.append(&5).await.unwrap();
+            let reader = journal.reader().await;
+            reader.read(0).await.unwrap();
+            reader.read_many(&[1, 2]).await.unwrap();
+            reader.try_read_sync(3).unwrap();
+            drop(reader);
+            journal.commit().await.unwrap();
+            journal.sync().await.unwrap();
+            journal.prune(2).await.unwrap();
+            journal.rewind(4).await.unwrap();
+
+            let buffer = context.encode();
+            for expected in [
+                "variable_metrics_size 4",
+                "variable_metrics_pruning_boundary 2",
+                "variable_metrics_retained 2",
+                "variable_metrics_tail_items 2",
+                "variable_metrics_append_calls_total 1",
+                "variable_metrics_append_many_calls_total 1",
+                "variable_metrics_read_calls_total 1",
+                "variable_metrics_read_many_calls_total 1",
+                "variable_metrics_try_read_sync_hits_total 1",
+                "variable_metrics_items_read_total 4",
+                "variable_metrics_commit_calls_total 1",
+                "variable_metrics_sync_calls_total 1",
+                "variable_metrics_append_duration_count 1",
+                "variable_metrics_append_many_duration_count 1",
+                "variable_metrics_read_duration_count 1",
+                "variable_metrics_read_many_duration_count 1",
+                "variable_metrics_commit_duration_count 1",
+                "variable_metrics_sync_duration_count 1",
+                "variable_metrics_data_tracked",
+                "variable_metrics_offsets_size 4",
+                "variable_metrics_offsets_blobs_tracked",
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
+            for unexpected in [
+                "variable_metrics_cache_hits_total",
+                "variable_metrics_cache_misses_total",
+            ] {
+                assert!(!buffer.contains(unexpected), "{unexpected}\n{buffer}");
             }
 
             journal.destroy().await.unwrap();

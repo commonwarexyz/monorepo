@@ -5,6 +5,9 @@
 //! - [RangeProof]: Proves a range of operations exist in the database.
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
+mod geometry;
+
+use self::geometry::RangeProofGeometry;
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{
@@ -47,7 +50,7 @@ impl<D: Digest> OpsRootWitness<D> {
     /// Return true if this witness proves that `canonical_root` commits to `ops_root`.
     pub fn verify<H: CHasher<Digest = D>>(
         &self,
-        hasher: &mut StandardHasher<H>,
+        hasher: &StandardHasher<H>,
         ops_root: &D,
         canonical_root: &D,
     ) -> bool {
@@ -109,41 +112,12 @@ where
     }
 }
 
-/// An inventory of all structural peaks for a Merkle-family tree, mapped linearly top-to-bottom
-/// relative to the bounds of a verified range proof.
-///
-/// Because the database operations log acts dynamically like an append-only structure (MMR or MMB),
-/// the elements verified in a range proof intersect with zero or more contiguous root peaks.
-/// This struct mechanically buckets every peak into exactly one of three sequential layout regions:
-/// those appearing structurally before the range, those structurally overlapping the range, and
-/// those physically placed after the range bounds.
-struct PeakLayout<F: Family> {
-    /// Peaks whose leaves are entirely preceding the operation range's starting location.
-    prefix: Vec<(Position<F>, u32)>,
-    /// Peaks that physically intersect with the operations proven within the range.
-    range: Vec<(Position<F>, u32)>,
-    /// Peaks whose leaves entirely succeed the operation range's ending location.
-    after: Vec<(Position<F>, u32)>,
-}
-
-#[derive(Clone, Copy)]
-struct GraftingInfo {
-    height: u32,
-    complete_chunks: u64,
-}
-
-impl GraftingInfo {
-    fn from_status<const N: usize>(status: &impl BitmapReadable<N>) -> Self {
-        Self {
-            height: grafting::height::<N>(),
-            complete_chunks: status.complete_chunks() as u64,
-        }
-    }
-}
-
+// Provides complete bitmap chunks by index for grafted reconstruction. Pruned chunks are returned
+// as zero chunks because their bits are already folded into the inactive prefix.
 struct BitmapGrafting<'a, B, const N: usize> {
     status: &'a B,
-    info: GraftingInfo,
+    grafting_height: u32,
+    complete_chunks: u64,
     pruned_chunks: u64,
 }
 
@@ -151,13 +125,14 @@ impl<'a, B: BitmapReadable<N>, const N: usize> BitmapGrafting<'a, B, N> {
     fn new(status: &'a B) -> Self {
         Self {
             status,
-            info: GraftingInfo::from_status(status),
+            grafting_height: grafting::height::<N>(),
+            complete_chunks: status.complete_chunks() as u64,
             pruned_chunks: status.pruned_chunks() as u64,
         }
     }
 
     fn chunk(&self, idx: u64) -> Option<[u8; N]> {
-        if idx >= self.info.complete_chunks {
+        if idx >= self.complete_chunks {
             None
         } else if idx < self.pruned_chunks {
             Some([0u8; N])
@@ -167,373 +142,72 @@ impl<'a, B: BitmapReadable<N>, const N: usize> BitmapGrafting<'a, B, N> {
     }
 }
 
-struct ProofPlan<F: Family> {
-    leaves: Location<F>,
-    range: Range<Location<F>>,
-    layout: PeakLayout<F>,
-    inactive_peaks: usize,
-    start_chunk: u64,
-    end_chunk: u64,
-    grafting: GraftingInfo,
-}
-
-impl<F: Family> ProofPlan<F> {
-    fn new(
-        leaves: Location<F>,
-        range: Range<Location<F>>,
-        inactive_peaks: usize,
-        grafting: GraftingInfo,
-    ) -> Result<Self, merkle::Error<F>> {
-        let layout = peak_layout(leaves, range.clone())?;
-        let end_loc = range.end.checked_sub(1).expect("range is non-empty");
-        let start_chunk = *range.start >> grafting.height;
-        let end_chunk = *end_loc >> grafting.height;
-
-        Ok(Self {
-            leaves,
-            range,
-            layout,
-            inactive_peaks,
-            start_chunk,
-            end_chunk,
-            grafting,
-        })
-    }
-
-    fn range_start(&self) -> u64 {
-        peaks_leaf_len(&self.layout.prefix)
-    }
-
-    fn after_start(&self) -> u64 {
-        self.range_start() + peaks_leaf_len(&self.layout.range)
-    }
-
-    fn prefix_raw_start(&self) -> usize {
-        prefix_raw_start_idx(&self.layout.prefix, self.start_chunk, self.grafting.height)
-    }
-
-    fn after_raw_end(&self) -> usize {
-        after_raw_end_idx(
-            &self.layout.after,
-            self.after_start(),
-            self.end_chunk,
-            self.grafting.height,
-        )
-    }
-
-    const fn chunk_available(&self, idx: u64) -> bool {
-        idx < self.grafting.complete_chunks
-    }
-
-    const fn total_peaks(&self) -> usize {
-        self.layout.prefix.len() + self.layout.range.len() + self.layout.after.len()
-    }
-}
-
-impl<F: Graftable> ProofPlan<F> {
-    fn from_inactivity_floor(
-        leaves: Location<F>,
-        range: Range<Location<F>>,
-        inactivity_floor: Location<F>,
-        grafting: GraftingInfo,
-    ) -> Result<Self, merkle::Error<F>> {
-        let inactive_peaks =
-            grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting.height)?;
-        Self::new(leaves, range, inactive_peaks, grafting)
-    }
-
-    fn needs_grafted_peak_fold(&self) -> Result<bool, merkle::Error<F>> {
-        let size = Position::<F>::try_from(self.leaves)?;
-        Ok(proof_needs_grafted_peak_fold(
-            &self.layout,
-            size,
-            self.grafting.height,
-            self.grafting.complete_chunks,
-        ))
-    }
-}
-
-/// Helper to bucket a tree's current peaks into prefix, range, and after sub-vectors.
-///
-/// Traverses all structural peaks left-to-right (from largest/leftmost to smallest/rightmost)
-/// and divides them into the three regions described by [`PeakLayout`].
-fn peak_layout<F: Family>(
-    leaves: Location<F>,
-    range: Range<Location<F>>,
-) -> Result<PeakLayout<F>, merkle::Error<F>> {
-    if range.is_empty() {
-        return Err(merkle::Error::Empty);
-    }
-    let end_minus_one = range.end.checked_sub(1).expect("range is non-empty");
-    if end_minus_one >= leaves {
-        return Err(merkle::Error::RangeOutOfBounds(range.end));
-    }
-
-    let size = Position::<F>::try_from(leaves)?;
-    let mut prefix = Vec::new();
-    let mut range_peaks = Vec::new();
-    let mut after = Vec::new();
-    let mut leaf_cursor = 0u64;
-
-    for (peak_pos, height) in F::peaks(size) {
-        let leaf_end = leaf_cursor + (1u64 << height);
-        if leaf_end <= *range.start {
-            prefix.push((peak_pos, height));
-        } else if leaf_cursor >= *range.end {
-            after.push((peak_pos, height));
-        } else {
-            range_peaks.push((peak_pos, height));
-        }
-        leaf_cursor = leaf_end;
-    }
-
-    Ok(PeakLayout {
-        prefix,
-        range: range_peaks,
-        after,
-    })
-}
-
-/// Determines if a specific chunk index spans multiple peaks and has been fully sealed.
-///
-/// If `chunk_idx` is less than `complete_chunks` and structurally covers more than
-/// one peak, it implies those discrete ops peaks must be explicitly folded together (via the
-/// "grafted fold" interception mechanics) during proof verification.
-fn chunk_needs_grafted_fold<F: Graftable>(
-    size: Position<F>,
-    chunk_idx: u64,
-    grafting_height: u32,
-    complete_chunks: u64,
-) -> bool {
-    chunk_idx < complete_chunks
-        && F::chunk_peaks(size, chunk_idx, grafting_height)
-            .nth(1)
-            .is_some()
-}
-
-/// Checks if the provided proof interacts with ANY multi-peak complete chunks.
-///
-/// It scans all peaks dynamically bucketed by `layout` (prefix, active range, and suffix after).
-/// If any peak's height is sub-grafting-height and falls within a completely sealed chunk
-/// that spans multiple peaks, the standard contiguous root verification MUST be intercepted and
-/// rebuilt completely using the `reconstruct_grafted_root` algorithm.
-fn proof_needs_grafted_peak_fold<F: Graftable>(
-    layout: &PeakLayout<F>,
-    size: Position<F>,
-    grafting_height: u32,
-    complete_chunks: u64,
-) -> bool {
-    layout
-        .prefix
-        .iter()
-        .chain(layout.range.iter())
-        .chain(layout.after.iter())
-        .any(|(pos, height)| {
-            if *height < grafting_height {
-                let chunk_idx = *F::leftmost_leaf(*pos, *height) >> grafting_height;
-                chunk_needs_grafted_fold(size, chunk_idx, grafting_height, complete_chunks)
-            } else {
-                false
-            }
-        })
-}
-
-/// Return the number of leaves covered by `peaks`.
-fn peaks_leaf_len<F: Family>(peaks: &[(Position<F>, u32)]) -> u64 {
-    peaks
-        .iter()
-        .fold(0u64, |acc, (_pos, height)| acc + (1u64 << *height))
-}
-
-/// Return the prefix index where peaks may need to regroup with caller-provided chunks.
-fn prefix_raw_start_idx<F: Family>(
-    peaks: &[(Position<F>, u32)],
-    start_chunk: u64,
-    grafting_height: u32,
-) -> usize {
-    let chunk_start = start_chunk << grafting_height;
-    let mut leaf_cursor = 0u64;
-    for (idx, (_pos, height)) in peaks.iter().enumerate() {
-        leaf_cursor += 1u64 << *height;
-        if leaf_cursor > chunk_start {
-            return idx;
-        }
-    }
-    peaks.len()
-}
-
-/// Return the after-region index up to which peaks may need caller-provided chunks.
-fn after_raw_end_idx<F: Family>(
-    peaks: &[(Position<F>, u32)],
-    start_leaf: u64,
-    end_chunk: u64,
-    grafting_height: u32,
-) -> usize {
-    let chunk_end = (end_chunk + 1) << grafting_height;
-    let mut leaf_cursor = start_leaf;
-    for (idx, (_pos, height)) in peaks.iter().enumerate() {
-        if leaf_cursor >= chunk_end {
-            return idx;
-        }
-        leaf_cursor += 1u64 << *height;
-    }
-    peaks.len()
-}
-
-/// Return the transformed grafted witness shape for a peak slice.
-fn transformed_peak_counts<F: Graftable>(
-    peaks: &[(Position<F>, u32)],
-    start_leaf: u64,
-    grafting_height: u32,
-    has_chunk: impl Fn(u64) -> bool,
-) -> Vec<usize> {
-    let chunk_size = 1u64 << grafting_height;
-    let mut leaf_cursor = start_leaf;
-    let mut out = Vec::new();
-    let mut pending_chunk: Option<(u64, usize)> = None;
-
-    let flush = |out: &mut Vec<usize>, pending: &mut Option<(u64, usize)>| {
-        if let Some((_idx, count)) = pending.take() {
-            out.push(count);
-        }
-    };
-
-    for (_pos, height) in peaks {
-        let peak_start = leaf_cursor;
-        leaf_cursor += 1u64 << *height;
-
-        if *height >= grafting_height {
-            flush(&mut out, &mut pending_chunk);
-            out.push(1);
-            continue;
-        }
-
-        let chunk_idx = peak_start / chunk_size;
-        match pending_chunk.take() {
-            Some((idx, count)) if idx == chunk_idx => {
-                pending_chunk = Some((idx, count + 1));
-            }
-            old_chunk => {
-                pending_chunk = old_chunk;
-                flush(&mut out, &mut pending_chunk);
-                if has_chunk(chunk_idx) {
-                    pending_chunk = Some((chunk_idx, 1));
-                } else {
-                    out.push(1);
-                }
-            }
-        }
-    }
-    flush(&mut out, &mut pending_chunk);
-
-    out
-}
-
-// Reconstructs the canonical grafted root from the combination of generic proof boundaries,
-// operation elements, and grafted prefix/suffix witnesses provided by the prover.
+// Reconstructs the canonical grafted root from the ops-tree range proof, operation elements, and
+// the prefix/suffix witnesses described by the five-segment geometry.
 fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
     verifier: &grafting::Verifier<'_, F, H>,
     proof: &RangeProof<F, H::Digest>,
-    plan: &ProofPlan<F>,
+    geometry: &RangeProofGeometry<F>,
     collected: &BTreeMap<Position<F>, H::Digest>,
     get_chunk: impl Fn(u64) -> Option<C>,
 ) -> Option<H::Digest> {
-    let prefix_start = 0;
-    let range_start = plan.range_start();
-    let after_start = plan.after_start();
-    let prefix_raw_start = plan.prefix_raw_start();
-    let after_raw_end = plan.after_raw_end();
+    let prefix_boundary = geometry.prefix_boundary();
+    let range_peaks = geometry.range_peaks();
+    let suffix_boundary = geometry.suffix_boundary();
+    let (prefix_counts, prefix_bitmap_witnesses, prefix_boundary_digests) =
+        geometry.split_prefix_witnesses(&proof.prefix_witnesses)?;
+    let (suffix_boundary_digests, suffix_bitmap_witnesses, suffix_counts) =
+        geometry.split_suffix_witnesses(&proof.suffix_witnesses)?;
 
-    let prefix_counts = transformed_peak_counts(
-        &plan.layout.prefix[..prefix_raw_start],
-        prefix_start,
-        plan.grafting.height,
-        |idx| plan.chunk_available(idx),
+    let mut peak_entries = Vec::with_capacity(
+        proof.prefix_witnesses.len() + range_peaks.len() + proof.suffix_witnesses.len(),
     );
-    let suffix_counts = transformed_peak_counts(
-        &plan.layout.after[after_raw_end..],
-        after_start + peaks_leaf_len(&plan.layout.after[..after_raw_end]),
-        plan.grafting.height,
-        |idx| plan.chunk_available(idx),
-    );
-    let prefix_witness_len = prefix_counts.len() + plan.layout.prefix[prefix_raw_start..].len();
-    let suffix_witness_len = plan.layout.after[..after_raw_end].len() + suffix_counts.len();
-    if proof.unfolded_prefix_peaks.len() != prefix_witness_len
-        || proof.unfolded_suffix_peaks.len() != suffix_witness_len
-    {
-        return None;
+    peak_entries.extend(prefix_bitmap_witnesses.iter().copied().zip(prefix_counts));
+    let mut range_digests = Vec::with_capacity(range_peaks.len());
+    for pos in range_peaks.positions() {
+        range_digests.push(*collected.get(&pos)?);
     }
 
-    let mut transformed = Vec::with_capacity(
-        proof.unfolded_prefix_peaks.len()
-            + plan.layout.range.len()
-            + proof.unfolded_suffix_peaks.len(),
-    );
-    let (prefix_transformed, prefix_raw) =
-        proof.unfolded_prefix_peaks.split_at(prefix_counts.len());
-    transformed.extend(prefix_transformed.iter().copied().zip(prefix_counts));
-    let mut range_digests = Vec::with_capacity(plan.layout.range.len());
-    for (pos, _) in &plan.layout.range {
-        range_digests.push(*collected.get(pos)?);
-    }
-    let (suffix_raw, suffix_transformed) = proof
-        .unfolded_suffix_peaks
-        .split_at(plan.layout.after[..after_raw_end].len());
-
-    // The transformed list has three regions: entries before the range-adjacent chunks, the
-    // middle chunks that may combine raw prefix/range/suffix peaks, and entries after that middle
-    // region. `middle_peaks` covers exactly the chunk span from the first raw prefix peak through
-    // the last raw suffix peak that can share a grafted chunk with the proven range.
-    let middle_iter = plan.layout.prefix[prefix_raw_start..]
-        .iter()
-        .map(|(_, h)| *h)
-        .zip(prefix_raw.iter().copied())
-        .chain(
-            plan.layout
-                .range
-                .iter()
-                .map(|(_, h)| *h)
-                .zip(range_digests.iter().copied()),
-        )
-        .chain(
-            plan.layout.after[..after_raw_end]
-                .iter()
-                .map(|(_, h)| *h)
-                .zip(suffix_raw.iter().copied()),
-        );
-    transformed.extend(grafting::transform_peak_digests::<F, _, _, _>(
+    // `root_with_folded_peaks` needs one ordered peak entry per reconstructed grafted peak. The
+    // pure prefix/suffix witnesses already contain grafted digests; the range-adjacent ops-tree
+    // digests must be transformed with their bitmap chunks first.
+    let middle_iter = prefix_boundary
+        .heights_with_digests(prefix_boundary_digests)
+        .chain(range_peaks.heights_with_digests(&range_digests))
+        .chain(suffix_boundary.heights_with_digests(suffix_boundary_digests));
+    peak_entries.extend(grafting::transform_peak_digests::<F, _, _, _>(
         verifier,
         middle_iter,
-        range_start - peaks_leaf_len(&plan.layout.prefix[prefix_raw_start..]),
-        plan.grafting.height,
+        prefix_boundary.start_leaf(),
+        geometry.grafting_height(),
         get_chunk,
     ));
-    transformed.extend(suffix_transformed.iter().copied().zip(suffix_counts));
+    peak_entries.extend(suffix_bitmap_witnesses.iter().copied().zip(suffix_counts));
 
     let inactive_peaks = proof.proof.inactive_peaks;
     let inactive_to_fold = grafting::transformed_inactive_peaks::<F, _>(
-        &transformed,
+        &peak_entries,
         inactive_peaks,
-        plan.total_peaks(),
+        geometry.total_peaks(),
     )
     .ok()?;
-    let digests = transformed.iter().map(|(digest, _count)| digest);
-    verifier.root_with_folded_peaks(plan.leaves, inactive_to_fold, inactive_peaks, digests)
+    let digests = peak_entries.iter().map(|(digest, _count)| digest);
+    verifier.root_with_folded_peaks(geometry.leaves(), inactive_to_fold, inactive_peaks, digests)
 }
 
 struct GraftedProofParts<F: Family, D: Digest> {
     proof: Proof<F, D>,
-    unfolded_prefix_peaks: Vec<D>,
-    unfolded_suffix_peaks: Vec<D>,
+    prefix_witnesses: Vec<D>,
+    suffix_witnesses: Vec<D>,
 }
 
 fn peak_digests<F: Family, D: Digest>(
-    peaks: &[(Position<F>, u32)],
+    peaks: impl IntoIterator<Item = Position<F>>,
     fetched: &BTreeMap<Position<F>, D>,
 ) -> Result<Vec<D>, Error<F>> {
     peaks
-        .iter()
-        .map(|&(pos, _)| {
+        .into_iter()
+        .map(|pos| {
             fetched
                 .get(&pos)
                 .copied()
@@ -551,24 +225,24 @@ fn prefix_witness<
 >(
     hasher: &StandardHasher<H>,
     bitmap: &BitmapGrafting<'_, B, N>,
-    peaks: &[(Position<F>, u32)],
-    raw_digests: &[D],
-    raw_start: usize,
+    geometry: &RangeProofGeometry<F>,
+    ops_peak_digests: &[D],
 ) -> Vec<D> {
+    let pure_prefix = geometry.pure_prefix();
+    let prefix_boundary = geometry.prefix_boundary();
+    let (pure_prefix_digests, boundary_digests) = ops_peak_digests.split_at(pure_prefix.len());
+    debug_assert_eq!(boundary_digests.len(), prefix_boundary.len());
     let mut witness = grafting::transform_peak_digests::<F, _, _, _>(
         hasher,
-        peaks[..raw_start]
-            .iter()
-            .map(|(_, h)| *h)
-            .zip(raw_digests[..raw_start].iter().copied()),
-        0,
-        bitmap.info.height,
+        pure_prefix.heights_with_digests(pure_prefix_digests),
+        pure_prefix.start_leaf(),
+        bitmap.grafting_height,
         |idx| bitmap.chunk(idx),
     )
     .into_iter()
     .map(|(digest, _count)| digest)
     .collect::<Vec<_>>();
-    witness.extend_from_slice(&raw_digests[raw_start..]);
+    witness.extend_from_slice(boundary_digests);
     witness
 }
 
@@ -581,21 +255,20 @@ fn suffix_witness<
 >(
     hasher: &StandardHasher<H>,
     bitmap: &BitmapGrafting<'_, B, N>,
-    peaks: &[(Position<F>, u32)],
-    raw_digests: &[D],
-    suffix_start: u64,
-    raw_end: usize,
+    geometry: &RangeProofGeometry<F>,
+    ops_peak_digests: &[D],
 ) -> Vec<D> {
-    let mut witness = raw_digests[..raw_end].to_vec();
+    let suffix_boundary = geometry.suffix_boundary();
+    let pure_suffix = geometry.pure_suffix();
+    let (boundary_digests, pure_suffix_digests) = ops_peak_digests.split_at(suffix_boundary.len());
+    debug_assert_eq!(pure_suffix_digests.len(), pure_suffix.len());
+    let mut witness = boundary_digests.to_vec();
     witness.extend(
         grafting::transform_peak_digests::<F, _, _, _>(
             hasher,
-            peaks[raw_end..]
-                .iter()
-                .map(|(_, h)| *h)
-                .zip(raw_digests[raw_end..].iter().copied()),
-            suffix_start + peaks_leaf_len(&peaks[..raw_end]),
-            bitmap.info.height,
+            pure_suffix.heights_with_digests(pure_suffix_digests),
+            pure_suffix.start_leaf(),
+            bitmap.grafting_height,
             |idx| bitmap.chunk(idx),
         )
         .into_iter()
@@ -615,13 +288,16 @@ async fn build_grafted_range_proof<
     hasher: &StandardHasher<H>,
     bitmap: &BitmapGrafting<'_, B, N>,
     storage: &S,
-    plan: &ProofPlan<F>,
+    geometry: &RangeProofGeometry<F>,
 ) -> Result<GraftedProofParts<F, D>, Error<F>> {
-    let proof_positions =
-        merkle::range_collection_nodes(plan.leaves, plan.inactive_peaks, plan.range.clone())?;
+    let proof_positions = merkle::range_collection_nodes(
+        geometry.leaves(),
+        geometry.inactive_peaks(),
+        geometry.range(),
+    )?;
     let mut fetch_positions = proof_positions.clone();
-    fetch_positions.extend(plan.layout.prefix.iter().map(|&(pos, _)| pos));
-    fetch_positions.extend(plan.layout.after.iter().map(|&(pos, _)| pos));
+    fetch_positions.extend(geometry.prefix_positions());
+    fetch_positions.extend(geometry.after_positions());
     fetch_positions.sort_unstable();
     debug_assert!(
         fetch_positions
@@ -645,37 +321,25 @@ async fn build_grafted_range_proof<
         .collect::<Result<_, Error<F>>>()?;
 
     let proof = merkle::build_range_collection_proof::<F, D, Error<F>>(
-        plan.leaves,
-        plan.inactive_peaks,
+        geometry.leaves(),
+        geometry.inactive_peaks(),
         &proof_positions,
         |pos| fetched.get(&pos).copied(),
         |pos| Error::from(merkle::Error::<F>::MissingNode(pos)),
     )?;
 
-    let prefix_raw = peak_digests(&plan.layout.prefix, &fetched)?;
-    let unfolded_prefix_peaks = prefix_witness::<F, D, H, B, N>(
-        hasher,
-        bitmap,
-        &plan.layout.prefix,
-        &prefix_raw,
-        plan.prefix_raw_start(),
-    );
+    let prefix_ops_peak_digests = peak_digests(geometry.prefix_positions(), &fetched)?;
+    let prefix_witnesses =
+        prefix_witness::<F, D, H, B, N>(hasher, bitmap, geometry, &prefix_ops_peak_digests);
 
-    let suffix_raw = peak_digests(&plan.layout.after, &fetched)?;
-    let suffix_start = plan.after_start();
-    let unfolded_suffix_peaks = suffix_witness::<F, D, H, B, N>(
-        hasher,
-        bitmap,
-        &plan.layout.after,
-        &suffix_raw,
-        suffix_start,
-        plan.after_raw_end(),
-    );
+    let suffix_ops_peak_digests = peak_digests(geometry.after_positions(), &fetched)?;
+    let suffix_witnesses =
+        suffix_witness::<F, D, H, B, N>(hasher, bitmap, geometry, &suffix_ops_peak_digests);
 
     Ok(GraftedProofParts {
         proof,
-        unfolded_prefix_peaks,
-        unfolded_suffix_peaks,
+        prefix_witnesses,
+        suffix_witnesses,
     })
 }
 
@@ -685,23 +349,19 @@ pub struct RangeProof<F: Family, D: Digest> {
     /// The Merkle digest material required to verify the proof.
     pub proof: Proof<F, D>,
 
-    /// Extra prefix witnesses needed when generic proof collection would hide peaks behind a
-    /// prefix accumulator that grafted reconstruction must inspect.
+    /// Extra prefix witnesses needed when grafted reconstruction must inspect peaks that ops-tree
+    /// proof collection could otherwise hide behind a prefix accumulator.
     ///
-    /// This vector is intentionally split by convention. It starts with already-transformed
-    /// grafted digests for the prefix region before the range-adjacent chunk span, then contains
-    /// raw peak digests that can regroup with the proven range. The verifier reconstructs the split
-    /// point from the peak layout.
-    pub unfolded_prefix_peaks: Vec<D>,
+    /// This vector follows the geometry's prefix segment order: bitmap witness digests for
+    /// `pure_prefix`, then ops-tree peak digests for `prefix_boundary`.
+    pub prefix_witnesses: Vec<D>,
 
-    /// Extra suffix witnesses needed when generic backward-bagged proofs hide peaks behind a
-    /// suffix accumulator that grafted reconstruction must inspect.
+    /// Extra suffix witnesses needed when grafted reconstruction must inspect peaks that ops-tree
+    /// proof collection could otherwise hide behind a suffix accumulator.
     ///
-    /// This vector is intentionally split by convention. It starts with raw peak digests adjacent
-    /// to the proven range, because those peaks may share grafted chunks with in-range peaks. It
-    /// then contains already-transformed grafted digests for the remaining suffix region. The
-    /// verifier reconstructs the split point from the peak layout.
-    pub unfolded_suffix_peaks: Vec<D>,
+    /// This vector follows the geometry's suffix segment order: ops-tree peak digests for
+    /// `suffix_boundary`, then bitmap witness digests for `pure_suffix`.
+    pub suffix_witnesses: Vec<D>,
 
     /// The partial chunk digest from the status bitmap at the time of proof generation, if any.
     pub partial_chunk_digest: Option<D>,
@@ -711,57 +371,82 @@ pub struct RangeProof<F: Family, D: Digest> {
     pub ops_root: D,
 }
 
+/// Parameters that identify the operation span and snapshot used to build a range proof.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub struct RangeProofSpec<F: Family, D: Digest> {
+    /// First operation location to prove.
+    pub start_loc: Location<F>,
+
+    /// Maximum number of operations to include.
+    pub max_ops: NonZeroU64,
+
+    /// Inactivity floor used to fold old inactive peaks.
+    pub inactivity_floor: Location<F>,
+
+    /// The ops-tree root at the time of proof generation.
+    pub ops_root: D,
+}
+
 impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Create a new range proof for the provided `range` of operations.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
         range: Range<Location<F>>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
-        let std_hasher = qmdb::hasher::<H>();
         let bitmap = BitmapGrafting::new(status);
         let leaves = Location::try_from(storage.size().await)?;
-        let plan = ProofPlan::from_inactivity_floor(leaves, range, inactivity_floor, bitmap.info)?;
+        let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
+            leaves,
+            inactivity_floor,
+            bitmap.grafting_height,
+        )?;
+        let geometry = RangeProofGeometry::new(
+            leaves,
+            range,
+            inactive_peaks,
+            bitmap.grafting_height,
+            bitmap.complete_chunks,
+        )?;
 
-        let needs_grafted_peak_fold = plan.needs_grafted_peak_fold()?;
+        let requires_grafted_reconstruction = geometry.requires_grafted_reconstruction()?;
         let GraftedProofParts {
             proof,
-            unfolded_prefix_peaks,
-            unfolded_suffix_peaks,
-        } = if needs_grafted_peak_fold {
-            build_grafted_range_proof(&std_hasher, &bitmap, storage, &plan).await?
+            prefix_witnesses,
+            suffix_witnesses,
+        } = if requires_grafted_reconstruction {
+            build_grafted_range_proof(hasher, &bitmap, storage, &geometry).await?
         } else {
             GraftedProofParts {
                 proof: merkle::verification::historical_range_proof(
-                    &std_hasher,
+                    hasher,
                     storage,
-                    plan.leaves,
-                    plan.range.clone(),
-                    plan.inactive_peaks,
+                    geometry.leaves(),
+                    geometry.range(),
+                    geometry.inactive_peaks(),
                 )
                 .await?,
-                unfolded_prefix_peaks: Vec::new(),
-                unfolded_suffix_peaks: Vec::new(),
+                prefix_witnesses: Vec::new(),
+                suffix_witnesses: Vec::new(),
             }
         };
 
         let (last_chunk, next_bit) = status.last_chunk();
         let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
-            // in the proof.
-            hasher.update(&last_chunk);
-            Some(hasher.finalize())
+            // Last chunk is incomplete, meaning it is not yet committed by the grafted bitmap root
+            // and needs to be included in the proof.
+            Some(hasher.digest(&last_chunk))
         } else {
             None
         };
 
         Ok(Self {
             proof,
-            unfolded_prefix_peaks,
-            unfolded_suffix_peaks,
+            prefix_witnesses,
+            suffix_witnesses,
             partial_chunk_digest,
             ops_root,
         })
@@ -775,37 +460,33 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
     /// Returns [`merkle::Error::LocationOverflow`] if `start_loc` > [merkle::Family::MAX_LEAVES].
-    /// Returns [`merkle::Error::RangeOutOfBounds`] if `start_loc` >= number of leaves in the MMR.
-    #[allow(clippy::too_many_arguments)]
+    /// Returns [`merkle::Error::RangeOutOfBounds`] if `start_loc` >= number of leaves in the tree.
     pub async fn new_with_ops<
         H: CHasher<Digest = D>,
         C: Contiguous,
         S: Storage<F, Digest = D>,
         const N: usize,
     >(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         status: &impl BitmapReadable<N>,
         storage: &S,
-        inactivity_floor: Location<F>,
         log: &C,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-        ops_root: D,
+        request: RangeProofSpec<F, D>,
     ) -> Result<(Self, Vec<C::Item>, Vec<[u8; N]>), Error<F>> {
-        // Compute the start and end locations & positions of the range.
+        // Compute the end location of the range.
         let leaves = Location::new(status.len());
-        if start_loc >= leaves {
-            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
+        if request.start_loc >= leaves {
+            return Err(merkle::Error::RangeOutOfBounds(request.start_loc).into());
         }
 
         // Reject ranges that start in pruned bitmap chunks.
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-        let start = *start_loc / chunk_bits;
+        let start = *request.start_loc / chunk_bits;
         if (start as usize) < status.pruned_chunks() {
-            return Err(Error::OperationPruned(start_loc));
+            return Err(Error::OperationPruned(request.start_loc));
         }
 
-        let max_loc = start_loc.saturating_add(max_ops.get());
+        let max_loc = request.start_loc.saturating_add(request.max_ops.get());
         let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted storage.
@@ -813,15 +494,15 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             hasher,
             status,
             storage,
-            inactivity_floor,
-            start_loc..end_loc,
-            ops_root,
+            request.inactivity_floor,
+            request.start_loc..end_loc,
+            request.ops_root,
         )
         .await?;
 
         // Collect the operations necessary to verify the proof.
         let reader = log.reader().await;
-        let futures = (*start_loc..*end_loc)
+        let futures = (*request.start_loc..*end_loc)
             .map(|i| reader.read(i))
             .collect::<Vec<_>>();
         let ops = try_join_all(futures).await?;
@@ -834,14 +515,12 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         Ok((proof, ops, chunks))
     }
-}
 
-impl<F: Graftable, D: Digest> RangeProof<F, D> {
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the db with the provided root, and having the activity status described by `chunks`.
     pub fn verify<H: CHasher<Digest = D>, O: Codec, const N: usize>(
         &self,
-        hasher: &mut H,
+        root_hasher: &StandardHasher<H>,
         start_loc: Location<F>,
         ops: &[O],
         chunks: &[[u8; N]],
@@ -883,11 +562,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let grafting_height = grafting::height::<N>();
-        let grafting = GraftingInfo {
-            height: grafting_height,
-            complete_chunks,
-        };
-        let verifier = grafting::Verifier::<F, H>::new(
+        let grafting_verifier = grafting::Verifier::<F, H>::new(
             grafting_height,
             start_chunk,
             chunk_vec,
@@ -905,7 +580,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             // chunk provided by the caller matches the digest embedded in the proof.
             if end_chunk == complete_chunks {
                 let last_chunk = chunks.last().expect("chunks non-empty");
-                if last_chunk_digest != verifier.digest(last_chunk) {
+                if last_chunk_digest != grafting_verifier.digest(last_chunk) {
                     debug!("last chunk digest does not match expected value");
                     return false;
                 }
@@ -915,31 +590,35 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             return false;
         }
 
-        let plan = match ProofPlan::new(
+        let geometry = match RangeProofGeometry::new(
             leaves,
             start_loc..end_loc,
             self.proof.inactive_peaks,
-            grafting,
+            grafting_height,
+            complete_chunks,
         ) {
-            Ok(plan) => plan,
+            Ok(geometry) => geometry,
             Err(error) => {
-                debug!(?error, "verification failed, invalid peak layout");
+                debug!(?error, "verification failed, invalid proof geometry");
                 return false;
             }
         };
-        let needs_grafted_peak_fold = match plan.needs_grafted_peak_fold() {
-            Ok(needs_grafted_peak_fold) => needs_grafted_peak_fold,
+        let requires_grafted_reconstruction = match geometry.requires_grafted_reconstruction() {
+            Ok(requires_grafted_reconstruction) => requires_grafted_reconstruction,
             Err(error) => {
                 debug!(?error, "verification failed, invalid size");
                 return false;
             }
         };
-        let merkle_root = if !needs_grafted_peak_fold {
-            if !self.unfolded_prefix_peaks.is_empty() || !self.unfolded_suffix_peaks.is_empty() {
-                debug!("verification failed, unexpected grafted metadata");
+        let merkle_root = if !requires_grafted_reconstruction {
+            if !self.prefix_witnesses.is_empty() || !self.suffix_witnesses.is_empty() {
+                debug!("verification failed, unexpected prefix/suffix witnesses");
                 return false;
             }
-            match self.proof.reconstruct_root(&verifier, &elements, start_loc) {
+            match self
+                .proof
+                .reconstruct_root(&grafting_verifier, &elements, start_loc)
+            {
                 Ok(root) => root,
                 Err(error) => {
                     debug!(?error, "invalid proof input");
@@ -949,7 +628,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         } else {
             let mut collected = Vec::new();
             if let Err(error) = self.proof.reconstruct_range_collecting(
-                &verifier,
+                &grafting_verifier,
                 &elements,
                 start_loc,
                 &mut collected,
@@ -968,33 +647,30 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                     .filter(|&idx| idx < chunks.len() as u64)
                     .map(|idx| chunks[idx as usize].as_ref())
             };
-            let Some(root) =
-                reconstruct_grafted_root(&verifier, self, &plan, &collected, get_chunk)
-            else {
+            let Some(root) = reconstruct_grafted_root(
+                &grafting_verifier,
+                self,
+                &geometry,
+                &collected,
+                get_chunk,
+            ) else {
                 debug!("verification failed, could not reconstruct grafted root");
                 return false;
             };
             root
         };
 
-        // Compute the canonical root and compare.
-        hasher.update(&self.ops_root);
-        hasher.update(&merkle_root);
-        if has_partial_chunk {
-            // partial_chunk_digest is guaranteed Some by the check above.
-            hasher.update(&next_bit.to_be_bytes());
-            hasher.update(self.partial_chunk_digest.as_ref().unwrap());
-        }
-        let reconstructed_root = hasher.finalize();
-        reconstructed_root == *root
+        let partial =
+            has_partial_chunk.then(|| (next_bit, self.partial_chunk_digest.as_ref().unwrap()));
+        combine_roots(root_hasher, &self.ops_root, &merkle_root, partial) == *root
     }
 }
 
 impl<F: Family, D: Digest> Write for RangeProof<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
-        self.unfolded_prefix_peaks.write(buf);
-        self.unfolded_suffix_peaks.write(buf);
+        self.prefix_witnesses.write(buf);
+        self.suffix_witnesses.write(buf);
         self.partial_chunk_digest.write(buf);
         self.ops_root.write(buf);
     }
@@ -1003,8 +679,8 @@ impl<F: Family, D: Digest> Write for RangeProof<F, D> {
 impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
     fn encode_size(&self) -> usize {
         self.proof.encode_size()
-            + self.unfolded_prefix_peaks.encode_size()
-            + self.unfolded_suffix_peaks.encode_size()
+            + self.prefix_witnesses.encode_size()
+            + self.suffix_witnesses.encode_size()
             + self.partial_chunk_digest.encode_size()
             + self.ops_root.encode_size()
     }
@@ -1020,15 +696,15 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
         let remaining = max_digests - proof.digests.len();
-        let unfolded_prefix_peaks = Vec::<D>::read_range(buf, ..=remaining)?;
-        let remaining = remaining - unfolded_prefix_peaks.len();
-        let unfolded_suffix_peaks = Vec::<D>::read_range(buf, ..=remaining)?;
+        let prefix_witnesses = Vec::<D>::read_range(buf, ..=remaining)?;
+        let remaining = remaining - prefix_witnesses.len();
+        let suffix_witnesses = Vec::<D>::read_range(buf, ..=remaining)?;
         let partial_chunk_digest = Option::<D>::read(buf)?;
         let ops_root = D::read(buf)?;
         Ok(Self {
             proof,
-            unfolded_prefix_peaks,
-            unfolded_suffix_peaks,
+            prefix_witnesses,
+            suffix_witnesses,
             partial_chunk_digest,
             ops_root,
         })
@@ -1043,8 +719,8 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             proof: u.arbitrary()?,
-            unfolded_prefix_peaks: u.arbitrary()?,
-            unfolded_suffix_peaks: u.arbitrary()?,
+            prefix_witnesses: u.arbitrary()?,
+            suffix_witnesses: u.arbitrary()?,
             partial_chunk_digest: u.arbitrary()?,
             ops_root: u.arbitrary()?,
         })
@@ -1072,7 +748,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>>(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,
@@ -1106,7 +782,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     /// `root`.
     pub fn verify<H: CHasher<Digest = D>, O: Codec>(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         operation: O,
         root: &D,
     ) -> bool {
@@ -1206,9 +882,7 @@ mod tests {
     }
 
     fn range_proof_digest_count<F: Family, D: Digest>(proof: &RangeProof<F, D>) -> usize {
-        proof.proof.digests.len()
-            + proof.unfolded_prefix_peaks.len()
-            + proof.unfolded_suffix_peaks.len()
+        proof.proof.digests.len() + proof.prefix_witnesses.len() + proof.suffix_witnesses.len()
     }
 
     #[test]
@@ -1228,27 +902,27 @@ mod tests {
         let ops_root = Sha256::hash(b"ops-root");
 
         let cases = [
-            // Minimal: no optional fields, no unfolded peaks.
+            // Minimal: no optional fields or prefix/suffix witnesses.
             RangeProof {
                 proof: proof.clone(),
-                unfolded_prefix_peaks: vec![],
-                unfolded_suffix_peaks: vec![],
+                prefix_witnesses: vec![],
+                suffix_witnesses: vec![],
                 partial_chunk_digest: None,
                 ops_root,
             },
-            // All optional fields populated, with unfolded peaks on both sides.
+            // All optional fields populated, with prefix/suffix witnesses on both sides.
             RangeProof {
                 proof,
-                unfolded_prefix_peaks: vec![Sha256::hash(b"u0"), Sha256::hash(b"u1")],
-                unfolded_suffix_peaks: vec![Sha256::hash(b"s0"), Sha256::hash(b"s1")],
+                prefix_witnesses: vec![Sha256::hash(b"u0"), Sha256::hash(b"u1")],
+                suffix_witnesses: vec![Sha256::hash(b"s0"), Sha256::hash(b"s1")],
                 partial_chunk_digest: Some(Sha256::hash(b"partial")),
                 ops_root,
             },
             // Default proof with only partial chunk digest.
             RangeProof {
                 proof: Proof::<F, sha256::Digest>::default(),
-                unfolded_prefix_peaks: vec![],
-                unfolded_suffix_peaks: vec![],
+                prefix_witnesses: vec![],
+                suffix_witnesses: vec![],
                 partial_chunk_digest: Some(Sha256::hash(b"only-partial")),
                 ops_root,
             },
@@ -1273,8 +947,8 @@ mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"d0")],
             },
-            unfolded_prefix_peaks: vec![Sha256::hash(b"u0")],
-            unfolded_suffix_peaks: vec![Sha256::hash(b"s0")],
+            prefix_witnesses: vec![Sha256::hash(b"u0")],
+            suffix_witnesses: vec![Sha256::hash(b"s0")],
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops-root"),
         };
@@ -1302,8 +976,8 @@ mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            unfolded_prefix_peaks: vec![Sha256::hash(b"peak")],
-            unfolded_suffix_peaks: vec![Sha256::hash(b"suf")],
+            prefix_witnesses: vec![Sha256::hash(b"peak")],
+            suffix_witnesses: vec![Sha256::hash(b"suf")],
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
@@ -1334,8 +1008,8 @@ mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            unfolded_prefix_peaks: vec![Sha256::hash(b"peak")],
-            unfolded_suffix_peaks: vec![Sha256::hash(b"suf")],
+            prefix_witnesses: vec![Sha256::hash(b"peak")],
+            suffix_witnesses: vec![Sha256::hash(b"suf")],
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
@@ -1425,9 +1099,8 @@ mod tests {
             .unwrap();
 
             let loc = mmb::Location::new(BitMap::<N>::CHUNK_SIZE_BITS + 4);
-            let mut proof_hasher = Sha256::new();
             let proof = RangeProof::new(
-                &mut proof_hasher,
+                &hasher,
                 &status,
                 &storage,
                 Location::new(0),
@@ -1438,9 +1111,8 @@ mod tests {
             .unwrap();
 
             let element = hasher.digest(&(*loc).to_be_bytes());
-            let mut verify_hasher = Sha256::new();
             assert!(proof.verify(
-                &mut verify_hasher,
+                &hasher,
                 loc,
                 &[element],
                 &[<BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 1)],
@@ -1458,35 +1130,18 @@ mod tests {
 
             let hasher = qmdb::hasher::<Sha256>();
             let grafting_height = grafting::height::<N>();
+            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
 
-            let (leaf_count, loc) = (17..=64u64)
+            let (leaf_count, loc) = (chunk_bits * 2 + 1..=64u64)
                 .find_map(|leaves| {
-                    let complete_chunks = leaves / BitMap::<N>::CHUNK_SIZE_BITS;
-                    if complete_chunks < 2 || leaves % BitMap::<N>::CHUNK_SIZE_BITS == 0 {
+                    let complete_chunks = leaves / chunk_bits;
+                    if complete_chunks < 2 || leaves % chunk_bits == 0 {
                         return None;
                     }
 
                     let size = F::location_to_position(mmb::Location::new(leaves));
                     F::chunk_peaks(size, 1, grafting_height).nth(1)?;
-
-                    for offset in 0..BitMap::<N>::CHUNK_SIZE_BITS {
-                        let loc = mmb::Location::new(BitMap::<N>::CHUNK_SIZE_BITS + offset);
-                        if *loc >= leaves {
-                            break;
-                        }
-                        let after_peaks = peak_layout(mmb::Location::new(leaves), loc..loc + 1)
-                            .ok()?
-                            .after;
-                        let has_partial_suffix_peak = after_peaks.iter().any(|(pos, height)| {
-                            *height < grafting_height
-                                && (*F::leftmost_leaf(*pos, *height) >> grafting_height)
-                                    == complete_chunks
-                        });
-                        if has_partial_suffix_peak {
-                            return Some((leaves, loc));
-                        }
-                    }
-                    None
+                    Some((leaves, mmb::Location::new(chunk_bits + 1)))
                 })
                 .expect("expected an MMB proof with a partial trailing suffix chunk");
 
@@ -1543,10 +1198,8 @@ mod tests {
             )
             .await
             .unwrap();
-
-            let mut proof_hasher = Sha256::new();
             let proof = RangeProof::new(
-                &mut proof_hasher,
+                &hasher,
                 &status,
                 &storage,
                 Location::new(0),
@@ -1558,9 +1211,8 @@ mod tests {
 
             let element = hasher.digest(&(*loc).to_be_bytes());
             let chunk_idx = (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-            let mut verify_hasher = Sha256::new();
             assert!(proof.verify(
-                &mut verify_hasher,
+                &hasher,
                 loc,
                 &[element],
                 &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
@@ -1598,14 +1250,19 @@ mod tests {
                         if *start_loc >= complete_chunks * chunk_bits {
                             return None;
                         }
-                        let layout = peak_layout(leaves_loc, start_loc..leaves_loc).ok()?;
-                        proof_needs_grafted_peak_fold(
-                            &layout,
-                            size,
+                        let geometry = RangeProofGeometry::<F>::new(
+                            leaves_loc,
+                            start_loc..leaves_loc,
+                            0,
                             grafting_height,
                             complete_chunks,
                         )
-                        .then_some((leaves, start_loc, complete_chunks))
+                        .ok()?;
+                        geometry.requires_grafted_reconstruction().ok()?.then_some((
+                            leaves,
+                            start_loc,
+                            complete_chunks,
+                        ))
                     })
                 })
                 .expect("expected an MMB proof into the trailing partial chunk");
@@ -1665,9 +1322,8 @@ mod tests {
             .unwrap();
 
             let leaves_loc = mmb::Location::new(leaf_count);
-            let mut proof_hasher = Sha256::new();
             let proof = RangeProof::new(
-                &mut proof_hasher,
+                &hasher,
                 &status,
                 &storage,
                 Location::new(0),
@@ -1685,9 +1341,7 @@ mod tests {
             let chunks = (start_chunk_idx..=end_chunk_idx)
                 .map(|chunk_idx| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx))
                 .collect::<Vec<_>>();
-
-            let mut verify_hasher = Sha256::new();
-            assert!(proof.verify(&mut verify_hasher, start_loc, &elements, &chunks, &root,));
+            assert!(proof.verify(&hasher, start_loc, &elements, &chunks, &root,));
         });
     }
     #[test_traced]
@@ -1753,9 +1407,8 @@ mod tests {
             .unwrap();
 
             let loc = mmb::Location::new(0);
-            let mut proof_hasher = Sha256::new();
             let mut proof = RangeProof::new(
-                &mut proof_hasher,
+                &hasher,
                 &status,
                 &storage,
                 Location::new(0),
@@ -1770,16 +1423,13 @@ mod tests {
 
             let mut tampered = proof.clone();
             tampered
-                .unfolded_prefix_peaks
-                .push(hasher.digest(b"fake unfolded prefix"));
-            let mut verify_hasher = Sha256::new();
-            assert!(!tampered.verify(&mut verify_hasher, loc, &[element], &[chunk], &root,));
+                .prefix_witnesses
+                .push(hasher.digest(b"fake prefix witness"));
+            assert!(!tampered.verify(&hasher, loc, &[element], &[chunk], &root,));
 
             // Tamper with the proof by injecting a fake partial chunk digest
             proof.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
-
-            let mut verify_hasher = Sha256::new();
-            assert!(!proof.verify(&mut verify_hasher, loc, &[element], &[chunk], &root,));
+            assert!(!proof.verify(&hasher, loc, &[element], &[chunk], &root,));
         });
     }
 
@@ -1794,25 +1444,28 @@ mod tests {
             let grafting_height = grafting::height::<N>();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
 
-            let (leaf_count, loc, layout) = (chunk_bits * 3..=128u64)
+            let (leaf_count, loc, geometry) = (chunk_bits * 3..=128u64)
                 .filter(|leaves| leaves % chunk_bits == 0)
                 .find_map(|leaves| {
                     let leaves_loc = mmb::Location::new(leaves);
                     let complete_chunks = leaves / chunk_bits;
                     (0..leaves).find_map(|idx| {
                         let loc = mmb::Location::new(idx);
-                        let layout = peak_layout(leaves_loc, loc..loc + 1).ok()?;
-                        let size = F::location_to_position(leaves_loc);
-                        proof_needs_grafted_peak_fold(
-                            &layout,
-                            size,
+                        let geometry = RangeProofGeometry::<F>::new(
+                            leaves_loc,
+                            loc..loc + 1,
+                            0,
                             grafting_height,
                             complete_chunks,
                         )
-                        .then_some((leaves, loc, layout))
+                        .ok()?;
+                        geometry
+                            .requires_grafted_reconstruction()
+                            .ok()?
+                            .then_some((leaves, loc, geometry))
                     })
                 })
-                .expect("expected an MMB proof requiring grafted peak folding");
+                .expect("expected an MMB proof requiring grafted reconstruction");
 
             let mut status = BitMap::<N>::new();
             for _ in 0..leaf_count {
@@ -1863,10 +1516,8 @@ mod tests {
             )
             .await
             .unwrap();
-
-            let mut proof_hasher = Sha256::new();
             let proof = RangeProof::new(
-                &mut proof_hasher,
+                &hasher,
                 &status,
                 &storage,
                 Location::new(0),
@@ -1876,27 +1527,15 @@ mod tests {
             .await
             .unwrap();
 
-            // Grafted reconstruction needs the individual prefix/suffix peaks that generic
-            // backward proofs may otherwise hide behind fold accumulators. These witnesses are
-            // already grouped by grafted chunk, so their counts can be smaller than raw peak
-            // counts.
-            let prefix_counts =
-                transformed_peak_counts(&layout.prefix, 0, grafting_height, |idx| {
-                    idx < leaf_count / chunk_bits
-                });
-            let suffix_start = peaks_leaf_len(&layout.prefix) + peaks_leaf_len(&layout.range);
-            let suffix_counts =
-                transformed_peak_counts(&layout.after, suffix_start, grafting_height, |idx| {
-                    idx < leaf_count / chunk_bits
-                });
-            assert_eq!(proof.unfolded_prefix_peaks.len(), prefix_counts.len());
-            assert_eq!(proof.unfolded_suffix_peaks.len(), suffix_counts.len());
+            // The prefix/suffix witnesses follow the five-segment geometry: bitmap witness
+            // digests for pure segments and individual ops-tree digests for boundary segments.
+            assert_eq!(proof.prefix_witnesses.len(), geometry.prefix_witness_len());
+            assert_eq!(proof.suffix_witnesses.len(), geometry.suffix_witness_len());
 
             let element = hasher.digest(&(*loc).to_be_bytes());
             let chunk_idx = (*loc / chunk_bits) as usize;
-            let mut verify_hasher = Sha256::new();
             assert!(proof.verify(
-                &mut verify_hasher,
+                &hasher,
                 loc,
                 &[element],
                 &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
@@ -1907,9 +1546,8 @@ mod tests {
 
             let mut tampered = proof.clone();
             tampered.proof.inactive_peaks = 1;
-            let mut verify_hasher = Sha256::new();
             assert!(!tampered.verify(
-                &mut verify_hasher,
+                &hasher,
                 loc,
                 &[element],
                 &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
@@ -1920,9 +1558,8 @@ mod tests {
 
             let mut tampered = proof.clone();
             tampered.proof.inactive_peaks = usize::MAX;
-            let mut verify_hasher = Sha256::new();
             assert!(!tampered.verify(
-                &mut verify_hasher,
+                &hasher,
                 loc,
                 &[element],
                 &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
@@ -1931,12 +1568,11 @@ mod tests {
                 &root,
             ));
 
-            let mut tampered = proof.clone();
+            let mut tampered = proof;
             assert!(!tampered.proof.digests.is_empty());
             tampered.proof.digests[0] = hasher.digest(b"fake generic sibling");
-            let mut verify_hasher = Sha256::new();
             assert!(!tampered.verify(
-                &mut verify_hasher,
+                &hasher,
                 loc,
                 &[element],
                 &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
@@ -1961,14 +1597,15 @@ mod tests {
             let leaves = mmb::Location::new(leaf_count);
             let inactivity_floor = mmb::Location::new(chunk_bits - 2);
 
-            let raw_inactive = F::inactive_peaks(F::location_to_position(leaves), inactivity_floor);
+            let ops_inactive_peaks =
+                F::inactive_peaks(F::location_to_position(leaves), inactivity_floor);
             let aligned_inactive = grafting::chunk_aligned_inactive_peaks::<F>(
                 leaves,
                 inactivity_floor,
                 grafting_height,
             )
             .unwrap();
-            assert_ne!(raw_inactive, aligned_inactive);
+            assert_ne!(ops_inactive_peaks, aligned_inactive);
 
             let mut status = BitMap::<N>::new();
             for _ in 0..leaf_count {
@@ -1976,10 +1613,10 @@ mod tests {
             }
             let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
 
-            // The ops root is the inner QMDB log root and commits the raw inactive peak count.
-            // The grafted bitmap root commits the chunk-aligned count, since grafted chunks are
+            // The ops root is the inner QMDB log root and commits the ops-tree inactive peak count.
+            // The grafted bitmap root commits the chunk-aligned count, since bitmap chunks are
             // the atomic inactive-prefix boundary for the current root.
-            let ops_root = ops.root(&hasher, raw_inactive).unwrap();
+            let ops_root = ops.root(&hasher, ops_inactive_peaks).unwrap();
 
             let chunk_inputs: Vec<_> =
                 (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
@@ -2025,9 +1662,8 @@ mod tests {
             .unwrap();
 
             let loc = mmb::Location::new(chunk_bits - 1);
-            let mut proof_hasher = Sha256::new();
             let proof = RangeProof::new(
-                &mut proof_hasher,
+                &hasher,
                 &status,
                 &storage,
                 inactivity_floor,
@@ -2040,8 +1676,7 @@ mod tests {
 
             let element = hasher.digest(&(*loc).to_be_bytes());
             let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
-            let mut verify_hasher = Sha256::new();
-            assert!(proof.verify(&mut verify_hasher, loc, &[element], &[chunk], &root));
+            assert!(proof.verify(&hasher, loc, &[element], &[chunk], &root));
         });
     }
 

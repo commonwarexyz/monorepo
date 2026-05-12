@@ -22,7 +22,7 @@ use crate::{
         current::{
             batch::BitmapBatch,
             grafting,
-            proof::{OperationProof, OpsRootWitness, RangeProof},
+            proof::{OperationProof, OpsRootWitness, RangeProof, RangeProofSpec},
         },
         operation::Operation as _,
         Error,
@@ -31,7 +31,11 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
+use commonware_runtime::telemetry::metrics::{
+    histogram::{duration_histogram, ScopedTimer, Timed},
+    Counter, Gauge, GaugeExt as _, MetricsExt as _,
+};
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
@@ -48,6 +52,79 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
+/// Metrics for the Current layer.
+pub(crate) struct Metrics<E: Context> {
+    /// Clock used for duration timers.
+    clock: Arc<E>,
+    /// Pruned bitmap chunks.
+    pruned_chunks: Gauge,
+    /// Most recent safe sync/prune boundary location.
+    sync_boundary: Gauge,
+    /// Current-layer apply-batch calls.
+    pub apply_batch_calls: Counter,
+    /// Duration of Current-layer apply-batch calls.
+    apply_batch_duration: Timed,
+    /// Current-layer sync calls.
+    pub sync_calls: Counter,
+    /// Duration of Current-layer sync calls.
+    sync_duration: Timed,
+    /// Current-layer prune calls.
+    pub prune_calls: Counter,
+    /// Duration of Current-layer prune calls.
+    prune_duration: Timed,
+}
+
+impl<E: Context> Metrics<E> {
+    /// Create and register metrics.
+    pub fn new(context: E) -> Self {
+        let pruned_chunks = context.gauge("pruned_chunks", "Number of pruned bitmap chunks");
+        let sync_boundary =
+            context.gauge("sync_boundary", "Most recent safe sync boundary location");
+        let apply_batch_calls = context.counter("apply_batch_calls", "Number of apply-batch calls");
+        let apply_batch_duration = duration_histogram(
+            &context,
+            "apply_batch_duration",
+            "Duration of apply-batch calls",
+        );
+        let sync_calls = context.counter("sync_calls", "Number of sync calls");
+        let sync_duration = duration_histogram(&context, "sync_duration", "Duration of sync calls");
+        let prune_calls = context.counter("prune_calls", "Number of prune calls");
+        let prune_duration =
+            duration_histogram(&context, "prune_duration", "Duration of prune calls");
+        let clock = Arc::new(context);
+
+        Self {
+            clock,
+            pruned_chunks,
+            sync_boundary,
+            apply_batch_calls,
+            apply_batch_duration: Timed::new(apply_batch_duration),
+            sync_calls,
+            sync_duration: Timed::new(sync_duration),
+            prune_calls,
+            prune_duration: Timed::new(prune_duration),
+        }
+    }
+
+    pub fn apply_batch_timer(&self) -> ScopedTimer<E> {
+        self.apply_batch_duration.scoped(&self.clock)
+    }
+
+    pub fn sync_timer(&self) -> ScopedTimer<E> {
+        self.sync_duration.scoped(&self.clock)
+    }
+
+    pub fn prune_timer(&self) -> ScopedTimer<E> {
+        self.prune_duration.scoped(&self.clock)
+    }
+
+    /// Update Current-specific state gauges.
+    pub fn update(&self, pruned_chunks: u64, sync_boundary: u64) {
+        let _ = self.pruned_chunks.try_set(pruned_chunks);
+        let _ = self.sync_boundary.try_set(sync_boundary);
+    }
+}
+
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
     F: merkle::Graftable,
@@ -57,7 +134,7 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
-    S: Strategy = Sequential,
+    S: Strategy,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
@@ -83,6 +160,9 @@ pub struct Db<
     /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
+
+    /// Metrics for the Current layer.
+    pub(super) metrics: Metrics<E>,
 }
 
 // Shared read-only functionality.
@@ -123,7 +203,7 @@ where
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         proof: &RangeProof<F, H::Digest>,
         start_loc: Location<F>,
         ops: &[Operation<F, U>],
@@ -188,7 +268,7 @@ where
     /// This can be used to authenticate an ops root against a trusted canonical `current` root.
     pub async fn ops_root_witness(
         &self,
-        hasher: &mut StandardHasher<H>,
+        hasher: &StandardHasher<H>,
     ) -> Result<OpsRootWitness<H::Digest>, Error<F>> {
         let storage = self.grafted_storage();
         let grafted_root = compute_grafted_root::<F, H, _, _, N>(
@@ -226,7 +306,7 @@ where
     /// Returns a proof for the operation at `loc`.
     pub(super) async fn operation_proof(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         loc: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, Error<F>> {
         let storage = self.grafted_storage();
@@ -255,7 +335,7 @@ where
     /// `start_loc` >= number of leaves in the tree.
     pub async fn range_proof(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<F, H::Digest>, Vec<Operation<F, U>>, Vec<[u8; N]>), Error<F>> {
@@ -265,11 +345,13 @@ where
             hasher,
             self.any.bitmap.as_ref(),
             &storage,
-            self.any.inactivity_floor_loc,
             &self.any.log,
-            start_loc,
-            max_ops,
-            ops_root,
+            RangeProofSpec {
+                start_loc,
+                max_ops,
+                inactivity_floor: self.any.inactivity_floor_loc,
+                ops_root,
+            },
         )
         .await
     }
@@ -361,6 +443,14 @@ where
         }
 
         Location::new(pruned_chunks * chunk_bits)
+    }
+
+    /// Update Current-specific state gauges.
+    pub(super) fn update_metrics(&self) {
+        self.metrics.update(
+            self.any.bitmap.pruned_chunks() as u64,
+            *self.sync_boundary(),
+        );
     }
 
     /// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
@@ -457,6 +547,8 @@ where
     /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
     ///   or retained node is missing, or the prune location overflows a [Position]).
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
         let sync_boundary = self.sync_boundary();
         if prune_loc > sync_boundary {
             return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
@@ -474,6 +566,8 @@ where
         self.sync_metadata().await?;
 
         self.any.prune_log(prune_loc).await?;
+        self.any.update_metrics().await;
+        self.update_metrics();
         Ok(())
     }
 
@@ -591,6 +685,7 @@ where
 
         self.grafted_tree = grafted_tree;
         self.root = root;
+        self.update_metrics();
 
         Ok(())
     }
@@ -644,11 +739,15 @@ where
 
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error<F>> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.sync_metadata().await
+        self.sync_metadata().await?;
+        self.update_metrics();
+        Ok(())
     }
 
     /// Destroy the db, removing all data from disk.
@@ -682,9 +781,12 @@ where
         &mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
         self.grafted_tree.apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
+        self.update_metrics();
         Ok(range)
     }
 }
@@ -1119,6 +1221,7 @@ mod tests {
         Sha256,
         OneCap,
         32,
+        commonware_parallel::Sequential,
     >;
     type MmbDb = fixed::Db<
         mmb::Family,
@@ -1128,6 +1231,7 @@ mod tests {
         Sha256,
         OneCap,
         32,
+        commonware_parallel::Sequential,
     >;
 
     async fn populate_fixed_db<F, DB>(db: &mut DB, start: u64, count: u64)
@@ -1164,23 +1268,23 @@ mod tests {
                 next_idx += 1;
             }
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_none());
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1196,31 +1300,31 @@ mod tests {
             .unwrap();
             populate_fixed_db::<mmb::Family, _>(&mut db, 0, 260).await;
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
             assert!(witness.partial_chunk.is_some());
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
             let wrong_ops_root = Sha256::hash(b"wrong ops root");
-            assert!(!witness.verify(&mut hasher, &wrong_ops_root, &canonical_root));
+            assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness.clone();
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness.clone();
             tampered.partial_chunk.as_mut().unwrap().0 += 1;
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
 
             let mut tampered = witness;
             tampered.partial_chunk.as_mut().unwrap().1 = Sha256::hash(b"wrong partial chunk");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1245,19 +1349,19 @@ mod tests {
                 "test requires at least one pruned chunk to exercise the zero-chunk path"
             );
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
 
             let wrong_canonical_root = Sha256::hash(b"wrong canonical root");
-            assert!(!witness.verify(&mut hasher, &ops_root, &wrong_canonical_root));
+            assert!(!witness.verify(&hasher, &ops_root, &wrong_canonical_root));
 
             let mut tampered = witness;
             tampered.grafted_root = Sha256::hash(b"wrong grafted root");
-            assert!(!tampered.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(!tampered.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 
@@ -1272,12 +1376,12 @@ mod tests {
             .await
             .unwrap();
 
-            let mut hasher = qmdb::hasher::<Sha256>();
-            let witness = db.ops_root_witness(&mut hasher).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let witness = db.ops_root_witness(&hasher).await.unwrap();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
-            assert!(witness.verify(&mut hasher, &ops_root, &canonical_root));
+            assert!(witness.verify(&hasher, &ops_root, &canonical_root));
         });
     }
 }

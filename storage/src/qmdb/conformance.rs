@@ -33,68 +33,105 @@ use std::num::{NonZeroU16, NonZeroUsize};
 type Ctx = deterministic::Context;
 
 type AnyMmrUnorderedFixed =
-    any::unordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap>;
+    any::unordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
 type AnyMmrUnorderedVariable =
-    any::unordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap>;
-type AnyMmrOrderedFixed = any::ordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap>;
+    any::unordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
+type AnyMmrOrderedFixed =
+    any::ordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
 type AnyMmrOrderedVariable =
-    any::ordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap>;
+    any::ordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
 
 type AnyMmbUnorderedFixed =
-    any::unordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap>;
+    any::unordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
 type AnyMmbUnorderedVariable =
-    any::unordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap>;
-type AnyMmbOrderedFixed = any::ordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap>;
+    any::unordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
+type AnyMmbOrderedFixed =
+    any::ordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
 type AnyMmbOrderedVariable =
-    any::ordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap>;
+    any::ordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, Sequential>;
 
 type CurrentMmrUnorderedFixed =
-    current::unordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
-type CurrentMmrUnorderedVariable =
-    current::unordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+    current::unordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+type CurrentMmrUnorderedVariable = current::unordered::variable::Db<
+    mmr::Family,
+    Ctx,
+    Digest,
+    Digest,
+    Sha256,
+    OneCap,
+    32,
+    Sequential,
+>;
 type CurrentMmrOrderedFixed =
-    current::ordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
-type CurrentMmrOrderedVariable =
-    current::ordered::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+    current::ordered::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+type CurrentMmrOrderedVariable = current::ordered::variable::Db<
+    mmr::Family,
+    Ctx,
+    Digest,
+    Digest,
+    Sha256,
+    OneCap,
+    32,
+    Sequential,
+>;
 
 type CurrentMmbUnorderedFixed =
-    current::unordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
-type CurrentMmbUnorderedVariable =
-    current::unordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+    current::unordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+type CurrentMmbUnorderedVariable = current::unordered::variable::Db<
+    mmb::Family,
+    Ctx,
+    Digest,
+    Digest,
+    Sha256,
+    OneCap,
+    32,
+    Sequential,
+>;
 type CurrentMmbOrderedFixed =
-    current::ordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
-type CurrentMmbOrderedVariable =
-    current::ordered::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32>;
+    current::ordered::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+type CurrentMmbOrderedVariable = current::ordered::variable::Db<
+    mmb::Family,
+    Ctx,
+    Digest,
+    Digest,
+    Sha256,
+    OneCap,
+    32,
+    Sequential,
+>;
 
-type ImmutableMmrFixed = immutable::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
-type ImmutableMmbFixed = immutable::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
+type ImmutableMmrFixed =
+    immutable::fixed::Db<mmr::Family, Ctx, Digest, Digest, Sha256, TwoCap, Sequential>;
+type ImmutableMmbFixed =
+    immutable::fixed::Db<mmb::Family, Ctx, Digest, Digest, Sha256, TwoCap, Sequential>;
 type ImmutableMmrVariable =
-    immutable::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
+    immutable::variable::Db<mmr::Family, Ctx, Digest, Digest, Sha256, TwoCap, Sequential>;
 type ImmutableMmbVariable =
-    immutable::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, TwoCap>;
+    immutable::variable::Db<mmb::Family, Ctx, Digest, Digest, Sha256, TwoCap, Sequential>;
 
-type KeylessMmrFixed = keyless::fixed::Db<mmr::Family, Ctx, U64, Sha256>;
-type KeylessMmbFixed = keyless::fixed::Db<mmb::Family, Ctx, U64, Sha256>;
-type KeylessMmrVariable = keyless::variable::Db<mmr::Family, Ctx, Vec<u8>, Sha256>;
-type KeylessMmbVariable = keyless::variable::Db<mmb::Family, Ctx, Vec<u8>, Sha256>;
+type KeylessMmrFixed = keyless::fixed::Db<mmr::Family, Ctx, U64, Sha256, Sequential>;
+type KeylessMmbFixed = keyless::fixed::Db<mmb::Family, Ctx, U64, Sha256, Sequential>;
+type KeylessMmrVariable = keyless::variable::Db<mmr::Family, Ctx, Vec<u8>, Sha256, Sequential>;
+type KeylessMmbVariable = keyless::variable::Db<mmb::Family, Ctx, Vec<u8>, Sha256, Sequential>;
 
 type ImmutableMmrCompactFixed =
-    immutable::fixed::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256>;
+    immutable::fixed::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 type ImmutableMmbCompactFixed =
-    immutable::fixed::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256>;
+    immutable::fixed::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 type ImmutableMmrCompactVariable =
-    immutable::variable::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, ((), ())>;
+    immutable::variable::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, ((), ()), Sequential>;
 type ImmutableMmbCompactVariable =
-    immutable::variable::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, ((), ())>;
+    immutable::variable::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, ((), ()), Sequential>;
 
-type KeylessMmrCompactFixed = keyless::fixed::CompactDb<mmr::Family, Ctx, U64, Sha256>;
-type KeylessMmbCompactFixed = keyless::fixed::CompactDb<mmb::Family, Ctx, U64, Sha256>;
+type KeylessMmrCompactFixed = keyless::fixed::CompactDb<mmr::Family, Ctx, U64, Sha256, Sequential>;
+type KeylessMmbCompactFixed = keyless::fixed::CompactDb<mmb::Family, Ctx, U64, Sha256, Sequential>;
 type KeylessMmrCompactVariable = keyless::variable::CompactDb<
     mmr::Family,
     Ctx,
     Vec<u8>,
     Sha256,
     (commonware_codec::RangeCfg<usize>, ()),
+    Sequential,
 >;
 type KeylessMmbCompactVariable = keyless::variable::CompactDb<
     mmb::Family,
@@ -102,6 +139,7 @@ type KeylessMmbCompactVariable = keyless::variable::CompactDb<
     Vec<u8>,
     Sha256,
     (commonware_codec::RangeCfg<usize>, ()),
+    Sequential,
 >;
 
 // Config constructors
@@ -109,7 +147,7 @@ type KeylessMmbCompactVariable = keyless::variable::CompactDb<
 const PAGE_SIZE: NonZeroU16 = NZU16!(101);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig {
+fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig<Sequential> {
     MerkleConfig {
         journal_partition: format!("{suffix}-mj"),
         metadata_partition: format!("{suffix}-mm"),
@@ -140,7 +178,10 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> any::FixedConfig<OneCap> {
+fn any_fixed_config(
+    suffix: &str,
+    pooler: &impl BufferPooler,
+) -> any::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle_config: merkle_config(suffix, &pc),
@@ -152,7 +193,7 @@ fn any_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> any::FixedConfi
 fn any_variable_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> any::VariableConfig<OneCap, ((), ())> {
+) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle_config: merkle_config(suffix, &pc),
@@ -161,7 +202,10 @@ fn any_variable_config(
     }
 }
 
-fn current_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> current::FixedConfig<OneCap> {
+fn current_fixed_config(
+    suffix: &str,
+    pooler: &impl BufferPooler,
+) -> current::FixedConfig<OneCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle_config: merkle_config(suffix, &pc),
@@ -174,7 +218,7 @@ fn current_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> current::Fi
 fn current_variable_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> current::VariableConfig<OneCap, ((), ())> {
+) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle_config: merkle_config(suffix, &pc),
@@ -187,7 +231,7 @@ fn current_variable_config(
 fn immutable_fixed_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> immutable::fixed::Config<TwoCap> {
+) -> immutable::fixed::Config<TwoCap, Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
         merkle_config: merkle_config(suffix, &pc),
@@ -199,7 +243,7 @@ fn immutable_fixed_config(
 fn immutable_variable_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> immutable::variable::Config<TwoCap, ((), ())> {
+) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
         merkle_config: merkle_config(suffix, &pc),
@@ -208,7 +252,10 @@ fn immutable_variable_config(
     }
 }
 
-fn keyless_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> keyless::fixed::Config {
+fn keyless_fixed_config(
+    suffix: &str,
+    pooler: &impl BufferPooler,
+) -> keyless::fixed::Config<Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     keyless::Config {
         merkle: merkle_config(suffix, &pc),
@@ -219,7 +266,7 @@ fn keyless_fixed_config(suffix: &str, pooler: &impl BufferPooler) -> keyless::fi
 fn keyless_variable_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
+) -> keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
     let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     keyless::Config {
         merkle: merkle_config(suffix, &pc),
@@ -227,7 +274,7 @@ fn keyless_variable_config(
     }
 }
 
-fn compact_merkle_config(suffix: &str) -> crate::merkle::compact::Config {
+fn compact_merkle_config(suffix: &str) -> crate::merkle::compact::Config<Sequential> {
     crate::merkle::compact::Config {
         partition: format!("{suffix}-compact"),
         strategy: Sequential,
@@ -237,7 +284,7 @@ fn compact_merkle_config(suffix: &str) -> crate::merkle::compact::Config {
 fn immutable_fixed_compact_config(
     suffix: &str,
     _pooler: &impl BufferPooler,
-) -> immutable::fixed::CompactConfig {
+) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
         merkle: compact_merkle_config(suffix),
         commit_codec_config: (),
@@ -247,7 +294,7 @@ fn immutable_fixed_compact_config(
 fn immutable_variable_compact_config(
     suffix: &str,
     _pooler: &impl BufferPooler,
-) -> immutable::variable::CompactConfig<((), ())> {
+) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
         merkle: compact_merkle_config(suffix),
         commit_codec_config: ((), ()),
@@ -257,7 +304,7 @@ fn immutable_variable_compact_config(
 fn keyless_fixed_compact_config(
     suffix: &str,
     _pooler: &impl BufferPooler,
-) -> keyless::fixed::CompactConfig {
+) -> keyless::fixed::CompactConfig<Sequential> {
     keyless::CompactConfig {
         merkle: compact_merkle_config(suffix),
         commit_codec_config: (),
@@ -267,7 +314,7 @@ fn keyless_fixed_compact_config(
 fn keyless_variable_compact_config(
     suffix: &str,
     _pooler: &impl BufferPooler,
-) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ())> {
+) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
     keyless::CompactConfig {
         merkle: compact_merkle_config(suffix),
         commit_codec_config: ((0..=10000usize).into(), ()),

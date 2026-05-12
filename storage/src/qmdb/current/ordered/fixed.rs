@@ -21,10 +21,10 @@ use crate::{
     Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
-pub type Db<F, E, K, V, H, T, const N: usize, S = Sequential> = super::db::Db<
+pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
     E,
     Journal<E, Operation<F, K, V>>,
@@ -66,7 +66,7 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize, S = Sequential> =
+    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize, S> =
         crate::qmdb::current::ordered::db::Db<
             F,
             E,
@@ -119,7 +119,16 @@ pub mod test {
     };
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest = Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
+    type CurrentTest = Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
@@ -144,7 +153,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "range-proofs-pruned".to_string();
-            let mut hasher = Sha256::new();
+            let hasher = crate::qmdb::hasher::<Sha256>();
             let mut db = open_db(context.child("db"), partition).await;
 
             let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
@@ -173,9 +182,7 @@ pub mod test {
 
             // Requesting a range proof at location 0 (in the pruned range) should return
             // OperationPruned, not panic.
-            let result = db
-                .range_proof(&mut hasher, Location::new(0), NZU64!(1))
-                .await;
+            let result = db.range_proof(&hasher, Location::new(0), NZU64!(1)).await;
             assert!(
                 matches!(result, Err(Error::OperationPruned(_))),
                 "expected OperationPruned, got {result:?}"

@@ -157,7 +157,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certification with `false`.
         ///
         /// Closing the channel is also terminal for this request and should be reserved for cases
-        /// where certification can no longer produce a verdict (for example, shutdown).
+        /// where certification can no longer produce a verdict (for example, shutdown), not for temporary
+        /// inability to decide.
         ///
         /// # Determinism Requirement
         ///
@@ -271,18 +272,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             context: (E, Self::Context),
             ancestry: AncestorStream<A, Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
-    }
 
-    /// An extension of [Application] that provides the ability to implementations to verify blocks.
-    ///
-    /// Some [Application]s may not require this functionality. When employing
-    /// erasure coding, for example, verification only serves to verify the integrity of the
-    /// received shard relative to the consensus commitment, and can therefore be
-    /// hidden from the application.
-    pub trait VerifyingApplication<E>: Application<E>
-    where
-        E: Rng + Spawner + Metrics + Clock,
-    {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         ///
         /// This future should not resolve until the implementation can produce a stable verdict.

@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`Inline`] adapts any [`VerifyingApplication`] to the marshal/consensus interfaces
+//! [`Inline`] adapts any [`Application`] to the marshal/consensus interfaces
 //! while keeping block validation in the [`Automaton::verify`] path. Unlike
 //! [`super::Deferred`], it does not defer application verification to certification.
 //! Instead, it only reports `true` from `verify` after parent/height checks and
@@ -58,7 +58,6 @@ use crate::{
     simplex::{types::Context, Plan},
     types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
@@ -172,12 +171,7 @@ impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -207,12 +201,7 @@ impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -482,12 +471,7 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -599,7 +583,7 @@ mod tests {
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
-        Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
+        Application, Automaton, Block, CertifiableAutomaton, Relay,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
@@ -619,12 +603,7 @@ mod tests {
     where
         E: Rng + Spawner + Metrics + Clock,
         S: Scheme,
-        A: VerifyingApplication<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-        >,
+        A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
         B: Block + Clone,
         ES: crate::types::Epocher,
     {

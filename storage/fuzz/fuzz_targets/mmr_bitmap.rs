@@ -12,8 +12,8 @@ const MAX_OPERATIONS: usize = 100;
 const CHUNK_SIZE: usize = 32;
 
 enum Bitmap<E: Clock + Storage + Metrics, D: Digest, const N: usize> {
-    Merkleized(MerkleizedBitMap<E, D, N>),
-    Unmerkleized(UnmerkleizedBitMap<E, D, N>),
+    Merkleized(MerkleizedBitMap<E, D, N, Sequential>),
+    Unmerkleized(UnmerkleizedBitMap<E, D, N, Sequential>),
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -60,7 +60,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new(ForwardFold);
-        let init_bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
+        let init_bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE, Sequential>::init(
             context.child("bitmap"),
             PARTITION,
             Sequential,
@@ -222,6 +222,7 @@ fn fuzz(input: FuzzInput) {
                                     deterministic::Context,
                                     sha256::Digest,
                                     CHUNK_SIZE,
+                                    Sequential,
                                 >::verify_bit_inclusion(
                                     &hasher, &proof, &chunk, bit_offset, &root
                                 ),
@@ -233,7 +234,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
-                    let bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
+                    let bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE, Sequential>::init(
                         context.child("bitmap").with_attribute("instance", restarts),
                         PARTITION,
                         Sequential,

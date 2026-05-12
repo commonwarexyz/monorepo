@@ -679,6 +679,11 @@ impl<F: Family> Subtree<F> {
         self.is_before(range) || self.leaf_start >= range.end
     }
 
+    /// True if this subtree's leaves lie wholly inside `range`.
+    fn is_inside(&self, range: &Range<Location<F>>) -> bool {
+        self.leaf_start >= range.start && self.leaf_end() <= range.end
+    }
+
     fn children(&self) -> (Self, Self) {
         let (left_pos, right_pos) = F::children(self.pos, self.height);
         let child_height = self.height - 1;
@@ -700,11 +705,14 @@ impl<F: Family> Subtree<F> {
     /// Collect sibling positions needed to reconstruct this subtree digest from a range of
     /// elements, in left-first DFS order.
     ///
-    /// At each node: if the subtree is entirely outside the range, its root position is emitted. If
-    /// it's a leaf in the range, nothing is emitted. Otherwise, recurse into children.
+    /// Emits outside subtrees and skips fully covered subtrees.
     fn collect_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Position<F>>) {
         if self.is_outside(range) {
             out.push(self.pos);
+            return;
+        }
+
+        if self.is_inside(range) {
             return;
         }
 
@@ -718,10 +726,7 @@ impl<F: Family> Subtree<F> {
     /// Collect sibling subtrees that lie wholly before the proven range, in the same
     /// left-first DFS order as [`collect_siblings`](Self::collect_siblings).
     ///
-    /// Only `range.start` is consulted: the `range.end` side doesn't matter for prefix
-    /// siblings. Pruning on `range.start` also keeps the traversal O(height) per peak:
-    /// pruning only by `range.end` would recurse into both children whenever a subtree
-    /// sits entirely inside the proven range, costing O(2^height) per such peak.
+    /// Only `range.start` is consulted because the `range.end` side cannot affect prefix siblings.
     fn collect_prefix_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Self>) {
         if self.is_before(range) {
             out.push(*self);
@@ -2568,6 +2573,22 @@ mod tests {
         }
     }
 
+    fn full_peak_range_blueprint_does_not_descend<F: Family>() {
+        let leaves = Location::new(1u64 << 40);
+        let range = Location::new(0)..leaves;
+
+        let bp = Blueprint::<F>::new(leaves, 0, Bagging::ForwardFold, range).unwrap();
+
+        assert!(
+            bp.range_peaks.iter().any(|peak| peak.height >= 39),
+            "test must include a large fully covered peak"
+        );
+        assert!(
+            bp.fetch_nodes.is_empty(),
+            "full-range proofs should not fetch per-peak siblings"
+        );
+    }
+
     /// `verify_proof_and_pinned_nodes` must accept pinned nodes at
     /// `F::nodes_to_pin(start_loc)` positions for any `(leaves, start_loc)` pair.
     ///
@@ -2715,6 +2736,10 @@ mod tests {
         no_duplicate_positions::<mmr::Family>();
     }
     #[test]
+    fn mmr_full_peak_range_blueprint_does_not_descend() {
+        full_peak_range_blueprint_does_not_descend::<mmr::Family>();
+    }
+    #[test]
     fn mmr_verify_proof_and_pinned_nodes_across_sizes() {
         verify_proof_and_pinned_nodes_across_sizes::<mmr::Family>();
     }
@@ -2814,6 +2839,10 @@ mod tests {
     #[test]
     fn mmb_no_duplicate_positions() {
         no_duplicate_positions::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_full_peak_range_blueprint_does_not_descend() {
+        full_peak_range_blueprint_does_not_descend::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_proof_and_pinned_nodes_across_sizes() {

@@ -267,7 +267,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 use std::sync::Arc;
 
@@ -280,9 +280,11 @@ pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
 
+use self::db::Metrics;
+
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy = Sequential> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
@@ -307,10 +309,10 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
 }
 
 /// Configuration for a `Current` authenticated db with fixed-size values.
-pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
+pub type FixedConfig<T, S> = Config<T, FConfig, S>;
 
 /// Configuration for a `Current` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
+pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 
 /// Initialize a `Current` authenticated db from the given config.
 pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
@@ -388,13 +390,17 @@ where
     )
     .await?;
 
-    Ok(db::Db {
+    let metrics = Metrics::new(context);
+    let db = db::Db {
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
         root,
-    })
+        metrics,
+    };
+    db.update_metrics();
+    Ok(db)
 }
 
 /// Extension trait for Current QMDB types that exposes bitmap information for testing.
@@ -455,7 +461,7 @@ pub mod tests {
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
         pooler: &impl BufferPooler,
-    ) -> FixedConfig<T> {
+    ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -481,7 +487,7 @@ pub mod tests {
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
         pooler: &impl BufferPooler,
-    ) -> VariableConfig<T, ((), ())> {
+    ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
@@ -1031,13 +1037,21 @@ pub mod tests {
     use commonware_macros::{test_group, test_traced};
 
     type OrderedFixedDb =
-        ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+        ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
     type OrderedVariableDb =
-        ordered::variable::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+        ordered::variable::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
     type UnorderedFixedDb =
-        unordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
-    type UnorderedVariableDb =
-        unordered::variable::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+        unordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+    type UnorderedVariableDb = unordered::variable::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        32,
+        Sequential,
+    >;
     type OrderedFixedP1Db = ordered::fixed::partitioned::Db<
         mmr::Family,
         Context,
@@ -1047,6 +1061,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type OrderedVariableP1Db = ordered::variable::partitioned::Db<
         mmr::Family,
@@ -1057,6 +1072,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type UnorderedFixedP1Db = unordered::fixed::partitioned::Db<
         mmr::Family,
@@ -1067,6 +1083,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type UnorderedVariableP1Db = unordered::variable::partitioned::Db<
         mmr::Family,
@@ -1077,6 +1094,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type OrderedFixedP2Db = ordered::fixed::partitioned::Db<
         mmr::Family,
@@ -1087,6 +1105,7 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
     type OrderedVariableP2Db = ordered::variable::partitioned::Db<
         mmr::Family,
@@ -1097,6 +1116,7 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
     type UnorderedFixedP2Db = unordered::fixed::partitioned::Db<
         mmr::Family,
@@ -1107,6 +1127,7 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
     type UnorderedVariableP2Db = unordered::variable::partitioned::Db<
         mmr::Family,
@@ -1117,16 +1138,25 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
 
     type OrderedFixedMmbDb =
-        ordered::fixed::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+        ordered::fixed::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
     type OrderedVariableMmbDb =
-        ordered::variable::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+        ordered::variable::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
     type UnorderedFixedMmbDb =
-        unordered::fixed::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
-    type UnorderedVariableMmbDb =
-        unordered::variable::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32>;
+        unordered::fixed::Db<mmb::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+    type UnorderedVariableMmbDb = unordered::variable::Db<
+        mmb::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        32,
+        Sequential,
+    >;
     type OrderedFixedMmbP1Db = ordered::fixed::partitioned::Db<
         mmb::Family,
         Context,
@@ -1136,6 +1166,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type OrderedVariableMmbP1Db = ordered::variable::partitioned::Db<
         mmb::Family,
@@ -1146,6 +1177,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type UnorderedFixedMmbP1Db = unordered::fixed::partitioned::Db<
         mmb::Family,
@@ -1156,6 +1188,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type UnorderedVariableMmbP1Db = unordered::variable::partitioned::Db<
         mmb::Family,
@@ -1166,6 +1199,7 @@ pub mod tests {
         OneCap,
         1,
         32,
+        Sequential,
     >;
     type OrderedFixedMmbP2Db = ordered::fixed::partitioned::Db<
         mmb::Family,
@@ -1176,6 +1210,7 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
     type OrderedVariableMmbP2Db = ordered::variable::partitioned::Db<
         mmb::Family,
@@ -1186,6 +1221,7 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
     type UnorderedFixedMmbP2Db = unordered::fixed::partitioned::Db<
         mmb::Family,
@@ -1196,6 +1232,7 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
     type UnorderedVariableMmbP2Db = unordered::variable::partitioned::Db<
         mmb::Family,
@@ -1206,6 +1243,7 @@ pub mod tests {
         OneCap,
         2,
         32,
+        Sequential,
     >;
 
     // Helper macro to create an open_db closure for a specific variant.
@@ -1743,8 +1781,8 @@ pub mod tests {
             assert_eq!(reopened.get(&k).await.unwrap(), expected);
 
             // key_value_proof: RangeProof::new must also handle pruned chunk 0.
-            let mut hasher = commonware_cryptography::Sha256::new();
-            let _proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let _proof = reopened.key_value_proof(&hasher, k).await.unwrap();
 
             reopened.destroy().await.unwrap();
         });
@@ -1984,10 +2022,10 @@ pub mod tests {
                 mmb_commit(&mut db, [(key(1), Some(val(round)))]).await;
             }
 
-            let mut hasher = commonware_cryptography::Sha256::new();
-            let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let proof = db.key_value_proof(&hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2007,10 +2045,10 @@ pub mod tests {
 
             assert_eq!(reopened.root(), target_root);
 
-            let mut hasher = commonware_cryptography::Sha256::new();
-            let proof = reopened.key_value_proof(&mut hasher, k).await.unwrap();
+            let hasher = qmdb::hasher::<Sha256>();
+            let proof = reopened.key_value_proof(&hasher, k).await.unwrap();
             assert!(UnorderedVariableMmbDb::verify_key_value_proof(
-                &mut hasher,
+                &hasher,
                 k,
                 val(60_000 + 199),
                 &proof,
@@ -2234,11 +2272,11 @@ pub mod tests {
                     "root mismatch after prune at round {round}"
                 );
 
-                let mut hasher = commonware_cryptography::Sha256::new();
-                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                let hasher = qmdb::hasher::<Sha256>();
+                let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &mut hasher,
+                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,
@@ -2267,11 +2305,11 @@ pub mod tests {
                     "value mismatch after reopen at round {round}"
                 );
 
-                let mut hasher = commonware_cryptography::Sha256::new();
-                let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
+                let hasher = qmdb::hasher::<Sha256>();
+                let proof = db.key_value_proof(&hasher, k).await.unwrap();
                 assert!(
                     UnorderedVariableMmbDb::verify_key_value_proof(
-                        &mut hasher,
+                        &hasher,
                         k,
                         expected.expect("value should exist"),
                         &proof,

@@ -18,7 +18,7 @@ use std::num::NonZeroU16;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, OneCap, 32>;
+type Db<F> = CurrentDb<F, deterministic::Context, Key, Value, Sha256, OneCap, 32, Sequential>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(137);
 const COLLISION_GROUPS: u8 = 4;
@@ -76,7 +76,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
+fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {

@@ -30,7 +30,7 @@ use crate::{
 use ahash::AHasher;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -203,7 +203,7 @@ impl<
 ///
 /// [`GenericMerkleizedBatch::get_node`] only covers the batch chain; committed positions
 /// return `None`. This adapter falls through to the committed Mem for those positions.
-struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy = Sequential> {
+struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy> {
     batch: &'a GenericMerkleizedBatch<F, D, S>,
     mem: &'a Mem<F, D>,
 }
@@ -234,7 +234,7 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
 ///
 /// Wraps a [`any::batch::UnmerkleizedBatch`] and adds bitmap and grafted MMR parent state
 /// needed to compute the current layer during [`merkleize`](Self::merkleize).
-pub struct UnmerkleizedBatch<F, H, U, const N: usize, S: Strategy = Sequential>
+pub struct UnmerkleizedBatch<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
     U: update::Update + Send + Sync,
@@ -293,7 +293,7 @@ pub struct MerkleizedBatch<
     D: Digest,
     U: update::Update + Send + Sync,
     const N: usize,
-    S: Strategy = Sequential,
+    S: Strategy,
 > where
     Operation<F, U>: Send + Sync,
 {
@@ -557,7 +557,7 @@ where
     Operation<F, U>: Codec,
 {
     let batch_len = inner.journal_batch.items().len();
-    let batch_base = *inner.new_last_commit_loc + 1 - batch_len as u64;
+    let batch_base = inner.bounds.total_size - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
     let overlay = build_chunk_overlay::<F, U, _, N>(
@@ -670,7 +670,7 @@ where
         &bitmap_batch,
         &grafted_storage,
         partial,
-        inner.new_inactivity_floor_loc,
+        inner.bounds.inactivity_floor,
         &ops_root,
     )
     .await?;

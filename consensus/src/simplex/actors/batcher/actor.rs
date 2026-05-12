@@ -398,7 +398,8 @@ where
                         }
 
                         // Verify the certificate
-                        if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
+                        if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
+                        {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid notarization");
                             continue;
                         }
@@ -440,7 +441,8 @@ where
                         }
 
                         // Verify the certificate
-                        if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
+                        if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
+                        {
                             commonware_p2p::block!(self.blocker, sender, %view, "invalid finalization");
                             continue;
                         }
@@ -495,7 +497,10 @@ where
                     self.added.inc();
 
                     // Update per-peer latest vote metric (only if higher than current)
-                    let _ = self.latest_vote.get_or_create_by(&sender).try_set_max(view.get());
+                    let _ = self
+                        .latest_vote
+                        .get_or_create_by(&sender)
+                        .try_set_max(view.get());
 
                     // If the current leader explicitly nullifies the current view, signal
                     // the voter so it can fast-path timeout without waiting for its local
@@ -582,9 +587,8 @@ where
                 }
 
                 // Try to construct and forward certificates
-                if let Some(notarization) = self
-                    .recover_latency
-                    .time_some(self.context.as_ref(), || {
+                if let Some(notarization) =
+                    self.recover_latency.time_some(self.context.as_ref(), || {
                         round.try_construct_notarization(&self.scheme, &self.strategy)
                     })
                 {
@@ -593,18 +597,16 @@ where
                     // Forward notarization to voter
                     let _ = voter.recovered(Certificate::Notarization(notarization));
                 }
-                if let Some(nullification) = self
-                    .recover_latency
-                    .time_some(self.context.as_ref(), || {
+                if let Some(nullification) =
+                    self.recover_latency.time_some(self.context.as_ref(), || {
                         round.try_construct_nullification(&self.scheme, &self.strategy)
                     })
                 {
                     debug!(view = %updated_view, "constructed nullification, forwarding to voter");
                     let _ = voter.recovered(Certificate::Nullification(nullification));
                 }
-                if let Some(finalization) = self
-                    .recover_latency
-                    .time_some(self.context.as_ref(), || {
+                if let Some(finalization) =
+                    self.recover_latency.time_some(self.context.as_ref(), || {
                         round.try_construct_finalization(&self.scheme, &self.strategy)
                     })
                 {

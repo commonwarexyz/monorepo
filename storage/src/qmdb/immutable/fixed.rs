@@ -16,7 +16,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
@@ -24,21 +24,20 @@ use commonware_utils::Array;
 pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
 
 /// Type alias for the fixed-size immutable database.
-pub type Db<F, E, K, V, H, T, S = Sequential> =
+pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, S = Sequential> =
-    super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
 
 type Journal<F, E, K, V, H, S> =
     authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H, S>;
 
 /// Configuration for a fixed-size immutable authenticated db.
-pub type Config<T, S = Sequential> = BaseConfig<T, JournalConfig, S>;
+pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 
 /// Configuration for a fixed-size compact immutable db.
-pub type CompactConfig<S = Sequential> = super::CompactConfig<(), S>;
+pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
 impl<
         F: Family,
@@ -87,7 +86,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
@@ -96,7 +95,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle_config: MmrConfig {
@@ -119,14 +118,14 @@ mod tests {
 
     async fn open_db<F: Family>(
         context: deterministic::Context,
-    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
+    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = config("partition", &context);
         Db::init(context, cfg).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
         context: deterministic::Context,
-    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256> {
+    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-immutable-fixed".into(),
@@ -137,13 +136,64 @@ mod tests {
         CompactDb::init(context, cfg).await.unwrap()
     }
 
+    #[test_traced("INFO")]
+    fn test_immutable_fixed_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let key = Sha256::fill(1u8);
+            let value = Sha256::fill(2u8);
+            let floor = db.inactivity_floor_loc();
+            let batch = db.new_batch().set(key, value).merkleize(&db, None, floor);
+            db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(crate::merkle::Location::new(0)).await.unwrap();
+
+            let metrics = ctx.encode();
+            for expected in [
+                "db_size 3",
+                "db_pruning_boundary 0",
+                "db_retained 3",
+                "db_inactivity_floor 0",
+                "db_last_commit 2",
+                "db_get_calls_total 1",
+                "db_get_many_calls_total 1",
+                "db_keys_requested_total 2",
+                "db_apply_batch_calls_total 1",
+                "db_operations_applied_total 2",
+                "db_commit_calls_total 1",
+                "db_sync_calls_total 1",
+                "db_prune_calls_total 1",
+                "db_get_duration_count 1",
+                "db_get_many_duration_count 1",
+                "db_apply_batch_duration_count 1",
+                "db_commit_duration_count 1",
+                "db_sync_duration_count 1",
+                "db_prune_duration_count 1",
+            ] {
+                assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+        });
+    }
+
     #[allow(clippy::type_complexity)]
     fn open<F: Family>(
         ctx: deterministic::Context,
     ) -> Pin<
         Box<
-            dyn Future<Output = Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap>>
-                + Send,
+            dyn Future<
+                    Output = Db<
+                        F,
+                        deterministic::Context,
+                        Digest,
+                        Digest,
+                        Sha256,
+                        TwoCap,
+                        Sequential,
+                    >,
+                > + Send,
         >,
     > {
         Box::pin(open_db::<F>(ctx))
@@ -153,7 +203,15 @@ mod tests {
 
     #[allow(dead_code)]
     fn assert_db_futures_are_send(
-        db: &mut Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>,
+        db: &mut Db<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            Digest,
+            Sha256,
+            TwoCap,
+            Sequential,
+        >,
         key: Digest,
         loc: crate::merkle::mmr::Location,
     ) {
@@ -164,7 +222,10 @@ mod tests {
         is_send(db.rewind(loc));
     }
 
-    fn small_sections_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+    fn small_sections_config(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> Config<TwoCap, Sequential> {
         let mut cfg = config(suffix, pooler);
         cfg.log.items_per_blob = NZU64!(1);
         cfg
@@ -172,7 +233,7 @@ mod tests {
 
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
-    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap> {
+    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = small_sections_config("partition", &context);
         Db::init(context, cfg).await.unwrap()
     }
@@ -182,8 +243,17 @@ mod tests {
         ctx: deterministic::Context,
     ) -> Pin<
         Box<
-            dyn Future<Output = Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap>>
-                + Send,
+            dyn Future<
+                    Output = Db<
+                        F,
+                        deterministic::Context,
+                        Digest,
+                        Digest,
+                        Sha256,
+                        TwoCap,
+                        Sequential,
+                    >,
+                > + Send,
         >,
     > {
         Box::pin(open_small_sections_db::<F>(ctx))

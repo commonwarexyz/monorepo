@@ -1,8 +1,8 @@
 //! Mock verifying application for Marshaled wrapper tests.
 //!
-//! This module provides a generic mock application that implements both
-//! `Application` and `VerifyingApplication` traits, suitable for testing
-//! the `Marshaled` wrapper in both standard and coding variants.
+//! This module provides a generic mock application that implements the
+//! `Application` trait, suitable for testing the `Marshaled` wrapper in
+//! both standard and coding variants.
 
 use crate::{
     marshal::ancestry::{AncestorStream, BlockProvider},
@@ -15,7 +15,7 @@ use commonware_utils::{
 };
 use std::{marker::PhantomData, sync::Arc};
 
-/// A mock application that implements `VerifyingApplication` for testing.
+/// A mock application that implements `Application` for testing.
 ///
 /// This mock:
 /// - Returns the provided genesis block from `genesis()`
@@ -81,14 +81,7 @@ where
     ) -> Option<Self::Block> {
         self.propose_result.clone()
     }
-}
 
-impl<B, S> crate::VerifyingApplication<deterministic::Context> for MockVerifyingApp<B, S>
-where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
-{
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
@@ -149,14 +142,7 @@ where
     ) -> Option<Self::Block> {
         None
     }
-}
 
-impl<B, S> crate::VerifyingApplication<deterministic::Context> for GatedVerifyingApp<B, S>
-where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
-{
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),

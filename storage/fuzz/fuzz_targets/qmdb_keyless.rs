@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
 };
@@ -22,6 +22,7 @@ use std::num::NonZeroU16;
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PROOF_OPS: u64 = 100;
+type CodecConfig = (commonware_codec::RangeCfg<usize>, ());
 
 /// Which error variant a bad-floor commit should produce.
 #[derive(Debug, Clone, Copy)]
@@ -189,12 +190,13 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(127);
 const PAGE_CACHE_SIZE: usize = 8;
 
-type Db<F> = Keyless<F, deterministic::Context, Vec<u8>, Sha256>;
+type Db<F, S> = Keyless<F, deterministic::Context, Vec<u8>, Sha256, S>;
 
-fn test_config(
+fn test_config<S: Strategy>(
     test_name: &str,
     pooler: &impl BufferPooler,
-) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+    strategy: S,
+) -> Config<CodecConfig, S> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
@@ -202,7 +204,7 @@ fn test_config(
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
-            strategy: Sequential,
+            strategy,
             page_cache: page_cache.clone(),
         },
         log: VConfig {
@@ -216,13 +218,13 @@ fn test_config(
     }
 }
 
-fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
+fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy: S) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
-        let cfg = test_config(suffix, &context);
-        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
+        let cfg = test_config(suffix, &context, strategy.clone());
+        let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
             .await
             .expect("Failed to init keyless db");
         let mut restarts = 0usize;
@@ -478,7 +480,7 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
                     pending_appends.clear();
                     drop(db);
 
-                    let cfg = test_config(suffix, &context);
+                    let cfg = test_config(suffix, &context, strategy.clone());
                     db = Db::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
@@ -501,6 +503,8 @@ fn fuzz_family<F: Family>(input: &FuzzInput, suffix: &str) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz_family::<mmr::Family>(&input, "fuzz-mmr");
-    fuzz_family::<mmb::Family>(&input, "fuzz-mmb");
+    fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", Sequential);
+    fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", Sequential);
+    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", Rayon::new(NZUsize!(2)).unwrap());
+    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", Rayon::new(NZUsize!(2)).unwrap());
 });

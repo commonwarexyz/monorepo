@@ -21,13 +21,13 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator>;
+pub type Database<E> = fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator, Sequential>;
 
 /// Operation type alias.
 pub type Operation = fixed::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig, Sequential> {
     let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
         context,
         NZU16!(2048),

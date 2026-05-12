@@ -39,7 +39,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::Db as AnyDb,
+            db::{Db as AnyDb, Metrics as AnyMetrics},
             operation::{update::Update, Operation},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
@@ -150,7 +150,9 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
-    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(index, log, Some(bitmap)).await?;
+    let any_metrics = AnyMetrics::new(context.child("any"));
+    let any: AnyDb<F, E, J, I, H, U, N, S> =
+        AnyDb::init_from_log(index, log, Some(bitmap), any_metrics).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -221,13 +223,16 @@ where
         db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
+    let metrics = db::Metrics::new(context);
     let current_db = db::Db {
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
         root,
+        metrics,
     };
+    current_db.update_metrics();
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.
     current_db.sync_metadata().await?;
@@ -376,8 +381,8 @@ impl_current_sync_database!(
 
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
-            for std::sync::Arc<$db<F, E, K, V, H, T, N>>
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
+            for std::sync::Arc<$db<F, E, K, V, H, T, N, S>>
         where
             F: Graftable,
             E: Context,
@@ -386,6 +391,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
@@ -418,10 +424,10 @@ macro_rules! impl_current_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    $db<F, E, K, V, H, T, N>,
+                    $db<F, E, K, V, H, T, N, S>,
                 >,
             >
         where
@@ -432,6 +438,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
@@ -465,10 +472,10 @@ macro_rules! impl_current_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    Option<$db<F, E, K, V, H, T, N>>,
+                    Option<$db<F, E, K, V, H, T, N, S>>,
                 >,
             >
         where
@@ -479,6 +486,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
