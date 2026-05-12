@@ -147,10 +147,6 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
 }
 
 /// Represents the pending-chunk slot in proof and witness types.
-///
-/// For families that support pending chunks (MMB), the concrete type is `Option<D>`.
-/// For families that don't (MMR), the concrete type is `()`, which is zero-sized and
-/// occupies no bytes on the wire.
 pub trait PendingChunkTrait<D: Digest>:
     Clone + Debug + Eq + Write + EncodeSize + Read<Cfg = ()> + Send + Sync
 {
@@ -196,10 +192,6 @@ impl<D: Digest> PendingChunkTrait<D> for () {
 /// chunk-to-peak mappings required by that process.
 pub trait Graftable: Family {
     /// The pending-chunk slot type for this family's proofs and witnesses.
-    ///
-    /// MMR uses `()` because a chunk's height-`gh` ancestor is born the moment the chunk
-    /// is bit-complete, so there is never a pending chunk. MMB uses `Option<D>` because its
-    /// delayed-merge gap can leave at most one pending chunk at a time.
     type PendingChunk<D: Digest>: PendingChunkTrait<D>;
 
     /// Return the nodes that collectively cover the leaf range of a bitmap chunk in a structure of

@@ -61,8 +61,7 @@ pub struct OpsRootWitness<F: Graftable, D: Digest> {
     /// The grafted-tree root committed by the canonical root.
     pub grafted_root: D,
 
-    /// The pending-chunk contribution. For families that support pending chunks (MMB), this
-    /// is `Option<D>`; for families that don't (MMR), this is `()`.
+    /// The pending-chunk contribution, if any.
     pub pending_chunk_digest: F::PendingChunk<D>,
 
     /// The trailing partial chunk contribution, if the bitmap length is not chunk-aligned:
@@ -154,8 +153,7 @@ pub struct RangeProof<F: Graftable, D: Digest> {
     /// The Merkle digest material required to verify the proof.
     pub proof: Proof<F, D>,
 
-    /// The pending-chunk contribution. For families that support pending chunks (MMB), this
-    /// is `Option<D>`; for families that don't (MMR), this is `()`.
+    /// The pending-chunk contribution, if any.
     pub pending_chunk_digest: F::PendingChunk<D>,
 
     /// Digest of the bitmap's trailing partial chunk, if any.
