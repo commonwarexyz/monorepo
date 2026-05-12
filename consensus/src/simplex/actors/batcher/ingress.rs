@@ -101,9 +101,6 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send an update message.
-    ///
-    /// Returns `None` if the leader is active, or `Some(reason)` if the round
-    /// should be nullified.
     pub fn update(
         &mut self,
         current: View,
