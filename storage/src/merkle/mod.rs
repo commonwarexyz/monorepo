@@ -148,9 +148,6 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
 }
 
 /// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
-///
-/// A local zero-sized type whose `TryFrom<Option<D>>` impl rejects `Some` values. The
-/// orphan rule forbids writing the same impl for `()`.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Unused;
 
