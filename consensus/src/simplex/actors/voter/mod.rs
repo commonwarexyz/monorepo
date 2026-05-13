@@ -6763,13 +6763,8 @@ mod tests {
                 select! {
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
-                            batcher::Message::Update {
-                                current, ..
-                            } => {
-
-                                if current > view_4 {
-                                    break true;
-                                }
+                            batcher::Message::Update { current, .. } if current > view_4 => {
+                                break true;
                             }
                             batcher::Message::Constructed(Vote::Nullify(n)) => {
                                 // Still voting nullify for view 4 - expected
@@ -7479,13 +7474,8 @@ mod tests {
                                 "received nullify for view 2 before its fresh leader timeout elapsed"
                             );
                         }
-                        batcher::Message::Update {
-                            current, ..
-                        } => {
-
-                            if current == View::new(2) {
-                                break;
-                            }
+                        batcher::Message::Update { current, .. } if current == View::new(2) => {
+                            break;
                         }
                         _ => {}
                     },
@@ -7651,13 +7641,8 @@ mod tests {
                         {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
-                        batcher::Message::Update {
-                            current, ..
-                        } => {
-
-                            if current >= View::new(2) {
-                                break true;
-                            }
+                        batcher::Message::Update { current, .. } if current >= View::new(2) => {
+                            break true;
                         }
                         _ => {}
                     },
@@ -7674,13 +7659,8 @@ mod tests {
                         {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
-                        batcher::Message::Update {
-                            current, ..
-                        } => {
-
-                            if current >= View::new(2) {
-                                break true;
-                            }
+                        batcher::Message::Update { current, .. } if current >= View::new(2) => {
+                            break true;
                         }
                         _ => {}
                     },
