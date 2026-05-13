@@ -32,20 +32,6 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         }
     }
 
-    fn finalization_view(&self) -> Option<View> {
-        let Self::Verified(Certificate::Finalization(c), _) = self else {
-            return None;
-        };
-        Some(c.view())
-    }
-
-    fn pruned_by_front(overflow: &VecDeque<Self>, view: View) -> bool {
-        overflow
-            .front()
-            .and_then(Self::finalization_view)
-            .is_some_and(|finalized| finalized >= view)
-    }
-
     fn duplicates(&self, pending: &Self) -> bool {
         match (self, pending) {
             (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
@@ -69,13 +55,18 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         // the voter's current/finalized view; otherwise retained higher-view
         // timeouts or proposals could be ignored as not yet current.
         let new_view = message.view();
-        if Self::pruned_by_front(overflow, new_view) {
+        if matches!(
+            overflow.front(),
+            Some(Self::Verified(Certificate::Finalization(finalized), _))
+                if finalized.view() >= new_view
+        ) {
             return false;
         }
 
-        if message.finalization_view().is_some() {
+        if matches!(&message, Self::Verified(Certificate::Finalization(_), _)) {
             overflow.retain(|pending| {
-                pending.finalization_view().is_none() && pending.view() > new_view
+                !matches!(pending, Self::Verified(Certificate::Finalization(_), _))
+                    && pending.view() > new_view
             });
             overflow.push_front(message);
             return true;

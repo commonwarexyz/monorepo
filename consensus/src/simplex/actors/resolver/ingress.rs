@@ -25,20 +25,6 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
         }
     }
 
-    fn finalization_view(&self) -> Option<View> {
-        let Self::Certificate(Certificate::Finalization(c)) = self else {
-            return None;
-        };
-        Some(c.view())
-    }
-
-    fn pruned_by_front(overflow: &VecDeque<Self>, view: View) -> bool {
-        overflow
-            .front()
-            .and_then(Self::finalization_view)
-            .is_some_and(|finalized| finalized >= view)
-    }
-
     fn duplicates(&self, pending: &Self) -> bool {
         match (self, pending) {
             (Self::Certificate(a), Self::Certificate(b)) if a.view() == b.view() => matches!(
@@ -61,13 +47,18 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         // pending requests are pruned before any surviving higher-view work is
         // processed.
         let new_view = message.view();
-        if Self::pruned_by_front(overflow, new_view) {
+        if matches!(
+            overflow.front(),
+            Some(Self::Certificate(Certificate::Finalization(finalized)))
+                if finalized.view() >= new_view
+        ) {
             return false;
         }
 
-        if message.finalization_view().is_some() {
+        if matches!(&message, Self::Certificate(Certificate::Finalization(_))) {
             overflow.retain(|pending| {
-                pending.finalization_view().is_none() && pending.view() > new_view
+                !matches!(pending, Self::Certificate(Certificate::Finalization(_)))
+                    && pending.view() > new_view
             });
             overflow.push_front(message);
             return true;
