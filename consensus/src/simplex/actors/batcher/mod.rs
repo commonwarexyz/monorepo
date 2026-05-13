@@ -2968,11 +2968,13 @@ mod tests {
             // relayed certificate we just processed, so no further timeout should fire.
             let next_view = active_view.next();
             batcher_mailbox.update(next_view, leader, View::zero(), None);
-            context.sleep(Duration::from_millis(50)).await;
-            assert!(matches!(
-                voter_receiver.try_recv(),
-                Err(std::sync::mpsc::TryRecvError::Empty)
-            ));
+            select! {
+                message = voter_receiver.recv() => match message {
+                    Some(_) => panic!("unexpected voter message after leader activity"),
+                    None => panic!("voter receiver closed"),
+                },
+                _ = context.sleep(Duration::from_millis(50)) => {},
+            };
         });
     }
 
