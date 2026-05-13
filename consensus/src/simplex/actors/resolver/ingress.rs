@@ -50,7 +50,7 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             return true;
         }
 
-        // Ignore the message if it is a duplicate.
+        // Ignore the message if it is a duplicate
         if overflow.iter().any(|pending| match (&message, pending) {
             (Self::Certificate(a), Self::Certificate(b)) if a.view() == b.view() => matches!(
                 (a, b),

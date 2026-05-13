@@ -57,7 +57,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             return true;
         }
 
-        // Ignore the message if it is a duplicate.
+        // Ignore the message if it is a duplicate
         if overflow.iter().any(|pending| match (&message, pending) {
             (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
             (Self::Timeout(x, _), Self::Timeout(y, _)) => x == y,
