@@ -71,7 +71,7 @@ use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
-pub(crate) const fn height<const N: usize>() -> u32 {
+pub const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
@@ -83,7 +83,7 @@ pub(crate) const fn height<const N: usize>() -> u32 {
 /// # Panics
 ///
 /// Panics if `grafting_height == 0`.
-pub(super) fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
+pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
     assert!(grafting_height >= 1, "grafting_height must be >= 1");
     let pos = F::subtree_root_position(Location::<F>::new(0), grafting_height);
     let birth_chunk_0 = F::peak_birth_size(pos, grafting_height);
@@ -148,7 +148,7 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 /// # Panics
 ///
 /// Panics if `ops_pos` is below the grafting height.
-pub(super) fn ops_to_grafted_pos<F: Graftable>(
+pub fn ops_to_grafted_pos<F: Graftable>(
     ops_pos: Position<F>,
     grafting_height: u32,
 ) -> Position<F> {
@@ -167,7 +167,7 @@ pub(super) fn ops_to_grafted_pos<F: Graftable>(
 
 /// Convert a grafted position to the ops-family position whose subtree covers the same ops-leaf
 /// range.
-pub(super) fn grafted_to_ops_pos<F: Graftable>(
+pub fn grafted_to_ops_pos<F: Graftable>(
     grafted_pos: Position<F>,
     grafting_height: u32,
 ) -> Position<F> {

@@ -744,6 +744,9 @@ impl<F: Family> Subtree<F> {
                 return Err(ReconstructionError::MissingDigests);
             };
             *cursor += 1;
+            if let Some(ref mut cd) = collected {
+                cd.push((self.pos, digest));
+            }
             return Ok(digest);
         }
 
