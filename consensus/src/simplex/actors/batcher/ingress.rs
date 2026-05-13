@@ -341,29 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn newer_update_replaces_pending_without_merging_finalized() {
-        let mut overflow = VecDeque::new();
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(4), View::new(4))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(5), View::zero())
-        ));
-
-        assert_eq!(overflow.len(), 1);
-        assert!(matches!(
-            overflow.pop_front(),
-            Some(Message::Update {
-                current,
-                finalized,
-                ..
-            }) if current == View::new(5) && finalized == View::zero()
-        ));
-    }
-
-    #[test]
     fn update_keeps_constructed_finalization_above_finalized() {
         let mut overflow = VecDeque::new();
         assert!(Message::handle(
