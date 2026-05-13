@@ -2,7 +2,6 @@
 
 use crate::{types::Height, Block, Heightable};
 use commonware_cryptography::Digestible;
-use commonware_utils::sync::Mutex;
 use futures::{
     future::{BoxFuture, OptionFuture},
     FutureExt, Stream,
@@ -49,16 +48,12 @@ pub struct ErasedBlockProvider<B: Block> {
 
 impl<B: Block> ErasedBlockProvider<B> {
     /// Erase a concrete [`BlockProvider`] into a type-erased provider.
-    ///
-    /// The provider is wrapped in a `Mutex` so that the resulting closure
-    /// is `Sync` (required by `Arc<dyn Fn + Send + Sync>`). The lock is
-    /// held only for the duration of `clone()`, never across an await.
-    pub fn new<M: BlockProvider<Block = B>>(provider: M) -> Self {
-        let provider = Arc::new(Mutex::new(provider));
+    pub fn new<M: BlockProvider<Block = B> + Sync>(provider: M) -> Self {
+        let provider = Arc::new(provider);
         Self {
             fetch: Arc::new(move |digest| {
-                let p = provider.lock().clone();
-                Box::pin(async move { p.fetch_block(digest).await })
+                let p = provider.as_ref().clone();
+                Box::pin(p.fetch_block(digest))
             }),
         }
     }
@@ -87,7 +82,7 @@ pub struct AncestorStream<M, B: Block> {
     pending: OptionFuture<BoxFuture<'static, Option<B>>>,
 }
 
-impl<M, B: Block> AncestorStream<M, B> {
+impl<M: Send + Sync, B: Block> AncestorStream<M, B> {
     /// Returns a reference to the next block that will be yielded by the
     /// stream, without consuming it.
     ///
