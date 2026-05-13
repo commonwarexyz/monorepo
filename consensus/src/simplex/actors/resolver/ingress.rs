@@ -26,19 +26,6 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
         }
     }
 
-    // Return whether this message duplicates a pending overflow message.
-    fn duplicates(&self, pending: &Self) -> bool {
-        match (self, pending) {
-            (Self::Certificate(a), Self::Certificate(b)) if a.view() == b.view() => matches!(
-                (a, b),
-                (Certificate::Notarization(_), Certificate::Notarization(_))
-                    | (Certificate::Nullification(_), Certificate::Nullification(_))
-                    | (Certificate::Finalization(_), Certificate::Finalization(_))
-            ),
-            (Self::Certified { view: x, .. }, Self::Certified { view: y, .. }) => x == y,
-            _ => false,
-        }
-    }
 }
 
 impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
@@ -64,7 +51,17 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             return true;
         }
 
-        if overflow.iter().any(|pending| message.duplicates(pending)) {
+        // Ignore the message if it is a duplicate.
+        if overflow.iter().any(|pending| match (&message, pending) {
+            (Self::Certificate(a), Self::Certificate(b)) if a.view() == b.view() => matches!(
+                (a, b),
+                (Certificate::Notarization(_), Certificate::Notarization(_))
+                    | (Certificate::Nullification(_), Certificate::Nullification(_))
+                    | (Certificate::Finalization(_), Certificate::Finalization(_))
+            ),
+            (Self::Certified { view: x, .. }, Self::Certified { view: y, .. }) => x == y,
+            _ => false,
+        }) {
             return true;
         }
         overflow.push_back(message);

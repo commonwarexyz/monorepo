@@ -33,20 +33,6 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         }
     }
 
-    // Return whether this message duplicates a pending overflow message.
-    fn duplicates(&self, pending: &Self) -> bool {
-        match (self, pending) {
-            (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
-            (Self::Timeout(x, _), Self::Timeout(y, _)) => x == y,
-            (Self::Verified(a, _), Self::Verified(b, _)) if a.view() == b.view() => matches!(
-                (a, b),
-                (Certificate::Notarization(_), Certificate::Notarization(_))
-                    | (Certificate::Nullification(_), Certificate::Nullification(_))
-                    | (Certificate::Finalization(_), Certificate::Finalization(_))
-            ),
-            _ => false,
-        }
-    }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
@@ -72,7 +58,18 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             return true;
         }
 
-        if overflow.iter().any(|pending| message.duplicates(pending)) {
+        // Ignore the message if it is a duplicate.
+        if overflow.iter().any(|pending| match (&message, pending) {
+            (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
+            (Self::Timeout(x, _), Self::Timeout(y, _)) => x == y,
+            (Self::Verified(a, _), Self::Verified(b, _)) if a.view() == b.view() => matches!(
+                (a, b),
+                (Certificate::Notarization(_), Certificate::Notarization(_))
+                    | (Certificate::Nullification(_), Certificate::Nullification(_))
+                    | (Certificate::Finalization(_), Certificate::Finalization(_))
+            ),
+            _ => false,
+        }) {
             return true;
         }
         overflow.push_back(message);
