@@ -155,6 +155,48 @@ mod tests {
         context.sleep(Duration::from_millis(10)).await;
     }
 
+    async fn expect_timeout<S: Scheme<Sha256Digest>>(
+        context: &mut deterministic::Context,
+        voter_receiver: &mut mailbox::Receiver<voter::Message<S, Sha256Digest>>,
+        expected_view: View,
+        expected_reason: TimeoutReason,
+    ) {
+        loop {
+            select! {
+                message = voter_receiver.recv() => match message {
+                    Some(voter::Message::Timeout(view, reason)) => {
+                        assert_eq!(view, expected_view);
+                        assert_eq!(reason, expected_reason);
+                        break;
+                    }
+                    Some(_) => {}
+                    None => panic!("voter receiver closed"),
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("timed out waiting for voter timeout");
+                },
+            }
+        }
+    }
+
+    async fn expect_no_timeout<S: Scheme<Sha256Digest>>(
+        context: &mut deterministic::Context,
+        voter_receiver: &mut mailbox::Receiver<voter::Message<S, Sha256Digest>>,
+    ) {
+        loop {
+            select! {
+                message = voter_receiver.recv() => match message {
+                    Some(voter::Message::Timeout(view, reason)) => {
+                        panic!("unexpected voter timeout for view {view}: {reason:?}");
+                    }
+                    Some(_) => {}
+                    None => panic!("voter receiver closed"),
+                },
+                _ = context.sleep(Duration::from_millis(50)) => break,
+            }
+        }
+    }
+
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         proposal: &Proposal<Sha256Digest>,
@@ -2636,7 +2678,7 @@ mod tests {
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
             // Create voter mailbox for batcher to send to
-            let (voter_sender, _voter_receiver) =
+            let (voter_sender, mut voter_receiver) =
                 mailbox::new::<voter::Message<S, Sha256Digest>>(NZUsize!(1024));
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
@@ -2678,11 +2720,19 @@ mod tests {
                 let view = View::new(v);
                 batcher_mailbox.update(view, leader, View::zero(), None);
             }
+            expect_no_timeout(&mut context, &mut voter_receiver).await;
 
             // Test 2: At view skip_timeout, the leader has been silent for
             // skip_timeout tracked views and should be marked inactive.
             let view = View::new(skip_timeout);
             batcher_mailbox.update(view, leader, View::zero(), None);
+            expect_timeout(
+                &mut context,
+                &mut voter_receiver,
+                view,
+                TimeoutReason::Inactivity,
+            )
+            .await;
 
             // Test 3: Send a vote from the leader for the current view (view 5)
             let round = Round::new(epoch, view);
@@ -2704,16 +2754,25 @@ mod tests {
             // Leader voted in view 5, which is in the recent window, so should be active
             let view = View::new(skip_timeout + 1);
             batcher_mailbox.update(view, leader, View::zero(), None);
+            expect_no_timeout(&mut context, &mut voter_receiver).await;
 
             // Test 5: Jump far ahead. The last seen message is now outside the
             // skip window, so the leader becomes inactive again.
             let view = View::new(100);
             batcher_mailbox.update(view, leader, View::zero(), None);
+            expect_timeout(
+                &mut context,
+                &mut voter_receiver,
+                view,
+                TimeoutReason::Inactivity,
+            )
+            .await;
 
             // Test 6: local leader inactivity should not trigger a fast-timeout hint.
             let self_leader = Participant::new(0);
             let view = View::new(101);
             batcher_mailbox.update(view, self_leader, View::zero(), None);
+            expect_no_timeout(&mut context, &mut voter_receiver).await;
         });
     }
 
@@ -2774,7 +2833,7 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
-            let (voter_sender, _voter_receiver) =
+            let (voter_sender, mut voter_receiver) =
                 mailbox::new::<voter::Message<S, Sha256Digest>>(NZUsize!(1024));
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
@@ -2812,6 +2871,13 @@ mod tests {
                 let view = View::new(v);
                 batcher_mailbox.update(view, leader, View::zero(), None);
             }
+            expect_timeout(
+                &mut context,
+                &mut voter_receiver,
+                View::new(skip_timeout),
+                TimeoutReason::Inactivity,
+            )
+            .await;
 
             // Send a nullify vote from the leader in view skip_timeout.
             let round = Round::new(epoch, View::new(skip_timeout));
@@ -2830,6 +2896,7 @@ mod tests {
             // Nullify-only activity should still count as activity for skip-timeout.
             let next_view = View::new(skip_timeout + 1);
             batcher_mailbox.update(next_view, leader, View::zero(), None);
+            expect_no_timeout(&mut context, &mut voter_receiver).await;
         });
     }
 
@@ -2955,10 +3022,13 @@ mod tests {
 
             // The threshold-view update should produce a fast-timeout, followed by the
             // verified finalization once the certificate is processed.
-            assert!(matches!(
-                voter_receiver.recv().await.expect("timeout"),
-                voter::Message::Timeout(v, TimeoutReason::Inactivity) if v == active_view
-            ));
+            expect_timeout(
+                &mut context,
+                &mut voter_receiver,
+                active_view,
+                TimeoutReason::Inactivity,
+            )
+            .await;
             assert!(matches!(
                 voter_receiver.recv().await.expect("verified"),
                 voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == active_view
@@ -2968,13 +3038,7 @@ mod tests {
             // relayed certificate we just processed, so no further timeout should fire.
             let next_view = active_view.next();
             batcher_mailbox.update(next_view, leader, View::zero(), None);
-            select! {
-                message = voter_receiver.recv() => match message {
-                    Some(_) => panic!("unexpected voter message after leader activity"),
-                    None => panic!("voter receiver closed"),
-                },
-                _ = context.sleep(Duration::from_millis(50)) => {},
-            };
+            expect_no_timeout(&mut context, &mut voter_receiver).await;
         });
     }
 
@@ -3034,7 +3098,7 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
-            let (voter_sender, _voter_receiver) =
+            let (voter_sender, mut voter_receiver) =
                 mailbox::new::<voter::Message<S, Sha256Digest>>(NZUsize!(1024));
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
@@ -3096,6 +3160,13 @@ mod tests {
             // Move current view to 2 with that same leader; this should fast-path timeout
             // through the voter mailbox.
             batcher_mailbox.update(buffered_view, leader_idx, View::zero(), None);
+            expect_timeout(
+                &mut context,
+                &mut voter_receiver,
+                buffered_view,
+                TimeoutReason::LeaderNullify,
+            )
+            .await;
         });
     }
 
@@ -3210,16 +3281,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let got_wrong_view_expire = select! {
-                message = voter_receiver.recv() => {
-                    matches!(message, Some(voter::Message::Timeout(view, _)) if view == wrong_view)
-                },
-                _ = context.sleep(Duration::from_millis(100)) => false,
-            };
-            assert!(
-                !got_wrong_view_expire,
-                "must not fast-path timeout for a leader nullify in a non-current view"
-            );
+            expect_no_timeout(&mut context, &mut voter_receiver).await;
         });
     }
 
