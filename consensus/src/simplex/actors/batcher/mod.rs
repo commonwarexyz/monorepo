@@ -2073,7 +2073,6 @@ mod tests {
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None);
 
-
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
@@ -2251,7 +2250,6 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None);
-
 
             // Build TWO different proposals for the same view
             let round = Round::new(epoch, view);
@@ -2454,7 +2452,6 @@ mod tests {
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None);
 
-
             // Give time for update to process
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2596,7 +2593,6 @@ mod tests {
             // Now set the leader - this should cause the proposal to be forwarded
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None);
-
 
             // Give time for batcher to process
             context.sleep(Duration::from_millis(50)).await;
@@ -3609,7 +3605,6 @@ mod tests {
             // Initialize batcher with view 5, participant 1 as leader
             let view = View::new(5);
             batcher_mailbox.update(view, leader, View::zero(), None);
-
 
             // Build proposal and send enough votes to reach quorum
             let round = Round::new(epoch, view);
