@@ -132,7 +132,7 @@ where
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
         P1: BlockProvider<Block = A::Block> + Clone,
-        P2: BlockProvider<Block = A::Block>,
+        P2: BlockProvider<Block = A::Block> + Send + Sync,
     {
         let timer = self.metrics.propose_duration.timer(context);
 
@@ -201,7 +201,7 @@ where
         mut response: oneshot::Sender<bool>,
     ) where
         P1: BlockProvider<Block = A::Block> + Clone,
-        P2: BlockProvider<Block = A::Block>,
+        P2: BlockProvider<Block = A::Block> + Send + Sync,
     {
         let timer = self.metrics.verify_duration.timer(context);
 

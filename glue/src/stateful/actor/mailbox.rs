@@ -159,11 +159,14 @@ where
             .expect("stateful actor dropped during genesis")
     }
 
-    async fn propose<BP: BlockProvider<Block = Self::Block>>(
+    async fn propose<BP>(
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<BP, Self::Block>,
-    ) -> Option<Self::Block> {
+    ) -> Option<Self::Block>
+    where
+        BP: BlockProvider<Block = Self::Block> + Send + Sync,
+    {
         let ancestry = ancestry.erase();
         self.sender
             .request(|response| Message::Propose {
@@ -175,11 +178,14 @@ where
             .flatten()
     }
 
-    async fn verify<BP: BlockProvider<Block = Self::Block>>(
+    async fn verify<BP>(
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<BP, Self::Block>,
-    ) -> bool {
+    ) -> bool
+    where
+        BP: BlockProvider<Block = Self::Block> + Send + Sync,
+    {
         let ancestry = ancestry.erase();
 
         // We must panic if we don't get a response; We cannot override the decision

@@ -78,6 +78,7 @@ use commonware_consensus::{
     Application as ConsensusApplication, Heightable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_p2p::Recipients;
 use commonware_runtime::{
     telemetry::metrics::{MetricsExt, Registered},
     Clock, Metrics, Spawner, Storage,
@@ -252,7 +253,9 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
                         height = processed_height.get(),
                         "processed block not yet in marshal archive, hinting fetch",
                     );
-                    marshal.hint_finalized(processed_height, None).await;
+                    marshal
+                        .hint_finalized(processed_height, Recipients::All)
+                        .await;
                     loop {
                         context.sleep(Duration::from_millis(500)).await;
                         if let Some(result) =

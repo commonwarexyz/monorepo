@@ -267,11 +267,13 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].
-        fn propose<A: BlockProvider<Block = Self::Block>>(
+        fn propose<A>(
             &mut self,
             context: (E, Self::Context),
             ancestry: AncestorStream<A, Self::Block>,
-        ) -> impl Future<Output = Option<Self::Block>> + Send;
+        ) -> impl Future<Output = Option<Self::Block>> + Send
+        where
+            A: BlockProvider<Block = Self::Block>  + Send + Sync;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         ///
@@ -279,10 +281,12 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Return `false` only when the block is permanently invalid for the supplied context and
         /// ancestry. If validity may still change as additional information becomes available,
         /// continue waiting instead of returning `false`.
-        fn verify<A: BlockProvider<Block = Self::Block>>(
+        fn verify<A>(
             &mut self,
             context: (E, Self::Context),
             ancestry: AncestorStream<A, Self::Block>,
-        ) -> impl Future<Output = bool> + Send;
+        ) -> impl Future<Output = bool> + Send
+        where
+            A: BlockProvider<Block = Self::Block>  + Send + Sync;
     }
 });
