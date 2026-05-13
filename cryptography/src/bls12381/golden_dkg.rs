@@ -526,7 +526,7 @@ fn select<M: Faults>(
 /// Compute the public output of the DKG without recovering a private share.
 ///
 /// This is the observer path: given the verified dealer logs, select a quorum of
-/// valid dealings and derive the resulting [`Sharing`]. Returns
+/// valid dealings and derive the resulting [`Output`]. Returns
 /// [`Error::DkgFailed`] if too few valid dealings are available, or
 /// [`Error::UnsupportedNumPlayers`] if `setup` is too small for `info`.
 pub fn observe<M: Faults>(
@@ -535,12 +535,18 @@ pub fn observe<M: Faults>(
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
     strategy: &impl Strategy,
-) -> Result<Sharing<MinPk>, Error> {
+) -> Result<Output<PublicKey>, Error> {
     check_setup(setup, info)?;
     let selection = select::<M>(rng, setup, info, logs, strategy)?;
     let public = selection.public_poly(strategy);
     let n = info.players.len() as u32;
-    Ok(Sharing::new(info.mode, NZU32!(n), public))
+    let sharing = Sharing::new(info.mode, NZU32!(n), public);
+    Ok(Output::new(
+        *info.summary(),
+        sharing,
+        info.dealers.clone(),
+        info.players.clone(),
+    ))
 }
 
 /// Compute the public output and recover this player's private share.
@@ -557,7 +563,7 @@ pub fn play<M: Faults>(
     logs: BTreeMap<PublicKey, DealerLog>,
     me: &PrivateKey,
     strategy: &impl Strategy,
-) -> Result<(Sharing<MinPk>, Share), Error> {
+) -> Result<(Output<PublicKey>, Share), Error> {
     check_setup(setup, info)?;
     let me_pub = me.public();
     let my_index = info.player_index(&me_pub)?;
@@ -600,8 +606,14 @@ pub fn play<M: Faults>(
 
     let n = info.players.len() as u32;
     let sharing = Sharing::new(info.mode, NZU32!(n), public);
+    let output = Output::new(
+        *info.summary(),
+        sharing,
+        info.dealers.clone(),
+        info.players.clone(),
+    );
     let share = Share::new(my_index, Private::new(private));
-    Ok((sharing, share))
+    Ok((output, share))
 }
 
 /// A [`DealerLog`] signed by its dealer.
@@ -1109,8 +1121,8 @@ mod test_plan {
                 logs.insert(pk, log);
             }
 
-            // Observe to get the public polynomial.
-            let sharing = observe::<N3f1>(rng, setup, &info, logs.clone(), &Sequential)
+            // Observe to get the public output.
+            let output = observe::<N3f1>(rng, setup, &info, logs.clone(), &Sequential)
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
             // Each player plays to get their share.
@@ -1121,17 +1133,6 @@ mod test_plan {
                 shares.push(share);
             }
 
-            let dealers: Set<PublicKey> = dealer_keys
-                .iter()
-                .map(|k| k.public())
-                .try_collect()
-                .unwrap();
-            let players: Set<PublicKey> = player_keys
-                .iter()
-                .map(|k| k.public())
-                .try_collect()
-                .unwrap();
-            let output = Output::new(*info.summary(), sharing, dealers, players);
             Ok((output, shares))
         }
 
@@ -1319,17 +1320,18 @@ mod test_plan {
                 return Ok(());
             }
 
-            let observe_sharing = observe_result.map_err(|e| anyhow::anyhow!("{e:?}"))?;
-            let (play_sharing, share) = play_result.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let observe_output = observe_result.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let (play_output, share) = play_result.map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-            // Verify observe and play produce the same public polynomial.
+            // Verify observe and play produce the same public output.
             assert_eq!(
-                observe_sharing, play_sharing,
-                "observe and play should produce the same public polynomial"
+                observe_output, play_output,
+                "observe and play should produce the same public output"
             );
 
             // Verify share matches public polynomial.
-            let expected = play_sharing
+            let expected = play_output
+                .public()
                 .partial_public(share.index)
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let actual = share.public::<MinPk>();
@@ -1338,7 +1340,7 @@ mod test_plan {
             // In reshare, verify group public key is preserved.
             if self.reshare {
                 let prev_public = info.previous.as_ref().unwrap().public().public();
-                let new_public = play_sharing.public();
+                let new_public = play_output.public().public();
                 assert_eq!(
                     prev_public, new_public,
                     "reshare should preserve group public key"
