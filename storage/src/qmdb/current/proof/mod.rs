@@ -1469,6 +1469,8 @@ mod tests {
         let operations = (*range.start..*range.end)
             .map(|i| hasher.digest(&i.to_be_bytes()))
             .collect::<Vec<_>>();
+
+        // Provide every bitmap chunk touched by the proven operation range.
         let start_chunk = (*range.start / chunk_bits) as usize;
         let end_chunk = ((*range.end - 1) / chunk_bits) as usize;
         let chunks = (start_chunk..=end_chunk)
@@ -1492,6 +1494,7 @@ mod tests {
                 .unwrap();
         assert!(!extracted.is_empty());
 
+        // The extractor should return the authenticated digest for every proven leaf.
         for loc in *start..*end {
             let pos = F::location_to_position(Location::<F>::new(loc));
             let expected = ops.get_node(pos).unwrap();
@@ -1503,6 +1506,7 @@ mod tests {
             );
         }
 
+        // Root mismatches are reported distinctly from malformed proof inputs.
         let wrong_root = hasher.digest(b"wrong current root");
         assert!(matches!(
             verify_proof_and_extract_digests(
@@ -1516,6 +1520,7 @@ mod tests {
             Err(merkle::Error::RootMismatch)
         ));
 
+        // Mutating operations or bitmap chunks must invalidate the extracted proof.
         let mut wrong_operations = operations.clone();
         wrong_operations[0] = hasher.digest(b"wrong operation");
         assert!(verify_proof_and_extract_digests(
