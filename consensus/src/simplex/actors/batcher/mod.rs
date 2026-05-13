@@ -42,6 +42,7 @@ mod tests {
             actors::voter,
             config::ForwardingPolicy,
             elector::RoundRobin,
+            metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
                 bls12381_multisig,
@@ -2865,18 +2866,15 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(context.child("network"),
-                participants.clone(),
-            )
-            .await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
                 elector: <RoundRobin>::default(),
             };
-            let reporter =
-                mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
             let me = participants[0].clone();
             let batcher_cfg = Config {
@@ -2932,14 +2930,13 @@ mod tests {
             for v in 1..skip_timeout {
                 let view = View::new(v);
                 batcher_mailbox.update(view, leader, View::zero(), None);
-
             }
 
-            // Enter the threshold view with no activity and confirm that we fast-timeout.
+            // Enter the threshold view with no activity. The batcher should signal the
+            // voter to fast-timeout because the leader has been silent for skip_timeout
+            // views.
             let active_view = View::new(skip_timeout);
-            batcher_mailbox
-                .update(active_view, leader, View::zero(), None);
-
+            batcher_mailbox.update(active_view, leader, View::zero(), None);
 
             // Deliver a certificate from the leader on the certificate channel. Even
             // without any vote traffic, that relay should count as fresh activity.
@@ -2954,19 +2951,30 @@ mod tests {
                 )
                 .await
                 .unwrap();
-
             context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.recv().await.unwrap();
-            assert!(
-                matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == active_view)
-            );
+
+            // The threshold-view update should produce a fast-timeout, followed by the
+            // verified finalization once the certificate is processed.
+            assert!(matches!(
+                voter_receiver.recv().await.expect("timeout"),
+                voter::Message::Timeout(v, TimeoutReason::Inactivity) if v == active_view
+            ));
+            assert!(matches!(
+                voter_receiver.recv().await.expect("verified"),
+                voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == active_view
+            ));
 
             // The next view should still consider the leader active because of the
-            // relayed certificate we just processed.
+            // relayed certificate we just processed, so no further timeout should fire.
             let next_view = active_view.next();
-            batcher_mailbox
-                .update(next_view, leader, View::zero(), None);
-
+            batcher_mailbox.update(next_view, leader, View::zero(), None);
+            select! {
+                message = voter_receiver.recv() => match message {
+                    Some(_) => panic!("unexpected voter message after leader activity"),
+                    None => panic!("voter receiver closed"),
+                },
+                _ = context.sleep(Duration::from_millis(50)) => {},
+            };
         });
     }
 

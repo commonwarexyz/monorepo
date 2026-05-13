@@ -9,7 +9,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(ALPHA {
+commonware_macros::stability_scope!(BETA {
     /// Feedback from submitting work to a bounded endpoint.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Feedback {

@@ -21,68 +21,75 @@ pub enum Message<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
-    fn duplicates(&self, pending: &Self) -> bool {
-        matches!(
-            (self, pending),
-            (Self::Update { current: x, .. }, Self::Update { current: y, .. }) if x == y
-        )
-    }
-
-    // A queued update is a pruning floor for overflow. Returns true when this
-    // update would drop `vote` once the batcher actor delivers the update.
-    fn prunes(&self, vote: &Vote<S, D>) -> bool {
-        let Self::Update {
-            current, finalized, ..
-        } = self
-        else {
-            return false;
-        };
+    // Overflow is kept in canonical delivery order: at most one update at the
+    // front, followed by retained constructed votes in arrival order. Updates
+    // are retained as whole snapshots so leader/proposal data stays paired with
+    // the current/finalized views that produced it.
+    fn prunes(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
         let view = vote.view();
         match vote {
             // Notarize and nullify votes are only useful for the current view
-            Vote::Notarize(_) | Vote::Nullify(_) => view < *current || view <= *finalized,
+            Vote::Notarize(_) | Vote::Nullify(_) => view < current || view <= finalized,
             // Finalize votes for prior non-finalized views can still combine
             // after the voter skips forward
-            Vote::Finalize(_) => view <= *finalized,
+            Vote::Finalize(_) => view <= finalized,
         }
     }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        match &message {
-            Self::Update { current, .. } => {
-                let current = *current;
-                let mut remove = Vec::new();
-
-                // Keep at most one useful pending update. A higher-view update
-                // already queued makes this one stale, while lower-view updates
-                // and votes pruned by this update can be removed.
-                for (index, p) in overflow.iter().enumerate() {
-                    match p {
-                        Self::Update { current: pc, .. } if *pc > current => return false,
-                        p if message.duplicates(p) => return true,
-                        Self::Update { .. } => remove.push(index),
-                        Self::Constructed(vote) if message.prunes(vote) => remove.push(index),
-                        Self::Constructed(_) => {}
+        match message {
+            update @ Self::Update {
+                current,
+                finalized: update_finalized,
+                ..
+            } => {
+                if let Some(Self::Update {
+                    current: pending_current,
+                    finalized: pending_finalized,
+                    ..
+                }) = overflow.front()
+                {
+                    // Updates are whole snapshots. Only replace the pending
+                    // update if this one is strictly newer; exact duplicates
+                    // report backoff, while stale updates are dropped.
+                    let pending = (*pending_current, *pending_finalized);
+                    if (current, update_finalized) <= pending {
+                        return (current, update_finalized) == pending;
                     }
+                    overflow.pop_front();
                 }
+                overflow.push_front(update);
 
-                // Remove from the back so indexes collected during the scan
-                // stay valid.
-                for r in remove.into_iter().rev() {
-                    overflow.remove(r);
-                }
-                overflow.push_back(message);
+                // Drop constructed votes made stale by the retained update.
+                // The survivors stay in arrival order.
+                overflow.retain(|message| match message {
+                    Self::Update { .. } => true,
+                    Self::Constructed(vote) => !Self::prunes(current, update_finalized, vote),
+                });
                 true
             }
             Self::Constructed(vote) => {
-                // If a pending update would make this vote stale, drop it now
-                // instead of delivering it after that update.
-                if overflow.iter().any(|p| p.prunes(vote)) {
+                if matches!(
+                    overflow.front(),
+                    Some(Self::Update { current, finalized, .. })
+                        if Self::prunes(*current, *finalized, &vote)
+                ) {
                     return false;
                 }
-                overflow.push_back(message);
+                if overflow.iter().any(|message| match message {
+                    Self::Constructed(pending) if pending.view() == vote.view() => matches!(
+                        (pending, &vote),
+                        (Vote::Notarize(_), Vote::Notarize(_))
+                            | (Vote::Nullify(_), Vote::Nullify(_))
+                            | (Vote::Finalize(_), Vote::Finalize(_))
+                    ),
+                    _ => false,
+                }) {
+                    return true;
+                }
+                overflow.push_back(Self::Constructed(vote));
                 true
             }
         }
@@ -234,11 +241,11 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Constructed(vote)) if vote.view() == View::new(3)
+            Some(Message::Update { current, .. }) if current == View::new(3)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Update { current, .. }) if current == View::new(3)
+            Some(Message::Constructed(vote)) if vote.view() == View::new(3)
         ));
     }
 
@@ -262,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_update_is_ignored() {
+    fn update_replaces_same_current_when_finalized_advances() {
         let mut overflow = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
@@ -280,12 +287,32 @@ mod tests {
                 current,
                 finalized,
                 ..
-            }) if current == View::new(5) && finalized == View::new(3)
+            }) if current == View::new(5) && finalized == View::new(4)
         ));
     }
 
     #[test]
-    fn stale_update_does_not_prune_retained_constructed_finalization() {
+    fn duplicate_constructed_message_is_ignored() {
+        let mut overflow = VecDeque::new();
+        assert!(Message::handle(
+            &mut overflow,
+            Message::Constructed(nullify_vote(View::new(5)))
+        ));
+        assert!(Message::handle(
+            &mut overflow,
+            Message::Constructed(nullify_vote(View::new(5)))
+        ));
+
+        assert_eq!(overflow.len(), 1);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Constructed(vote))
+                if matches!(vote, Vote::Nullify(_)) && vote.view() == View::new(5)
+        ));
+    }
+
+    #[test]
+    fn lower_current_update_is_dropped_without_merging_finalized() {
         let mut overflow = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
@@ -303,12 +330,39 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Update { current, .. }) if current == View::new(5)
+            Some(Message::Update {
+                current,
+                finalized,
+                ..
+            }) if current == View::new(5) && finalized == View::zero()
         ));
         assert!(matches!(
             overflow.pop_front(),
             Some(Message::Constructed(vote))
                 if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(3)
+        ));
+    }
+
+    #[test]
+    fn newer_update_replaces_pending_without_merging_finalized() {
+        let mut overflow = VecDeque::new();
+        assert!(Message::handle(
+            &mut overflow,
+            update(View::new(4), View::new(4))
+        ));
+        assert!(Message::handle(
+            &mut overflow,
+            update(View::new(5), View::zero())
+        ));
+
+        assert_eq!(overflow.len(), 1);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Update {
+                current,
+                finalized,
+                ..
+            }) if current == View::new(5) && finalized == View::zero()
         ));
     }
 
@@ -327,12 +381,45 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
+            Some(Message::Update { current, .. }) if current == View::new(5)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Constructed(vote))
+                if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(4)
+        ));
+    }
+
+    #[test]
+    fn constructed_finalizations_remain_in_arrival_order_after_update() {
+        let mut overflow = VecDeque::new();
+        assert!(Message::handle(
+            &mut overflow,
+            Message::Constructed(finalize_vote(View::new(4)))
+        ));
+        assert!(Message::handle(
+            &mut overflow,
+            Message::Constructed(finalize_vote(View::new(2)))
+        ));
+        assert!(Message::handle(
+            &mut overflow,
+            update(View::new(3), View::new(1))
+        ));
+
+        assert_eq!(overflow.len(), 3);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Update { current, .. }) if current == View::new(3)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
             Some(Message::Constructed(vote))
                 if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(4)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Update { current, .. }) if current == View::new(5)
+            Some(Message::Constructed(vote))
+                if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(2)
         ));
     }
 
