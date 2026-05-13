@@ -58,8 +58,7 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard hashing with ops-space positions.
 //!
-//! The grafted tree is incrementally maintained with ops-positioned hashing when grafted leaves
-//! change.
+//! The grafted tree is incrementally maintained when grafted leaves change.
 
 use crate::merkle::{
     self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
