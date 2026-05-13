@@ -24,7 +24,7 @@ impl<S: Scheme, D: Digest> Message<S, D> {
     // Overflow is kept in canonical delivery order: at most one update at the
     // front, followed by retained constructed votes in arrival order. The
     // update carries the strongest current/finalized floor seen while it is
-    // pending, so later inserts only need to compare against that front item.
+    // pending, so constructed votes only need that front item for pruning.
     fn prunes(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
         let view = vote.view();
         match vote {
@@ -80,8 +80,8 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     (current, update_finalized)
                 };
 
-                // A new update changes the pruning floor. Retain order is
-                // enough because constructed votes stay in arrival order.
+                // Drop constructed votes made stale by the retained update.
+                // The survivors stay in arrival order.
                 overflow.retain(|message| match message {
                     Self::Update { .. } => true,
                     Self::Constructed(vote) => !Self::prunes(current, finalized, vote),
