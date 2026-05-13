@@ -2,10 +2,12 @@
 #![warn(unused_extern_crates)]
 
 extern crate rustc_ast;
+extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_span;
 
 use rustc_ast::ast::LitKind;
+use rustc_errors::DiagDecorator;
 use rustc_hir::{Expr, ExprKind, Node};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::{Span, Symbol};
@@ -61,13 +63,13 @@ fn check_child_attribute_name_conflict(cx: &LateContext<'_>, expr: &Expr<'_>) {
     for attribute in attributes {
         for child in &children {
             if child.value == attribute.value {
-                cx.span_lint(CHILD_ATTRIBUTE_NAME_CONFLICT, attribute.span, |diag| {
+                cx.emit_span_lint(CHILD_ATTRIBUTE_NAME_CONFLICT, attribute.span, DiagDecorator(|diag| {
                     diag.primary_message("child name conflicts with context attribute name");
                     diag.span_help(
                         child.span,
                         "choose a child name for the component and an attribute name for the varying field",
                     );
-                });
+                }));
             }
         }
     }
