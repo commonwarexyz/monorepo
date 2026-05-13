@@ -73,6 +73,17 @@ pub trait Database: Sized + Send {
         async { false }
     }
 
-    /// Get the root digest of the database for verification
+    /// Get the root digest of the database for verification.
+    ///
+    /// For databases where the public root differs from the ops root used for streaming
+    /// verification (e.g., `current`), this returns the **ops root**.
     fn root(&self) -> Self::Digest;
+
+    /// Returns the database's canonical (public) root digest.
+    ///
+    /// For most databases, the canonical root equals the ops root. For `current` databases,
+    /// the canonical root additionally commits to the activity bitmap and grafted tree state.
+    fn canonical_root(&self) -> Self::Digest {
+        self.root()
+    }
 }

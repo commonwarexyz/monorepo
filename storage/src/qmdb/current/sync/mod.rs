@@ -1,16 +1,18 @@
-//! Shared synchronization logic for [crate::qmdb::current] databases.
+//! Synchronization logic for [crate::qmdb::current] databases.
 //!
 //! Contains implementation of [crate::qmdb::sync::Database] for all
-//! [Db](crate::qmdb::current::db::Db) variants (ordered/unordered, fixed/variable).
+//! [Db](crate::qmdb::current::db::Db) variants (ordered/unordered, fixed/variable), plus a
+//! canonical-root-aware [sync()] wrapper.
 //!
 //! The canonical root of a `current` database combines the ops root, grafted root, and optional
 //! pending and partial chunk digests into a single hash (see the [Root structure](super) section in
-//! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
-//! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
-//! (identical to `any` sync). Callers that verify current ops proofs directly should use
-//! `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need
-//! to authenticate the synced ops root against a trusted canonical root; the sync engine does not
-//! perform this check itself.
+//! the module documentation). The generic sync engine operates on the **ops root** internally,
+//! downloading operations and verifying each batch against the ops root using ops-tree range proofs
+//! (identical to `any` sync).
+//!
+//! Callers that only trust a canonical root (e.g., from consensus) should use [sync()] with a
+//! [Target] that includes an [OpsRootWitness]. The wrapper verifies the witness before starting
+//! the engine and checks the reconstructed canonical root after sync completes.
 //!
 //! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
@@ -18,6 +20,8 @@
 //!
 //! The [Database]`::`[root()](crate::qmdb::sync::Database::root) implementation returns the **ops
 //! root** (not the canonical root) because that is what the sync engine verifies against.
+//! [Database::canonical_root()](crate::qmdb::sync::Database::canonical_root) returns the full
+//! canonical root.
 //!
 //! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
 //! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
@@ -33,6 +37,7 @@ use crate::{
     },
     merkle::{
         full::{self, Merkle},
+        hasher::Standard as StandardHasher,
         Graftable, Location,
     },
     qmdb::{
@@ -56,29 +61,181 @@ use crate::{
             ordered::{
                 fixed::Db as CurrentOrderedFixedDb, variable::Db as CurrentOrderedVariableDb,
             },
+            proof::OpsRootWitness,
             unordered::{
                 fixed::Db as CurrentUnorderedFixedDb, variable::Db as CurrentUnorderedVariableDb,
             },
             FixedConfig, VariableConfig,
         },
         operation::{Committable, Key, Operation as _},
-        sync::{Database, DatabaseConfig as Config},
+        sync::{
+            self as qmdb_sync, engine::Config as EngineConfig, Database,
+            DatabaseConfig, DbResolver, EngineError,
+        },
     },
     translator::Translator,
     Context, Persistable,
 };
-use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_codec::{Codec, CodecShared, Encode, Read as CodecRead, ReadExt as _};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,
+    bitmap::Prunable as BitMap,
+    channel::{mpsc, oneshot},
+    range::NonEmptyRange,
+    sync::AsyncMutex,
+    Array,
 };
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 #[cfg(test)]
 pub(crate) mod tests;
 
-impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
+/// Sync target for `current` databases that trusts a canonical root.
+///
+/// The caller trusts `canonical_root` (e.g., from consensus). The server provides
+/// `ops_root` and `witness`; the sync wrapper verifies
+/// `witness.verify(hasher, &ops_root, &canonical_root)` before starting the engine.
+#[derive(Clone, Debug)]
+pub struct Target<F: Graftable, D: Digest> {
+    /// The trusted canonical root.
+    pub canonical_root: D,
+    /// The ops root provided by the sync source.
+    pub ops_root: D,
+    /// Witness proving that `canonical_root` commits to `ops_root`.
+    pub witness: OpsRootWitness<F, D>,
+    /// Range of operations to sync.
+    pub range: NonEmptyRange<Location<F>>,
+}
+
+impl<F: Graftable, D: Digest> Target<F, D> {
+    /// Verify the witness and return the corresponding engine-level target.
+    pub fn to_engine_target<H: commonware_cryptography::Hasher<Digest = D>>(
+        &self,
+        hasher: &StandardHasher<H>,
+    ) -> Option<qmdb_sync::Target<F, D>> {
+        if self.witness.verify(hasher, &self.ops_root, &self.canonical_root) {
+            Some(qmdb_sync::Target {
+                root: self.ops_root,
+                canonical_root: Some(self.canonical_root),
+                range: self.range.clone(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl<F: Graftable, D: Digest> commonware_codec::Write for Target<F, D> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.canonical_root.write(buf);
+        self.ops_root.write(buf);
+        self.witness.write(buf);
+        self.range.write(buf);
+    }
+}
+
+impl<F: Graftable, D: Digest> commonware_codec::EncodeSize for Target<F, D> {
+    fn encode_size(&self) -> usize {
+        self.canonical_root.encode_size()
+            + self.ops_root.encode_size()
+            + self.witness.encode_size()
+            + self.range.encode_size()
+    }
+}
+
+impl<F: Graftable, D: Digest> commonware_codec::Read for Target<F, D> {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _: &(),
+    ) -> Result<Self, commonware_codec::Error> {
+        let canonical_root = D::read(buf)?;
+        let ops_root = D::read(buf)?;
+        let witness = OpsRootWitness::<F, D>::read(buf)?;
+        let range = NonEmptyRange::<Location<F>>::read(buf)?;
+        Ok(Self {
+            canonical_root,
+            ops_root,
+            witness,
+            range,
+        })
+    }
+}
+
+/// Configuration for canonical-root-aware sync of a `current` database.
+pub struct Config<DB: Database, R: DbResolver<DB>>
+where
+    DB::Family: Graftable,
+    DB::Op: Encode,
+{
+    /// Runtime context.
+    pub context: DB::Context,
+    /// Resolver for fetching operations and proofs.
+    pub resolver: R,
+    /// Sync target with canonical root and witness.
+    pub target: Target<DB::Family, DB::Digest>,
+    /// Maximum parallel outstanding requests.
+    pub max_outstanding_requests: usize,
+    /// Maximum operations per fetch batch.
+    pub fetch_batch_size: NonZeroU64,
+    /// Operations to apply per internal batch.
+    pub apply_batch_size: usize,
+    /// Database-specific configuration.
+    pub db_config: DB::Config,
+    /// Channel for receiving target updates during sync.
+    ///
+    /// Each update's `canonical_root` must match the updated database state. Callers are
+    /// responsible for verifying any witness before sending.
+    pub update_rx: Option<mpsc::Receiver<qmdb_sync::Target<DB::Family, DB::Digest>>>,
+    /// Channel that requests sync completion once the current target is reached.
+    pub finish_rx: Option<mpsc::Receiver<()>>,
+    /// Channel to notify an observer when the current target is reached.
+    pub reached_target_tx: Option<mpsc::Sender<qmdb_sync::Target<DB::Family, DB::Digest>>>,
+    /// Historical roots to retain for in-flight request verification.
+    pub max_retained_roots: usize,
+}
+
+/// Sync a `current` database from a trusted canonical root.
+///
+/// Verifies the [OpsRootWitness] against the trusted canonical root before starting the
+/// engine, and checks the reconstructed canonical root after sync completes.
+pub async fn sync<DB, R>(
+    config: Config<DB, R>,
+) -> Result<DB, qmdb_sync::Error<DB::Family, R::Error, DB::Digest>>
+where
+    DB: Database,
+    DB::Family: Graftable,
+    DB::Op: Encode,
+    R: DbResolver<DB>,
+{
+    let hasher = qmdb::hasher::<DB::Hasher>();
+
+    let engine_target = config
+        .target
+        .to_engine_target(&hasher)
+        .ok_or(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid))?;
+
+    let engine_config = EngineConfig::<DB, R> {
+        context: config.context,
+        resolver: config.resolver,
+        target: engine_target,
+        max_outstanding_requests: config.max_outstanding_requests,
+        fetch_batch_size: config.fetch_batch_size,
+        apply_batch_size: config.apply_batch_size,
+        db_config: config.db_config,
+        update_rx: config.update_rx,
+        finish_rx: config.finish_rx,
+        reached_target_tx: config.reached_target_tx,
+        max_retained_roots: config.max_retained_roots,
+    };
+
+    qmdb_sync::sync(engine_config).await
+}
+
+impl<T: Translator, J: Clone, S: Strategy> DatabaseConfig for super::Config<T, J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -348,6 +505,10 @@ macro_rules! impl_current_sync_database {
             /// batches against the ops tree.
             fn root(&self) -> Self::Digest {
                 self.any.root()
+            }
+
+            fn canonical_root(&self) -> Self::Digest {
+                self.root
             }
         }
     };

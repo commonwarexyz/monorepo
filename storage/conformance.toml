@@ -332,7 +332,7 @@ hash = "c6702e8b8d2e96438df00786289df9ee4ec92a767974fa1484766a246ebc71b7"
 
 ["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<MmrFamily,sha256::Digest>>"]
 n_cases = 65536
-hash = "f742d92a0af0af78a9519bf637bc52ea869965a85a84101a4c53f53eb39325ca"
+hash = "db1c6cc1cd9c4dedb2a4a04c38f25c2e309f6162df163bb16ce83549e3b403c5"
 
 ["commonware_storage::queue::conformance::QueueConformance"]
 n_cases = 512

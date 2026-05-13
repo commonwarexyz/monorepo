@@ -826,6 +826,16 @@ where
                 }));
             }
 
+            if let Some(expected_canonical) = self.target.canonical_root {
+                let got_canonical = database.canonical_root();
+                if got_canonical != expected_canonical {
+                    return Err(SyncError::Engine(EngineError::CanonicalRootMismatch {
+                        expected: expected_canonical,
+                        actual: got_canonical,
+                    }));
+                }
+            }
+
             return Ok(NextStep::Complete(database));
         }
 

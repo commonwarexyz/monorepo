@@ -53,6 +53,12 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Error extracting pinned nodes
     #[error("error extracting pinned nodes: {0}")]
     PinnedNodes(String),
+    /// Ops root witness failed verification against the trusted canonical root
+    #[error("ops root witness failed verification")]
+    OpsRootWitnessInvalid,
+    /// Canonical root mismatch after sync
+    #[error("canonical root mismatch - expected {expected:?}, got {actual:?}")]
+    CanonicalRootMismatch { expected: D, actual: D },
 }
 
 /// Errors that can occur during database synchronization.

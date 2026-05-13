@@ -5,7 +5,10 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{
     mmr::{self, Location},
-    qmdb::sync::{self, compact},
+    qmdb::{
+        current::sync::Target as CurrentTarget,
+        sync::{self, compact},
+    },
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use std::num::NonZeroU64;
@@ -63,6 +66,35 @@ where
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
             wire::Message::GetSyncTargetResponse(r) => Ok(r.target),
+            wire::Message::Error(err) => Err(crate::Error::Server {
+                code: err.error_code,
+                message: err.message,
+            }),
+            _ => Err(crate::Error::UnexpectedResponse { request_id }),
+        }
+    }
+
+    /// Returns the current-database sync target (canonical root + witness).
+    pub async fn get_current_sync_target(
+        &self,
+    ) -> Result<CurrentTarget<mmr::Family, D>, crate::Error> {
+        let request_id = self.request_id_generator.next();
+        let request =
+            wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id });
+        let (tx, rx) = oneshot::channel();
+        self.request_tx
+            .clone()
+            .send(io::Request {
+                request,
+                response_tx: tx,
+            })
+            .await
+            .map_err(|_| crate::Error::RequestChannelClosed)?;
+        let response = rx
+            .await
+            .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
+        match response {
+            wire::Message::GetCurrentSyncTargetResponse(r) => Ok(r.target),
             wire::Message::Error(err) => Err(crate::Error::Server {
                 code: err.error_code,
                 message: err.message,

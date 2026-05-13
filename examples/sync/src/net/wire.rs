@@ -6,7 +6,10 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
     mmr::{self, Location, Proof},
-    qmdb::sync::{compact, compact::State, Target},
+    qmdb::{
+        current::sync::Target as CurrentTarget,
+        sync::{compact, compact::State, Target},
+    },
 };
 use std::num::NonZeroU64;
 
@@ -52,6 +55,16 @@ where
 {
     pub request_id: RequestId,
     pub target: Target<mmr::Family, D>,
+}
+
+/// Response with current-database sync target (canonical root + witness).
+#[derive(Debug)]
+pub struct GetCurrentSyncTargetResponse<D>
+where
+    D: Digest,
+{
+    pub request_id: RequestId,
+    pub target: CurrentTarget<mmr::Family, D>,
 }
 
 /// Request for compact authenticated state.
@@ -104,6 +117,7 @@ where
     GetCompactTargetResponse(GetCompactTargetResponse<D>),
     GetCompactStateRequest(GetCompactStateRequest<D>),
     GetCompactStateResponse(GetCompactStateResponse<Op, D>),
+    GetCurrentSyncTargetResponse(GetCurrentSyncTargetResponse<D>),
     Error(ErrorResponse),
 }
 
@@ -121,6 +135,7 @@ where
             Self::GetCompactTargetResponse(r) => r.request_id,
             Self::GetCompactStateRequest(r) => r.request_id,
             Self::GetCompactStateResponse(r) => r.request_id,
+            Self::GetCurrentSyncTargetResponse(r) => r.request_id,
             Self::Error(e) => e.request_id,
         }
     }
@@ -176,6 +191,10 @@ where
                 7u8.write(buf);
                 resp.write(buf);
             }
+            Self::GetCurrentSyncTargetResponse(resp) => {
+                9u8.write(buf);
+                resp.write(buf);
+            }
             Self::Error(err) => {
                 8u8.write(buf);
                 err.write(buf);
@@ -199,6 +218,7 @@ where
             Self::GetCompactTargetResponse(resp) => resp.encode_size(),
             Self::GetCompactStateRequest(req) => req.encode_size(),
             Self::GetCompactStateResponse(resp) => resp.encode_size(),
+            Self::GetCurrentSyncTargetResponse(resp) => resp.encode_size(),
             Self::Error(err) => err.encode_size(),
         }
     }
@@ -235,6 +255,9 @@ where
                 GetCompactStateResponse::read(buf)?,
             )),
             8 => Ok(Self::Error(ErrorResponse::read(buf)?)),
+            9 => Ok(Self::GetCurrentSyncTargetResponse(
+                GetCurrentSyncTargetResponse::read(buf)?,
+            )),
             d => Err(CodecError::InvalidEnum(d)),
         }
     }
@@ -411,6 +434,28 @@ where
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let target = Target::<mmr::Family, D>::read_cfg(buf, &())?;
+        Ok(Self { request_id, target })
+    }
+}
+
+impl<D: Digest> Write for GetCurrentSyncTargetResponse<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+        self.target.write(buf);
+    }
+}
+
+impl<D: Digest> EncodeSize for GetCurrentSyncTargetResponse<D> {
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size() + self.target.encode_size()
+    }
+}
+
+impl<D: Digest> Read for GetCurrentSyncTargetResponse<D> {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        let target = CurrentTarget::<mmr::Family, D>::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
     }
 }
