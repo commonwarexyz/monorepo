@@ -55,36 +55,44 @@ impl<S: Scheme, D: Digest> Message<S, D> {
             _ => false,
         }
     }
+
+    fn front_finalization(overflow: &VecDeque<Self>) -> Option<View> {
+        match overflow.front() {
+            Some(Self::Verified(Certificate::Finalization(f), _)) => Some(f.view()),
+            _ => None,
+        }
+    }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         let new_view = message.view();
-        let new_is_finalization = message.is_finalization();
-        let mut remove = Vec::new();
 
-        // Finalizations are the voter mailbox's pruning floor. They make all
-        // work at or below their view stale, but work from higher views remains
-        // useful and must stay queued.
-        for (index, pending) in overflow.iter().enumerate() {
-            let pending_view = pending.view();
-            if pending.is_finalization() && pending_view >= new_view {
+        // Overflow is kept in delivery order: an optional finalization pruning
+        // floor at the front, then retained higher-view messages in arrival
+        // order. The finalization must be delivered first because it advances
+        // the voter's current/finalized view; otherwise retained higher-view
+        // timeouts or proposals could be ignored as not yet current.
+        if message.is_finalization() {
+            if Self::front_finalization(overflow).is_some_and(|view| view >= new_view) {
                 return false;
             }
-            if new_is_finalization && pending_view <= new_view {
-                remove.push(index);
-                continue;
-            }
+            overflow.retain(|pending| pending.view() > new_view);
+            overflow.push_front(message);
+            return true;
+        }
+
+        let start = match Self::front_finalization(overflow) {
+            Some(view) if view >= new_view => return false,
+            Some(_) => 1,
+            None => 0,
+        };
+        for pending in overflow.iter().skip(start) {
             if message.duplicates(pending) {
                 return true;
             }
         }
 
-        // Apply removals after the scan so pruning decisions are made against
-        // the same queue snapshot.
-        for r in remove.into_iter().rev() {
-            overflow.remove(r);
-        }
         overflow.push_back(message);
         true
     }
@@ -206,12 +214,15 @@ mod tests {
         ));
 
         assert_eq!(overflow.len(), 2);
-        assert!(overflow
-            .iter()
-            .any(|message| matches!(message, Message::Proposal(p) if p.view() == View::new(4))));
-        assert!(overflow.iter().any(|message| {
-            matches!(message, Message::Verified(Certificate::Finalization(f), false) if f.view() == View::new(3))
-        }));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Verified(Certificate::Finalization(f), false))
+                if f.view() == View::new(3)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Proposal(p)) if p.view() == View::new(4)
+        ));
     }
 
     #[test]
@@ -265,12 +276,15 @@ mod tests {
         ));
 
         assert_eq!(overflow.len(), 2);
-        assert!(overflow.iter().any(|message| {
-            matches!(message, Message::Verified(Certificate::Finalization(f), false) if f.view() == View::new(3))
-        }));
-        assert!(overflow
-            .iter()
-            .any(|message| matches!(message, Message::Proposal(p) if p.view() == View::new(4))));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Verified(Certificate::Finalization(f), false))
+                if f.view() == View::new(3)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Proposal(p)) if p.view() == View::new(4)
+        ));
     }
 
     #[test]

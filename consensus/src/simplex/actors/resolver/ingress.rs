@@ -47,36 +47,44 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
             _ => false,
         }
     }
+
+    fn front_finalization(overflow: &VecDeque<Self>) -> Option<View> {
+        match overflow.front() {
+            Some(Self::Certificate(Certificate::Finalization(f))) => Some(f.view()),
+            _ => None,
+        }
+    }
 }
 
 impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         let new_view = message.view();
-        let new_is_finalization = message.is_finalization();
-        let mut remove = Vec::new();
 
-        // Finalizations are the resolver mailbox's pruning floor. A queued
-        // finalization covers certificates and certification results at or
-        // below its view, but later views can still change resolver state.
-        for (index, pending) in overflow.iter().enumerate() {
-            let pending_view = pending.view();
-            if pending.is_finalization() && pending_view >= new_view {
+        // Overflow is kept in delivery order: an optional finalization pruning
+        // floor at the front, then retained higher-view messages in arrival
+        // order. The finalization must be delivered first so resolver state and
+        // pending requests are pruned before any surviving higher-view work is
+        // processed.
+        if message.is_finalization() {
+            if Self::front_finalization(overflow).is_some_and(|view| view >= new_view) {
                 return false;
             }
-            if new_is_finalization && pending_view <= new_view {
-                remove.push(index);
-                continue;
-            }
+            overflow.retain(|pending| pending.view() > new_view);
+            overflow.push_front(message);
+            return true;
+        }
+
+        let start = match Self::front_finalization(overflow) {
+            Some(view) if view >= new_view => return false,
+            Some(_) => 1,
+            None => 0,
+        };
+        for pending in overflow.iter().skip(start) {
             if message.duplicates(pending) {
                 return true;
             }
         }
 
-        // Apply removals after the scan so pruning decisions are made against
-        // the same queue snapshot.
-        for r in remove.into_iter().rev() {
-            overflow.remove(r);
-        }
         overflow.push_back(message);
         true
     }
@@ -255,15 +263,23 @@ mod tests {
         ));
 
         assert_eq!(overflow.len(), 3);
-        assert!(overflow.iter().any(|message| {
-            matches!(message, MailboxMessage::Certificate(Certificate::Nullification(n)) if n.view() == View::new(5))
-        }));
-        assert!(overflow.iter().any(|message| {
-            matches!(message, MailboxMessage::Certified { view, success: false } if *view == View::new(5))
-        }));
-        assert!(overflow.iter().any(|message| {
-            matches!(message, MailboxMessage::Certificate(Certificate::Finalization(f)) if f.view() == View::new(3))
-        }));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Certificate(Certificate::Finalization(f)))
+                if f.view() == View::new(3)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Certificate(Certificate::Nullification(n)))
+                if n.view() == View::new(5)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Certified {
+                view,
+                success: false
+            }) if view == View::new(5)
+        ));
     }
 
     #[test]
@@ -323,12 +339,16 @@ mod tests {
         ));
 
         assert_eq!(overflow.len(), 2);
-        assert!(overflow.iter().any(|message| {
-            matches!(message, MailboxMessage::Certificate(Certificate::Finalization(f)) if f.view() == View::new(3))
-        }));
-        assert!(overflow.iter().any(|message| {
-            matches!(message, MailboxMessage::Certificate(Certificate::Nullification(n)) if n.view() == View::new(4))
-        }));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Certificate(Certificate::Finalization(f)))
+                if f.view() == View::new(3)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Certificate(Certificate::Nullification(n)))
+                if n.view() == View::new(4)
+        ));
     }
 
     #[test]
