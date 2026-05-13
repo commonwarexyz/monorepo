@@ -58,7 +58,7 @@ jobs:
     - name: Install coverage tooling
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.129
+        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
     - name: Normalize flags for paths
       id: path-normalization
       run: |

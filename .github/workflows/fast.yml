@@ -16,7 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.57
-  NIGHTLY_VERSION: nightly-2025-11-15
+  NIGHTLY_VERSION: nightly
   PANDOC_VERSION: 3.8.2.1
 
 jobs:
@@ -109,7 +109,7 @@ jobs:
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: just@1.43.0,cargo-nextest@0.9.129
+        tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run tests
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
 
@@ -139,7 +139,7 @@ jobs:
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: just@1.43.0,cargo-nextest@0.9.129
+        tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run subset tests
       run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
     - name: Run subset doc tests
