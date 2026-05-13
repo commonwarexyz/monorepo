@@ -60,6 +60,29 @@
 //!
 //! Both functions select a quorum of valid dealings, filtering out invalid ones.
 //!
+//! # Safety
+//!
+//! Two invariants must be upheld by callers:
+//!
+//! - **All participants must agree on the same set of [`DealerLog`]s.** [`observe`] and
+//!   [`play`] internally select a quorum of valid dealings from the supplied logs; if
+//!   different participants feed in different sets of logs they may select different
+//!   quorums and end up with inconsistent public outputs and shares. The set of logs
+//!   used to finalize a round must therefore be agreed upon (e.g. via consensus or
+//!   broadcast) before being passed to these functions.
+//! - **The round number must never be reused.** The round number is bound into the
+//!   transcript that domain-separates every signature, dealing, and VRF output in the
+//!   protocol. Reusing a round number across two distinct executions allows messages
+//!   from one execution to be replayed or mixed into another, breaking the protocol's
+//!   security. Always strictly increment the round number for every new attempt,
+//!   *including failed rounds* (e.g. rounds that aborted due to too few valid
+//!   dealings); never re-run a round under the same number.
+//! - **Dealers in a reshare round must be players in the previous round.** A reshare
+//!   recovers the group secret by interpolating the dealers' previous shares, so every
+//!   dealer in the current round's [`Info`] must appear in the previous [`Output`]'s
+//!   player set. Configurations that violate this requirement cannot produce a valid
+//!   subset interpolator and will fail.
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -253,6 +276,12 @@ impl Info {
     /// Create a new round configuration.
     ///
     /// Pass a previous [`Output`] to perform a reshare; pass `None` for a fresh DKG.
+    ///
+    /// `round` must be strictly greater than any previously used round number for this
+    /// group, *including the round numbers of any failed attempts*. Reusing a round
+    /// number across executions allows messages from one round to be mixed into
+    /// another and breaks the protocol's security guarantees (see the module-level
+    /// "Safety" section).
     pub fn new(
         round: u64,
         previous: Option<Output<PublicKey>>,
