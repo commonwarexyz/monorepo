@@ -7,7 +7,7 @@
 //! _graftable_ chunk of the bitmap is hashed together with the corresponding subtree root from the
 //! ops tree to produce a single "grafted leaf" digest. These digests, along with their ancestor
 //! nodes, are stored in an in-memory Merkle structure (using grafted-space positions internally,
-//! with ops-space positions in hash pre-images via [GraftedHasher]).
+//! with ops-space positions in hash pre-images).
 //!
 //! A chunk is _graftable_ once its height-`G` ancestor exists in the ops tree as a single node. In
 //! MMR every complete chunk is immediately graftable. MMB's delayed merges allow at most one chunk
@@ -58,8 +58,7 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard hashing with ops-space positions.
 //!
-//! The grafted tree is incrementally maintained via [GraftedHasher] when grafted leaves
-//! change.
+//! The grafted tree is incrementally maintained when grafted leaves change.
 
 use crate::merkle::{
     self, hasher::Hasher as HasherTrait, storage::Storage as StorageTrait, Family, Graftable,
@@ -71,7 +70,7 @@ use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
-pub(crate) const fn height<const N: usize>() -> u32 {
+pub const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
@@ -83,7 +82,7 @@ pub(crate) const fn height<const N: usize>() -> u32 {
 /// # Panics
 ///
 /// Panics if `grafting_height == 0`.
-pub(super) fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
+pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
     assert!(grafting_height >= 1, "grafting_height must be >= 1");
     let pos = F::subtree_root_position(Location::<F>::new(0), grafting_height);
     let birth_chunk_0 = F::peak_birth_size(pos, grafting_height);
@@ -148,10 +147,7 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 /// # Panics
 ///
 /// Panics if `ops_pos` is below the grafting height.
-pub(super) fn ops_to_grafted_pos<F: Graftable>(
-    ops_pos: Position<F>,
-    grafting_height: u32,
-) -> Position<F> {
+pub fn ops_to_grafted_pos<F: Graftable>(ops_pos: Position<F>, grafting_height: u32) -> Position<F> {
     let ops_height = F::pos_to_height(ops_pos);
     assert!(
         ops_height >= grafting_height,
@@ -167,7 +163,7 @@ pub(super) fn ops_to_grafted_pos<F: Graftable>(
 
 /// Convert a grafted position to the ops-family position whose subtree covers the same ops-leaf
 /// range.
-pub(super) fn grafted_to_ops_pos<F: Graftable>(
+pub fn grafted_to_ops_pos<F: Graftable>(
     grafted_pos: Position<F>,
     grafting_height: u32,
 ) -> Position<F> {
