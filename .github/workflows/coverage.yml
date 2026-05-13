@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NIGHTLY_VERSION: nightly-2025-11-15
+  NIGHTLY_VERSION: nightly
 
 jobs:
   Coverage:
