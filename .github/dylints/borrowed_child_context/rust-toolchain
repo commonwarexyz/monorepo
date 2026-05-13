@@ -1,5 +1,5 @@
 # Dylint discovers library toolchains from this directory, so the just/CI
 # `cargo +nightly-... dylint` invocation does not pin the library build.
 [toolchain]
-channel = "nightly-2025-11-15"
+channel = "nightly"
 components = ["rustc-dev", "llvm-tools-preview"]
