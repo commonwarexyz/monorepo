@@ -297,8 +297,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         Ok((proof, ops, chunks))
     }
 
-    /// Reconstruct the canonical current root, optionally collecting authenticated leaf digests
-    /// while walking the embedded Merkle proof.
+    /// Reconstruct the canonical current root, optionally collecting authenticated nodes
+    /// encountered while walking the embedded Merkle proof.
     fn reconstruct_root<H, O, const N: usize>(
         &self,
         root_hasher: &StandardHasher<H>,
