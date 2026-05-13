@@ -52,6 +52,9 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     ..
                 }) = overflow.front()
                 {
+                    // Updates are whole snapshots. Only replace the pending
+                    // update if this one is strictly newer; exact duplicates
+                    // report backoff, while stale updates are dropped.
                     let pending = (*pending_current, *pending_finalized);
                     if (current, update_finalized) <= pending {
                         return (current, update_finalized) == pending;
