@@ -35,7 +35,6 @@ impl<S: Scheme, D: Digest> Message<S, D> {
             Vote::Finalize(_) => view <= finalized,
         }
     }
-
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
