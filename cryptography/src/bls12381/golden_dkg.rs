@@ -875,13 +875,22 @@ impl Dealing {
             let mut m = Vec::with_capacity(len);
             let mut x = Vec::with_capacity(len);
             for p in &info.players {
+                // Every player must have a masked share, including the dealer
+                // when it overlaps with the player set. The dealer's own row is
+                // not algebraically meaningful (the dealer knows `f` and could
+                // produce any consistent `(z, M)` pair), but `play` relies on
+                // its presence to recover its own share.
+                if self.masked_shares.get_value(p).is_none() {
+                    return false;
+                }
                 if p == dealer {
                     continue;
                 }
                 r.push(SmallScalar::random(&mut *rng));
-                let Some(z_i) = self.masked_shares.get_value(p) else {
-                    return false;
-                };
+                let z_i = self
+                    .masked_shares
+                    .get_value(p)
+                    .expect("presence checked above");
                 z.push(z_i.clone());
                 let Some(m_i) = mask_commitments.get_value(p) else {
                     return false;
@@ -1813,6 +1822,63 @@ mod tests {
                 num_players: 4
             })
         ));
+    }
+
+    /// Regression test: in a 1-dealer/1-player overlap round (where the only
+    /// dealer is also the only player), `Dealing::check` must reject a dealing
+    /// whose `masked_shares` row for the caller is missing. Previously, `check`
+    /// skipped the dealer's row unconditionally, so `observe` would accept the
+    /// tampered log and `play` would panic on
+    /// `expect("select checks that all players have shares")`.
+    #[test]
+    fn missing_self_share_in_overlap_round_is_rejected() {
+        let mut rng = commonware_utils::test_rng();
+        let me = PrivateKey::random(&mut rng);
+        let me_pub = me.public();
+
+        let dealer_set: Set<PublicKey> = std::iter::once(me_pub.clone()).try_collect().unwrap();
+        let player_set: Set<PublicKey> = std::iter::once(me_pub.clone()).try_collect().unwrap();
+        let info = Info::new(0, None, dealer_set, player_set);
+
+        // Honest dealing first.
+        let signed = deal::<N3f1>(&mut rng, &TEST_SETUP, &info, &me, None, &Sequential)
+            .expect("honest deal should succeed");
+        let (pk, mut log) = signed.identify().expect("valid signature");
+        assert_eq!(pk, me_pub);
+        assert!(
+            log.dealing.masked_shares.get_value(&me_pub).is_some(),
+            "honest dealing should include the dealer's self-row when it overlaps with players",
+        );
+
+        // Strip the self-row, leaving the rest of the dealing intact.
+        let new_shares: Map<PublicKey, Scalar> = log
+            .dealing
+            .masked_shares
+            .iter_pairs()
+            .filter(|(p, _)| **p != me_pub)
+            .map(|(p, v)| (p.clone(), v.clone()))
+            .try_collect()
+            .unwrap();
+        log.dealing.masked_shares = new_shares;
+
+        let mut logs = BTreeMap::new();
+        logs.insert(pk, log);
+
+        // `observe` must now reject the dealing instead of selecting it.
+        let observe_result =
+            observe::<N3f1>(&mut rng, &TEST_SETUP, &info, logs.clone(), &Sequential);
+        assert!(
+            matches!(observe_result, Err(Error::DkgFailed)),
+            "observe should reject a dealing missing the self-row, got {observe_result:?}",
+        );
+
+        // `play` must surface DkgFailed rather than panic.
+        let play_result = play::<N3f1>(&mut rng, &TEST_SETUP, &info, logs, &me, &Sequential);
+        assert!(
+            matches!(play_result, Err(Error::DkgFailed)),
+            "play should reject a dealing missing the self-row, got {:?}",
+            play_result.as_ref().map(|_| "Ok"),
+        );
     }
 
     #[test_group("slow")]
