@@ -23,7 +23,7 @@ pub struct State<S: Scheme, D: Digest> {
     /// Nullifications for any view greater than the floor.
     nullifications: BTreeMap<View, Certificate<S, D>>,
     /// Window of requests to send to the resolver.
-    fetch_concurrent: NonZeroUsize,
+    fetch_concurrent: usize,
     /// Next view to consider when fetching. Avoids re-scanning
     /// views we've already requested or have nullifications for.
     fetch_floor: View,
@@ -44,7 +44,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             floor: None,
             notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
-            fetch_concurrent,
+            fetch_concurrent: fetch_concurrent.get(),
             fetch_floor: View::zero(),
             satisfied_by: HashMap::new(),
             failed_views: HashSet::new(),
@@ -190,7 +190,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         let start = self.fetch_floor.max(self.floor_view().next());
         let views: Vec<_> = View::range(start, self.current_view)
             .filter(|view| !self.nullifications.contains_key(view))
-            .take(self.fetch_concurrent.get())
+            .take(self.fetch_concurrent)
             .collect();
 
         // Update the fetch floor to reduce duplicate iteration in the future.
