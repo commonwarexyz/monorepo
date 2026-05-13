@@ -529,11 +529,7 @@ impl<D: EngineDefinition> Plan<D> {
                 }
 
                 // Check termination.
-                let target_count = if delayed_started {
-                    total
-                } else {
-                    active_count
-                };
+                let target_count = if delayed_started { total } else { active_count };
                 let states = team.active_states();
                 let done = self
                     .exit_condition
@@ -546,9 +542,16 @@ impl<D: EngineDefinition> Plan<D> {
                         )
                     })?;
                 if done {
-                    result = self.finish(
-                        &ctx, tracker, &team, crashes, &scheduled_actions, delayed_started,
-                    ).await;
+                    result = self
+                        .finish(
+                            &ctx,
+                            tracker,
+                            &team,
+                            crashes,
+                            &scheduled_actions,
+                            delayed_started,
+                        )
+                        .await;
                     break;
                 }
 
@@ -558,13 +561,8 @@ impl<D: EngineDefinition> Plan<D> {
                         if tracker.min_view() >= after {
                             info!(target: "simulator", "starting delayed participants");
                             for pk in &delayed {
-                                team.start_one(
-                                    &ctx,
-                                    &oracle,
-                                    pk.clone(),
-                                    monitor_tx.clone(),
-                                )
-                                .await;
+                                team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone())
+                                    .await;
                             }
                             delayed_started = true;
                         }
@@ -575,11 +573,7 @@ impl<D: EngineDefinition> Plan<D> {
                 if !self.exit_condition.requires_polling() {
                     continue;
                 }
-                let target_count = if delayed_started {
-                    total
-                } else {
-                    active_count
-                };
+                let target_count = if delayed_started { total } else { active_count };
                 let states = team.active_states();
                 let done = self
                     .exit_condition
@@ -595,24 +589,29 @@ impl<D: EngineDefinition> Plan<D> {
                     continue;
                 }
 
-                result = self.finish(
-                    &ctx, tracker, &team, crashes, &scheduled_actions, delayed_started,
-                ).await;
+                result = self
+                    .finish(
+                        &ctx,
+                        tracker,
+                        &team,
+                        crashes,
+                        &scheduled_actions,
+                        delayed_started,
+                    )
+                    .await;
                 break;
             },
             Some(pk) = restart_rx.recv() else break => {
                 team.restart(&ctx, &oracle, pk, monitor_tx.clone()).await;
             },
-            Some(cmd) = schedule_rx.recv() else break => {
-                match cmd {
-                    ScheduleCmd::Crash(pk) => {
-                        if team.crash(&pk) {
-                            crashes += 1;
-                        }
+            Some(cmd) = schedule_rx.recv() else break => match cmd {
+                ScheduleCmd::Crash(pk) => {
+                    if team.crash(&pk) {
+                        crashes += 1;
                     }
-                    ScheduleCmd::Restart(pk) => {
-                        team.restart(&ctx, &oracle, pk, monitor_tx.clone()).await;
-                    }
+                }
+                ScheduleCmd::Restart(pk) => {
+                    team.restart(&ctx, &oracle, pk, monitor_tx.clone()).await;
                 }
             },
             _ = crash_rx.recv() => {

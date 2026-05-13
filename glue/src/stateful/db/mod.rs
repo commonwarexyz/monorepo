@@ -1666,16 +1666,14 @@ mod tests {
                     _ = finish_signal => {
                         break;
                     },
-                    update = update_signal => {
-                        match update {
-                            Some(update) => {
-                                final_target = update;
-                            }
-                            None => {
-                                tip_updates = None;
-                                if finish.is_none() {
-                                    break;
-                                }
+                    update = update_signal => match update {
+                        Some(update) => {
+                            final_target = update;
+                        }
+                        None => {
+                            tip_updates = None;
+                            if finish.is_none() {
+                                break;
                             }
                         }
                     },
@@ -1727,16 +1725,14 @@ mod tests {
                     _ = finish_signal => {
                         break;
                     },
-                    update = update_signal => {
-                        match update {
-                            Some(update) => {
-                                final_target = update;
-                            }
-                            None => {
-                                tip_updates = None;
-                                if finish.is_none() {
-                                    break;
-                                }
+                    update = update_signal => match update {
+                        Some(update) => {
+                            final_target = update;
+                        }
+                        None => {
+                            tip_updates = None;
+                            if finish.is_none() {
+                                break;
                             }
                         }
                     },
@@ -1882,18 +1878,16 @@ mod tests {
                     _ = finish_signal => {
                         break;
                     },
-                    update = update_signal => {
-                        match update {
-                            Some(update) => {
-                                final_target = update;
-                                observed_update = true;
-                                reported_target = None;
-                            }
-                            None => {
-                                tip_updates = None;
-                                if finish.is_none() {
-                                    break;
-                                }
+                    update = update_signal => match update {
+                        Some(update) => {
+                            final_target = update;
+                            observed_update = true;
+                            reported_target = None;
+                        }
+                        None => {
+                            tip_updates = None;
+                            if finish.is_none() {
+                                break;
                             }
                         }
                     },
@@ -1949,18 +1943,16 @@ mod tests {
                     _ = finish_signal => {
                         break;
                     },
-                    update = update_signal => {
-                        match update {
-                            Some(update) => {
-                                observer.update_count.fetch_add(1, Ordering::SeqCst);
-                                final_target = update;
-                                reported_target = None;
-                            }
-                            None => {
-                                tip_updates = None;
-                                if finish.is_none() {
-                                    break;
-                                }
+                    update = update_signal => match update {
+                        Some(update) => {
+                            observer.update_count.fetch_add(1, Ordering::SeqCst);
+                            final_target = update;
+                            reported_target = None;
+                        }
+                        None => {
+                            tip_updates = None;
+                            if finish.is_none() {
+                                break;
                             }
                         }
                     },
@@ -2016,20 +2008,18 @@ mod tests {
                     _ = finish_signal => {
                         break;
                     },
-                    update = update_signal => {
-                        match update {
-                            Some(update) => {
-                                observer.update_count.fetch_add(1, Ordering::SeqCst);
-                                if update != final_target {
-                                    final_target = update;
-                                    reported_target = None;
-                                }
+                    update = update_signal => match update {
+                        Some(update) => {
+                            observer.update_count.fetch_add(1, Ordering::SeqCst);
+                            if update != final_target {
+                                final_target = update;
+                                reported_target = None;
                             }
-                            None => {
-                                tip_updates = None;
-                                if finish.is_none() {
-                                    break;
-                                }
+                        }
+                        None => {
+                            tip_updates = None;
+                            if finish.is_none() {
+                                break;
                             }
                         }
                     },

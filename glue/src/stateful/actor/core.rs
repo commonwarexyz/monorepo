@@ -390,7 +390,14 @@ where
                         debug!("proposal rejected: state sync in progress");
                         response.send_lossy(None);
                     }
-                    (Mode::Syncing(syncing), Message::Verify { context, ancestry, response }) => {
+                    (
+                        Mode::Syncing(syncing),
+                        Message::Verify {
+                            context,
+                            ancestry,
+                            response,
+                        },
+                    ) => {
                         syncing
                             .held_verify_requests
                             .retain(|request| !request.response.is_closed());

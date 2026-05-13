@@ -175,11 +175,12 @@ where
                     subs.retain(|s| !s.is_closed());
                     !subs.is_empty()
                 });
-                let mailbox_message = if !(self.mailbox_rx.is_closed() && self.mailbox_rx.is_empty()) {
-                    Either::Left(self.mailbox_rx.recv())
-                } else {
-                    Either::Right(future::pending())
-                };
+                let mailbox_message =
+                    if !(self.mailbox_rx.is_closed() && self.mailbox_rx.is_empty()) {
+                        Either::Left(self.mailbox_rx.recv())
+                    } else {
+                        Either::Right(future::pending())
+                    };
             },
             on_stopped => {
                 return;
@@ -200,14 +201,16 @@ where
             },
             Some(message) = handler_rx.recv() else {
                 return;
-            } => {
-                match message {
-                    handler::EngineMessage::Deliver { key, value, response } => {
-                        self.handle_deliver(key, value, response).await;
-                    }
-                    handler::EngineMessage::Produce { key, response } => {
-                        self.handle_produce(key, response).await;
-                    }
+            } => match message {
+                handler::EngineMessage::Deliver {
+                    key,
+                    value,
+                    response,
+                } => {
+                    self.handle_deliver(key, value, response).await;
+                }
+                handler::EngineMessage::Produce { key, response } => {
+                    self.handle_produce(key, response).await;
                 }
             },
         }

@@ -95,9 +95,7 @@ where
         futures::pin_mut!(cancel_rx);
 
         select! {
-            response = response.as_mut() => {
-                response.ok_or(ResponseDropped)?
-            },
+            response = response.as_mut() => response.ok_or(ResponseDropped)?,
             _ = cancel_rx.as_mut() => {
                 if let Some(response) = response.as_mut().now_or_never() {
                     return response.ok_or(ResponseDropped)?;
