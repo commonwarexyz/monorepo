@@ -20,7 +20,10 @@ use commonware_codec::{
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Map, Array, Span, TryCollect, TryFromIterator};
+use commonware_utils::{
+    ordered::{Map, Set},
+    Array, Span, TryCollect, TryFromIterator,
+};
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
@@ -612,6 +615,11 @@ impl VrfCommitments {
     /// produced. `transcript` must match the outer transcript the dealers used
     /// when proving (typically `Transcript::resume(*info.summary())`).
     ///
+    /// `players` is the set of receiver public keys relevant to this round.
+    /// Senders whose commitment map references any receiver outside `players`
+    /// are dropped before any proof-system work, bounding verifier cost to
+    /// `players.len()` regardless of the [`Setup`]'s configured ceiling.
+    ///
     /// On success, returns each sender's verified commitments: each entry
     /// in the returned map is a plain group encoding (`G^output`, with no
     /// Pedersen blinding) of the VRF output that sender computed for that
@@ -627,22 +635,34 @@ impl VrfCommitments {
         rng: &mut impl CryptoRngCore,
         setup: &Setup,
         transcript: &Transcript,
+        players: &Set<PublicKey>,
         outputs: impl IntoIterator<Item = (PublicKey, Bytes, Self)>,
         strategy: &impl Strategy,
     ) -> Map<PublicKey, Map<PublicKey, G1>> {
         // Materialize the batch up front. Each sender's `msg` must parse as a
-        // `Summary` (the format the prover passed in), and the sender must
-        // have supplied exactly one `pedersen_to_plain` proof per commitment;
-        // senders that fail either check are dropped before we touch the
-        // proof system. The per-receiver proof count is enforced here (rather
-        // than at the codec layer) because that is the first point at which
-        // we hold both the commitment map and the proof vector together.
+        // `Summary` (the format the prover passed in), the sender must have
+        // supplied exactly one `pedersen_to_plain` proof per commitment, and
+        // every receiver in the commitment map must be in `players` (otherwise
+        // a malicious dealer could pad a small round's eVRF statement up to
+        // the setup's ceiling and inflate verifier cost). Senders that fail
+        // any of these checks are dropped before we touch the proof system.
+        // The per-receiver proof count is enforced here (rather than at the
+        // codec layer) because that is the first point at which we hold both
+        // the commitment map and the proof vector together.
         let outputs: Vec<(PublicKey, Bytes, Self)> = outputs
             .into_iter()
             .filter_map(|(sender, msg, commitments)| {
                 let mut buf: &[u8] = msg.as_ref();
                 let _: Summary = ReadExt::read(&mut buf).ok()?;
                 if commitments.proof.pedersen_to_plain.len() != commitments.commitments.len() {
+                    return None;
+                }
+                if commitments
+                    .commitments
+                    .keys()
+                    .iter()
+                    .any(|pk| players.position(pk).is_none())
+                {
                     return None;
                 }
                 Some((sender, msg, commitments))
@@ -781,10 +801,12 @@ mod tests {
             &Sequential,
         );
 
+        let players: Set<PublicKey> = receiver_pks.iter().cloned().try_collect().unwrap();
         let result = VrfCommitments::check_batch(
             &mut rng,
             &TEST_SETUP,
             &outer_transcript,
+            &players,
             std::iter::once((sender_pk.clone(), msg, commitments.clone())),
             &Sequential,
         );
@@ -825,10 +847,12 @@ mod tests {
         // Tamper with one commitment so the bulletproofs check should fail.
         commitments.perturb(&receiver_pks[0], &G1::generator());
 
+        let players: Set<PublicKey> = receiver_pks.iter().cloned().try_collect().unwrap();
         let result = VrfCommitments::check_batch(
             &mut rng,
             &TEST_SETUP,
             &outer_transcript,
+            &players,
             std::iter::once((sender_pk, msg, commitments)),
             &Sequential,
         );
@@ -870,10 +894,12 @@ mod tests {
             "test setup expects fewer proofs than commitments",
         );
 
+        let players: Set<PublicKey> = receiver_pks.iter().cloned().try_collect().unwrap();
         let result = VrfCommitments::check_batch(
             &mut rng,
             &TEST_SETUP,
             &outer_transcript,
+            &players,
             std::iter::once((sender_pk, msg, commitments)),
             &Sequential,
         );
@@ -919,10 +945,12 @@ mod tests {
         // fails and we exercise the per-sender fallback path.
         prepared[1].2.perturb(&receiver_pks[0], &G1::generator());
 
+        let players: Set<PublicKey> = receiver_pks.iter().cloned().try_collect().unwrap();
         let result = VrfCommitments::check_batch(
             &mut rng,
             &TEST_SETUP,
             &outer_transcript,
+            &players,
             prepared.iter().cloned(),
             &Sequential,
         );
