@@ -70,13 +70,15 @@ pub struct OpsRootWitness<F: Graftable, D: Digest> {
 }
 
 impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
-    /// Return true if this witness proves that `canonical_root` commits to `ops_root`.
-    pub fn verify<H: CHasher<Digest = D>>(
+    /// Compute the canonical `current` root that commits to `ops_root` through this witness.
+    ///
+    /// See the [Canonical root structure](self#canonical-root-structure) section in the module
+    /// documentation for the full layout.
+    pub fn canonical_root<H: CHasher<Digest = D>>(
         &self,
         hasher: &StandardHasher<H>,
         ops_root: &D,
-        canonical_root: &D,
-    ) -> bool {
+    ) -> D {
         let partial = self.partial_chunk.as_ref().map(|(nb, d)| (*nb, d));
         combine_roots(
             hasher,
@@ -84,7 +86,17 @@ impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
             &self.grafted_root,
             self.pending_chunk_digest.as_ref(),
             partial,
-        ) == *canonical_root
+        )
+    }
+
+    /// Return true if this witness proves that `canonical_root` commits to `ops_root`.
+    pub fn verify<H: CHasher<Digest = D>>(
+        &self,
+        hasher: &StandardHasher<H>,
+        ops_root: &D,
+        canonical_root: &D,
+    ) -> bool {
+        self.canonical_root(hasher, ops_root) == *canonical_root
     }
 }
 
@@ -799,6 +811,27 @@ mod tests {
             let decoded = OpsRootWitness::<F, sha256::Digest>::decode(encoded).unwrap();
             assert_eq!(decoded, witness);
         }
+    }
+
+    #[test]
+    fn test_ops_root_witness_canonical_root_matches_verify() {
+        type F = mmb::Family;
+
+        let hasher = qmdb::hasher::<Sha256>();
+        let ops_root = Sha256::hash(b"ops root");
+        let witness: OpsRootWitness<F, _> = OpsRootWitness {
+            grafted_root: Sha256::hash(b"grafted root"),
+            pending_chunk_digest: Some(Sha256::hash(b"pending chunk")),
+            partial_chunk: Some((13, Sha256::hash(b"partial chunk"))),
+        };
+
+        let canonical_root = witness.canonical_root(&hasher, &ops_root);
+
+        assert!(witness.verify(&hasher, &ops_root, &canonical_root));
+        assert_ne!(canonical_root, ops_root);
+
+        let wrong_ops_root = Sha256::hash(b"wrong ops root");
+        assert!(!witness.verify(&hasher, &wrong_ops_root, &canonical_root));
     }
 
     fn range_proof_digest_count<F: Graftable, D: Digest>(proof: &RangeProof<F, D>) -> usize {
