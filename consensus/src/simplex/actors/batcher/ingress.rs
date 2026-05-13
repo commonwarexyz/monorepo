@@ -42,13 +42,13 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 finalized: update_finalized,
                 ..
             } => {
+                // Ignore the update unless it is newer than the pending update
                 if let Some(Self::Update {
                     current: pending_current,
                     finalized: pending_finalized,
                     ..
                 }) = overflow.front()
                 {
-                    // Ignore the update unless it is newer than the pending update
                     let pending = (*pending_current, *pending_finalized);
                     if (current, update_finalized) <= pending {
                         return (current, update_finalized) == pending;
@@ -65,6 +65,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 true
             }
             Self::Constructed(vote) => {
+                // Ignore the constructed vote if it is stale
                 if matches!(
                     overflow.front(),
                     Some(Self::Update { current, finalized, .. })
@@ -72,6 +73,8 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 ) {
                     return false;
                 }
+
+                // Ignore the constructed vote if it is a duplicate
                 if overflow.iter().any(|message| match message {
                     Self::Constructed(pending) if pending.view() == vote.view() => matches!(
                         (pending, &vote),
