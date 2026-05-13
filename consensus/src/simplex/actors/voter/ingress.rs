@@ -32,7 +32,6 @@ impl<S: Scheme, D: Digest> Message<S, D> {
             Self::Verified(c, _) => c.view(),
         }
     }
-
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {

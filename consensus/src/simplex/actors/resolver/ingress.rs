@@ -25,7 +25,6 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
             Self::Certified { view, .. } => *view,
         }
     }
-
 }
 
 impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
