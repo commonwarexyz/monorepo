@@ -5,12 +5,12 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity, Plan},
-    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
+    simplex::{Plan, elector::Config as Elector, types::Activity},
+    types::{Epoch, ViewDelta},
 };
 pub use actor::Actor;
-use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::paged::CacheRef;
 pub use ingress::Mailbox;
@@ -50,6 +50,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
+        Viewable,
         simplex::{
             actors::{
                 batcher,
@@ -59,8 +60,8 @@ mod tests {
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
-                bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-                secp256r1, Scheme,
+                Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf,
+                ed25519, secp256r1,
             },
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -68,25 +69,24 @@ mod tests {
             },
         },
         types::{Participant, Round, View},
-        Viewable,
     };
     use commonware_actor::mailbox;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
+        Hasher as _, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
-        Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
-        Runner, Supervisor as _,
+        Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
+        telemetry::traces::collector::TraceStorage,
     };
-    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{NZU16, NZUsize, sync::Mutex};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -473,7 +473,6 @@ mod tests {
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
-
                         break;
                     }
                     _ => {
@@ -526,7 +525,6 @@ mod tests {
                     } => {
                         assert_eq!(current, View::new(301));
                         assert_eq!(finalized, View::new(300));
-
                         break;
                     }
                     _ => {
@@ -709,7 +707,6 @@ mod tests {
                     } => {
                         assert_eq!(current, View::new(51));
                         assert_eq!(finalized, View::new(50));
-
                         break;
                     }
                     _ => {
@@ -797,7 +794,6 @@ mod tests {
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
-
                         break;
                     }
                     _ => {
@@ -1504,7 +1500,6 @@ mod tests {
                     } => {
                         assert_eq!(current, View::new(2));
                         assert_eq!(finalized, View::new(1));
-
                         break;
                     }
                     _ => {
@@ -2356,7 +2351,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -2521,7 +2516,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2546,7 +2541,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(duplicate_window) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2710,7 +2705,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -2894,7 +2889,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -3031,7 +3026,7 @@ mod tests {
             loop {
                 select! {
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -3231,7 +3226,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(ready_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     },
                     message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
@@ -3309,7 +3304,7 @@ mod tests {
                 select! {
                     _ = context.sleep_until(target_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         batcher::Message::Constructed(_) => {}
                     },
                     message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
@@ -5533,9 +5528,7 @@ mod tests {
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { .. } = msg.unwrap() {
-
-                        }
+                        if let batcher::Message::Update { .. } = msg.unwrap() {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => {
                         break None;
@@ -5643,9 +5636,7 @@ mod tests {
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { .. } = msg.unwrap() {
-
-                        }
+                        if let batcher::Message::Update { .. } = msg.unwrap() {}
                     },
                     _ = context.sleep(Duration::from_secs(6)) => break None,
                 }
@@ -5743,7 +5734,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(15)) => {
@@ -5765,11 +5756,7 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, ..
-                        } = msg.unwrap()
-                        {
-
+                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             if current > target_view {
                                 break true;
                             }
@@ -5874,7 +5861,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Notarize(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -5893,7 +5880,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -5910,11 +5897,7 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, ..
-                        } = msg.unwrap()
-                        {
-
+                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             if current > target_view {
                                 break true;
                             }
@@ -6018,7 +6001,7 @@ mod tests {
                         {
                             break n.proposal.clone();
                         }
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -6037,7 +6020,7 @@ mod tests {
                         batcher::Message::Constructed(Vote::Nullify(n))
                             if n.view() == target_view =>
                             break,
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(1)) => {
@@ -6054,11 +6037,7 @@ mod tests {
             let advanced = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, ..
-                        } = msg.unwrap()
-                        {
-
+                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             if current > target_view {
                                 break true;
                             }
@@ -6583,7 +6562,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(n)) if n.view() == view_4 =>
                             break,
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(10)) => {
@@ -6659,11 +6638,7 @@ mod tests {
             let rescued = loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, ..
-                        } = msg.unwrap()
-                        {
-
+                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             if current > view_5 {
                                 break true;
                             }
@@ -6914,7 +6889,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -6939,7 +6914,7 @@ mod tests {
                             // certification being indefinitely pending.
                             break;
                         }
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(8)) => {
@@ -7468,7 +7443,7 @@ mod tests {
                         {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(2)) => {
@@ -7952,9 +7927,7 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { .. } = msg.unwrap() {
-
-                        }
+                        if let batcher::Message::Update { .. } = msg.unwrap() {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("timed out waiting for failed certification in first run");
@@ -8036,11 +8009,7 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, ..
-                        } = msg.unwrap()
-                        {
-
+                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             // After replay, should be at target_view (not past it).
                             if current == target_view && replayed_certified {
                                 break;
@@ -8187,7 +8156,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {},
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -8205,11 +8174,7 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, ..
-                        } = msg.unwrap()
-                        {
-
+                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             if current > target_view {
                                 break;
                             }
@@ -8296,11 +8261,7 @@ mod tests {
                         _ => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update {
-                            current, ..
-                        } = msg.unwrap()
-                        {
-
+                        if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             if current > target_view && replayed_nullification {
                                 break;
                             }
@@ -8454,16 +8415,12 @@ mod tests {
             loop {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Update {
-                            current, ..
-                        } if current > target_view => {
+                        batcher::Message::Update { current, .. } if current > target_view => {
                             // Signal leader inactivity to trigger the timeout path.
                             mailbox.timeout(current, TimeoutReason::Inactivity);
                             break;
                         }
-                        batcher::Message::Update { .. } => {
-
-                        }
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
@@ -8484,9 +8441,7 @@ mod tests {
                         {
                             break;
                         }
-                        batcher::Message::Update { .. } => {
-
-                        }
+                        batcher::Message::Update { .. } => {}
                         _ => {}
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
