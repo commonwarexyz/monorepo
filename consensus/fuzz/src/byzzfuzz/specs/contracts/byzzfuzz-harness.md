@@ -36,7 +36,7 @@ FuzzInput
     | raw_bytes -> FuzzRng
     | required_containers -> schedule bounds and phase 1 target
     | forwarding -> spawn_honest_validator, then currently disabled in fuzz()
-    | certify -> spawn_honest_validator, applied uniformly to every honest validator
+    | certify -> overwritten by ByzzFuzz, then passed to spawn_honest_validator
     v
 byzzfuzz::run
     |
@@ -46,11 +46,11 @@ byzzfuzz::run
 fuzz() panic handling
 ```
 
-ByzzFuzz overwrites `configuration`, `partition`, and `degraded_network` before setup. Other fields remain available to shared helper calls.
+ByzzFuzz overwrites `configuration`, `partition`, `degraded_network`, and `certify` before setup. The `certify` override samples a ByzzFuzz-specific policy from the deterministic context; single-target variants in that policy pin to the byzantine validator so the disabled certifier coincides with the existing adversary. Other fields remain available to shared helper calls.
 
 ## Error Propagation
 
-ByzzFuzz liveness failures and invariant failures panic inside `run`. The top-level `fuzz` function catches the unwind, prints `raw_bytes`, and resumes the panic. The panic hook drains and prints the decision log only when `BYZZFUZZ_LOG` is set.
+ByzzFuzz liveness failures and invariant failures panic inside `run`. The top-level `fuzz` function catches the unwind, prints `raw_bytes`, and resumes the panic. The panic hook drains and prints the decision log only when `CONSENSUS_FUZZ_LOG` is set.
 
 ## Breaking Change Checklist
 
@@ -59,3 +59,4 @@ ByzzFuzz liveness failures and invariant failures panic inside `run`. The top-le
 - If `setup_network` or `spawn_honest_validator` signatures change, update `runner.rs` wiring and this contract.
 - If panic-log behavior changes, update [Observability](../domains/observability.md).
 - If ByzzFuzz stops forcing `N4F0C4` or connected topology, update [Runner Liveness](../domains/runner-liveness.md) and create or supersede an ADR.
+- If the ByzzFuzz certify-policy sampler stops pinning single-target variants to the byzantine validator, update [Invariants](../invariants/invariants.md) and create or supersede an ADR.

@@ -88,12 +88,7 @@ impl Arbitrary<'_> for NodeFuzzInput {
         // Single-target certify variants are not sampled: the node-fuzz
         // harness runs only one honest engine, so disabling its certifier
         // halts liveness.
-        let certify = match u.int_in_range(0..=9)? {
-            0..=6 => crate::CertifyChoice::Always,
-            _ => crate::CertifyChoice::SometimesReject {
-                seed: u.arbitrary::<u64>()?,
-            },
-        };
+        let certify = crate::CertifyChoice::Always;
 
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {

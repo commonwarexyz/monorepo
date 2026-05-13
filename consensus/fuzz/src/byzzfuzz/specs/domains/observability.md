@@ -44,7 +44,7 @@ The log is bounded by line count, so the trail kept on panic is the most recent 
 | Parameter | Source | Meaning |
 | --------- | ------ | ------- |
 | Retention cap | `log.rs` | Maximum retained decision lines. |
-| Print on panic | `BYZZFUZZ_LOG` env var | Enables panic-time log printing when any value is set. |
+| Print diagnostics | `CONSENSUS_FUZZ_LOG` env var | Enables sanitized configuration printing and ByzzFuzz panic-time log printing when any value is set. |
 
 ## Extension Points
 
