@@ -148,10 +148,7 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 /// # Panics
 ///
 /// Panics if `ops_pos` is below the grafting height.
-pub fn ops_to_grafted_pos<F: Graftable>(
-    ops_pos: Position<F>,
-    grafting_height: u32,
-) -> Position<F> {
+pub fn ops_to_grafted_pos<F: Graftable>(ops_pos: Position<F>, grafting_height: u32) -> Position<F> {
     let ops_height = F::pos_to_height(ops_pos);
     assert!(
         ops_height >= grafting_height,
