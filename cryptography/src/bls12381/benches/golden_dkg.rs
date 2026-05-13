@@ -79,20 +79,21 @@ fn bench_golden_dkg_deal(c: &mut Criterion) {
 
 /// Time for a receiver to verify one dealer's [`SignedDealerLog`].
 ///
-/// `golden_dkg::observe` performs the full verification a real receiver does
-/// (signature check, eVRF batch check, and the per-dealing linear check).
+/// Performs the full verification a real receiver does: the signature check
+/// via `SignedDealerLog::identify`, plus the eVRF batch check and per-dealing
+/// linear check via `golden_dkg::observe`.
 fn bench_golden_dkg_verify(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
         let signed = bench.deal(&mut rng);
-        let (pk, log) = signed.identify().expect("honest log should identify");
-        let mut logs = BTreeMap::<PublicKey, DealerLog>::new();
-        logs.insert(pk, log);
         c.bench_function(&format!("{}::verify/n={}", module_path!(), n), |b| {
             b.iter_batched(
-                || (bench.info.clone(), logs.clone(), StdRng::seed_from_u64(0)),
-                |(info, logs, mut rng)| {
+                || (bench.info.clone(), signed.clone(), StdRng::seed_from_u64(0)),
+                |(info, signed, mut rng)| {
+                    let (pk, log) = signed.identify().expect("honest log should identify");
+                    let mut logs = BTreeMap::<PublicKey, DealerLog>::new();
+                    logs.insert(pk, log);
                     black_box(
                         golden_dkg::observe::<N3f1>(&mut rng, &SETUP, &info, logs, &Sequential)
                             .unwrap(),
