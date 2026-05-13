@@ -36,40 +36,48 @@ impl<S: Scheme, D: Digest> Message<S, D> {
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        // Ignore the message if there exists a pending finalization
+        // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
         if matches!(
             overflow.front(),
-            Some(Self::Verified(Certificate::Finalization(finalized), _))
-                if finalized.view() >= new_view
+            Some(Self::Verified(Certificate::Finalization(old_finalized), _))
+                if old_finalized.view() >= new_view
         ) {
             return false;
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(&message, Self::Verified(Certificate::Finalization(_), _)) {
-            overflow.retain(|pending| {
-                if matches!(pending, Self::Verified(Certificate::Finalization(_), _)) {
+            overflow.retain(|old_message| {
+                if matches!(
+                    old_message,
+                    Self::Verified(Certificate::Finalization(_), _)
+                ) {
                     return false;
                 }
-                pending.view() > new_view
+                old_message.view() > new_view
             });
             overflow.push_front(message);
             return true;
         }
 
         // Ignore the message if it is a duplicate
-        if overflow.iter().any(|pending| match (&message, pending) {
-            (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
+        if overflow.iter().any(|old_message| match (&message, old_message) {
+            (Self::Proposal(new_proposal), Self::Proposal(old_proposal)) => {
+                new_proposal.view() == old_proposal.view()
+            }
             // Timeout reasons are equivalent for control flow; retain the first queued reason.
-            (Self::Timeout(x, _), Self::Timeout(y, _)) => x == y,
-            (Self::Verified(a, _), Self::Verified(b, _)) if a.view() == b.view() => matches!(
-                (a, b),
-                (Certificate::Notarization(_), Certificate::Notarization(_))
-                    | (Certificate::Nullification(_), Certificate::Nullification(_))
-                    | (Certificate::Finalization(_), Certificate::Finalization(_))
-            ),
+            (Self::Timeout(new_view, _), Self::Timeout(old_view, _)) => new_view == old_view,
+            (Self::Verified(new_certificate, _), Self::Verified(old_certificate, _)) => {
+                new_certificate.view() == old_certificate.view()
+                    && matches!(
+                        (new_certificate, old_certificate),
+                        (Certificate::Notarization(_), Certificate::Notarization(_))
+                            | (Certificate::Nullification(_), Certificate::Nullification(_))
+                            | (Certificate::Finalization(_), Certificate::Finalization(_))
+                    )
+            }
             _ => false,
         }) {
             return true;

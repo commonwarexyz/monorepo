@@ -29,38 +29,47 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
 
 impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        // Ignore the message if there exists a pending finalization
+        // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
         if matches!(
             overflow.front(),
-            Some(Self::Certificate(Certificate::Finalization(finalized)))
-                if finalized.view() >= new_view
+            Some(Self::Certificate(Certificate::Finalization(old_finalized)))
+                if old_finalized.view() >= new_view
         ) {
             return false;
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(&message, Self::Certificate(Certificate::Finalization(_))) {
-            overflow.retain(|pending| {
-                if matches!(pending, Self::Certificate(Certificate::Finalization(_))) {
+            overflow.retain(|old_message| {
+                if matches!(
+                    old_message,
+                    Self::Certificate(Certificate::Finalization(_))
+                ) {
                     return false;
                 }
-                pending.view() > new_view
+                old_message.view() > new_view
             });
             overflow.push_front(message);
             return true;
         }
 
         // Ignore the message if it is a duplicate
-        if overflow.iter().any(|pending| match (&message, pending) {
-            (Self::Certificate(a), Self::Certificate(b)) if a.view() == b.view() => matches!(
-                (a, b),
-                (Certificate::Notarization(_), Certificate::Notarization(_))
-                    | (Certificate::Nullification(_), Certificate::Nullification(_))
-                    | (Certificate::Finalization(_), Certificate::Finalization(_))
-            ),
-            (Self::Certified { view: x, .. }, Self::Certified { view: y, .. }) => x == y,
+        if overflow.iter().any(|old_message| match (&message, old_message) {
+            (Self::Certificate(new_certificate), Self::Certificate(old_certificate)) => {
+                new_certificate.view() == old_certificate.view()
+                    && matches!(
+                        (new_certificate, old_certificate),
+                        (Certificate::Notarization(_), Certificate::Notarization(_))
+                            | (Certificate::Nullification(_), Certificate::Nullification(_))
+                            | (Certificate::Finalization(_), Certificate::Finalization(_))
+                    )
+            }
+            (
+                Self::Certified { view: new_view, .. },
+                Self::Certified { view: old_view, .. },
+            ) => new_view == old_view,
             _ => false,
         }) {
             return true;

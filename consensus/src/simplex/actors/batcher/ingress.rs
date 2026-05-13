@@ -37,20 +37,21 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match message {
             update @ Self::Update {
-                current,
-                finalized: update_finalized,
+                current: new_current,
+                finalized: new_finalized,
                 ..
             } => {
-                // Ignore the update unless it is newer than the pending update
+                // Ignore the update unless it is newer than the queued update
                 if let Some(Self::Update {
-                    current: pending_current,
-                    finalized: pending_finalized,
+                    current: old_current,
+                    finalized: old_finalized,
                     ..
                 }) = overflow.front()
                 {
-                    let pending = (*pending_current, *pending_finalized);
-                    if (current, update_finalized) <= pending {
-                        return (current, update_finalized) == pending;
+                    let old = (*old_current, *old_finalized);
+                    let new = (new_current, new_finalized);
+                    if new <= old {
+                        return new == old;
                     }
                     overflow.pop_front();
                 }
@@ -59,24 +60,24 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 // Retain only the newest update and any constructed votes still useful after it
                 overflow.retain(|message| match message {
                     Self::Update { .. } => true,
-                    Self::Constructed(vote) => !Self::prunes(current, update_finalized, vote),
+                    Self::Constructed(vote) => !Self::prunes(new_current, new_finalized, vote),
                 });
                 true
             }
-            Self::Constructed(vote) => {
+            Self::Constructed(new_vote) => {
                 // Ignore the constructed vote if it is stale
                 if matches!(
                     overflow.front(),
-                    Some(Self::Update { current, finalized, .. })
-                        if Self::prunes(*current, *finalized, &vote)
+                    Some(Self::Update { current: old_current, finalized: old_finalized, .. })
+                        if Self::prunes(*old_current, *old_finalized, &new_vote)
                 ) {
                     return false;
                 }
 
                 // Ignore the constructed vote if it is a duplicate
-                if overflow.iter().any(|message| match message {
-                    Self::Constructed(pending) if pending.view() == vote.view() => matches!(
-                        (pending, &vote),
+                if overflow.iter().any(|old_message| match old_message {
+                    Self::Constructed(old_vote) if old_vote.view() == new_vote.view() => matches!(
+                        (old_vote, &new_vote),
                         (Vote::Notarize(_), Vote::Notarize(_))
                             | (Vote::Nullify(_), Vote::Nullify(_))
                             | (Vote::Finalize(_), Vote::Finalize(_))
@@ -85,7 +86,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 }) {
                     return true;
                 }
-                overflow.push_back(Self::Constructed(vote));
+                overflow.push_back(Self::Constructed(new_vote));
                 true
             }
         }
@@ -246,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_update_is_dropped_when_newer_update_is_pending() {
+    fn stale_update_is_dropped_when_newer_update_is_queued() {
         let mut overflow = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
