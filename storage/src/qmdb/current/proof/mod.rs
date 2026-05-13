@@ -297,8 +297,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         Ok((proof, ops, chunks))
     }
 
-    /// Reconstruct the canonical current root, optionally collecting authenticated nodes
-    /// encountered while walking the embedded Merkle proof.
+    /// Reconstruct the canonical current root, optionally collecting the positioned digests
+    /// required to compute the peaks covering the proven range.
     fn reconstruct_root<H, O, const N: usize>(
         &self,
         root_hasher: &StandardHasher<H>,
@@ -465,8 +465,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     }
 }
 
-/// Verify that a [RangeProof] is valid for a range of operations and extract all digests (and
-/// their positions) in the range of the proof.
+/// Verify that a [RangeProof] is valid for a range of operations and return the positioned digests
+/// required to compute the peaks covering the proven range.
 pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
     hasher: &StandardHasher<H>,
     proof: &RangeProof<F, D>,
