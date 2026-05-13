@@ -541,8 +541,9 @@ impl EncodeSize for Proof {
 
 impl Read for Proof {
     /// `max_players` bounds both the number of `pedersen_to_plain` proofs (one
-    /// per receiver) and, via [`lg_len_for_players`], the number of IPA rounds
-    /// admissible in the inner circuit proof.
+    /// per receiver, which is checked when validating logs for inclusion in
+    /// [`super::observe`] or [`super::play`]) and, via [`lg_len_for_players`],
+    /// the number of IPA rounds admissible in the inner circuit proof.
     type Cfg = NonZeroU32;
 
     fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
@@ -611,10 +612,13 @@ impl VrfCommitments {
     /// produced. `transcript` must match the outer transcript the dealers used
     /// when proving (typically `Transcript::resume(*info.summary())`).
     ///
-    /// On success, returns each sender's verified commitments. If the
-    /// combined batch check fails, falls back to checking each sender's
-    /// equation individually and returns the subset that verified
-    /// successfully.
+    /// On success, returns each sender's verified commitments: each entry
+    /// in the returned map is a plain group encoding (`G^output`, with no
+    /// Pedersen blinding) of the VRF output that sender computed for that
+    /// receiver.
+    ///
+    /// Returns only the commitments which successfully verified. Bad commitments
+    /// are simply ommitted from the result.
     ///
     /// # Panics
     ///
