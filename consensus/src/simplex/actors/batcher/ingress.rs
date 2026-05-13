@@ -22,18 +22,9 @@ pub enum Message<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Message<S, D> {
     // Overflow is kept in canonical delivery order: at most one update at the
-    // front, followed by constructed votes sorted by view and vote kind. The
+    // front, followed by retained constructed votes in arrival order. The
     // update carries the strongest current/finalized floor seen while it is
     // pending, so later inserts only need to compare against that front item.
-    fn vote_key(vote: &Vote<S, D>) -> (View, u8) {
-        let kind = match vote {
-            Vote::Notarize(_) => 0,
-            Vote::Nullify(_) => 1,
-            Vote::Finalize(_) => 2,
-        };
-        (vote.view(), kind)
-    }
-
     fn prunes(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
         let view = vote.view();
         match vote {
@@ -90,7 +81,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 };
 
                 // A new update changes the pruning floor. Retain order is
-                // enough because constructed votes were already sorted.
+                // enough because constructed votes stay in arrival order.
                 overflow.retain(|message| match message {
                     Self::Update { .. } => true,
                     Self::Constructed(vote) => !Self::prunes(current, finalized, vote),
@@ -109,17 +100,20 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     return false;
                 }
 
-                let key = Self::vote_key(&vote);
-                match overflow.binary_search_by(|pending| match pending {
-                    Self::Update { .. } => std::cmp::Ordering::Less,
-                    Self::Constructed(pending) => Self::vote_key(pending).cmp(&key),
+                if overflow.iter().any(|message| {
+                    matches!(
+                        message,
+                        Self::Constructed(pending)
+                            if pending.view() == vote.view()
+                                && std::mem::discriminant(pending)
+                                    == std::mem::discriminant(&vote)
+                    )
                 }) {
-                    Ok(_) => true,
-                    Err(index) => {
-                        overflow.insert(index, Self::Constructed(vote));
-                        true
-                    }
+                    return true;
                 }
+
+                overflow.push_back(Self::Constructed(vote));
+                true
             }
         }
     }
@@ -392,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn constructed_finalizations_are_sorted_after_update() {
+    fn constructed_finalizations_remain_in_arrival_order_after_update() {
         let mut overflow = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
@@ -415,12 +409,12 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(Message::Constructed(vote))
-                if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(2)
+                if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(4)
         ));
         assert!(matches!(
             overflow.pop_front(),
             Some(Message::Constructed(vote))
-                if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(4)
+                if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(2)
         ));
     }
 
