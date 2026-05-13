@@ -698,7 +698,8 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
     const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 
-    type Qmdb<E> = any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap>;
+    type Qmdb<E> =
+        any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
     type DbSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -827,7 +828,7 @@ mod tests {
 
     #[derive(Clone)]
     struct FinalizedObserver {
-        db_config: any::FixedConfig<TwoCap>,
+        db_config: any::FixedConfig<TwoCap, Sequential>,
         reopened_counters: Arc<Mutex<Vec<u64>>>,
     }
 
@@ -846,7 +847,7 @@ mod tests {
         }
 
         fn with_finalized_observer(
-            db_config: any::FixedConfig<TwoCap>,
+            db_config: any::FixedConfig<TwoCap, Sequential>,
         ) -> (Self, Arc<Mutex<Vec<u64>>>) {
             let reopened_counters = Arc::new(Mutex::new(Vec::new()));
             let observer = FinalizedObserver {
@@ -1000,7 +1001,7 @@ mod tests {
         context_cell: ContextCell<deterministic::Context>,
         processor: Processor<deterministic::Context, ExecutionApp>,
         provider: MapProvider,
-        db_config: any::FixedConfig<TwoCap>,
+        db_config: any::FixedConfig<TwoCap, Sequential>,
         finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
     }
 
@@ -1029,7 +1030,7 @@ mod tests {
         async fn with_app(
             context: deterministic::Context,
             provider: MapProvider,
-            config: any::FixedConfig<TwoCap>,
+            config: any::FixedConfig<TwoCap, Sequential>,
             app: ExecutionApp,
             finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
         ) -> Self {
@@ -1163,7 +1164,10 @@ mod tests {
         format!("processor_harness_{id}")
     }
 
-    fn qmdb_config(prefix: &str, context: &deterministic::Context) -> any::FixedConfig<TwoCap> {
+    fn qmdb_config(
+        prefix: &str,
+        context: &deterministic::Context,
+    ) -> any::FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
             merkle_config: MmrJournalConfig {

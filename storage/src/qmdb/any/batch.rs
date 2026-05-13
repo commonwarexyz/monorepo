@@ -1522,16 +1522,6 @@ where
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
         batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
-
-    /// Inactivity floor location after this batch's floor raise.
-    pub const fn inactivity_floor(&self) -> Location<F> {
-        self.bounds.inactivity_floor
-    }
-
-    /// Total operation count after this batch.
-    pub const fn size(&self) -> Location<F> {
-        Location::new(self.bounds.total_size)
-    }
 }
 
 impl<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy> MerkleizedBatch<F, D, U, S>

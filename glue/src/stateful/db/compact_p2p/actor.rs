@@ -332,7 +332,8 @@ mod tests {
         async fn block(&mut self, _peer: Self::PublicKey) {}
     }
 
-    type TestDb = keyless_fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256>;
+    type TestDb =
+        keyless_fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
     type TestActor = Actor<
         deterministic::Context,
         ed25519::PublicKey,

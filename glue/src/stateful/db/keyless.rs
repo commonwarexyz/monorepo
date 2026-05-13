@@ -456,13 +456,14 @@ mod tests {
     use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
-    type FixedDb = fixed::Db<mmr::Family, deterministic::Context, U64, Sha256>;
-    type VariableDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256>;
+    type FixedDb = fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
+    type VariableDb =
+        variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config {
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         storage_keyless::Config {
             merkle: MerkleConfig {

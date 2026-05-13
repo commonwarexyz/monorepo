@@ -63,7 +63,8 @@ use rand::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
-type Qmdb<E> = fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap>;
+type Qmdb<E> =
+    fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
 pub(crate) type SingleDatabaseSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
 type MarshalMailbox = MarshalMailboxOf<Standard<Block>>;
@@ -208,12 +209,13 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
         let parent = ancestry.peek()?;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, batches).await;
+        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(merkleized.inactivity_floor(), merkleized.size()),
+            range: non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size)),
         };
         Some(Proposed { block, merkleized })
     }
@@ -226,8 +228,10 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let tip = ancestry.peek()?;
         let merkleized = Self::execute(tip.height(), batches).await;
+        let bounds = merkleized.bounds();
         if merkleized.root() != tip.state_root
-            || non_empty_range!(merkleized.inactivity_floor(), merkleized.size()) != tip.range
+            || non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size))
+                != tip.range
         {
             return None;
         }

@@ -64,7 +64,8 @@ use rand::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The QMDB database type used by the multi-db e2e tests.
-type Qmdb<E> = fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap>;
+type Qmdb<E> =
+    fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
 /// A single QMDB database behind a lock.
 type SingleDb<E> = Arc<AsyncRwLock<Qmdb<E>>>;
@@ -246,14 +247,22 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
         let parent = ancestry.peek()?;
         let height = Height::new(parent.height().get() + 1);
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
+        let bounds_a = merkleized_a.bounds();
+        let bounds_b = merkleized_b.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             root_a: merkleized_a.root(),
-            range_a: non_empty_range!(merkleized_a.inactivity_floor(), merkleized_a.size()),
+            range_a: non_empty_range!(
+                bounds_a.inactivity_floor,
+                Location::new(bounds_a.total_size)
+            ),
             root_b: merkleized_b.root(),
-            range_b: non_empty_range!(merkleized_b.inactivity_floor(), merkleized_b.size()),
+            range_b: non_empty_range!(
+                bounds_b.inactivity_floor,
+                Location::new(bounds_b.total_size)
+            ),
         };
         Some(Proposed {
             block,
@@ -269,12 +278,18 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let tip = ancestry.peek()?;
         let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
+        let bounds_a = merkleized_a.bounds();
+        let bounds_b = merkleized_b.bounds();
         let matches_a = merkleized_a.root() == tip.root_a
-            && non_empty_range!(merkleized_a.inactivity_floor(), merkleized_a.size())
-                == tip.range_a;
+            && non_empty_range!(
+                bounds_a.inactivity_floor,
+                Location::new(bounds_a.total_size)
+            ) == tip.range_a;
         let matches_b = merkleized_b.root() == tip.root_b
-            && non_empty_range!(merkleized_b.inactivity_floor(), merkleized_b.size())
-                == tip.range_b;
+            && non_empty_range!(
+                bounds_b.inactivity_floor,
+                Location::new(bounds_b.total_size)
+            ) == tip.range_b;
         if !matches_a || !matches_b {
             return None;
         }

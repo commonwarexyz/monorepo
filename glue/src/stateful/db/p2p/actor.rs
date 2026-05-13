@@ -426,6 +426,7 @@ mod tests {
         sha256::Digest,
         Sha256,
         TwoCap,
+        Sequential,
     >;
     type TestOp = <Arc<AsyncRwLock<TestDb>> as SyncResolver>::Op;
 
@@ -474,7 +475,7 @@ mod tests {
         oneshot::channel()
     }
 
-    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap> {
+    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
         FixedConfig {
             merkle_config: MmrJournalConfig {

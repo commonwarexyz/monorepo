@@ -343,7 +343,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         loop {
-            let context = context.child("attempt").with_attribute("attempt", attempt);
+            let context = context.child("sync").with_attribute("attempt", attempt);
             attempt += 1;
             let db = sync::compact::sync(sync::compact::Config::<Self, R> {
                 context,
@@ -410,7 +410,7 @@ where
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         loop {
-            let context = context.child("attempt").with_attribute("attempt", attempt);
+            let context = context.child("sync").with_attribute("attempt", attempt);
             attempt += 1;
             let db = sync::compact::sync(sync::compact::Config::<Self, R> {
                 context,
@@ -456,7 +456,8 @@ mod tests {
     use commonware_storage::merkle::{compact::Config as MerkleConfig, mmr};
     use commonware_utils::{NZUsize, NZU64};
 
-    type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, Digest, Digest, Sha256>;
+    type FixedDb =
+        fixed::CompactDb<mmr::Family, deterministic::Context, Digest, Digest, Sha256, Sequential>;
     type VariableDb = variable::CompactDb<
         mmr::Family,
         deterministic::Context,
@@ -464,9 +465,10 @@ mod tests {
         Vec<u8>,
         Sha256,
         ((), (commonware_codec::RangeCfg<usize>, ())),
+        Sequential,
     >;
 
-    fn fixed_config(suffix: &str) -> fixed::CompactConfig {
+    fn fixed_config(suffix: &str) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
             merkle: MerkleConfig {
                 partition: format!("stateful-immutable-unjournaled-{suffix}"),

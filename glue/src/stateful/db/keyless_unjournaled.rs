@@ -334,7 +334,7 @@ where
                 }
             }
 
-            let context = context.child("attempt").with_attribute("attempt", attempt);
+            let context = context.child("sync").with_attribute("attempt", attempt);
             attempt += 1;
             let update_future = tip_updates.as_mut().map_or_else(
                 || Either::Right(pending()),
@@ -425,7 +425,7 @@ where
                 }
             }
 
-            let context = context.child("attempt").with_attribute("attempt", attempt);
+            let context = context.child("sync").with_attribute("attempt", attempt);
             attempt += 1;
             let update_future = tip_updates.as_mut().map_or_else(
                 || Either::Right(pending()),
@@ -497,14 +497,16 @@ mod tests {
     use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
     use std::time::Duration;
 
-    type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256>;
-    type FullFixedDb = storage_keyless::fixed::Db<mmr::Family, deterministic::Context, U64, Sha256>;
+    type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
+    type FullFixedDb =
+        storage_keyless::fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
     type VariableDb = variable::CompactDb<
         mmr::Family,
         deterministic::Context,
         Vec<u8>,
         Sha256,
         (commonware_codec::RangeCfg<usize>, ()),
+        Sequential,
     >;
 
     #[derive(Clone)]
@@ -534,7 +536,7 @@ mod tests {
         }
     }
 
-    fn fixed_config(suffix: &str) -> fixed::CompactConfig {
+    fn fixed_config(suffix: &str) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
             merkle: MerkleConfig {
                 partition: format!("stateful-keyless-unjournaled-{suffix}"),
@@ -547,7 +549,7 @@ mod tests {
     fn full_fixed_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> storage_keyless::fixed::Config {
+    ) -> storage_keyless::fixed::Config<Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
         storage_keyless::fixed::Config {
             merkle: FullMerkleConfig {
