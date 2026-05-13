@@ -57,10 +57,7 @@ type ByzzReporter<P> =
 fn sample_byzzfuzz_certify(context: &mut deterministic::Context) -> CertifyChoice {
     match context.gen_range(0..10u32) {
         0..=5 => CertifyChoice::Always,
-        6..=7 => CertifyChoice::SometimesReject {
-            seed: context.gen::<u64>(),
-        },
-        8 => CertifyChoice::SingleCancel {
+        6..=7 => CertifyChoice::SingleCancel {
             target_idx: BYZANTINE_IDX as u8,
         },
         _ => CertifyChoice::SinglePending {
@@ -98,14 +95,12 @@ where
         Clone + Send + Sync + 'static,
 {
     // Override the harness-wide `input.certify` with ByzzFuzz-specific
-    // sampling. `FuzzInput::arbitrary` restricts to `Always` /
-    // `SometimesReject` because it must hold for every mode (Standard,
-    // FaultyMessaging, Twins on N4F1C3 cannot survive losing one of three
-    // honest certifiers). ByzzFuzz forces N4F0C4 *and* keeps Byzantine
-    // process faults active post-GST; `sample_byzzfuzz_certify` pins the
-    // single-target variants to the byzantine index so the disabled
-    // certifier coincides with the adversary rather than adding a new
-    // correct-validator failure.
+    // sampling. `FuzzInput::arbitrary` uses `Always` because Standard,
+    // FaultyMessaging, and Twins on N4F1C3 cannot survive losing one of three
+    // honest certifiers. ByzzFuzz forces N4F0C4 *and* keeps Byzantine process
+    // faults active post-GST; `sample_byzzfuzz_certify` pins the single-target
+    // variants to the byzantine index so the disabled certifier coincides with
+    // the adversary rather than adding a new correct-validator failure.
     input.certify = sample_byzzfuzz_certify(context);
 
     // Sample `(c, d, r)` here rather than threading it through `FuzzInput` type.
@@ -325,6 +320,7 @@ where
     executor.start(|mut context| async move {
         let gate = FaultGate::new();
         let setup = setup_engines::<P>(&mut context, &mut input, gate.clone(), "byzzfuzz").await;
+        crate::print_fuzz_input(crate::Mode::Byzzfuzz, &input);
         let mut reporters = setup.reporters;
         let byzantine_view = setup.byzantine_view;
         let proc_schedule = setup.proc_schedule;

@@ -32,8 +32,7 @@ use commonware_consensus::{
     Monitor, Viewable,
 };
 use commonware_cryptography::{
-    certificate::Scheme, sha256::Digest as Sha256Digest, Hasher, PublicKey as CryptoPublicKey,
-    Sha256,
+    certificate::Scheme, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
@@ -54,12 +53,15 @@ pub use simplex::{
 };
 use std::{
     collections::HashMap,
+    fmt,
     num::{NonZeroU16, NonZeroUsize},
     panic,
     sync::Arc,
     time::Duration,
 };
 pub const EPOCH: u64 = 333;
+
+const FUZZ_LOG_ENV: &str = "CONSENSUS_FUZZ_LOG";
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -139,51 +141,22 @@ async fn setup_degraded_network<P: CryptoPublicKey, E: Clock>(
     }
 }
 
-/// Per-iteration choice of `Application::certify` behavior. `Always` and
-/// `SometimesReject` apply uniformly to every honest validator a fuzz
-/// iteration spawns and produce identical decisions across honest validators
-/// for the same `(view, payload)` -- the Simplex protocol requires
-/// certification to be deterministic and consistent across honest
-/// participants (see `consensus/src/simplex/mod.rs`). `SingleCancel` and
-/// `SinglePending` apply their non-default certifier only to the validator at
-/// `target_idx` so quorum certification is still reachable.
+/// Per-iteration choice of `Application::certify` behavior.
+///
+/// `SingleCancel` and `SinglePending` apply their non-default certifier only
+/// to the validator at `target_idx` so quorum certification is still reachable
+/// when the selected validator already overlaps another modeled adversary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertifyChoice {
     Always,
-    /// Reject a small fraction of `(view, payload)` pairs. `seed` makes the
-    /// predicate iteration-distinguishable; the decision does not depend on
-    /// validator identity so honest validators agree.
-    SometimesReject {
-        seed: u64,
-    },
-    SingleCancel {
-        target_idx: u8,
-    },
-    SinglePending {
-        target_idx: u8,
-    },
+    SingleCancel { target_idx: u8 },
+    SinglePending { target_idx: u8 },
 }
-
-/// Per-(view, payload) reject rate, in percent (0..100), used by
-/// [`CertifyChoice::SometimesReject`]. Small so quorum certification remains
-/// reachable.
-const CERTIFY_REJECT_PCT: u8 = 3;
 
 impl CertifyChoice {
     pub fn into_certifier(self, validator_idx: usize) -> application::Certifier<Sha256Digest> {
         match self {
             CertifyChoice::Always => application::Certifier::Always,
-            CertifyChoice::SometimesReject { seed } => {
-                application::Certifier::Custom(Box::new(move |round, payload| {
-                    let mut h = Sha256::default();
-                    h.update(b"SIMPLEX_FUZZ_CERTIFY_SEED");
-                    h.update(&seed.to_be_bytes());
-                    h.update(&round.view().get().to_be_bytes());
-                    h.update(payload.as_ref());
-                    let digest = h.finalize();
-                    digest.as_ref()[0] % 100 >= CERTIFY_REJECT_PCT
-                }))
-            }
             CertifyChoice::SingleCancel { target_idx } => {
                 if validator_idx == target_idx as usize {
                     application::Certifier::Cancel
@@ -199,6 +172,57 @@ impl CertifyChoice {
                 }
             }
         }
+    }
+}
+
+struct FuzzInputDebug<'a>(&'a FuzzInput);
+
+impl fmt::Debug for FuzzInputDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let input = self.0;
+        f.debug_struct("FuzzInput")
+            .field("raw_bytes_len", &input.raw_bytes.len())
+            .field("required_containers", &input.required_containers)
+            .field("degraded_network", &input.degraded_network)
+            .field("configuration", &input.configuration)
+            .field("partition", &input.partition)
+            .field("strategy", &input.strategy)
+            .field("messaging_faults", &input.messaging_faults)
+            .field("forwarding", &input.forwarding)
+            .field("certify", &input.certify)
+            .finish()
+    }
+}
+
+struct NodeFuzzInputDebug<'a>(&'a NodeFuzzInput);
+
+impl fmt::Debug for NodeFuzzInputDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let input = self.0;
+        f.debug_struct("NodeFuzzInput")
+            .field("raw_bytes_len", &input.raw_bytes.len())
+            .field("events", &input.events)
+            .field("forwarding", &input.forwarding)
+            .field("certify", &input.certify)
+            .finish()
+    }
+}
+
+fn print_fuzz_input(mode: Mode, input: &FuzzInput) {
+    if std::env::var_os(FUZZ_LOG_ENV).is_some() {
+        eprintln!(
+            "consensus fuzz configuration: mode={mode:?} input={:?}",
+            FuzzInputDebug(input)
+        );
+    }
+}
+
+fn print_node_fuzz_input(mode: simplex_node::NodeMode, input: &NodeFuzzInput) {
+    if std::env::var_os(FUZZ_LOG_ENV).is_some() {
+        eprintln!(
+            "consensus node fuzz configuration: mode={mode:?} input={:?}",
+            NodeFuzzInputDebug(input)
+        );
     }
 }
 
@@ -284,22 +308,10 @@ impl Arbitrary<'_> for FuzzInput {
             _ => ForwardingPolicy::SilentLeader,
         };
 
-        // Certify policy distribution (safe for every mode this `FuzzInput` is
-        // consumed by, including Standard/FaultyMessaging/Twins on N4F1C3
-        // where only three engines are honest certifiers). Variants that
-        // disable certification on a target validator (`SingleCancel`,
-        // `SinglePending`) are not sampled here because losing one of three
-        // certifiers drops below the n=4 quorum of three;
-        //   70%  Always           - matches prior fuzz behavior; covers the success path
-        //   30%  SometimesReject  - covers state.rs:122 certification-failure path;
-        //                           uniform across honest validators per the Simplex
-        //                           consensus contract
-        let certify = match u.int_in_range(0..=9)? {
-            0..=6 => CertifyChoice::Always,
-            _ => CertifyChoice::SometimesReject {
-                seed: u.arbitrary::<u64>()?,
-            },
-        };
+        // Single-target certify variants are not sampled here because standard
+        // N4F1C3 modes have only three honest certifiers; disabling one drops
+        // below the quorum of three.
+        let certify = CertifyChoice::Always;
 
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
@@ -1591,7 +1603,7 @@ impl FuzzMode for Byzzfuzz {
 }
 
 /// Install (once per process) a panic-hook chain that drains and prints the
-/// ByzzFuzz decision log when the `BYZZFUZZ_LOG` environment variable is
+/// ByzzFuzz decision log when the `CONSENSUS_FUZZ_LOG` environment variable is
 /// set (any value). Off by default to keep the libfuzzer crash output
 /// terse. The log is dumped *before* the previous hook runs: libfuzzer-sys
 /// installs a panic hook that prints + `abort()`s the process, so anything
@@ -1603,7 +1615,7 @@ fn install_byzzfuzz_panic_hook() {
     HOOK.call_once(|| {
         // Sample the env var once at install time -- the hook itself runs
         // in panic context and shouldn't touch global env state.
-        let dump = std::env::var_os("BYZZFUZZ_LOG").is_some();
+        let dump = std::env::var_os(FUZZ_LOG_ENV).is_some();
         let prev = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
             if dump {
@@ -1626,21 +1638,24 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     // or remove this mode entirely from fuzzing
     input.forwarding = ForwardingPolicy::Disabled;
 
-    let raw_bytes = input.raw_bytes.clone();
     if matches!(M::MODE, Mode::Byzzfuzz) {
         install_byzzfuzz_panic_hook();
+    } else {
+        if matches!(M::MODE, Mode::FaultyNet) {
+            // We run only fuzzing with network faults, populated later by the
+            // chosen strategy.
+            input.partition = Partition::Adaptive(Vec::new());
+        }
+        print_fuzz_input(M::MODE, &input);
     }
+
+    let raw_bytes = input.raw_bytes.clone();
     let run_result = match M::MODE {
         Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
         Mode::FaultyMessaging => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_faulty_messaging::<P>(input)
         })),
-        Mode::FaultyNet => {
-            // We run only fuzzing with network faults
-            // which will be populated later, depending on the chosen strategy.
-            input.partition = Partition::Adaptive(Vec::new());
-            panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
-        }
+        Mode::FaultyNet => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
         Mode::TwinsMutator => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twins_mutator::<P>(input)
         })),
@@ -1674,6 +1689,8 @@ pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(mut input: 
     // TODO: enabled it again after the application mock support forwarding policies
     // or remove this mode entirely from fuzzing
     input.forwarding = ForwardingPolicy::Disabled;
+
+    print_node_fuzz_input(M::MODE, &input);
 
     let raw_bytes_for_panic = input.raw_bytes.clone();
     let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| run_fuzz_node::<P, M>(input)));

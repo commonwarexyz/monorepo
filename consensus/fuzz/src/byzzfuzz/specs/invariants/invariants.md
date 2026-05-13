@@ -82,5 +82,5 @@ This is the central catalog of ByzzFuzz invariants. Before changing code or spec
 - `take` drains the buffer in insertion order.
 - `clear` empties the buffer before each ByzzFuzz run.
 - Successful ByzzFuzz runs drain the buffer so later runs start clean.
-- The panic hook prints the log only when `BYZZFUZZ_LOG` is present in the environment.
+- The panic hook prints the log only when `CONSENSUS_FUZZ_LOG` is present in the environment.
 - The panic hook runs before the previously installed hook.
