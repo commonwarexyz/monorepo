@@ -1,5 +1,29 @@
 name: Setup
 inputs:
+  toolchain:
+    description: "The Rust toolchain to install."
+    required: false
+    default: "stable"
+  components:
+    description: "Rust components to install."
+    required: false
+    default: ""
+  targets:
+    description: "Rust targets to install."
+    required: false
+    default: ""
+  additional-toolchain:
+    description: "An additional Rust toolchain to install."
+    required: false
+    default: ""
+  additional-components:
+    description: "Rust components to install for the additional toolchain."
+    required: false
+    default: ""
+  additional-targets:
+    description: "Rust targets to install for the additional toolchain."
+    required: false
+    default: ""
   additional-cache-key:
     description: "An additional cache key that is added alongside the automatic `job`-based cache key."
     required: false
@@ -17,6 +41,19 @@ runs:
         echo "CARGO_TARGET_DIR=/mnt/target" >> "$GITHUB_ENV"
         echo "CARGO_HOME=/mnt/.cargo" >> "$GITHUB_ENV"
         echo "/mnt/.cargo/bin" >> "$GITHUB_PATH"
+    - name: Install additional Rust toolchain
+      if: inputs.additional-toolchain != ''
+      uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+      with:
+        toolchain: ${{ inputs.additional-toolchain }}
+        components: ${{ inputs.additional-components }}
+        targets: ${{ inputs.additional-targets }}
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
     - name: Normalize cache key
       id: cache-key
       shell: bash

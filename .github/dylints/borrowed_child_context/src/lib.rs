@@ -1,9 +1,11 @@
 #![feature(rustc_private)]
 #![warn(unused_extern_crates)]
 
+extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_span;
 
+use rustc_errors::DiagDecorator;
 use rustc_hir::{BorrowKind, Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::{Span, Symbol};
@@ -47,13 +49,13 @@ impl<'tcx> LateLintPass<'tcx> for BorrowedChildContext {
         };
 
         if let Some(span) = first_child_call(borrowed) {
-            cx.span_lint(BORROWED_CHILD_CONTEXT, span, |diag| {
+            cx.emit_span_lint(BORROWED_CHILD_CONTEXT, span, DiagDecorator(|diag| {
                 diag.primary_message("borrowed temporary child context");
                 diag.span_help(
                     expr.span,
                     "pass a reference to an existing context, or bind the child context before borrowing it",
                 );
-            });
+            }));
         }
     }
 }
