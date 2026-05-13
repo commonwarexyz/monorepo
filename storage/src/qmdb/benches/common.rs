@@ -29,6 +29,9 @@ use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 pub type Digest = <Sha256 as Hasher>::Digest;
 
+/// Default items per blob for benchmarks. This is small enough that blob boundary crossings
+/// (which trigger fsync) can dominate benchmark time. Benchmarks that don't want to measure
+/// that cost should override via the `_with` config generators.
 pub const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 pub const CHUNK_SIZE: usize = 32;
 pub const THREADS: NonZeroUsize = NZUsize!(8);
@@ -84,30 +87,36 @@ fn merkle_cfg(
     suffix: &str,
     ctx: &(impl BufferPooler + ThreadPooler),
     page_cache: CacheRef,
+    items_per_blob: NonZeroU64,
 ) -> MerkleConfig<Rayon> {
     MerkleConfig {
         journal_partition: format!("journal-{suffix}"),
         metadata_partition: format!("metadata-{suffix}"),
-        items_per_blob: ITEMS_PER_BLOB,
+        items_per_blob,
         write_buffer: WRITE_BUFFER_SIZE,
         strategy: ctx.create_strategy(THREADS).unwrap(),
         page_cache,
     }
 }
 
-fn fix_log_cfg(suffix: &str, page_cache: CacheRef) -> FConfig {
+fn fix_log_cfg(suffix: &str, page_cache: CacheRef, items_per_blob: NonZeroU64) -> FConfig {
     FConfig {
         partition: format!("log-journal-{suffix}"),
-        items_per_blob: ITEMS_PER_BLOB,
+        items_per_blob,
         page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
     }
 }
 
-fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfig<C> {
+fn var_log_cfg<C>(
+    suffix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> VConfig<C> {
     VConfig {
         partition: format!("log-journal-{suffix}"),
-        items_per_section: ITEMS_PER_BLOB,
+        items_per_section,
         compression: None,
         codec_config,
         page_cache,
@@ -116,10 +125,17 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 }
 
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap, Rayon> {
+    any_fix_cfg_with(ctx, ITEMS_PER_BLOB)
+}
+
+pub fn any_fix_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> AnyFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
     }
 }
@@ -127,10 +143,17 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
 pub fn cur_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentFixedConfig<EightCap, Rayon> {
+    cur_fix_cfg_with(ctx, ITEMS_PER_BLOB)
+}
+
+pub fn cur_fix_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> CurrentFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone()),
-        journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
     }
@@ -139,10 +162,17 @@ pub fn cur_fix_cfg(
 pub fn any_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+    any_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
+}
+
+pub fn any_var_digest_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
     }
 }
@@ -150,10 +180,17 @@ pub fn any_var_digest_cfg(
 pub fn cur_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+    cur_var_digest_cfg_with(ctx, ITEMS_PER_BLOB)
+}
+
+pub fn cur_var_digest_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
@@ -165,10 +202,22 @@ type VarVecCfg = ((), (commonware_codec::RangeCfg<usize>, ()));
 pub fn any_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
+    any_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
+}
+
+pub fn any_var_vec_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        journal_config: var_log_cfg(
+            PARTITION_VAR,
+            page_cache,
+            ((), ((0..=10000).into(), ())),
+            items_per_blob,
+        ),
         translator: EightCap,
     }
 }
@@ -176,10 +225,22 @@ pub fn any_var_vec_cfg(
 pub fn cur_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
+    cur_var_vec_cfg_with(ctx, ITEMS_PER_BLOB)
+}
+
+pub fn cur_var_vec_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        journal_config: var_log_cfg(
+            PARTITION_VAR,
+            page_cache,
+            ((), ((0..=10000).into(), ())),
+            items_per_blob,
+        ),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
@@ -188,10 +249,22 @@ pub fn cur_var_vec_cfg(
 pub fn keyless_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
+    keyless_cfg_with(ctx, ITEMS_PER_BLOB)
+}
+
+pub fn keyless_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
-        merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
-        log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),
+        merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone(), items_per_blob),
+        log: var_log_cfg(
+            PARTITION_KEYLESS,
+            page_cache,
+            ((0..=10000).into(), ()),
+            items_per_blob,
+        ),
     }
 }
 

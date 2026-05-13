@@ -96,6 +96,7 @@ impl AlignedBuffer {
 }
 
 impl Drop for AlignedBuffer {
+    #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: ptr/layout came from the global allocator and are unchanged.
         unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
@@ -115,7 +116,7 @@ pub(crate) trait Owner: Send + Sync + 'static {
 pub(crate) struct UntrackedOwner;
 
 impl Owner for UntrackedOwner {
-    #[inline]
+    #[inline(always)]
     fn release(self, buffer: AlignedBuffer) {
         drop(buffer);
     }
@@ -132,7 +133,7 @@ pub(crate) struct TrackedOwner {
 }
 
 impl Owner for TrackedOwner {
-    #[inline]
+    #[inline(always)]
     fn release(self, buffer: AlignedBuffer) {
         BufferPoolThreadCache::push(self.class, self.slot, buffer);
     }
@@ -172,6 +173,7 @@ impl<O: Owner> BufInner<O> {
 }
 
 impl<O: Owner> Drop for BufInner<O> {
+    #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: Drop is called at most once for this value.
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
@@ -541,6 +543,7 @@ impl<O: Owner> AsMut<[u8]> for BufMut<O> {
 }
 
 impl<O: Owner> Drop for BufMut<O> {
+    #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: Drop is only called once. freeze() wraps self in ManuallyDrop
         // to prevent this Drop impl from running after ownership is transferred.

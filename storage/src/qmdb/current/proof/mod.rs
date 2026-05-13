@@ -4,64 +4,102 @@
 //! - [OpsRootWitness]: Authenticates an ops root against a canonical `current` root.
 //! - [RangeProof]: Proves a range of operations exist in the database.
 //! - [OperationProof]: Proves a specific operation is active in the database.
+//!
+//! # Canonical root structure
+//!
+//! ```text
+//! canonical_root = hash(
+//!     ops_root
+//!     || grafted_root
+//!     [|| pending_chunk_digest]
+//!     [|| next_bit_be || partial_chunk_digest]
+//! )
+//! ```
+//!
+//! - `ops_root` is the root of the operations tree (MMR or MMB).
+//! - `grafted_root` commits to the activity bitmap's **graftable** chunks (chunks whose height-G
+//!   ancestor has been born in the ops tree).
+//! - `pending_chunk_digest` is `H(pending_bytes)` if a chunk is bit-complete in the bitmap but its
+//!   h=G ancestor has not yet been born; absent otherwise.
+//! - `(next_bit_be, partial_chunk_digest)` covers the trailing partial chunk when the bitmap length
+//!   is not chunk-aligned; both elements are absent when it is.
+//!
+//! Pending and partial slots are independent: at gh >= 3 they can coexist. When both are present,
+//! pending hashes in before partial.
 
-mod geometry;
-
-use self::geometry::RangeProofGeometry;
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{
         self,
         hasher::{Hasher, Standard as StandardHasher},
         storage::Storage,
-        Family, Graftable, Location, Position, Proof,
+        Family, Graftable, Location, PendingChunk, Position, Proof,
     },
     qmdb::{
         self,
-        current::{db::combine_roots, grafting},
+        current::{
+            db::{combine_roots, partial_chunk, pending_chunk},
+            grafting,
+        },
         Error,
     },
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    varint::UInt, Codec, EncodeSize, Read, ReadExt as _, ReadRangeExt as _, Write,
-};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
-use core::ops::Range;
+use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, num::NonZeroU64};
 use tracing::debug;
 
 /// Witness that a particular `ops_root` is committed by a `current` canonical root.
 ///
-/// `canonical_root = hash(ops_root || grafted_root [|| next_bit || partial_chunk_digest])`
+/// See the [Canonical root structure](self#canonical-root-structure) section in the module
+/// documentation for the full layout.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct OpsRootWitness<D: Digest> {
+pub struct OpsRootWitness<F: Graftable, D: Digest> {
     /// The grafted-tree root committed by the canonical root.
     pub grafted_root: D,
+
+    /// The pending-chunk contribution, if any.
+    pub pending_chunk_digest: F::PendingChunk<D>,
 
     /// The trailing partial chunk contribution, if the bitmap length is not chunk-aligned:
     /// `(next_bit, partial_chunk_digest)`.
     pub partial_chunk: Option<(u64, D)>,
 }
 
-impl<D: Digest> OpsRootWitness<D> {
-    /// Return true if this witness proves that `canonical_root` commits to `ops_root`.
+impl<F: Graftable, D: Digest> OpsRootWitness<F, D> {
+    /// Compute the canonical `current` root that commits to `ops_root` through this witness.
+    ///
+    /// See the [Canonical root structure](self#canonical-root-structure) section in the module
+    /// documentation for the full layout.
+    pub fn root<H: CHasher<Digest = D>>(&self, hasher: &StandardHasher<H>, ops_root: &D) -> D {
+        let partial = self.partial_chunk.as_ref().map(|(nb, d)| (*nb, d));
+        combine_roots(
+            hasher,
+            ops_root,
+            &self.grafted_root,
+            self.pending_chunk_digest.as_ref(),
+            partial,
+        )
+    }
+
+    /// Return true if this witness proves that `root` commits to `ops_root`.
     pub fn verify<H: CHasher<Digest = D>>(
         &self,
         hasher: &StandardHasher<H>,
         ops_root: &D,
-        canonical_root: &D,
+        root: &D,
     ) -> bool {
-        let partial = self.partial_chunk.as_ref().map(|(nb, d)| (*nb, d));
-        combine_roots(hasher, ops_root, &self.grafted_root, partial) == *canonical_root
+        self.root(hasher, ops_root) == *root
     }
 }
 
-impl<D: Digest> Write for OpsRootWitness<D> {
+impl<F: Graftable, D: Digest> Write for OpsRootWitness<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.grafted_root.write(buf);
+        self.pending_chunk_digest.write(buf);
         self.partial_chunk.is_some().write(buf);
         if let Some((next_bit, digest)) = &self.partial_chunk {
             UInt(*next_bit).write(buf);
@@ -70,9 +108,10 @@ impl<D: Digest> Write for OpsRootWitness<D> {
     }
 }
 
-impl<D: Digest> EncodeSize for OpsRootWitness<D> {
+impl<F: Graftable, D: Digest> EncodeSize for OpsRootWitness<F, D> {
     fn encode_size(&self) -> usize {
         self.grafted_root.encode_size()
+            + self.pending_chunk_digest.encode_size()
             + self
                 .partial_chunk
                 .as_ref()
@@ -80,11 +119,12 @@ impl<D: Digest> EncodeSize for OpsRootWitness<D> {
     }
 }
 
-impl<D: Digest> Read for OpsRootWitness<D> {
+impl<F: Graftable, D: Digest> Read for OpsRootWitness<F, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let grafted_root = D::read(buf)?;
+        let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
         let partial_chunk = if bool::read(buf)? {
             let next_bit = UInt::<u64>::read(buf)?.into();
             let digest = D::read(buf)?;
@@ -94,280 +134,40 @@ impl<D: Digest> Read for OpsRootWitness<D> {
         };
         Ok(Self {
             grafted_root,
+            pending_chunk_digest,
             partial_chunk,
         })
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for OpsRootWitness<D>
+impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for OpsRootWitness<F, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             grafted_root: u.arbitrary()?,
+            pending_chunk_digest: u.arbitrary()?,
             partial_chunk: u.arbitrary()?,
         })
     }
 }
 
-// Provides complete bitmap chunks by index for grafted reconstruction. Pruned chunks are returned
-// as zero chunks because their bits are already folded into the inactive prefix.
-struct BitmapGrafting<'a, B, const N: usize> {
-    status: &'a B,
-    grafting_height: u32,
-    complete_chunks: u64,
-    pruned_chunks: u64,
-}
-
-impl<'a, B: BitmapReadable<N>, const N: usize> BitmapGrafting<'a, B, N> {
-    fn new(status: &'a B) -> Self {
-        Self {
-            status,
-            grafting_height: grafting::height::<N>(),
-            complete_chunks: status.complete_chunks() as u64,
-            pruned_chunks: status.pruned_chunks() as u64,
-        }
-    }
-
-    fn chunk(&self, idx: u64) -> Option<[u8; N]> {
-        if idx >= self.complete_chunks {
-            None
-        } else if idx < self.pruned_chunks {
-            Some([0u8; N])
-        } else {
-            Some(self.status.get_chunk(idx as usize))
-        }
-    }
-}
-
-// Reconstructs the canonical grafted root from the ops-tree range proof, operation elements, and
-// the prefix/suffix witnesses described by the five-segment geometry.
-fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
-    verifier: &grafting::Verifier<'_, F, H>,
-    proof: &RangeProof<F, H::Digest>,
-    geometry: &RangeProofGeometry<F>,
-    collected: &BTreeMap<Position<F>, H::Digest>,
-    get_chunk: impl Fn(u64) -> Option<C>,
-) -> Option<H::Digest> {
-    let prefix_boundary = geometry.prefix_boundary();
-    let range_peaks = geometry.range_peaks();
-    let suffix_boundary = geometry.suffix_boundary();
-    let (prefix_counts, prefix_bitmap_witnesses, prefix_boundary_digests) =
-        geometry.split_prefix_witnesses(&proof.prefix_witnesses)?;
-    let (suffix_boundary_digests, suffix_bitmap_witnesses, suffix_counts) =
-        geometry.split_suffix_witnesses(&proof.suffix_witnesses)?;
-
-    let mut peak_entries = Vec::with_capacity(
-        proof.prefix_witnesses.len() + range_peaks.len() + proof.suffix_witnesses.len(),
-    );
-    peak_entries.extend(prefix_bitmap_witnesses.iter().copied().zip(prefix_counts));
-    let mut range_digests = Vec::with_capacity(range_peaks.len());
-    for pos in range_peaks.positions() {
-        range_digests.push(*collected.get(&pos)?);
-    }
-
-    // `root_with_folded_peaks` needs one ordered peak entry per reconstructed grafted peak. The
-    // pure prefix/suffix witnesses already contain grafted digests; the range-adjacent ops-tree
-    // digests must be transformed with their bitmap chunks first.
-    let middle_iter = prefix_boundary
-        .heights_with_digests(prefix_boundary_digests)
-        .chain(range_peaks.heights_with_digests(&range_digests))
-        .chain(suffix_boundary.heights_with_digests(suffix_boundary_digests));
-    peak_entries.extend(grafting::transform_peak_digests::<F, _, _, _>(
-        verifier,
-        middle_iter,
-        prefix_boundary.start_leaf(),
-        geometry.grafting_height(),
-        get_chunk,
-    ));
-    peak_entries.extend(suffix_bitmap_witnesses.iter().copied().zip(suffix_counts));
-
-    let inactive_peaks = proof.proof.inactive_peaks;
-    let inactive_to_fold = grafting::transformed_inactive_peaks::<F, _>(
-        &peak_entries,
-        inactive_peaks,
-        geometry.total_peaks(),
-    )
-    .ok()?;
-    let digests = peak_entries.iter().map(|(digest, _count)| digest);
-    verifier.root_with_folded_peaks(geometry.leaves(), inactive_to_fold, inactive_peaks, digests)
-}
-
-struct GraftedProofParts<F: Family, D: Digest> {
-    proof: Proof<F, D>,
-    prefix_witnesses: Vec<D>,
-    suffix_witnesses: Vec<D>,
-}
-
-fn peak_digests<F: Family, D: Digest>(
-    peaks: impl IntoIterator<Item = Position<F>>,
-    fetched: &BTreeMap<Position<F>, D>,
-) -> Result<Vec<D>, Error<F>> {
-    peaks
-        .into_iter()
-        .map(|pos| {
-            fetched
-                .get(&pos)
-                .copied()
-                .ok_or_else(|| Error::from(merkle::Error::<F>::MissingNode(pos)))
-        })
-        .collect()
-}
-
-fn prefix_witness<
-    F: Graftable,
-    D: Digest,
-    H: CHasher<Digest = D>,
-    B: BitmapReadable<N>,
-    const N: usize,
->(
-    hasher: &StandardHasher<H>,
-    bitmap: &BitmapGrafting<'_, B, N>,
-    geometry: &RangeProofGeometry<F>,
-    ops_peak_digests: &[D],
-) -> Vec<D> {
-    let pure_prefix = geometry.pure_prefix();
-    let prefix_boundary = geometry.prefix_boundary();
-    let (pure_prefix_digests, boundary_digests) = ops_peak_digests.split_at(pure_prefix.len());
-    debug_assert_eq!(boundary_digests.len(), prefix_boundary.len());
-    let mut witness = grafting::transform_peak_digests::<F, _, _, _>(
-        hasher,
-        pure_prefix.heights_with_digests(pure_prefix_digests),
-        pure_prefix.start_leaf(),
-        bitmap.grafting_height,
-        |idx| bitmap.chunk(idx),
-    )
-    .into_iter()
-    .map(|(digest, _count)| digest)
-    .collect::<Vec<_>>();
-    witness.extend_from_slice(boundary_digests);
-    witness
-}
-
-fn suffix_witness<
-    F: Graftable,
-    D: Digest,
-    H: CHasher<Digest = D>,
-    B: BitmapReadable<N>,
-    const N: usize,
->(
-    hasher: &StandardHasher<H>,
-    bitmap: &BitmapGrafting<'_, B, N>,
-    geometry: &RangeProofGeometry<F>,
-    ops_peak_digests: &[D],
-) -> Vec<D> {
-    let suffix_boundary = geometry.suffix_boundary();
-    let pure_suffix = geometry.pure_suffix();
-    let (boundary_digests, pure_suffix_digests) = ops_peak_digests.split_at(suffix_boundary.len());
-    debug_assert_eq!(pure_suffix_digests.len(), pure_suffix.len());
-    let mut witness = boundary_digests.to_vec();
-    witness.extend(
-        grafting::transform_peak_digests::<F, _, _, _>(
-            hasher,
-            pure_suffix.heights_with_digests(pure_suffix_digests),
-            pure_suffix.start_leaf(),
-            bitmap.grafting_height,
-            |idx| bitmap.chunk(idx),
-        )
-        .into_iter()
-        .map(|(digest, _count)| digest),
-    );
-    witness
-}
-
-async fn build_grafted_range_proof<
-    F: Graftable,
-    D: Digest,
-    H: CHasher<Digest = D>,
-    S: Storage<F, Digest = D>,
-    B: BitmapReadable<N>,
-    const N: usize,
->(
-    hasher: &StandardHasher<H>,
-    bitmap: &BitmapGrafting<'_, B, N>,
-    storage: &S,
-    geometry: &RangeProofGeometry<F>,
-) -> Result<GraftedProofParts<F, D>, Error<F>> {
-    let proof_positions = merkle::range_collection_nodes(
-        geometry.leaves(),
-        geometry.inactive_peaks(),
-        geometry.range(),
-    )?;
-    let mut fetch_positions = proof_positions.clone();
-    fetch_positions.extend(geometry.prefix_positions());
-    fetch_positions.extend(geometry.after_positions());
-    fetch_positions.sort_unstable();
-    debug_assert!(
-        fetch_positions
-            .windows(2)
-            .all(|window| window[0] != window[1]),
-        "grafted proof fetch positions should be unique"
-    );
-
-    let node_futures = fetch_positions
-        .into_iter()
-        .map(|pos| async move { storage.get_node(pos).await.map(|digest| (pos, digest)) })
-        .collect::<Vec<_>>();
-    let fetched: BTreeMap<Position<F>, D> = try_join_all(node_futures)
-        .await?
-        .into_iter()
-        .map(|(pos, digest)| {
-            digest
-                .ok_or_else(|| Error::from(merkle::Error::<F>::MissingNode(pos)))
-                .map(|d| (pos, d))
-        })
-        .collect::<Result<_, Error<F>>>()?;
-
-    let proof = merkle::build_range_collection_proof::<F, D, Error<F>>(
-        geometry.leaves(),
-        geometry.inactive_peaks(),
-        &proof_positions,
-        |pos| fetched.get(&pos).copied(),
-        |pos| Error::from(merkle::Error::<F>::MissingNode(pos)),
-    )?;
-
-    let prefix_ops_peak_digests = peak_digests(geometry.prefix_positions(), &fetched)?;
-    let prefix_witnesses =
-        prefix_witness::<F, D, H, B, N>(hasher, bitmap, geometry, &prefix_ops_peak_digests);
-
-    let suffix_ops_peak_digests = peak_digests(geometry.after_positions(), &fetched)?;
-    let suffix_witnesses =
-        suffix_witness::<F, D, H, B, N>(hasher, bitmap, geometry, &suffix_ops_peak_digests);
-
-    Ok(GraftedProofParts {
-        proof,
-        prefix_witnesses,
-        suffix_witnesses,
-    })
-}
-
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct RangeProof<F: Family, D: Digest> {
+pub struct RangeProof<F: Graftable, D: Digest> {
     /// The Merkle digest material required to verify the proof.
     pub proof: Proof<F, D>,
 
-    /// Extra prefix witnesses needed when grafted reconstruction must inspect peaks that ops-tree
-    /// proof collection could otherwise hide behind a prefix accumulator.
-    ///
-    /// This vector follows the geometry's prefix segment order: bitmap witness digests for
-    /// `pure_prefix`, then ops-tree peak digests for `prefix_boundary`.
-    pub prefix_witnesses: Vec<D>,
+    /// The pending-chunk contribution, if any.
+    pub pending_chunk_digest: F::PendingChunk<D>,
 
-    /// Extra suffix witnesses needed when grafted reconstruction must inspect peaks that ops-tree
-    /// proof collection could otherwise hide behind a suffix accumulator.
-    ///
-    /// This vector follows the geometry's suffix segment order: ops-tree peak digests for
-    /// `suffix_boundary`, then bitmap witness digests for `pure_suffix`.
-    pub suffix_witnesses: Vec<D>,
-
-    /// The partial chunk digest from the status bitmap at the time of proof generation, if any.
+    /// Digest of the bitmap's trailing partial chunk, if any.
     pub partial_chunk_digest: Option<D>,
 
-    /// The ops-tree root at the time of proof generation.
-    /// Needed by the verifier to reconstruct the canonical root.
+    /// The ops-tree root digest.
     pub ops_root: D,
 }
 
@@ -397,56 +197,37 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         range: Range<Location<F>>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
-        let bitmap = BitmapGrafting::new(status);
-        let leaves = Location::try_from(storage.size().await)?;
+        // Snapshot ops_leaves once and thread through every derivation that needs it so the
+        // pruned <= graftable <= complete invariant holds across all derivations.
+        let ops_leaves = Location::try_from(storage.size().await)?;
+        let grafting_height = grafting::height::<N>();
         let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
-            leaves,
+            ops_leaves,
             inactivity_floor,
-            bitmap.grafting_height,
+            grafting_height,
         )?;
-        let geometry = RangeProofGeometry::new(
-            leaves,
+
+        let proof = merkle::verification::historical_range_proof(
+            hasher,
+            storage,
+            ops_leaves,
             range,
             inactive_peaks,
-            bitmap.grafting_height,
-            bitmap.complete_chunks,
-        )?;
+        )
+        .await?;
 
-        let requires_grafted_reconstruction = geometry.requires_grafted_reconstruction()?;
-        let GraftedProofParts {
-            proof,
-            prefix_witnesses,
-            suffix_witnesses,
-        } = if requires_grafted_reconstruction {
-            build_grafted_range_proof(hasher, &bitmap, storage, &geometry).await?
-        } else {
-            GraftedProofParts {
-                proof: merkle::verification::historical_range_proof(
-                    hasher,
-                    storage,
-                    geometry.leaves(),
-                    geometry.range(),
-                    geometry.inactive_peaks(),
-                )
-                .await?,
-                prefix_witnesses: Vec::new(),
-                suffix_witnesses: Vec::new(),
-            }
-        };
+        let partial_chunk_digest =
+            partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(&chunk));
 
-        let (last_chunk, next_bit) = status.last_chunk();
-        let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, meaning it is not yet committed by the grafted bitmap root
-            // and needs to be included in the proof.
-            Some(hasher.digest(&last_chunk))
-        } else {
-            None
-        };
+        let pending_chunk_digest: F::PendingChunk<D> =
+            pending_chunk::<_, _, N>(status, ops_leaves, grafting_height)?
+                .map(|chunk| hasher.digest(&chunk))
+                .try_into()
+                .expect("pending_chunk must be consistent with family");
 
         Ok(Self {
             proof,
-            prefix_witnesses,
-            suffix_witnesses,
+            pending_chunk_digest,
             partial_chunk_digest,
             ops_root,
         })
@@ -516,24 +297,28 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         Ok((proof, ops, chunks))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the db with the provided root, and having the activity status described by `chunks`.
-    pub fn verify<H: CHasher<Digest = D>, O: Codec, const N: usize>(
+    /// Reconstruct the canonical current root, optionally collecting the positioned digests
+    /// required to compute the peaks covering the proven range.
+    fn reconstruct_root<H, O, const N: usize>(
         &self,
         root_hasher: &StandardHasher<H>,
         start_loc: Location<F>,
         ops: &[O],
         chunks: &[[u8; N]],
-        root: &H::Digest,
-    ) -> bool {
+        collected: Option<&mut Vec<(Position<F>, D)>>,
+    ) -> Result<D, merkle::Error<F>>
+    where
+        H: CHasher<Digest = D>,
+        O: Codec,
+    {
         if ops.is_empty() || chunks.is_empty() {
             debug!("verification failed, empty input");
-            return false;
+            return Err(merkle::Error::InvalidProof);
         }
         // Compute the (non-inclusive) end location of the range.
         let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
             debug!("verification failed, end_loc overflow");
-            return false;
+            return Err(merkle::Error::InvalidProof);
         };
 
         let leaves = self.proof.leaves;
@@ -542,7 +327,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 loc = ?end_loc,
                 ?leaves, "verification failed, invalid range"
             );
-            return false;
+            return Err(merkle::Error::InvalidProof);
         }
 
         // Validate the number of input chunks.
@@ -553,7 +338,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         if (end_chunk - start_chunk + 1) != chunks.len() as u64 {
             debug!("verification failed, chunk metadata length mismatch");
-            return false;
+            return Err(merkle::Error::InvalidProof);
         }
 
         let next_bit = *leaves % chunk_bits;
@@ -562,18 +347,42 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let grafting_height = grafting::height::<N>();
+
+        let graftable_chunks =
+            grafting::graftable_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
+        let pending_chunks = complete_chunks - graftable_chunks;
+        if pending_chunks > 1 {
+            debug!(
+                ?complete_chunks,
+                ?graftable_chunks,
+                "verification failed, multiple pending chunks"
+            );
+            return Err(merkle::Error::InvalidProof);
+        }
+        let has_pending_chunk = pending_chunks == 1;
+
         let grafting_verifier = grafting::Verifier::<F, H>::new(
             grafting_height,
             start_chunk,
             chunk_vec,
+            graftable_chunks,
             qmdb::ROOT_BAGGING,
         );
+
+        if self.pending_chunk_digest.as_ref().is_some() != has_pending_chunk {
+            debug!(
+                pending_in_proof = self.pending_chunk_digest.as_ref().is_some(),
+                expected = has_pending_chunk,
+                "pending_chunk_digest presence does not match bitmap state"
+            );
+            return Err(merkle::Error::InvalidProof);
+        }
 
         // For partial chunks, validate the last chunk digest from the proof.
         if has_partial_chunk {
             let Some(last_chunk_digest) = self.partial_chunk_digest else {
                 debug!("proof has no partial chunk digest");
-                return false;
+                return Err(merkle::Error::InvalidProof);
             };
 
             // If the proof covers an operation in the partial chunk, verify that the
@@ -582,112 +391,127 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                 let last_chunk = chunks.last().expect("chunks non-empty");
                 if last_chunk_digest != grafting_verifier.digest(last_chunk) {
                     debug!("last chunk digest does not match expected value");
-                    return false;
+                    return Err(merkle::Error::InvalidProof);
                 }
             }
         } else if self.partial_chunk_digest.is_some() {
             debug!("proof has unexpected partial chunk digest");
-            return false;
+            return Err(merkle::Error::InvalidProof);
         }
 
-        let geometry = match RangeProofGeometry::new(
-            leaves,
-            start_loc..end_loc,
-            self.proof.inactive_peaks,
-            grafting_height,
-            complete_chunks,
-        ) {
-            Ok(geometry) => geometry,
-            Err(error) => {
-                debug!(?error, "verification failed, invalid proof geometry");
-                return false;
-            }
-        };
-        let requires_grafted_reconstruction = match geometry.requires_grafted_reconstruction() {
-            Ok(requires_grafted_reconstruction) => requires_grafted_reconstruction,
-            Err(error) => {
-                debug!(?error, "verification failed, invalid size");
-                return false;
-            }
-        };
-        let merkle_root = if !requires_grafted_reconstruction {
-            if !self.prefix_witnesses.is_empty() || !self.suffix_witnesses.is_empty() {
-                debug!("verification failed, unexpected prefix/suffix witnesses");
-                return false;
-            }
-            match self
-                .proof
-                .reconstruct_root(&grafting_verifier, &elements, start_loc)
-            {
-                Ok(root) => root,
-                Err(error) => {
-                    debug!(?error, "invalid proof input");
-                    return false;
+        // For a pending chunk, validate the supplied chunk bytes against the digest in the proof
+        // when the verifier's range includes the pending chunk's index. The pending chunk is at
+        // index `graftable_chunks` (== `complete_chunks - 1` when present).
+        if let Some(pending_digest) = self.pending_chunk_digest.as_ref() {
+            let pending_idx = graftable_chunks;
+            if pending_idx >= start_chunk && pending_idx <= end_chunk {
+                let local = (pending_idx - start_chunk) as usize;
+                // The earlier `chunks.len() == end_chunk - start_chunk + 1` check makes this
+                // index in-bounds for well-formed inputs; treat any mismatch as a malformed
+                // proof (rather than panicking) since `verify` runs against attacker-supplied data.
+                let Some(pending_chunk_bytes) = chunks.get(local) else {
+                    debug!(
+                        ?pending_idx,
+                        chunks_len = chunks.len(),
+                        "pending chunk index out of range in supplied chunks"
+                    );
+                    return Err(merkle::Error::InvalidProof);
+                };
+                if *pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
+                    debug!("pending chunk digest does not match expected value");
+                    return Err(merkle::Error::InvalidProof);
                 }
             }
-        } else {
-            let mut collected = Vec::new();
-            if let Err(error) = self.proof.reconstruct_range_collecting(
-                &grafting_verifier,
-                &elements,
-                start_loc,
-                &mut collected,
-            ) {
-                debug!(?error, "invalid proof input");
-                return false;
-            };
+        }
 
-            let collected: BTreeMap<Position<F>, D> = collected.into_iter().collect();
-            let get_chunk = |chunk_idx: u64| -> Option<&[u8]> {
-                if chunk_idx >= complete_chunks {
-                    return None;
-                }
-                chunk_idx
-                    .checked_sub(start_chunk)
-                    .filter(|&idx| idx < chunks.len() as u64)
-                    .map(|idx| chunks[idx as usize].as_ref())
-            };
-            let Some(root) = reconstruct_grafted_root(
-                &grafting_verifier,
-                self,
-                &geometry,
-                &collected,
-                get_chunk,
-            ) else {
-                debug!("verification failed, could not reconstruct grafted root");
-                return false;
-            };
-            root
+        let merkle_root = match self.proof.reconstruct_root_inner(
+            &grafting_verifier,
+            &elements,
+            start_loc,
+            collected,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                debug!(?error, "invalid proof input");
+                return Err(merkle::Error::InvalidProof);
+            }
         };
 
         let partial =
             has_partial_chunk.then(|| (next_bit, self.partial_chunk_digest.as_ref().unwrap()));
-        combine_roots(root_hasher, &self.ops_root, &merkle_root, partial) == *root
+        Ok(combine_roots(
+            root_hasher,
+            &self.ops_root,
+            &merkle_root,
+            self.pending_chunk_digest.as_ref(),
+            partial,
+        ))
+    }
+
+    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
+    /// the db with the provided root, and having the activity status described by `chunks`.
+    pub fn verify<H: CHasher<Digest = D>, O: Codec, const N: usize>(
+        &self,
+        root_hasher: &StandardHasher<H>,
+        start_loc: Location<F>,
+        ops: &[O],
+        chunks: &[[u8; N]],
+        root: &H::Digest,
+    ) -> bool {
+        matches!(
+            self.reconstruct_root(root_hasher, start_loc, ops, chunks, None),
+            Ok(reconstructed_root) if reconstructed_root == *root
+        )
     }
 }
 
-impl<F: Family, D: Digest> Write for RangeProof<F, D> {
+/// Verify that a [RangeProof] is valid for a range of operations and return the positioned digests
+/// required to compute the peaks covering the proven range.
+pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
+    hasher: &StandardHasher<H>,
+    proof: &RangeProof<F, D>,
+    start_loc: Location<F>,
+    operations: &[Op],
+    chunks: &[[u8; N]],
+    target_root: &D,
+) -> Result<Vec<(Position<F>, D)>, merkle::Error<F>>
+where
+    F: Graftable,
+    Op: Codec,
+    H: CHasher<Digest = D>,
+    D: Digest,
+{
+    let mut collected = Vec::new();
+    let reconstructed_root =
+        proof.reconstruct_root(hasher, start_loc, operations, chunks, Some(&mut collected))?;
+    if reconstructed_root != *target_root {
+        debug!("verification failed, root mismatch");
+        return Err(merkle::Error::RootMismatch);
+    }
+
+    Ok(collected)
+}
+
+impl<F: Graftable, D: Digest> Write for RangeProof<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
-        self.prefix_witnesses.write(buf);
-        self.suffix_witnesses.write(buf);
+        self.pending_chunk_digest.write(buf);
         self.partial_chunk_digest.write(buf);
         self.ops_root.write(buf);
     }
 }
 
-impl<F: Family, D: Digest> EncodeSize for RangeProof<F, D> {
+impl<F: Graftable, D: Digest> EncodeSize for RangeProof<F, D> {
     fn encode_size(&self) -> usize {
         self.proof.encode_size()
-            + self.prefix_witnesses.encode_size()
-            + self.suffix_witnesses.encode_size()
+            + self.pending_chunk_digest.encode_size()
             + self.partial_chunk_digest.encode_size()
             + self.ops_root.encode_size()
     }
 }
 
-impl<F: Family, D: Digest> Read for RangeProof<F, D> {
-    /// The maximum number of digests allowed across all digest vectors in the range proof.
+impl<F: Graftable, D: Digest> Read for RangeProof<F, D> {
+    /// The maximum number of digests in the embedded Merkle proof.
     type Cfg = usize;
 
     fn read_cfg(
@@ -695,16 +519,12 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
-        let remaining = max_digests - proof.digests.len();
-        let prefix_witnesses = Vec::<D>::read_range(buf, ..=remaining)?;
-        let remaining = remaining - prefix_witnesses.len();
-        let suffix_witnesses = Vec::<D>::read_range(buf, ..=remaining)?;
+        let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
         let partial_chunk_digest = Option::<D>::read(buf)?;
         let ops_root = D::read(buf)?;
         Ok(Self {
             proof,
-            prefix_witnesses,
-            suffix_witnesses,
+            pending_chunk_digest,
             partial_chunk_digest,
             ops_root,
         })
@@ -712,15 +532,15 @@ impl<F: Family, D: Digest> Read for RangeProof<F, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for RangeProof<F, D>
+impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for RangeProof<F, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             proof: u.arbitrary()?,
-            prefix_witnesses: u.arbitrary()?,
-            suffix_witnesses: u.arbitrary()?,
+            pending_chunk_digest: u.arbitrary()?,
             partial_chunk_digest: u.arbitrary()?,
             ops_root: u.arbitrary()?,
         })
@@ -729,7 +549,7 @@ where
 
 /// A proof that a specific operation is currently active in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct OperationProof<F: Family, D: Digest, const N: usize> {
+pub struct OperationProof<F: Graftable, D: Digest, const N: usize> {
     /// The location of the operation in the db.
     pub loc: Location<F>,
 
@@ -801,7 +621,7 @@ impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     }
 }
 
-impl<F: Family, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
+impl<F: Graftable, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.loc.write(buf);
         self.chunk.write(buf);
@@ -809,14 +629,14 @@ impl<F: Family, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
     }
 }
 
-impl<F: Family, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N> {
+impl<F: Graftable, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N> {
     fn encode_size(&self) -> usize {
         self.loc.encode_size() + self.chunk.encode_size() + self.range_proof.encode_size()
     }
 }
 
-impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
-    /// The total digest cap forwarded to the embedded range proof.
+impl<F: Graftable, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
+    /// The maximum number of digests forwarded to the embedded range proof.
     type Cfg = usize;
 
     fn read_cfg(
@@ -835,9 +655,10 @@ impl<F: Family, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: Family, D: Digest, const N: usize> arbitrary::Arbitrary<'_> for OperationProof<F, D, N>
+impl<F: Graftable, D: Digest, const N: usize> arbitrary::Arbitrary<'_> for OperationProof<F, D, N>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -853,36 +674,59 @@ mod tests {
     use super::*;
     use crate::{
         merkle::{conformance::build_test_mem, mem::Mem},
-        mmb,
+        mmb, mmr,
         qmdb::current::{db, grafting},
     };
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{sha256, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner};
     use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+    use core::ops::Range;
 
     #[test]
     fn test_ops_root_witness_codec_roundtrip() {
+        type F = mmb::Family;
         for partial_chunk in [
             None,
             Some((0u64, Sha256::hash(b"partial-zero"))),
             Some((123u64, Sha256::hash(b"partial-nonzero"))),
         ] {
-            let witness = OpsRootWitness {
+            let witness: OpsRootWitness<F, _> = OpsRootWitness {
                 grafted_root: Sha256::hash(b"grafted"),
+                pending_chunk_digest: None,
                 partial_chunk,
             };
             let encoded = witness.encode();
             assert_eq!(encoded.len(), witness.encode_size());
-            let decoded = OpsRootWitness::<sha256::Digest>::decode(encoded).unwrap();
+            let decoded = OpsRootWitness::<F, sha256::Digest>::decode(encoded).unwrap();
             assert_eq!(decoded, witness);
         }
     }
 
-    fn range_proof_digest_count<F: Family, D: Digest>(proof: &RangeProof<F, D>) -> usize {
-        proof.proof.digests.len() + proof.prefix_witnesses.len() + proof.suffix_witnesses.len()
+    #[test]
+    fn test_ops_root_witness_root_matches_verify() {
+        type F = mmb::Family;
+
+        let hasher = qmdb::hasher::<Sha256>();
+        let ops_root = Sha256::hash(b"ops root");
+        let witness: OpsRootWitness<F, _> = OpsRootWitness {
+            grafted_root: Sha256::hash(b"grafted root"),
+            pending_chunk_digest: Some(Sha256::hash(b"pending chunk")),
+            partial_chunk: Some((13, Sha256::hash(b"partial chunk"))),
+        };
+
+        let root = witness.root(&hasher, &ops_root);
+
+        assert!(witness.verify(&hasher, &ops_root, &root));
+        assert_ne!(root, ops_root);
+
+        let wrong_ops_root = Sha256::hash(b"wrong ops root");
+        assert!(!witness.verify(&hasher, &wrong_ops_root, &root));
+    }
+
+    fn range_proof_digest_count<F: Graftable, D: Digest>(proof: &RangeProof<F, D>) -> usize {
+        proof.proof.digests.len()
     }
 
     #[test]
@@ -905,24 +749,21 @@ mod tests {
             // Minimal: no optional fields or prefix/suffix witnesses.
             RangeProof {
                 proof: proof.clone(),
-                prefix_witnesses: vec![],
-                suffix_witnesses: vec![],
+                pending_chunk_digest: None,
                 partial_chunk_digest: None,
                 ops_root,
             },
-            // All optional fields populated, with prefix/suffix witnesses on both sides.
+            // All optional fields populated.
             RangeProof {
                 proof,
-                prefix_witnesses: vec![Sha256::hash(b"u0"), Sha256::hash(b"u1")],
-                suffix_witnesses: vec![Sha256::hash(b"s0"), Sha256::hash(b"s1")],
+                pending_chunk_digest: Some(Sha256::hash(b"pending")),
                 partial_chunk_digest: Some(Sha256::hash(b"partial")),
                 ops_root,
             },
             // Default proof with only partial chunk digest.
             RangeProof {
                 proof: Proof::<F, sha256::Digest>::default(),
-                prefix_witnesses: vec![],
-                suffix_witnesses: vec![],
+                pending_chunk_digest: None,
                 partial_chunk_digest: Some(Sha256::hash(b"only-partial")),
                 ops_root,
             },
@@ -938,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn test_range_proof_codec_enforces_total_digest_budget() {
+    fn test_range_proof_codec_enforces_merkle_digest_budget() {
         type F = mmb::Family;
 
         let proof = RangeProof {
@@ -947,8 +788,7 @@ mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"d0")],
             },
-            prefix_witnesses: vec![Sha256::hash(b"u0")],
-            suffix_witnesses: vec![Sha256::hash(b"s0")],
+            pending_chunk_digest: None,
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops-root"),
         };
@@ -965,6 +805,39 @@ mod tests {
     }
 
     #[test]
+    fn test_range_proof_decode_rejects_pending_for_mmr() {
+        const MAX_DIGESTS: usize = 64;
+
+        let proof = RangeProof {
+            proof: Proof::<mmb::Family, sha256::Digest> {
+                leaves: mmb::Location::new(42),
+                inactive_peaks: 0,
+                digests: vec![Sha256::hash(b"d0")],
+            },
+            pending_chunk_digest: Some(Sha256::hash(b"pending")),
+            partial_chunk_digest: None,
+            ops_root: Sha256::hash(b"ops-root"),
+        };
+        let encoded = proof.encode();
+
+        // MMB allows pending_chunk_digest.
+        assert!(RangeProof::<mmb::Family, sha256::Digest>::decode_cfg(
+            encoded.clone(),
+            &MAX_DIGESTS
+        )
+        .is_ok());
+
+        // MMR rejects it on decode.
+        assert!(
+            RangeProof::<crate::merkle::mmr::Family, sha256::Digest>::decode_cfg(
+                encoded,
+                &MAX_DIGESTS
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn test_operation_proof_codec_roundtrip() {
         type F = mmb::Family;
         const N: usize = 32;
@@ -976,8 +849,7 @@ mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            prefix_witnesses: vec![Sha256::hash(b"peak")],
-            suffix_witnesses: vec![Sha256::hash(b"suf")],
+            pending_chunk_digest: None,
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
@@ -998,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_proof_codec_enforces_total_digest_budget() {
+    fn test_operation_proof_codec_enforces_merkle_digest_budget() {
         type F = mmb::Family;
         const N: usize = 32;
 
@@ -1008,8 +880,7 @@ mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            prefix_witnesses: vec![Sha256::hash(b"peak")],
-            suffix_witnesses: vec![Sha256::hash(b"suf")],
+            pending_chunk_digest: None,
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
@@ -1031,52 +902,461 @@ mod tests {
         );
     }
 
-    #[test_traced]
-    fn test_range_proof_verifies_for_mmb_multi_peak_chunk() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            type F = mmb::Family;
-            const N: usize = 1;
+    #[test_async]
+    async fn test_range_proof_verifies_for_mmb_multi_peak_chunk() {
+        type F = mmb::Family;
+        const N: usize = 1;
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let grafting_height = grafting::height::<N>();
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
 
-            let leaf_count = (16..=64u64)
-                .find(|&leaves| {
-                    let size = F::location_to_position(mmb::Location::new(leaves));
-                    F::chunk_peaks(size, 1, grafting_height).nth(1).is_some()
-                })
-                .expect("expected an MMB size whose second chunk spans multiple peaks");
+        let leaf_count = (16..=64u64)
+            .find(|&leaves| {
+                let size = F::location_to_position(mmb::Location::new(leaves));
+                F::chunk_peaks(size, 1, grafting_height).nth(1).is_some()
+            })
+            .expect("expected an MMB size whose second chunk spans multiple peaks");
 
-            let mut status = BitMap::<N>::new();
-            for _ in 0..leaf_count {
-                status.push(true);
+        let mut status = BitMap::<N>::new();
+        for _ in 0..leaf_count {
+            status.push(true);
+        }
+        let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+        let ops_root = ops.root(&hasher, 0).unwrap();
+
+        let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
+            *Location::<F>::try_from(ops.size()).unwrap(),
+            grafting_height,
+        )
+        .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+            as usize;
+        let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
+            .map(|chunk_idx| {
+                (
+                    chunk_idx,
+                    <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                )
+            })
+            .collect();
+        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops,
+            chunk_inputs,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        let merkleized = {
+            let mut batch = grafted.new_batch();
+            for (_, digest) in leaf_digests {
+                batch = batch.add_leaf_digest(digest);
             }
-            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, 0).unwrap();
+            batch.merkleize(&grafted, &grafted_hasher)
+        };
+        grafted.apply_batch(&merkleized).unwrap();
 
-            let chunk_inputs: Vec<_> =
-                (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
-                    .map(|chunk_idx| {
-                        (
-                            chunk_idx,
-                            <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
-                        )
-                    })
-                    .collect();
-            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
-            leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+        let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
+        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status,
+            &storage,
+            ops_leaves_for_root,
+            None,
+            Location::new(0),
+            &ops_root,
+        )
+        .await
+        .unwrap();
 
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-            let mut grafted = Mem::<F, sha256::Digest>::new();
+        let loc = mmb::Location::new(BitMap::<N>::CHUNK_SIZE_BITS + 4);
+        let proof = RangeProof::new(
+            &hasher,
+            &status,
+            &storage,
+            Location::new(0),
+            loc..loc + 1,
+            ops_root,
+        )
+        .await
+        .unwrap();
+
+        let element = hasher.digest(&(*loc).to_be_bytes());
+        assert!(proof.verify(
+            &hasher,
+            loc,
+            &[element],
+            &[<BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 1)],
+            &root,
+        ));
+    }
+
+    #[test_async]
+    async fn test_range_proof_verifies_with_partial_suffix_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+
+        let (leaf_count, loc) = (chunk_bits * 2 + 1..=64u64)
+            .find_map(|leaves| {
+                let complete_chunks = leaves / chunk_bits;
+                if complete_chunks < 2 || leaves % chunk_bits == 0 {
+                    return None;
+                }
+
+                let size = F::location_to_position(mmb::Location::new(leaves));
+                F::chunk_peaks(size, 1, grafting_height).nth(1)?;
+                Some((leaves, mmb::Location::new(chunk_bits + 1)))
+            })
+            .expect("expected an MMB proof with a partial trailing suffix chunk");
+
+        let mut status = BitMap::<N>::new();
+        for _ in 0..leaf_count {
+            status.push(true);
+        }
+        let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+        let ops_root = ops.root(&hasher, 0).unwrap();
+
+        let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
+            *Location::<F>::try_from(ops.size()).unwrap(),
+            grafting_height,
+        )
+        .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+            as usize;
+        let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
+            .map(|chunk_idx| {
+                (
+                    chunk_idx,
+                    <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                )
+            })
+            .collect();
+        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops,
+            chunk_inputs,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        let merkleized = {
+            let mut batch = grafted.new_batch();
+            for (_, digest) in leaf_digests {
+                batch = batch.add_leaf_digest(digest);
+            }
+            batch.merkleize(&grafted, &grafted_hasher)
+        };
+        grafted.apply_batch(&merkleized).unwrap();
+
+        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+        let partial = {
+            let (chunk, next_bit) = status.last_chunk();
+            Some((*chunk, next_bit))
+        };
+        let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
+        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status,
+            &storage,
+            ops_leaves_for_root,
+            partial,
+            Location::new(0),
+            &ops_root,
+        )
+        .await
+        .unwrap();
+        let proof = RangeProof::new(
+            &hasher,
+            &status,
+            &storage,
+            Location::new(0),
+            loc..loc + 1,
+            ops_root,
+        )
+        .await
+        .unwrap();
+
+        let element = hasher.digest(&(*loc).to_be_bytes());
+        let chunk_idx = (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
+        assert!(proof.verify(
+            &hasher,
+            loc,
+            &[element],
+            &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
+                &status, chunk_idx
+            )],
+            &root,
+        ));
+    }
+
+    #[test_async]
+    async fn test_range_proof_verifies_when_range_reaches_partial_chunk_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+
+        // Search for an MMB size whose chunk 1 is multi-peak AND whose total leaves
+        // aren't chunk-aligned (so a partial trailing chunk exists). The proven range
+        // starts inside chunk 1 and extends to the end (touching the partial chunk).
+        let (leaf_count, start_loc, complete_chunks) = (17..=128u64)
+            .find_map(|leaves| {
+                let complete_chunks = leaves / chunk_bits;
+                if complete_chunks < 2 || leaves % chunk_bits == 0 {
+                    return None;
+                }
+                let leaves_loc = mmb::Location::new(leaves);
+                let size = F::location_to_position(leaves_loc);
+                F::chunk_peaks(size, 1, grafting_height).nth(1)?;
+                let start_loc = mmb::Location::new(chunk_bits + 1);
+                Some((leaves, start_loc, complete_chunks))
+            })
+            .expect("expected an MMB size with chunk 1 multi-peak and a partial trailing chunk");
+
+        let mut status = BitMap::<N>::new();
+        for _ in 0..leaf_count {
+            status.push(true);
+        }
+        let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+        let ops_root = ops.root(&hasher, 0).unwrap();
+
+        let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
+            *Location::<F>::try_from(ops.size()).unwrap(),
+            grafting_height,
+        )
+        .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+            as usize;
+        let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
+            .map(|chunk_idx| {
+                (
+                    chunk_idx,
+                    <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                )
+            })
+            .collect();
+        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops,
+            chunk_inputs,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        let merkleized = {
+            let mut batch = grafted.new_batch();
+            for (_, digest) in leaf_digests {
+                batch = batch.add_leaf_digest(digest);
+            }
+            batch.merkleize(&grafted, &grafted_hasher)
+        };
+        grafted.apply_batch(&merkleized).unwrap();
+
+        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+        let partial = {
+            let (chunk, next_bit) = status.last_chunk();
+            Some((*chunk, next_bit))
+        };
+        let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
+        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status,
+            &storage,
+            ops_leaves_for_root,
+            partial,
+            Location::new(0),
+            &ops_root,
+        )
+        .await
+        .unwrap();
+
+        let leaves_loc = mmb::Location::new(leaf_count);
+        let proof = RangeProof::new(
+            &hasher,
+            &status,
+            &storage,
+            Location::new(0),
+            start_loc..leaves_loc,
+            ops_root,
+        )
+        .await
+        .unwrap();
+
+        let elements = (*start_loc..leaf_count)
+            .map(|idx| hasher.digest(&idx.to_be_bytes()))
+            .collect::<Vec<_>>();
+        let start_chunk_idx = (*start_loc / chunk_bits) as usize;
+        let end_chunk_idx = complete_chunks as usize;
+        let chunks = (start_chunk_idx..=end_chunk_idx)
+            .map(|chunk_idx| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx))
+            .collect::<Vec<_>>();
+        assert!(proof.verify(&hasher, start_loc, &elements, &chunks, &root,));
+
+        // Flip a byte in the trailing partial chunk while preserving the window shape.
+        let mut bad_chunks = chunks;
+        let last = bad_chunks.last_mut().unwrap();
+        last[0] ^= 1;
+        assert!(
+            !proof.verify(&hasher, start_loc, &elements, &bad_chunks, &root),
+            "tampered partial chunk bytes should not verify"
+        );
+    }
+
+    #[test_async]
+    async fn test_range_proof_rejects_unexpected_partial_chunk_digest() {
+        type F = mmb::Family;
+        const N: usize = 1;
+
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+
+        let leaf_count = chunk_bits * 2; // Perfect chunks, NO partial trailing bits
+        let mut status = BitMap::<N>::new();
+        for _ in 0..leaf_count {
+            status.push(true);
+        }
+        let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+        let ops_root = ops.root(&hasher, 0).unwrap();
+
+        let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
+            *Location::<F>::try_from(ops.size()).unwrap(),
+            grafting_height,
+        )
+        .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+            as usize;
+        let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
+            .map(|chunk_idx| {
+                (
+                    chunk_idx,
+                    <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                )
+            })
+            .collect();
+        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops,
+            chunk_inputs,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        let merkleized = {
+            let mut batch = grafted.new_batch();
+            for (_, digest) in leaf_digests {
+                batch = batch.add_leaf_digest(digest);
+            }
+            batch.merkleize(&grafted, &grafted_hasher)
+        };
+        grafted.apply_batch(&merkleized).unwrap();
+
+        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+        let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
+        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status,
+            &storage,
+            ops_leaves_for_root,
+            None,
+            Location::new(0),
+            &ops_root,
+        )
+        .await
+        .unwrap();
+
+        let loc = mmb::Location::new(0);
+        let mut proof = RangeProof::new(
+            &hasher,
+            &status,
+            &storage,
+            Location::new(0),
+            loc..loc + 1,
+            ops_root,
+        )
+        .await
+        .unwrap();
+
+        let element = hasher.digest(&(*loc).to_be_bytes());
+        let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
+
+        // Tamper with the proof by injecting a fake partial chunk digest
+        let mut tampered = proof.clone();
+        tampered.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
+        assert!(!tampered.verify(&hasher, loc, &[element], &[chunk], &root,));
+
+        proof.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
+        assert!(!proof.verify(&hasher, loc, &[element], &[chunk], &root,));
+    }
+
+    async fn current_range_proof_fixture<F: Graftable, const N: usize>(
+        leaf_count: u64,
+        range: Range<Location<F>>,
+    ) -> (
+        StandardHasher<Sha256>,
+        RangeProof<F, sha256::Digest>,
+        Vec<sha256::Digest>,
+        Vec<[u8; N]>,
+        sha256::Digest,
+        Mem<F, sha256::Digest>,
+    ) {
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+
+        let mut status = BitMap::<N>::new();
+        for _ in 0..leaf_count {
+            status.push(true);
+        }
+
+        let ops = build_test_mem(&hasher, Mem::<F, sha256::Digest>::new(), leaf_count);
+        let ops_root = ops.root(&hasher, 0).unwrap();
+        let ops_leaves = Location::<F>::try_from(ops.size()).unwrap();
+
+        let graftable_chunks_for_test =
+            grafting::graftable_chunks::<F>(*ops_leaves, grafting_height)
+                .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+                as usize;
+        let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
+            .map(|chunk_idx| {
+                (
+                    chunk_idx,
+                    <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                )
+            })
+            .collect();
+        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops,
+            chunk_inputs,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        if !leaf_digests.is_empty() {
             let merkleized = {
                 let mut batch = grafted.new_batch();
                 for (_, digest) in leaf_digests {
@@ -1085,599 +1365,863 @@ mod tests {
                 batch.merkleize(&grafted, &grafted_hasher)
             };
             grafted.apply_batch(&merkleized).unwrap();
+        }
 
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let root = db::compute_db_root::<F, Sha256, _, _, N>(
-                &hasher,
-                &status,
-                &storage,
-                None,
-                Location::new(0),
-                &ops_root,
-            )
-            .await
-            .unwrap();
+        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status,
+            &storage,
+            ops_leaves,
+            db::partial_chunk::<_, N>(&status),
+            Location::new(0),
+            &ops_root,
+        )
+        .await
+        .unwrap();
 
-            let loc = mmb::Location::new(BitMap::<N>::CHUNK_SIZE_BITS + 4);
-            let proof = RangeProof::new(
-                &hasher,
-                &status,
-                &storage,
-                Location::new(0),
-                loc..loc + 1,
-                ops_root,
-            )
-            .await
-            .unwrap();
+        let proof = RangeProof::new(
+            &hasher,
+            &status,
+            &storage,
+            Location::new(0),
+            range.clone(),
+            ops_root,
+        )
+        .await
+        .unwrap();
+        let operations = (*range.start..*range.end)
+            .map(|i| hasher.digest(&i.to_be_bytes()))
+            .collect::<Vec<_>>();
 
-            let element = hasher.digest(&(*loc).to_be_bytes());
-            assert!(proof.verify(
-                &hasher,
-                loc,
-                &[element],
-                &[<BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 1)],
-                &root,
-            ));
-        });
+        // Provide every bitmap chunk touched by the proven operation range.
+        let start_chunk = (*range.start / chunk_bits) as usize;
+        let end_chunk = ((*range.end - 1) / chunk_bits) as usize;
+        let chunks = (start_chunk..=end_chunk)
+            .map(|chunk_idx| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx))
+            .collect::<Vec<_>>();
+
+        assert!(proof.verify(&hasher, range.start, &operations, &chunks, &root));
+
+        (hasher, proof, operations, chunks, root, ops)
     }
 
-    #[test_traced]
-    fn test_range_proof_verifies_with_partial_suffix_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            type F = mmb::Family;
-            const N: usize = 1;
+    async fn verify_proof_and_extract_digests_inner<F: Graftable>() {
+        const N: usize = 1;
+        let start = Location::<F>::new(14);
+        let end = Location::<F>::new(18);
+        let (hasher, proof, operations, chunks, root, ops) =
+            current_range_proof_fixture::<F, N>(18, start..end).await;
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let grafting_height = grafting::height::<N>();
-            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let extracted =
+            verify_proof_and_extract_digests(&hasher, &proof, start, &operations, &chunks, &root)
+                .unwrap();
+        assert!(!extracted.is_empty());
 
-            let (leaf_count, loc) = (chunk_bits * 2 + 1..=64u64)
-                .find_map(|leaves| {
-                    let complete_chunks = leaves / chunk_bits;
-                    if complete_chunks < 2 || leaves % chunk_bits == 0 {
-                        return None;
+        // The extractor should return the authenticated digest for every proven leaf.
+        for loc in *start..*end {
+            let pos = F::location_to_position(Location::<F>::new(loc));
+            let expected = ops.get_node(pos).unwrap();
+            assert!(
+                extracted
+                    .iter()
+                    .any(|(actual_pos, actual)| *actual_pos == pos && *actual == expected),
+                "missing extracted leaf digest at {pos:?}",
+            );
+        }
+
+        // Root mismatches are reported distinctly from malformed proof inputs.
+        let wrong_root = hasher.digest(b"wrong current root");
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                start,
+                &operations,
+                &chunks,
+                &wrong_root,
+            ),
+            Err(merkle::Error::RootMismatch)
+        ));
+
+        // Mutating operations or bitmap chunks must invalidate the extracted proof.
+        let mut wrong_operations = operations.clone();
+        wrong_operations[0] = hasher.digest(b"wrong operation");
+        assert!(verify_proof_and_extract_digests(
+            &hasher,
+            &proof,
+            start,
+            &wrong_operations,
+            &chunks,
+            &root,
+        )
+        .is_err());
+
+        let mut bad_chunks = chunks;
+        bad_chunks.last_mut().unwrap()[0] ^= 1;
+        assert!(verify_proof_and_extract_digests(
+            &hasher,
+            &proof,
+            start,
+            &operations,
+            &bad_chunks,
+            &root,
+        )
+        .is_err());
+    }
+
+    #[test_async]
+    async fn test_verify_proof_and_extract_digests_handles_no_grafted_chunks_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+        let start = Location::<F>::new(2);
+        let end = Location::<F>::new(4);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(6, start..end).await;
+
+        let extracted =
+            verify_proof_and_extract_digests(&hasher, &proof, start, &operations, &chunks, &root)
+                .unwrap();
+
+        assert!(!extracted.is_empty());
+    }
+
+    #[test_async]
+    async fn test_verify_proof_and_extract_digests_rejects_malformed_inputs_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+        let start = Location::<F>::new(14);
+        let end = Location::<F>::new(18);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(18, start..end).await;
+
+        let no_operations = Vec::<sha256::Digest>::new();
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                start,
+                &no_operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let no_chunks = Vec::<[u8; N]>::new();
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                start,
+                &operations[..1],
+                &no_chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                F::MAX_LEAVES,
+                &operations[..1],
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                proof.proof.leaves,
+                &operations[..1],
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                start,
+                &operations,
+                &chunks[..chunks.len() - 1],
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let mut missing_partial = proof.clone();
+        missing_partial.partial_chunk_digest = None;
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &missing_partial,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let mut broken_merkle = proof;
+        assert!(!broken_merkle.proof.digests.is_empty());
+        broken_merkle.proof.digests.clear();
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &broken_merkle,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+    }
+
+    #[test_async]
+    async fn test_verify_proof_and_extract_digests_rejects_metadata_mismatches_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+        let start = Location::<F>::new(14);
+        let end = Location::<F>::new(18);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(18, start..end).await;
+
+        assert!(proof.pending_chunk_digest.is_some());
+
+        let mut missing_pending = proof.clone();
+        missing_pending.pending_chunk_digest = None;
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &missing_pending,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let mut wrong_pending = proof.clone();
+        wrong_pending.pending_chunk_digest = Some(hasher.digest(b"wrong pending"));
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &wrong_pending,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let aligned_start = Location::<F>::new(8);
+        let aligned_end = Location::<F>::new(12);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(16, aligned_start..aligned_end).await;
+        assert!(proof.partial_chunk_digest.is_none());
+
+        // A chunk-aligned proof must not carry partial metadata.
+        let mut unexpected_partial = proof;
+        unexpected_partial.partial_chunk_digest = Some(hasher.digest(b"unexpected partial"));
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &unexpected_partial,
+                aligned_start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+    }
+
+    #[test_async]
+    async fn test_verify_proof_and_extract_digests_mmr() {
+        verify_proof_and_extract_digests_inner::<mmr::Family>().await;
+    }
+
+    #[test_async]
+    async fn test_verify_proof_and_extract_digests_mmb() {
+        verify_proof_and_extract_digests_inner::<mmb::Family>().await;
+    }
+
+    /// Active chunks always have a single h=G peak; multi-peak structure can only appear
+    /// at the pending-chunk index. This test exhaustively scans MMB sizes that have a
+    /// pending chunk (the only configuration where multi-peak chunks ever existed) and
+    /// asserts that every graftable chunk has exactly one peak.
+    #[test_async]
+    async fn test_graftable_chunks_always_single_peak_at_pending_sizes() {
+        type F = mmb::Family;
+        const N: usize = 1;
+
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+
+        let mut found_any_pending = false;
+        for leaves in chunk_bits * 3..=128u64 {
+            let leaves_loc = mmb::Location::new(leaves);
+            let leaves_count = *leaves_loc;
+            let complete = leaves_count / chunk_bits;
+            let graftable =
+                grafting::graftable_chunks::<F>(leaves_count, grafting_height).min(complete);
+            if graftable == complete {
+                continue; // no pending chunk at this size
+            }
+            found_any_pending = true;
+
+            // Pending chunks (index >= graftable) are allowed multi-peak; their digests
+            // are hashed into the canonical root separately.
+            let size = F::location_to_position(leaves_loc);
+            for chunk_idx in 0..graftable {
+                let count = F::chunk_peaks(size, chunk_idx, grafting_height).count();
+                assert_eq!(
+                count, 1,
+                "graftable chunk {chunk_idx} has {count} peaks (leaves={leaves_count}, graftable={graftable}, complete={complete})"
+            );
+            }
+        }
+        assert!(
+            found_any_pending,
+            "expected at least one MMB size in [{}, 128] with a pending chunk",
+            chunk_bits * 3
+        );
+
+        // End-to-end: build a proof for an op in a chunk-aligned MMB whose chunk 1 is
+        // multi-peak, and confirm the proof has only the standard digest material.
+        let leaf_count = (chunk_bits * 2..=256u64)
+            .filter(|leaves| leaves % chunk_bits == 0)
+            .find(|&leaves| {
+                let size = F::location_to_position(mmb::Location::new(leaves));
+                F::chunk_peaks(size, 1, grafting_height).nth(1).is_some()
+            })
+            .expect("expected a chunk-aligned MMB size whose chunk 1 is multi-peak");
+        let loc = mmb::Location::new(chunk_bits + 1);
+
+        let mut status = BitMap::<N>::new();
+        for _ in 0..leaf_count {
+            status.push(true);
+        }
+        let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+        let ops_root = ops.root(&hasher, 0).unwrap();
+
+        let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
+            *Location::<F>::try_from(ops.size()).unwrap(),
+            grafting_height,
+        )
+        .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+            as usize;
+        let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
+            .map(|chunk_idx| {
+                (
+                    chunk_idx,
+                    <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                )
+            })
+            .collect();
+        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops,
+            chunk_inputs,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        let merkleized = {
+            let mut batch = grafted.new_batch();
+            for (_, digest) in leaf_digests {
+                batch = batch.add_leaf_digest(digest);
+            }
+            batch.merkleize(&grafted, &grafted_hasher)
+        };
+        grafted.apply_batch(&merkleized).unwrap();
+
+        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+        let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
+        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status,
+            &storage,
+            ops_leaves_for_root,
+            None,
+            Location::new(0),
+            &ops_root,
+        )
+        .await
+        .unwrap();
+        let proof = RangeProof::new(
+            &hasher,
+            &status,
+            &storage,
+            Location::new(0),
+            loc..loc + 1,
+            ops_root,
+        )
+        .await
+        .unwrap();
+
+        let element = hasher.digest(&(*loc).to_be_bytes());
+        let chunk_idx = (*loc / chunk_bits) as usize;
+        assert!(proof.verify(
+            &hasher,
+            loc,
+            &[element],
+            &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
+                &status, chunk_idx
+            )],
+            &root,
+        ));
+
+        let mut tampered = proof.clone();
+        tampered.proof.inactive_peaks = 1;
+        assert!(!tampered.verify(
+            &hasher,
+            loc,
+            &[element],
+            &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
+                &status, chunk_idx
+            )],
+            &root,
+        ));
+
+        let mut tampered = proof.clone();
+        tampered.proof.inactive_peaks = usize::MAX;
+        assert!(!tampered.verify(
+            &hasher,
+            loc,
+            &[element],
+            &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
+                &status, chunk_idx
+            )],
+            &root,
+        ));
+
+        let mut tampered = proof;
+        assert!(!tampered.proof.digests.is_empty());
+        tampered.proof.digests[0] = hasher.digest(b"fake generic sibling");
+        assert!(!tampered.verify(
+            &hasher,
+            loc,
+            &[element],
+            &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
+                &status, chunk_idx
+            )],
+            &root,
+        ));
+    }
+
+    /// Pending and partial chunks coexist when the bitmap has both (1) a chunk whose bits
+    /// are complete but whose h=G ancestor isn't yet born, AND (2) an in-progress trailing
+    /// chunk. At G=3 (N=1) chunk 0 is pending for ops_leaves in [8, 11), and any ops_leaves
+    /// strictly in (8, 11) also has a partial trailing chunk. This test builds those states
+    /// and round-trips a `RangeProof` that spans both regions.
+    #[test_async]
+    async fn test_pending_and_partial_coexist_at_g_3() {
+        type F = mmb::Family;
+        const N: usize = 1; // G = 3, chunk_bits = 8
+
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        assert_eq!(grafting_height, 3);
+        assert_eq!(chunk_bits, 8);
+
+        // For G=3, chunk 0 is pending while ops_leaves is in [8, 11). Pending+partial
+        // coexistence holds for k in [1, 2] (k=3 transitions chunk 0 to graftable).
+        for k in 1u64..=2 {
+            let leaf_count = chunk_bits + k;
+            let mut status = BitMap::<N>::new();
+            for _ in 0..leaf_count {
+                status.push(true);
+            }
+            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+            let ops_root = ops.root(&hasher, 0).unwrap();
+
+            let complete = <BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64;
+            let graftable =
+                grafting::graftable_chunks::<F>(leaf_count, grafting_height).min(complete);
+            let next_bit = leaf_count % chunk_bits;
+            assert_eq!(complete, 1);
+            assert_eq!(graftable, 0);
+            assert!(next_bit > 0, "expected partial chunk for k={k}");
+
+            // Build a grafted tree from the (zero) graftable chunks and a Storage covering
+            // the post-state.
+            let chunk_inputs: Vec<_> = (0..graftable as usize)
+                .map(|chunk_idx| {
+                    (
+                        chunk_idx,
+                        <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                    )
+                })
+                .collect();
+            let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+                &hasher,
+                &ops,
+                chunk_inputs,
+                &Sequential,
+            )
+            .await
+            .unwrap();
+            let grafted_hasher =
+                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+            let mut grafted = Mem::<F, sha256::Digest>::new();
+            if !leaf_digests.is_empty() {
+                let merkleized = {
+                    let mut batch = grafted.new_batch();
+                    for (_, digest) in leaf_digests {
+                        batch = batch.add_leaf_digest(digest);
                     }
-
-                    let size = F::location_to_position(mmb::Location::new(leaves));
-                    F::chunk_peaks(size, 1, grafting_height).nth(1)?;
-                    Some((leaves, mmb::Location::new(chunk_bits + 1)))
-                })
-                .expect("expected an MMB proof with a partial trailing suffix chunk");
-
-            let mut status = BitMap::<N>::new();
-            for _ in 0..leaf_count {
-                status.push(true);
+                    batch.merkleize(&grafted, &grafted_hasher)
+                };
+                grafted.apply_batch(&merkleized).unwrap();
             }
-            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, 0).unwrap();
-
-            let chunk_inputs: Vec<_> =
-                (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
-                    .map(|chunk_idx| {
-                        (
-                            chunk_idx,
-                            <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
-                        )
-                    })
-                    .collect();
-            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
-            leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
-
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-            let mut grafted = Mem::<F, sha256::Digest>::new();
-            let merkleized = {
-                let mut batch = grafted.new_batch();
-                for (_, digest) in leaf_digests {
-                    batch = batch.add_leaf_digest(digest);
-                }
-                batch.merkleize(&grafted, &grafted_hasher)
-            };
-            grafted.apply_batch(&merkleized).unwrap();
-
             let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let partial = {
-                let (chunk, next_bit) = status.last_chunk();
-                Some((*chunk, next_bit))
-            };
-            let root = db::compute_db_root::<F, Sha256, _, _, N>(
+
+            let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
+            let canonical_root = db::compute_db_root::<F, Sha256, _, _, N>(
                 &hasher,
                 &status,
                 &storage,
-                partial,
+                ops_leaves_for_root,
+                db::partial_chunk::<_, N>(&status),
                 Location::new(0),
                 &ops_root,
             )
             .await
             .unwrap();
+
+            // OpsRootWitness round-trip
+            let pending_chunk_digest =
+                db::pending_chunk::<F, _, N>(&status, ops_leaves_for_root, grafting_height)
+                    .unwrap()
+                    .map(|c| hasher.digest(&c));
+            let partial_digest =
+                db::partial_chunk::<_, N>(&status).map(|(c, nb)| (nb, hasher.digest(&c)));
+            let grafted_root = db::compute_grafted_root::<F, Sha256, _, _, N>(
+                &hasher,
+                &status,
+                &storage,
+                ops_leaves_for_root,
+                Location::new(0),
+            )
+            .await
+            .unwrap();
+            let witness: OpsRootWitness<F, _> = OpsRootWitness {
+                grafted_root,
+                pending_chunk_digest,
+                partial_chunk: partial_digest,
+            };
+            assert!(
+                witness.verify(&hasher, &ops_root, &canonical_root),
+                "OpsRootWitness verify failed at k={k}"
+            );
+            assert!(
+                pending_chunk_digest.is_some(),
+                "expected pending chunk at k={k}"
+            );
+            assert!(
+                witness.partial_chunk.is_some(),
+                "expected partial chunk at k={k}"
+            );
+
+            // Range proof spanning the pending chunk into the partial bits
+            let start = mmb::Location::new(0);
+            let end = mmb::Location::new(leaf_count);
             let proof = RangeProof::new(
                 &hasher,
                 &status,
                 &storage,
                 Location::new(0),
-                loc..loc + 1,
+                start..end,
                 ops_root,
             )
             .await
             .unwrap();
+            assert!(
+                proof.pending_chunk_digest.is_some(),
+                "expected RangeProof pending_chunk_digest at k={k}"
+            );
+            assert!(
+                proof.partial_chunk_digest.is_some(),
+                "expected RangeProof partial_chunk_digest at k={k}"
+            );
 
-            let element = hasher.digest(&(*loc).to_be_bytes());
-            let chunk_idx = (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-            assert!(proof.verify(
-                &hasher,
-                loc,
-                &[element],
-                &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
-                    &status, chunk_idx
-                )],
-                &root,
-            ));
-        });
-    }
+            let elements: Vec<sha256::Digest> = (0..leaf_count)
+                .map(|i| hasher.digest(&i.to_be_bytes()))
+                .collect();
+            // Range covers chunks 0..=1: chunk 0 is pending, chunk 1 is partial. Provide both.
+            let chunks: Vec<[u8; N]> = (0..=1)
+                .map(|i| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, i))
+                .collect();
+            assert!(
+                proof.verify(&hasher, start, &elements, &chunks, &canonical_root),
+                "RangeProof verify failed at k={k}"
+            );
 
-    #[test_traced]
-    fn test_range_proof_verifies_when_range_reaches_partial_chunk_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            type F = mmb::Family;
-            const N: usize = 1;
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let grafting_height = grafting::height::<N>();
-            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-
-            let (leaf_count, start_loc, complete_chunks) = (17..=128u64)
-                .find_map(|leaves| {
-                    let complete_chunks = leaves / chunk_bits;
-                    if complete_chunks < 2 || leaves % chunk_bits == 0 {
-                        return None;
-                    }
-
-                    let leaves_loc = mmb::Location::new(leaves);
-                    let size = F::location_to_position(leaves_loc);
-                    F::chunk_peaks(size, 1, grafting_height).nth(1)?;
-
-                    (0..chunk_bits).find_map(|offset| {
-                        let start_loc = mmb::Location::new(chunk_bits + offset);
-                        if *start_loc >= complete_chunks * chunk_bits {
-                            return None;
-                        }
-                        let geometry = RangeProofGeometry::<F>::new(
-                            leaves_loc,
-                            start_loc..leaves_loc,
-                            0,
-                            grafting_height,
-                            complete_chunks,
-                        )
-                        .ok()?;
-                        geometry.requires_grafted_reconstruction().ok()?.then_some((
-                            leaves,
-                            start_loc,
-                            complete_chunks,
-                        ))
-                    })
-                })
-                .expect("expected an MMB proof into the trailing partial chunk");
-
-            let mut status = BitMap::<N>::new();
-            for _ in 0..leaf_count {
-                status.push(true);
-            }
-            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, 0).unwrap();
-
-            let chunk_inputs: Vec<_> =
-                (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
-                    .map(|chunk_idx| {
-                        (
-                            chunk_idx,
-                            <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
-                        )
-                    })
-                    .collect();
-            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
-            leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
-
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-            let mut grafted = Mem::<F, sha256::Digest>::new();
-            let merkleized = {
-                let mut batch = grafted.new_batch();
-                for (_, digest) in leaf_digests {
-                    batch = batch.add_leaf_digest(digest);
-                }
-                batch.merkleize(&grafted, &grafted_hasher)
-            };
-            grafted.apply_batch(&merkleized).unwrap();
-
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let partial = {
-                let (chunk, next_bit) = status.last_chunk();
-                Some((*chunk, next_bit))
-            };
-            let root = db::compute_db_root::<F, Sha256, _, _, N>(
-                &hasher,
-                &status,
-                &storage,
-                partial,
-                Location::new(0),
-                &ops_root,
-            )
-            .await
-            .unwrap();
-
-            let leaves_loc = mmb::Location::new(leaf_count);
-            let proof = RangeProof::new(
+            let pending_loc = mmb::Location::new(3);
+            let pending_proof = RangeProof::new(
                 &hasher,
                 &status,
                 &storage,
                 Location::new(0),
-                start_loc..leaves_loc,
+                pending_loc..pending_loc + 1,
                 ops_root,
             )
             .await
             .unwrap();
+            assert!(
+                pending_proof.pending_chunk_digest.is_some(),
+                "expected single-element proof to carry pending chunk digest at k={k}"
+            );
+            let pending_element = hasher.digest(&(*pending_loc).to_be_bytes());
+            assert!(
+                pending_proof.verify(
+                    &hasher,
+                    pending_loc,
+                    &[pending_element],
+                    &[chunks[0]],
+                    &canonical_root,
+                ),
+                "single-element proof inside pending chunk failed at k={k}"
+            );
 
-            let elements = (*start_loc..leaf_count)
-                .map(|idx| hasher.digest(&idx.to_be_bytes()))
-                .collect::<Vec<_>>();
-            let start_chunk_idx = (*start_loc / chunk_bits) as usize;
-            let end_chunk_idx = complete_chunks as usize;
-            let chunks = (start_chunk_idx..=end_chunk_idx)
-                .map(|chunk_idx| <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx))
-                .collect::<Vec<_>>();
-            assert!(proof.verify(&hasher, start_loc, &elements, &chunks, &root,));
-        });
-    }
-    #[test_traced]
-    fn test_range_proof_rejects_unexpected_partial_chunk_digest() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            type F = mmb::Family;
-            const N: usize = 1;
-
-            let hasher = qmdb::hasher::<Sha256>();
-            let grafting_height = grafting::height::<N>();
-            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-
-            let leaf_count = chunk_bits * 2; // Perfect chunks, NO partial trailing bits
-            let mut status = BitMap::<N>::new();
-            for _ in 0..leaf_count {
-                status.push(true);
-            }
-            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, 0).unwrap();
-
-            let chunk_inputs: Vec<_> =
-                (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
-                    .map(|chunk_idx| {
-                        (
-                            chunk_idx,
-                            <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
-                        )
-                    })
-                    .collect();
-            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
-            leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
-
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-            let mut grafted = Mem::<F, sha256::Digest>::new();
-            let merkleized = {
-                let mut batch = grafted.new_batch();
-                for (_, digest) in leaf_digests {
-                    batch = batch.add_leaf_digest(digest);
-                }
-                batch.merkleize(&grafted, &grafted_hasher)
-            };
-            grafted.apply_batch(&merkleized).unwrap();
-
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let root = db::compute_db_root::<F, Sha256, _, _, N>(
-                &hasher,
-                &status,
-                &storage,
-                None,
-                Location::new(0),
-                &ops_root,
-            )
-            .await
-            .unwrap();
-
-            let loc = mmb::Location::new(0);
-            let mut proof = RangeProof::new(
-                &hasher,
-                &status,
-                &storage,
-                Location::new(0),
-                loc..loc + 1,
-                ops_root,
-            )
-            .await
-            .unwrap();
-
-            let element = hasher.digest(&(*loc).to_be_bytes());
-            let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
+            // Tamper with the pending chunk digest or its supplied bytes.
+            let mut tampered = proof.clone();
+            tampered.pending_chunk_digest = Some(hasher.digest(b"fake pending"));
+            assert!(
+                !tampered.verify(&hasher, start, &elements, &chunks, &canonical_root),
+                "tampered pending digest accepted at k={k}"
+            );
 
             let mut tampered = proof.clone();
-            tampered
-                .prefix_witnesses
-                .push(hasher.digest(b"fake prefix witness"));
-            assert!(!tampered.verify(&hasher, loc, &[element], &[chunk], &root,));
+            tampered.pending_chunk_digest = None;
+            assert!(
+                !tampered.verify(&hasher, start, &elements, &chunks, &canonical_root),
+                "missing pending digest accepted at k={k}"
+            );
 
-            // Tamper with the proof by injecting a fake partial chunk digest
-            proof.partial_chunk_digest = Some(hasher.digest(b"fake partial chunk"));
-            assert!(!proof.verify(&hasher, loc, &[element], &[chunk], &root,));
-        });
+            let mut bad_chunks = chunks.clone();
+            bad_chunks[0][0] ^= 1;
+            assert!(
+                !proof.verify(&hasher, start, &elements, &bad_chunks, &canonical_root),
+                "tampered pending chunk bytes accepted at k={k}"
+            );
+        }
     }
 
-    #[test_traced]
-    fn test_range_proof_unfolds_mmb_peaks_for_grafted_reconstruction() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            type F = mmb::Family;
-            const N: usize = 1;
+    /// Appending one op at the exact birth size of a pending chunk's h=G ancestor causes
+    /// the chunk to transition from pending to graftable. The canonical root must change, and
+    /// a freshly-rebuilt grafted tree from the post-state must contain the now-graftable
+    /// chunk's leaf.
+    #[test_async]
+    async fn test_pending_to_graftable_transition_at_birth_size() {
+        type F = mmb::Family;
+        const N: usize = 1; // G = 3, chunk_bits = 8
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let grafting_height = grafting::height::<N>();
-            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        assert_eq!(grafting_height, 3);
 
-            let (leaf_count, loc, geometry) = (chunk_bits * 3..=128u64)
-                .filter(|leaves| leaves % chunk_bits == 0)
-                .find_map(|leaves| {
-                    let leaves_loc = mmb::Location::new(leaves);
-                    let complete_chunks = leaves / chunk_bits;
-                    (0..leaves).find_map(|idx| {
-                        let loc = mmb::Location::new(idx);
-                        let geometry = RangeProofGeometry::<F>::new(
-                            leaves_loc,
-                            loc..loc + 1,
-                            0,
-                            grafting_height,
-                            complete_chunks,
-                        )
-                        .ok()?;
-                        geometry
-                            .requires_grafted_reconstruction()
-                            .ok()?
-                            .then_some((leaves, loc, geometry))
-                    })
-                })
-                .expect("expected an MMB proof requiring grafted reconstruction");
+        // chunk 0's h=G ancestor: birth = 3*2^(G-1) - 1 = 11 for G=3.
+        let birth = (3u64 << (grafting_height - 1)) - 1;
+        let pre_state_leaves = birth - 1; // = 10: chunk 0 still pending
+        let post_state_leaves = birth; // = 11: chunk 0 just graftable
 
-            let mut status = BitMap::<N>::new();
-            for _ in 0..leaf_count {
-                status.push(true);
-            }
-            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
-            let ops_root = ops.root(&hasher, 0).unwrap();
+        assert_eq!(pre_state_leaves, 10);
+        assert_eq!(post_state_leaves, 11);
 
-            let chunk_inputs: Vec<_> =
-                (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
-                    .map(|chunk_idx| {
-                        (
-                            chunk_idx,
-                            <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
-                        )
-                    })
-                    .collect();
-            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
-            leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+        let graftable_pre = grafting::graftable_chunks::<F>(pre_state_leaves, grafting_height);
+        let graftable_post = grafting::graftable_chunks::<F>(post_state_leaves, grafting_height);
+        assert_eq!(graftable_pre, 0);
+        assert_eq!(graftable_post, 1);
 
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-            let mut grafted = Mem::<F, sha256::Digest>::new();
-            let merkleized = {
-                let mut batch = grafted.new_batch();
-                for (_, digest) in leaf_digests {
-                    batch = batch.add_leaf_digest(digest);
-                }
-                batch.merkleize(&grafted, &grafted_hasher)
-            };
-            grafted.apply_batch(&merkleized).unwrap();
+        // Pre-state canonical root: chunk 0 is pending; grafted tree empty.
+        let mut status_pre = BitMap::<N>::new();
+        for _ in 0..pre_state_leaves {
+            status_pre.push(true);
+        }
+        let ops_pre = build_test_mem(&hasher, mmb::mem::Mmb::new(), pre_state_leaves);
+        let ops_root_pre = ops_pre.root(&hasher, 0).unwrap();
+        let grafted_pre = Mem::<F, sha256::Digest>::new();
+        let storage_pre =
+            grafting::Storage::new(&grafted_pre, grafting_height, &ops_pre, hasher.clone());
+        let canonical_pre = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status_pre,
+            &storage_pre,
+            Location::<F>::new(pre_state_leaves),
+            db::partial_chunk::<_, N>(&status_pre),
+            Location::new(0),
+            &ops_root_pre,
+        )
+        .await
+        .unwrap();
 
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let root = db::compute_db_root::<F, Sha256, _, _, N>(
-                &hasher,
-                &status,
-                &storage,
-                None,
-                Location::new(0),
-                &ops_root,
-            )
-            .await
-            .unwrap();
-            let proof = RangeProof::new(
-                &hasher,
-                &status,
-                &storage,
-                Location::new(0),
-                loc..loc + 1,
-                ops_root,
-            )
-            .await
-            .unwrap();
+        // Post-state canonical root.
+        let mut status_post = BitMap::<N>::new();
+        for _ in 0..post_state_leaves {
+            status_post.push(true);
+        }
+        let ops_post = build_test_mem(&hasher, mmb::mem::Mmb::new(), post_state_leaves);
+        let ops_root_post = ops_post.root(&hasher, 0).unwrap();
+        // After transition chunk 0 has a single h=G ancestor; build the grafted tree.
+        let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops_post,
+            core::iter::once((
+                0usize,
+                <BitMap<N> as BitmapReadable<N>>::get_chunk(&status_post, 0),
+            )),
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            leaf_digests.len(),
+            1,
+            "post-state must have 1 graftable chunk"
+        );
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted_post = Mem::<F, sha256::Digest>::new();
+        let merkleized = grafted_post
+            .new_batch()
+            .add_leaf_digest(leaf_digests[0].1)
+            .merkleize(&grafted_post, &grafted_hasher);
+        grafted_post.apply_batch(&merkleized).unwrap();
+        let storage_post =
+            grafting::Storage::new(&grafted_post, grafting_height, &ops_post, hasher.clone());
 
-            // The prefix/suffix witnesses follow the five-segment geometry: bitmap witness
-            // digests for pure segments and individual ops-tree digests for boundary segments.
-            assert_eq!(proof.prefix_witnesses.len(), geometry.prefix_witness_len());
-            assert_eq!(proof.suffix_witnesses.len(), geometry.suffix_witness_len());
+        let canonical_post = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status_post,
+            &storage_post,
+            Location::<F>::new(post_state_leaves),
+            db::partial_chunk::<_, N>(&status_post),
+            Location::new(0),
+            &ops_root_post,
+        )
+        .await
+        .unwrap();
 
-            let element = hasher.digest(&(*loc).to_be_bytes());
-            let chunk_idx = (*loc / chunk_bits) as usize;
-            assert!(proof.verify(
-                &hasher,
-                loc,
-                &[element],
-                &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
-                    &status, chunk_idx
-                )],
-                &root,
-            ));
-
-            let mut tampered = proof.clone();
-            tampered.proof.inactive_peaks = 1;
-            assert!(!tampered.verify(
-                &hasher,
-                loc,
-                &[element],
-                &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
-                    &status, chunk_idx
-                )],
-                &root,
-            ));
-
-            let mut tampered = proof.clone();
-            tampered.proof.inactive_peaks = usize::MAX;
-            assert!(!tampered.verify(
-                &hasher,
-                loc,
-                &[element],
-                &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
-                    &status, chunk_idx
-                )],
-                &root,
-            ));
-
-            let mut tampered = proof;
-            assert!(!tampered.proof.digests.is_empty());
-            tampered.proof.digests[0] = hasher.digest(b"fake generic sibling");
-            assert!(!tampered.verify(
-                &hasher,
-                loc,
-                &[element],
-                &[<BitMap<N> as BitmapReadable<N>>::get_chunk(
-                    &status, chunk_idx
-                )],
-                &root,
-            ));
-        });
+        assert_ne!(
+            canonical_pre, canonical_post,
+            "canonical root must change when chunk 0 transitions from pending to graftable"
+        );
     }
 
-    #[test_traced]
-    fn test_range_proof_allows_ops_and_grafted_inactive_counts_to_differ() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            type F = mmb::Family;
-            const N: usize = 1;
+    #[test_async]
+    async fn test_range_proof_allows_ops_and_grafted_inactive_counts_to_differ() {
+        type F = mmb::Family;
+        const N: usize = 1;
 
-            let hasher = qmdb::hasher::<Sha256>();
-            let grafting_height = grafting::height::<N>();
-            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-            let leaf_count = chunk_bits;
-            let leaves = mmb::Location::new(leaf_count);
-            let inactivity_floor = mmb::Location::new(chunk_bits - 2);
+        let hasher = qmdb::hasher::<Sha256>();
+        let grafting_height = grafting::height::<N>();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let leaf_count = chunk_bits;
+        let leaves = mmb::Location::new(leaf_count);
+        let inactivity_floor = mmb::Location::new(chunk_bits - 2);
 
-            let ops_inactive_peaks =
-                F::inactive_peaks(F::location_to_position(leaves), inactivity_floor);
-            let aligned_inactive = grafting::chunk_aligned_inactive_peaks::<F>(
-                leaves,
-                inactivity_floor,
-                grafting_height,
-            )
-            .unwrap();
-            assert_ne!(ops_inactive_peaks, aligned_inactive);
+        let ops_inactive_peaks =
+            F::inactive_peaks(F::location_to_position(leaves), inactivity_floor);
+        let aligned_inactive =
+            grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)
+                .unwrap();
+        assert_ne!(ops_inactive_peaks, aligned_inactive);
 
-            let mut status = BitMap::<N>::new();
-            for _ in 0..leaf_count {
-                status.push(true);
+        let mut status = BitMap::<N>::new();
+        for _ in 0..leaf_count {
+            status.push(true);
+        }
+        let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+
+        // The ops root is the inner QMDB log root and commits the ops-tree inactive peak count.
+        // The grafted bitmap root commits the chunk-aligned count, since bitmap chunks are
+        // the atomic inactive-prefix boundary for the current root.
+        let ops_root = ops.root(&hasher, ops_inactive_peaks).unwrap();
+
+        let graftable_chunks_for_test = grafting::graftable_chunks::<F>(
+            *Location::<F>::try_from(ops.size()).unwrap(),
+            grafting_height,
+        )
+        .min(<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status) as u64)
+            as usize;
+        let chunk_inputs: Vec<_> = (0..graftable_chunks_for_test)
+            .map(|chunk_idx| {
+                (
+                    chunk_idx,
+                    <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
+                )
+            })
+            .collect();
+        let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+            &hasher,
+            &ops,
+            chunk_inputs,
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+
+        let grafted_hasher = grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        let merkleized = {
+            let mut batch = grafted.new_batch();
+            for (_, digest) in leaf_digests {
+                batch = batch.add_leaf_digest(digest);
             }
-            let ops = build_test_mem(&hasher, mmb::mem::Mmb::new(), leaf_count);
+            batch.merkleize(&grafted, &grafted_hasher)
+        };
+        grafted.apply_batch(&merkleized).unwrap();
 
-            // The ops root is the inner QMDB log root and commits the ops-tree inactive peak count.
-            // The grafted bitmap root commits the chunk-aligned count, since bitmap chunks are
-            // the atomic inactive-prefix boundary for the current root.
-            let ops_root = ops.root(&hasher, ops_inactive_peaks).unwrap();
+        let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
+        let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
+        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+            &hasher,
+            &status,
+            &storage,
+            ops_leaves_for_root,
+            None,
+            inactivity_floor,
+            &ops_root,
+        )
+        .await
+        .unwrap();
 
-            let chunk_inputs: Vec<_> =
-                (0..<BitMap<N> as BitmapReadable<N>>::complete_chunks(&status))
-                    .map(|chunk_idx| {
-                        (
-                            chunk_idx,
-                            <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, chunk_idx),
-                        )
-                    })
-                    .collect();
-            let mut leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &hasher,
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
-            leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
+        let loc = mmb::Location::new(chunk_bits - 1);
+        let proof = RangeProof::new(
+            &hasher,
+            &status,
+            &storage,
+            inactivity_floor,
+            loc..loc + 1,
+            ops_root,
+        )
+        .await
+        .unwrap();
+        assert_eq!(proof.proof.inactive_peaks, aligned_inactive);
 
-            let grafted_hasher =
-                grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
-            let mut grafted = Mem::<F, sha256::Digest>::new();
-            let merkleized = {
-                let mut batch = grafted.new_batch();
-                for (_, digest) in leaf_digests {
-                    batch = batch.add_leaf_digest(digest);
-                }
-                batch.merkleize(&grafted, &grafted_hasher)
-            };
-            grafted.apply_batch(&merkleized).unwrap();
-
-            let storage = grafting::Storage::new(&grafted, grafting_height, &ops, hasher.clone());
-            let root = db::compute_db_root::<F, Sha256, _, _, N>(
-                &hasher,
-                &status,
-                &storage,
-                None,
-                inactivity_floor,
-                &ops_root,
-            )
-            .await
-            .unwrap();
-
-            let loc = mmb::Location::new(chunk_bits - 1);
-            let proof = RangeProof::new(
-                &hasher,
-                &status,
-                &storage,
-                inactivity_floor,
-                loc..loc + 1,
-                ops_root,
-            )
-            .await
-            .unwrap();
-            assert_eq!(proof.proof.inactive_peaks, aligned_inactive);
-
-            let element = hasher.digest(&(*loc).to_be_bytes());
-            let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
-            assert!(proof.verify(&hasher, loc, &[element], &[chunk], &root));
-        });
+        let element = hasher.digest(&(*loc).to_be_bytes());
+        let chunk = <BitMap<N> as BitmapReadable<N>>::get_chunk(&status, 0);
+        assert!(proof.verify(&hasher, loc, &[element], &[chunk], &root));
     }
 
     #[cfg(feature = "arbitrary")]
@@ -1688,7 +2232,8 @@ mod tests {
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<OpsRootWitness<Sha256Digest>>,
+            CodecConformance<OpsRootWitness<mmr::Family, Sha256Digest>>,
+            CodecConformance<OpsRootWitness<mmb::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmr::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmb::Family, Sha256Digest>>,
             CodecConformance<OperationProof<mmr::Family, Sha256Digest, 32>>,

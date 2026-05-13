@@ -335,8 +335,7 @@ pub mod tests {
             // commit op.
             let proof = RangeProof {
                 proof: Proof::default(),
-                prefix_witnesses: vec![],
-                suffix_witnesses: vec![],
+                pending_chunk_digest: None.try_into().unwrap(),
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };

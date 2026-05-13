@@ -97,8 +97,9 @@ where
     D: Digest,
     Update<K, V>: Read,
 {
-    /// `(max_digests, update_cfg, value_cfg)`: total digest cap for the embedded operation
-    /// proof, the read configuration for [Update], and the read configuration for the value type.
+    /// `(max_digests, update_cfg, value_cfg)`: Merkle digest cap forwarded to the embedded
+    /// operation proof, the read configuration for [Update], and the read configuration for the
+    /// value type.
     type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
 
     fn read_cfg(
@@ -131,6 +132,7 @@ where
     K: for<'a> arbitrary::Arbitrary<'a>,
     V::Value: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let op_proof = u.arbitrary()?;
@@ -482,8 +484,7 @@ pub mod tests {
             // Empty range proof should not crash or verify, since even an empty db has a single
             let proof = RangeProof {
                 proof: Proof::default(),
-                prefix_witnesses: vec![],
-                suffix_witnesses: vec![],
+                pending_chunk_digest: None.try_into().unwrap(),
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
@@ -894,8 +895,7 @@ pub mod tests {
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(b"sib")],
             },
-            prefix_witnesses: vec![Sha256::hash(b"peak")],
-            suffix_witnesses: vec![Sha256::hash(b"suf")],
+            pending_chunk_digest: None,
             partial_chunk_digest: None,
             ops_root: Sha256::hash(b"ops"),
         };
@@ -909,8 +909,6 @@ pub mod tests {
 
     fn op_proof_digest_count(proof: &OperationProof<mmb::Family, Digest, 32>) -> usize {
         proof.range_proof.proof.digests.len()
-            + proof.range_proof.prefix_witnesses.len()
-            + proof.range_proof.suffix_witnesses.len()
     }
 
     type CodecExclusionProof =
@@ -932,7 +930,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_key_value_proof_codec_enforces_total_digest_budget() {
+    fn test_key_value_proof_codec_enforces_merkle_digest_budget() {
         let proof = CodecKeyValueProof {
             proof: sample_op_proof(),
             next_key: Sha256::hash(b"next-key"),
@@ -970,7 +968,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_exclusion_proof_codec_enforces_total_digest_budget() {
+    fn test_exclusion_proof_codec_enforces_merkle_digest_budget() {
         let cases = [
             CodecExclusionProof::KeyValue(
                 sample_op_proof(),

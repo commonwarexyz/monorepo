@@ -5,8 +5,8 @@
 //! inactivity floor declared by its commit. Older batches in the chain are tracked as
 //! [`AncestorBounds`] in newest-first order; some may already be on disk and others may not.
 //!
-//! Before applying a batch to the DB, [`Bounds::validate_apply_to`] checks two things shared
-//! across QMDB variants (any, immutable, keyless):
+//! Before applying a batch to the DB, the internal validation checks two things shared across QMDB
+//! variants (any, immutable, keyless):
 //!
 //! - The batch is not stale: the current DB size must match either the batch's recorded
 //!   `db_size`, its `base_size`, or one of its ancestor boundaries.
@@ -14,9 +14,8 @@
 //!   its own commit location. Ancestors already on disk are skipped (their floors were
 //!   validated when they were first applied); the rest of the chain and the tip are checked.
 //!
-//! The helpers [`ancestors`] and [`parent_and_ancestors`] walk the chain via weak parent
-//! references; [`collect_ancestor_bounds`] snapshots them into a `Vec` for storage on a
-//! merkleized batch.
+//! Internal helpers walk the chain via weak parent references and snapshot ancestor bounds into a
+//! `Vec` for storage on a merkleized batch.
 
 use crate::{
     merkle::{Family, Location},
@@ -27,29 +26,29 @@ use std::sync::{Arc, Weak};
 
 /// Bounds declared by an ancestor batch's commit.
 #[derive(Clone)]
-pub(crate) struct AncestorBounds<F: Family> {
+pub struct AncestorBounds<F: Family> {
     /// Inactivity floor declared by the ancestor commit.
-    pub(crate) floor: Location<F>,
+    pub floor: Location<F>,
     /// Total operations after the ancestor batch.
-    pub(crate) end: u64,
+    pub end: u64,
 }
 
 /// Position and inactivity-floor state for a merkleized QMDB batch.
 #[derive(Clone)]
-pub(crate) struct Bounds<F: Family> {
+pub struct Bounds<F: Family> {
     /// Total operations before this batch's own operations.
-    pub(crate) base_size: u64,
+    pub base_size: u64,
     /// Boundary between committed DB operations and operations kept in this batch chain.
     ///
     /// Usually this is the DB size when the batch was created. If older ancestors were
     /// dropped, the boundary moves forward to the oldest ancestor still kept in memory.
-    pub(crate) db_size: u64,
+    pub db_size: u64,
     /// Total operations after this batch.
-    pub(crate) total_size: u64,
+    pub total_size: u64,
     /// Ancestor bounds in newest-first order.
-    pub(crate) ancestors: Vec<AncestorBounds<F>>,
+    pub ancestors: Vec<AncestorBounds<F>>,
     /// Inactivity floor declared by this batch's commit.
-    pub(crate) inactivity_floor: Location<F>,
+    pub inactivity_floor: Location<F>,
 }
 
 impl<F: Family> Bounds<F> {

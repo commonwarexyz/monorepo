@@ -26,7 +26,7 @@ use crate::{
     qmdb::{
         self,
         any::value::ValueEncoding,
-        batch_chain,
+        batch_chain::{self, Bounds},
         compact::{
             batch as compact_batch,
             witness::{self, ServeState},
@@ -127,6 +127,11 @@ where
     /// Return the root digest after this batch is applied.
     pub const fn root(&self) -> D {
         self.root
+    }
+
+    /// Return the [`Bounds`] of the batch.
+    pub const fn bounds(&self) -> &Bounds<F> {
+        &self.bounds
     }
 
     /// Create a new speculative batch with this one as its parent.

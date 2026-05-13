@@ -58,7 +58,7 @@ use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
 
 pub mod any;
-pub(crate) mod batch_chain;
+pub mod batch_chain;
 pub(crate) mod bitmap;
 pub(crate) mod compact;
 #[cfg(test)]
