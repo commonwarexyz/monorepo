@@ -1,3 +1,4 @@
+//! Test harness for marshal variants.
 //!
 //! This module provides a trait-based abstraction that allows writing tests once
 //! and running them against both the standard and coding marshal variants.
