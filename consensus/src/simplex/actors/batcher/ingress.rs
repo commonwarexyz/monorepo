@@ -51,9 +51,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     ..
                 }) = overflow.front()
                 {
-                    // Updates are whole snapshots. Only replace the pending
-                    // update if this one is strictly newer; exact duplicates
-                    // report backoff, while stale updates are dropped.
+                    // Ignore the update unless it is newer than the pending update
                     let pending = (*pending_current, *pending_finalized);
                     if (current, update_finalized) <= pending {
                         return (current, update_finalized) == pending;
@@ -62,8 +60,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 }
                 overflow.push_front(update);
 
-                // Drop constructed votes made stale by the retained update.
-                // The survivors stay in arrival order.
+                // Retain only the newest update and any constructed votes still useful after it
                 overflow.retain(|message| match message {
                     Self::Update { .. } => true,
                     Self::Constructed(vote) => !Self::prunes(current, update_finalized, vote),

@@ -49,11 +49,8 @@ impl<S: Scheme, D: Digest> Message<S, D> {
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        // Overflow is kept in delivery order: an optional finalization pruning
-        // floor at the front, then retained higher-view messages in arrival
-        // order. The finalization must be delivered first because it advances
-        // the voter's current/finalized view; otherwise retained higher-view
-        // timeouts or proposals could be ignored as not yet current.
+        // Ignore the message if there exists a pending finalization
+        // with a view greater than or equal to the new view
         let new_view = message.view();
         if matches!(
             overflow.front(),
@@ -63,6 +60,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             return false;
         }
 
+        // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(&message, Self::Verified(Certificate::Finalization(_), _)) {
             overflow.retain(|pending| {
                 !matches!(pending, Self::Verified(Certificate::Finalization(_), _))
