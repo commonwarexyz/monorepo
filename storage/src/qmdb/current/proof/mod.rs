@@ -314,28 +314,38 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         O: Codec,
     {
         if ops.is_empty() || chunks.is_empty() {
+            debug!("verification failed, empty input");
             return Err(merkle::Error::InvalidProof);
         }
+        // Compute the (non-inclusive) end location of the range.
         let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
+            debug!("verification failed, end_loc overflow");
             return Err(merkle::Error::InvalidProof);
         };
 
         let leaves = self.proof.leaves;
         if end_loc > leaves {
+            debug!(
+                loc = ?end_loc,
+                ?leaves, "verification failed, invalid range"
+            );
             return Err(merkle::Error::InvalidProof);
         }
 
+        // Validate the number of input chunks.
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         let start_chunk = *start_loc / chunk_bits;
         let end_chunk = (*end_loc - 1) / chunk_bits;
         let complete_chunks = *leaves / chunk_bits;
 
         if (end_chunk - start_chunk + 1) != chunks.len() as u64 {
+            debug!("verification failed, chunk metadata length mismatch");
             return Err(merkle::Error::InvalidProof);
         }
 
         let next_bit = *leaves % chunk_bits;
         let has_partial_chunk = next_bit != 0;
+
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let grafting_height = grafting::height::<N>();
@@ -344,6 +354,11 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             grafting::graftable_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
         let pending_chunks = complete_chunks - graftable_chunks;
         if pending_chunks > 1 {
+            debug!(
+                ?complete_chunks,
+                ?graftable_chunks,
+                "verification failed, multiple pending chunks"
+            );
             return Err(merkle::Error::InvalidProof);
         }
         let has_pending_chunk = pending_chunks == 1;
@@ -357,39 +372,72 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         );
 
         if self.pending_chunk_digest.as_ref().is_some() != has_pending_chunk {
+            debug!(
+                pending_in_proof = self.pending_chunk_digest.as_ref().is_some(),
+                expected = has_pending_chunk,
+                "pending_chunk_digest presence does not match bitmap state"
+            );
             return Err(merkle::Error::InvalidProof);
         }
 
+        // For partial chunks, validate the last chunk digest from the proof.
         if has_partial_chunk {
             let Some(last_chunk_digest) = self.partial_chunk_digest else {
+                debug!("proof has no partial chunk digest");
                 return Err(merkle::Error::InvalidProof);
             };
 
+            // If the proof covers an operation in the partial chunk, verify that the
+            // chunk provided by the caller matches the digest embedded in the proof.
             if end_chunk == complete_chunks {
                 let last_chunk = chunks.last().expect("chunks non-empty");
                 if last_chunk_digest != grafting_verifier.digest(last_chunk) {
+                    debug!("last chunk digest does not match expected value");
                     return Err(merkle::Error::InvalidProof);
                 }
             }
         } else if self.partial_chunk_digest.is_some() {
+            debug!("proof has unexpected partial chunk digest");
             return Err(merkle::Error::InvalidProof);
         }
 
+        // For a pending chunk, validate the supplied chunk bytes against the digest in the proof
+        // when the verifier's range includes the pending chunk's index. The pending chunk is at
+        // index `graftable_chunks` (== `complete_chunks - 1` when present).
         if let Some(pending_digest) = self.pending_chunk_digest.as_ref() {
             let pending_idx = graftable_chunks;
             if pending_idx >= start_chunk && pending_idx <= end_chunk {
                 let local = (pending_idx - start_chunk) as usize;
-                let pending_chunk_bytes = &chunks[local];
+                // The earlier `chunks.len() == end_chunk - start_chunk + 1` check makes this
+                // index in-bounds for well-formed inputs; treat any mismatch as a malformed
+                // proof (rather than panicking) since `verify` runs against attacker-supplied data.
+                let Some(pending_chunk_bytes) = chunks.get(local) else {
+                    debug!(
+                        ?pending_idx,
+                        chunks_len = chunks.len(),
+                        "pending chunk index out of range in supplied chunks"
+                    );
+                    return Err(merkle::Error::InvalidProof);
+                };
                 if *pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
+                    debug!("pending chunk digest does not match expected value");
                     return Err(merkle::Error::InvalidProof);
                 }
             }
         }
 
-        let merkle_root = self
-            .proof
-            .reconstruct_root_inner(&grafting_verifier, &elements, start_loc, collected)
-            .map_err(|_| merkle::Error::InvalidProof)?;
+        let merkle_root = match self.proof.reconstruct_root_inner(
+            &grafting_verifier,
+            &elements,
+            start_loc,
+            collected,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                debug!(?error, "invalid proof input");
+                return Err(merkle::Error::InvalidProof);
+            }
+        };
 
         let partial =
             has_partial_chunk.then(|| (next_bit, self.partial_chunk_digest.as_ref().unwrap()));
@@ -444,6 +492,7 @@ where
         Some(&mut collected),
     )?;
     if reconstructed_root != *target_root {
+        debug!("verification failed, root mismatch");
         return Err(merkle::Error::RootMismatch);
     }
 
