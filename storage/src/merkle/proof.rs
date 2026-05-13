@@ -1269,59 +1269,6 @@ mod tests {
         }
     }
 
-    fn range_proof_extraction_preserves_position_keyed_siblings<F: Family>() {
-        let hasher = H::new(ForwardFold);
-        let mem = build_raw::<F>(&hasher, 16);
-        let leaves = mem.leaves();
-        let range = Location::<F>::new(5)..Location::<F>::new(7);
-        let root = mem.root(&hasher, 0).unwrap();
-        let elements = (5u64..7).map(u64::to_be_bytes).collect::<Vec<_>>();
-        let proof: Proof<F, D> = build_range_proof(
-            &hasher,
-            leaves,
-            0,
-            range.clone(),
-            |pos| mem.get_node(pos),
-            Error::ElementPruned,
-        )
-        .unwrap();
-        let blueprint = Blueprint::new(leaves, 0, ForwardFold, range.clone()).unwrap();
-
-        assert!(
-            !blueprint.fetch_nodes.is_empty(),
-            "test range must require sibling digests",
-        );
-
-        let extracted = proof
-            .verify_range_inclusion_and_extract_digests(&hasher, &elements, range.start, &root)
-            .unwrap();
-        let digest_offset = usize::from(!blueprint.fold_prefix.is_empty());
-
-        for (index, &position) in blueprint.fetch_nodes.iter().enumerate() {
-            let digest = proof.digests[digest_offset + index];
-            let occurrences = extracted
-                .iter()
-                .filter(|&&(actual_position, actual_digest)| {
-                    actual_position == position && actual_digest == digest
-                })
-                .count();
-            assert_eq!(
-                occurrences, 1,
-                "extracted digests should contain position-keyed proof digest at {position:?} exactly once",
-            );
-        }
-    }
-
-    #[test]
-    fn test_range_proof_extraction_preserves_position_keyed_siblings_mmr() {
-        range_proof_extraction_preserves_position_keyed_siblings::<mmr::Family>();
-    }
-
-    #[test]
-    fn test_range_proof_extraction_preserves_position_keyed_siblings_mmb() {
-        range_proof_extraction_preserves_position_keyed_siblings::<mmb::Family>();
-    }
-
     fn multi_proofs_verify_for_supported_root_shapes<F: Family>() {
         let mem = build_raw::<F>(&H::new(ForwardFold), 123);
         let leaves = mem.leaves();

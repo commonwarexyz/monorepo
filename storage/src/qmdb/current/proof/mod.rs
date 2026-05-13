@@ -1580,6 +1580,184 @@ mod tests {
     }
 
     #[test_async]
+    async fn test_verify_proof_and_extract_digests_handles_no_grafted_chunks_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+        let start = Location::<F>::new(2);
+        let end = Location::<F>::new(4);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(6, start..end).await;
+
+        let extracted =
+            verify_proof_and_extract_digests(&hasher, &proof, start, &operations, &chunks, &root)
+                .unwrap();
+
+        assert!(!extracted.is_empty());
+    }
+
+    #[test_async]
+    async fn test_verify_proof_and_extract_digests_rejects_malformed_inputs_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+        let start = Location::<F>::new(14);
+        let end = Location::<F>::new(18);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(18, start..end).await;
+
+        let no_operations = Vec::<sha256::Digest>::new();
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                start,
+                &no_operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let no_chunks = Vec::<[u8; N]>::new();
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                start,
+                &operations[..1],
+                &no_chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                F::MAX_LEAVES,
+                &operations[..1],
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                proof.proof.leaves,
+                &operations[..1],
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &proof,
+                start,
+                &operations,
+                &chunks[..chunks.len() - 1],
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let mut missing_partial = proof.clone();
+        missing_partial.partial_chunk_digest = None;
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &missing_partial,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let mut broken_merkle = proof.clone();
+        assert!(!broken_merkle.proof.digests.is_empty());
+        broken_merkle.proof.digests.clear();
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &broken_merkle,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+    }
+
+    #[test_async]
+    async fn test_verify_proof_and_extract_digests_rejects_metadata_mismatches_mmb() {
+        type F = mmb::Family;
+        const N: usize = 1;
+        let start = Location::<F>::new(14);
+        let end = Location::<F>::new(18);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(18, start..end).await;
+
+        assert!(proof.pending_chunk_digest.is_some());
+
+        let mut missing_pending = proof.clone();
+        missing_pending.pending_chunk_digest = None;
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &missing_pending,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let mut wrong_pending = proof.clone();
+        wrong_pending.pending_chunk_digest = Some(hasher.digest(b"wrong pending"));
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &wrong_pending,
+                start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+
+        let aligned_start = Location::<F>::new(8);
+        let aligned_end = Location::<F>::new(12);
+        let (hasher, proof, operations, chunks, root, _ops) =
+            current_range_proof_fixture::<F, N>(16, aligned_start..aligned_end).await;
+        assert!(proof.partial_chunk_digest.is_none());
+
+        // A chunk-aligned proof must not carry partial metadata.
+        let mut unexpected_partial = proof;
+        unexpected_partial.partial_chunk_digest = Some(hasher.digest(b"unexpected partial"));
+        assert!(matches!(
+            verify_proof_and_extract_digests(
+                &hasher,
+                &unexpected_partial,
+                aligned_start,
+                &operations,
+                &chunks,
+                &root,
+            ),
+            Err(merkle::Error::InvalidProof)
+        ));
+    }
+
+    #[test_async]
     async fn test_verify_proof_and_extract_digests_mmr() {
         verify_proof_and_extract_digests_inner::<mmr::Family>().await;
     }
