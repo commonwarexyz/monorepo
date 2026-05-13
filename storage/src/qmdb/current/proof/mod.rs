@@ -555,14 +555,7 @@ where
         let pending_idx = graftable_chunks;
         if pending_idx >= start_chunk && pending_idx <= end_chunk {
             let local = (pending_idx - start_chunk) as usize;
-            let Some(pending_chunk_bytes) = chunks.get(local) else {
-                debug!(
-                    ?pending_idx,
-                    chunks_len = chunks.len(),
-                    "pending chunk index out of range in supplied chunks"
-                );
-                return Err(merkle::Error::InvalidProof);
-            };
+            let pending_chunk_bytes = &chunks[local];
             if *pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
                 debug!("pending chunk digest does not match expected value");
                 return Err(merkle::Error::InvalidProof);
@@ -1680,7 +1673,7 @@ mod tests {
             Err(merkle::Error::InvalidProof)
         ));
 
-        let mut broken_merkle = proof.clone();
+        let mut broken_merkle = proof;
         assert!(!broken_merkle.proof.digests.is_empty());
         broken_merkle.proof.digests.clear();
         assert!(matches!(
