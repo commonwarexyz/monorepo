@@ -22,9 +22,9 @@ pub enum Message<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Message<S, D> {
     // Overflow is kept in canonical delivery order: at most one update at the
-    // front, followed by retained constructed votes in arrival order. The
-    // update carries the strongest current/finalized floor seen while it is
-    // pending, so constructed votes only need that front item for pruning.
+    // front, followed by retained constructed votes in arrival order. Updates
+    // are retained as whole snapshots so leader/proposal data stays paired with
+    // the current/finalized views that produced it.
     fn prunes(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
         let view = vote.view();
         match vote {
@@ -45,53 +45,33 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         };
         Some((*current, *finalized))
     }
-
-    const fn set_finalized(&mut self, retained_finalized: View) {
-        let Self::Update { finalized, .. } = self else {
-            return;
-        };
-        *finalized = retained_finalized;
-    }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match message {
-            mut update @ Self::Update {
+            update @ Self::Update {
                 current,
                 finalized: update_finalized,
                 ..
             } => {
-                let (current, finalized) = if matches!(overflow.front(), Some(Self::Update { .. }))
+                if let Some((pending_current, pending_finalized)) =
+                    overflow.front().and_then(Self::update_bounds)
                 {
-                    let mut pending = overflow.pop_front().expect("pending update");
-                    let (pending_current, pending_finalized) =
-                        pending.update_bounds().expect("pending update");
-                    if current <= pending_current && update_finalized <= pending_finalized {
-                        overflow.push_front(pending);
+                    if current < pending_current
+                        || (current == pending_current && update_finalized <= pending_finalized)
+                    {
                         return current == pending_current && update_finalized == pending_finalized;
                     }
-
-                    let retained_finalized = update_finalized.max(pending_finalized);
-                    if current >= pending_current {
-                        update.set_finalized(retained_finalized);
-                        overflow.push_front(update);
-                        (current, retained_finalized)
-                    } else {
-                        pending.set_finalized(retained_finalized);
-                        overflow.push_front(pending);
-                        (pending_current, retained_finalized)
-                    }
-                } else {
-                    overflow.push_front(update);
-                    (current, update_finalized)
-                };
+                    overflow.pop_front();
+                }
+                overflow.push_front(update);
 
                 // Drop constructed votes made stale by the retained update.
                 // The survivors stay in arrival order.
                 overflow.retain(|message| match message {
                     Self::Update { .. } => true,
-                    Self::Constructed(vote) => !Self::prunes(current, finalized, vote),
+                    Self::Constructed(vote) => !Self::prunes(current, update_finalized, vote),
                 });
                 true
             }
@@ -337,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_current_update_advances_finalized_floor() {
+    fn lower_current_update_is_dropped_without_merging_finalized() {
         let mut overflow = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
@@ -347,9 +327,37 @@ mod tests {
             &mut overflow,
             Message::Constructed(finalize_vote(View::new(3)))
         ));
+        assert!(!Message::handle(
+            &mut overflow,
+            update(View::new(4), View::new(4))
+        ));
+
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Update {
+                current,
+                finalized,
+                ..
+            }) if current == View::new(5) && finalized == View::zero()
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(Message::Constructed(vote))
+                if matches!(vote, Vote::Finalize(_)) && vote.view() == View::new(3)
+        ));
+    }
+
+    #[test]
+    fn newer_update_replaces_pending_without_merging_finalized() {
+        let mut overflow = VecDeque::new();
         assert!(Message::handle(
             &mut overflow,
             update(View::new(4), View::new(4))
+        ));
+        assert!(Message::handle(
+            &mut overflow,
+            update(View::new(5), View::zero())
         ));
 
         assert_eq!(overflow.len(), 1);
@@ -359,7 +367,7 @@ mod tests {
                 current,
                 finalized,
                 ..
-            }) if current == View::new(5) && finalized == View::new(4)
+            }) if current == View::new(5) && finalized == View::zero()
         ));
     }
 
