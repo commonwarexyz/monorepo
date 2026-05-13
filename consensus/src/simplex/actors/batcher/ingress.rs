@@ -27,8 +27,7 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         match vote {
             // Notarize and nullify votes are only useful for the current view
             Vote::Notarize(_) | Vote::Nullify(_) => view < current || view <= finalized,
-            // Finalize votes for prior non-finalized views can still combine
-            // after the voter skips forward
+            // Finalize votes are useful in any view that isn't yet finalized
             Vote::Finalize(_) => view <= finalized,
         }
     }
