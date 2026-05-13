@@ -44,7 +44,6 @@ use crate::{
         Error,
     },
 };
-use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -436,153 +435,159 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         ) == *root
     }
 
-    /// Verify this range proof against `root` and return the authenticated Merkle digests exposed
-    /// during reconstruction.
-    ///
-    /// The returned map is keyed by ops-space Merkle position and includes the digest material
-    /// authenticated by the proof while reconstructing the grafted current root. Returns `None` if
-    /// the proof, operations, chunks, pending/partial chunk metadata, or canonical root do not
-    /// verify.
-    pub fn verify_and_extract_digests<H: CHasher<Digest = D>, O: Codec, const N: usize>(
-        &self,
-        root_hasher: &StandardHasher<H>,
-        start_loc: Location<F>,
-        ops: &[O],
-        chunks: &[[u8; N]],
-        root: &D,
-    ) -> Option<BTreeMap<Position<F>, D>> {
-        if ops.is_empty() || chunks.is_empty() {
-            debug!("verification failed, empty input");
-            return None;
-        }
-        let Some(end_loc) = start_loc.checked_add(ops.len() as u64) else {
-            debug!("verification failed, end_loc overflow");
-            return None;
-        };
+}
 
-        let leaves = self.proof.leaves;
-        if end_loc > leaves {
-            debug!(
-                loc = ?end_loc,
-                ?leaves, "verification failed, invalid range"
-            );
-            return None;
-        }
-
-        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-        let start_chunk = *start_loc / chunk_bits;
-        let end_chunk = (*end_loc - 1) / chunk_bits;
-        let complete_chunks = *leaves / chunk_bits;
-
-        if (end_chunk - start_chunk + 1) != chunks.len() as u64 {
-            debug!("verification failed, chunk metadata length mismatch");
-            return None;
-        }
-
-        let next_bit = *leaves % chunk_bits;
-        let has_partial_chunk = next_bit != 0;
-
-        let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
-        let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let grafting_height = grafting::height::<N>();
-
-        let graftable_chunks =
-            grafting::graftable_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
-        let pending_chunks = complete_chunks - graftable_chunks;
-        if pending_chunks > 1 {
-            debug!(
-                ?complete_chunks,
-                ?graftable_chunks,
-                "verification failed, multiple pending chunks"
-            );
-            return None;
-        }
-        let has_pending_chunk = pending_chunks == 1;
-
-        let grafting_verifier = grafting::Verifier::<F, H>::new(
-            grafting_height,
-            start_chunk,
-            chunk_vec,
-            graftable_chunks,
-            qmdb::ROOT_BAGGING,
-        );
-
-        if self.pending_chunk_digest.as_ref().is_some() != has_pending_chunk {
-            debug!(
-                pending_in_proof = self.pending_chunk_digest.as_ref().is_some(),
-                expected = has_pending_chunk,
-                "pending_chunk_digest presence does not match bitmap state"
-            );
-            return None;
-        }
-
-        if has_partial_chunk {
-            let Some(last_chunk_digest) = self.partial_chunk_digest else {
-                debug!("proof has no partial chunk digest");
-                return None;
-            };
-
-            if end_chunk == complete_chunks {
-                let last_chunk = chunks.last().expect("chunks non-empty");
-                if last_chunk_digest != grafting_verifier.digest(last_chunk) {
-                    debug!("last chunk digest does not match expected value");
-                    return None;
-                }
-            }
-        } else if self.partial_chunk_digest.is_some() {
-            debug!("proof has unexpected partial chunk digest");
-            return None;
-        }
-
-        if let Some(pending_digest) = self.pending_chunk_digest.as_ref() {
-            let pending_idx = graftable_chunks;
-            if pending_idx >= start_chunk && pending_idx <= end_chunk {
-                let local = (pending_idx - start_chunk) as usize;
-                let Some(pending_chunk_bytes) = chunks.get(local) else {
-                    debug!(
-                        ?pending_idx,
-                        chunks_len = chunks.len(),
-                        "pending chunk index out of range in supplied chunks"
-                    );
-                    return None;
-                };
-                if *pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
-                    debug!("pending chunk digest does not match expected value");
-                    return None;
-                }
-            }
-        }
-
-        let mut collected = Vec::new();
-        let merkle_root = match self.proof.reconstruct_root_inner(
-            &grafting_verifier,
-            &elements,
-            start_loc,
-            Some(&mut collected),
-        ) {
-            Ok(root) => root,
-            Err(error) => {
-                debug!(?error, "invalid proof input");
-                return None;
-            }
-        };
-
-        let partial =
-            has_partial_chunk.then(|| (next_bit, self.partial_chunk_digest.as_ref().unwrap()));
-        let reconstructed_root = combine_roots(
-            root_hasher,
-            &self.ops_root,
-            &merkle_root,
-            self.pending_chunk_digest.as_ref(),
-            partial,
-        );
-        if reconstructed_root != *root {
-            debug!("verification failed, root mismatch");
-            return None;
-        }
-
-        Some(collected.into_iter().collect())
+/// Verify that a [RangeProof] is valid for a range of operations and extract all digests (and
+/// their positions) in the range of the proof.
+///
+/// This is the Current equivalent of [`crate::qmdb::verify::verify_proof_and_extract_digests`].
+/// It also validates the supplied bitmap chunks, pending/partial chunk metadata, grafted chunk
+/// hashing, and final canonical root composition.
+pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
+    hasher: &StandardHasher<H>,
+    proof: &RangeProof<F, D>,
+    start_loc: Location<F>,
+    operations: &[Op],
+    chunks: &[[u8; N]],
+    target_root: &D,
+) -> Result<Vec<(Position<F>, D)>, merkle::Error<F>>
+where
+    F: Graftable,
+    Op: Codec,
+    H: CHasher<Digest = D>,
+    D: Digest,
+{
+    if operations.is_empty() || chunks.is_empty() {
+        debug!("verification failed, empty input");
+        return Err(merkle::Error::InvalidProof);
     }
+    let Some(end_loc) = start_loc.checked_add(operations.len() as u64) else {
+        debug!("verification failed, end_loc overflow");
+        return Err(merkle::Error::InvalidProof);
+    };
+
+    let leaves = proof.proof.leaves;
+    if end_loc > leaves {
+        debug!(
+            loc = ?end_loc,
+            ?leaves, "verification failed, invalid range"
+        );
+        return Err(merkle::Error::InvalidProof);
+    }
+
+    let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+    let start_chunk = *start_loc / chunk_bits;
+    let end_chunk = (*end_loc - 1) / chunk_bits;
+    let complete_chunks = *leaves / chunk_bits;
+
+    if (end_chunk - start_chunk + 1) != chunks.len() as u64 {
+        debug!("verification failed, chunk metadata length mismatch");
+        return Err(merkle::Error::InvalidProof);
+    }
+
+    let next_bit = *leaves % chunk_bits;
+    let has_partial_chunk = next_bit != 0;
+
+    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
+    let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
+    let grafting_height = grafting::height::<N>();
+
+    let graftable_chunks =
+        grafting::graftable_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
+    let pending_chunks = complete_chunks - graftable_chunks;
+    if pending_chunks > 1 {
+        debug!(
+            ?complete_chunks,
+            ?graftable_chunks,
+            "verification failed, multiple pending chunks"
+        );
+        return Err(merkle::Error::InvalidProof);
+    }
+    let has_pending_chunk = pending_chunks == 1;
+
+    let grafting_verifier = grafting::Verifier::<F, H>::new(
+        grafting_height,
+        start_chunk,
+        chunk_vec,
+        graftable_chunks,
+        qmdb::ROOT_BAGGING,
+    );
+
+    if proof.pending_chunk_digest.as_ref().is_some() != has_pending_chunk {
+        debug!(
+            pending_in_proof = proof.pending_chunk_digest.as_ref().is_some(),
+            expected = has_pending_chunk,
+            "pending_chunk_digest presence does not match bitmap state"
+        );
+        return Err(merkle::Error::InvalidProof);
+    }
+
+    if has_partial_chunk {
+        let Some(last_chunk_digest) = proof.partial_chunk_digest else {
+            debug!("proof has no partial chunk digest");
+            return Err(merkle::Error::InvalidProof);
+        };
+
+        if end_chunk == complete_chunks {
+            let last_chunk = chunks.last().expect("chunks non-empty");
+            if last_chunk_digest != grafting_verifier.digest(last_chunk) {
+                debug!("last chunk digest does not match expected value");
+                return Err(merkle::Error::InvalidProof);
+            }
+        }
+    } else if proof.partial_chunk_digest.is_some() {
+        debug!("proof has unexpected partial chunk digest");
+        return Err(merkle::Error::InvalidProof);
+    }
+
+    if let Some(pending_digest) = proof.pending_chunk_digest.as_ref() {
+        let pending_idx = graftable_chunks;
+        if pending_idx >= start_chunk && pending_idx <= end_chunk {
+            let local = (pending_idx - start_chunk) as usize;
+            let Some(pending_chunk_bytes) = chunks.get(local) else {
+                debug!(
+                    ?pending_idx,
+                    chunks_len = chunks.len(),
+                    "pending chunk index out of range in supplied chunks"
+                );
+                return Err(merkle::Error::InvalidProof);
+            };
+            if *pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
+                debug!("pending chunk digest does not match expected value");
+                return Err(merkle::Error::InvalidProof);
+            }
+        }
+    }
+
+    let mut collected = Vec::new();
+    let merkle_root = match proof.proof.reconstruct_root_inner(
+        &grafting_verifier,
+        &elements,
+        start_loc,
+        Some(&mut collected),
+    ) {
+        Ok(root) => root,
+        Err(error) => {
+            debug!(?error, "invalid proof input");
+            return Err(merkle::Error::InvalidProof);
+        }
+    };
+
+    let partial =
+        has_partial_chunk.then(|| (next_bit, proof.partial_chunk_digest.as_ref().unwrap()));
+    let reconstructed_root = combine_roots(
+        hasher,
+        &proof.ops_root,
+        &merkle_root,
+        proof.pending_chunk_digest.as_ref(),
+        partial,
+    );
+    if reconstructed_root != *target_root {
+        debug!("verification failed, root mismatch");
+        return Err(merkle::Error::RootMismatch);
+    }
+
+    Ok(collected)
 }
 
 impl<F: Graftable, D: Digest> Write for RangeProof<F, D> {

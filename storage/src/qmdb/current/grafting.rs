@@ -7,7 +7,7 @@
 //! _graftable_ chunk of the bitmap is hashed together with the corresponding subtree root from the
 //! ops tree to produce a single "grafted leaf" digest. These digests, along with their ancestor
 //! nodes, are stored in an in-memory Merkle structure (using grafted-space positions internally,
-//! with ops-space positions in hash pre-images via [GraftedHasher]).
+//! with ops-space positions in hash pre-images).
 //!
 //! A chunk is _graftable_ once its height-`G` ancestor exists in the ops tree as a single node. In
 //! MMR every complete chunk is immediately graftable. MMB's delayed merges allow at most one chunk
@@ -58,7 +58,7 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard hashing with ops-space positions.
 //!
-//! The grafted tree is incrementally maintained via [GraftedHasher] when grafted leaves
+//! The grafted tree is incrementally maintained with ops-positioned hashing when grafted leaves
 //! change.
 
 use crate::merkle::{
