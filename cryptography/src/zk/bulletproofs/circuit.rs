@@ -390,7 +390,8 @@ fn r1cs_to_circuit_maybe_witness<F: Ring>(
     //
     //   <A_ij, z_j> <B_ij, z_j> = <C_ij, z_j>
     //
-    // z_0 = 1, and some of the witness indices of z are to become our v vector.
+    // with `z_0 = 1` (the Arkworks convention). Some of the remaining
+    // witness indices of `z` are to become our v vector.
     //
     // We set:
     //
@@ -403,28 +404,43 @@ fn r1cs_to_circuit_maybe_witness<F: Ring>(
     // To do so, we use additional l_i wires for non-committed witness values.
     // The corresponding r_i and o_i wires are not used anywhere else, so they
     // do not need additional linear constraints.
+    //
+    // The bulletproof circuit reserves output position 0 for the constant
+    // `1` with the same meaning as Arkworks's `z_0`, so contributions from
+    // R1CS column 0 are routed straight to bulletproof column 0 rather
+    // than being placed in a free internal wire (which would let a
+    // malicious prover pick `z_0` freely and bypass any constraint that
+    // depends on the constant).
     r1cs.normalize();
     let (r1cs_width, r1cs_height) = (r1cs.width(), r1cs.height());
     let committed_indices = Set::from_iter_dedup(committed_indices.iter().cloned());
+    assert!(
+        committed_indices.iter().next().is_none_or(|&i| i > 0),
+        "R1CS column 0 (the constant `1`) cannot be a committed value"
+    );
     let v_len = committed_indices.len();
-    // Use x for the internal wires. Any witness that isn't in v is in x.
-    let x_len = r1cs_width - v_len;
-    // This will contain a mapping from old indices in the witness, into new indices.
-    // Any new index > v_len is part of the internal wires.
+    // The R1CS witness indices `1..r1cs_width` get partitioned into v
+    // (committed) and x (free internal-wire) slots. Index 0 is the
+    // constant `1` and is not represented as a witness wire.
+    let non_const_width = r1cs_width.saturating_sub(1);
+    let x_len = non_const_width - v_len;
+    // Mapping from R1CS column index `j > 0` into either a v slot or an
+    // x slot. Stored at `old_to_new[j - 1]`.
     let old_to_new = {
-        let mut out = vec![(true, 0usize); r1cs_width];
+        let mut out = vec![(true, 0usize); non_const_width];
         // What index the current v value is at.
         let mut v_i = 0;
         // What index the current x value is at.
         let mut x_i = 0;
         let mut committed_indices = committed_indices.iter().peekable();
-        for (i, out_i) in out.iter_mut().enumerate() {
-            let (in_v, counter) = if committed_indices.next_if(|&&j| j == i).is_some() {
+        for (j, out_j) in out.iter_mut().enumerate() {
+            let r1cs_index = j + 1;
+            let (in_v, counter) = if committed_indices.next_if(|&&k| k == r1cs_index).is_some() {
                 (true, &mut v_i)
             } else {
                 (false, &mut x_i)
             };
-            *out_i = (in_v, *counter);
+            *out_j = (in_v, *counter);
             *counter += 1;
         }
         out
@@ -432,13 +448,19 @@ fn r1cs_to_circuit_maybe_witness<F: Ring>(
     // The length of the l, r and o vectors.
     let internal_len = x_len + r1cs.height();
     let witness = witness.map(|(witness, blinding)| {
+        debug_assert!(
+            witness.first().is_none_or(|w| w == &F::one()),
+            "R1CS witness slot 0 must be the constant 1"
+        );
         let mut left = &r1cs.a * witness.as_slice();
         let mut right = &r1cs.b * witness.as_slice();
         let mut out = &r1cs.c * witness.as_slice();
         let mut x = vec![F::zero(); x_len];
         let mut values = vec![F::zero(); v_len];
-        for (i, w_i) in witness.into_iter().enumerate() {
-            let (in_v, i_new) = old_to_new[i];
+        // Skip the constant slot at index 0; it is implicit in the
+        // bulletproof circuit's output position 0.
+        for (i, w_i) in witness.into_iter().enumerate().skip(1) {
+            let (in_v, i_new) = old_to_new[i - 1];
             let array = if in_v { &mut values } else { &mut x };
             array[i_new] = w_i;
         }
@@ -465,14 +487,20 @@ fn r1cs_to_circuit_maybe_witness<F: Ring>(
         (2 * r1cs_height, 1 + v_len + 2 * internal_len, r1cs.c),
     ] {
         for ((i, j), m_ij) in m {
-            let (in_v, j_new) = old_to_new[j];
-            let col = if in_v {
-                // In this case, we just have a v value, and those start at index 1.
-                j_new + 1
+            let col = if j == 0 {
+                // R1CS column 0 is the constant `1`, which lives at the
+                // bulletproof circuit's output position 0.
+                0
             } else {
-                // Non-committed witness values live in `x`, which is stored
-                // at the tail of the LEFT wires region.
-                x_col_base + j_new
+                let (in_v, j_new) = old_to_new[j - 1];
+                if in_v {
+                    // In this case, we just have a v value, and those start at index 1.
+                    j_new + 1
+                } else {
+                    // Non-committed witness values live in `x`, which is stored
+                    // at the tail of the LEFT wires region.
+                    x_col_base + j_new
+                }
             };
             weights[(row_start + i, col)] = m_ij;
         }
@@ -1713,7 +1741,7 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, Circuit, Setup, SparseMatrix};
+    use super::{fuzz, r1cs_to_circuit, Circuit, R1cs, Setup, SparseMatrix, Witness};
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
@@ -1796,5 +1824,60 @@ mod test {
             u.arbitrary::<fuzz::Plan>()?.run(u)?;
             Ok(())
         });
+    }
+
+    /// Regression test for an R1CS-to-circuit conversion soundness bug:
+    /// `r1cs_to_circuit` did not preserve the constant column `z_0 = 1`
+    /// of the Arkworks-style R1CS witness. R1CS column 0 was being
+    /// routed to a free internal wire (`x[0]`) of the bulletproof
+    /// circuit instead of the circuit's hard-coded constant column
+    /// (output position 0), letting a malicious prover pick `z_0`
+    /// freely and trivially satisfy any constraint that depended on
+    /// the constant.
+    ///
+    /// Here we encode the R1CS constraint
+    ///
+    /// ```text
+    /// (z_0 + z_1) * z_0 = 4 * z_0
+    /// ```
+    ///
+    /// Under the standard `z_0 = 1` convention, the only satisfying
+    /// assignment has `z_1 = 3`. We treat `z_1` as a committed value,
+    /// build the verifier-side circuit, and confirm that a maliciously
+    /// hand-crafted witness corresponding to `z_0 = 0`, `z_1 = 0` is
+    /// rejected.
+    #[test]
+    fn r1cs_to_circuit_enforces_constant_column() {
+        // R1CS over F: (z_0 + z_1) * z_0 = 4 * z_0
+        let mut a = SparseMatrix::<F>::default();
+        a[(0, 0)] = F::one();
+        a[(0, 1)] = F::one();
+        let mut b = SparseMatrix::<F>::default();
+        b[(0, 0)] = F::one();
+        let mut c = SparseMatrix::<F>::default();
+        c[(0, 0)] = F::from(4u8);
+        let r1cs = R1cs { a, b, c };
+
+        // Treat z_1 (R1CS column 1) as the committed value.
+        let circuit = r1cs_to_circuit(r1cs, &[1usize]);
+
+        // Hand-craft a witness as a malicious prover would: commit to
+        // `v[0] = 0` (i.e. `z_1 = 0`) and pretend every internal wire
+        // is zero. Under the standard `z_0 = 1` convention this would
+        // violate the R1CS (the only honest solution is `z_1 = 3`).
+        let malicious = Witness::new(
+            vec![F::zero()], // v = [z_1] = [0]
+            vec![F::zero()], // blinding
+            vec![F::zero()], // left wires
+            vec![F::zero()], // right wires
+            vec![F::zero()], // out wires
+        )
+        .expect("witness lengths must match the circuit");
+
+        assert!(
+            !malicious.is_satisfied(&circuit),
+            "circuit derived from an R1CS that depends on the constant \
+             column must reject witnesses corresponding to z_0 != 1"
+        );
     }
 }
