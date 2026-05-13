@@ -40,41 +40,40 @@ impl<S: Scheme, D: Digest> Message<S, D> {
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match message {
-            mut update @ Self::Update {
+            update @ Self::Update {
                 current,
                 finalized: update_finalized,
                 ..
             } => {
-                let (current, finalized) = if let Some(Self::Update {
-                    current: pending_current,
-                    finalized: pending_finalized,
-                    ..
-                }) = overflow.front()
+                let (current, finalized) = if let Some(pending @ Self::Update { .. }) =
+                    overflow.front_mut()
                 {
-                    let pending_current = *pending_current;
-                    let pending_finalized = *pending_finalized;
-                    let exact = current == pending_current && update_finalized == pending_finalized;
-                    let improves_current = current > pending_current;
-                    let improves_finalized = update_finalized > pending_finalized;
-                    if !improves_current && !improves_finalized {
-                        return exact;
+                    let Self::Update {
+                        current: pending_current,
+                        finalized: pending_finalized,
+                        ..
+                    } = pending
+                    else {
+                        unreachable!("pending matched as update");
+                    };
+                    let (pending_current, pending_finalized) =
+                        (*pending_current, *pending_finalized);
+                    if current <= pending_current && update_finalized <= pending_finalized {
+                        return current == pending_current && update_finalized == pending_finalized;
                     }
 
                     let retained_finalized = update_finalized.max(pending_finalized);
-                    if improves_current || current == pending_current {
-                        let Self::Update { finalized, .. } = &mut update else {
-                            unreachable!("update matched above");
-                        };
-                        *finalized = retained_finalized;
-                        *overflow.front_mut().expect("front checked above") = update;
-                        (current, retained_finalized)
-                    } else {
-                        let Some(Self::Update { finalized, .. }) = overflow.front_mut() else {
-                            unreachable!("front checked above");
-                        };
-                        *finalized = retained_finalized;
-                        (pending_current, retained_finalized)
+                    if current >= pending_current {
+                        *pending = update;
                     }
+                    let Self::Update {
+                        current, finalized, ..
+                    } = pending
+                    else {
+                        unreachable!("pending matched as update");
+                    };
+                    *finalized = retained_finalized;
+                    (*current, retained_finalized)
                 } else {
                     overflow.push_front(update);
                     (current, update_finalized)
@@ -100,14 +99,16 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     return false;
                 }
 
-                if overflow.iter().any(|message| {
-                    matches!(
-                        message,
-                        Self::Constructed(pending)
-                            if pending.view() == vote.view()
-                                && std::mem::discriminant(pending)
-                                    == std::mem::discriminant(&vote)
-                    )
+                if overflow.iter().any(|message| match message {
+                    Self::Constructed(pending) if pending.view() == vote.view() => {
+                        match (pending, &vote) {
+                            (Vote::Notarize(_), Vote::Notarize(_))
+                            | (Vote::Nullify(_), Vote::Nullify(_))
+                            | (Vote::Finalize(_), Vote::Finalize(_)) => true,
+                            _ => false,
+                        }
+                    }
+                    _ => false,
                 }) {
                     return true;
                 }
