@@ -36,15 +36,6 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         }
     }
 
-    const fn update_bounds(&self) -> Option<(View, View)> {
-        let Self::Update {
-            current, finalized, ..
-        } = self
-        else {
-            return None;
-        };
-        Some((*current, *finalized))
-    }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
@@ -55,13 +46,15 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 finalized: update_finalized,
                 ..
             } => {
-                if let Some((pending_current, pending_finalized)) =
-                    overflow.front().and_then(Self::update_bounds)
+                if let Some(Self::Update {
+                    current: pending_current,
+                    finalized: pending_finalized,
+                    ..
+                }) = overflow.front()
                 {
-                    if current < pending_current
-                        || (current == pending_current && update_finalized <= pending_finalized)
-                    {
-                        return current == pending_current && update_finalized == pending_finalized;
+                    let pending = (*pending_current, *pending_finalized);
+                    if (current, update_finalized) <= pending {
+                        return (current, update_finalized) == pending;
                     }
                     overflow.pop_front();
                 }
