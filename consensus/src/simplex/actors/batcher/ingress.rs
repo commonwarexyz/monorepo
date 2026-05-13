@@ -35,40 +35,53 @@ impl<S: Scheme, D: Digest> Message<S, D> {
             Vote::Finalize(_) => view <= finalized,
         }
     }
+
+    const fn update_bounds(&self) -> Option<(View, View)> {
+        let Self::Update {
+            current, finalized, ..
+        } = self
+        else {
+            return None;
+        };
+        Some((*current, *finalized))
+    }
+
+    const fn set_finalized(&mut self, retained_finalized: View) {
+        let Self::Update { finalized, .. } = self else {
+            return;
+        };
+        *finalized = retained_finalized;
+    }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match message {
-            update @ Self::Update {
+            mut update @ Self::Update {
                 current,
                 finalized: update_finalized,
                 ..
             } => {
-                let (current, finalized) = if let Some(Self::Update {
-                    current: pending_current,
-                    finalized: pending_finalized,
-                    ..
-                }) = overflow.front()
+                let (current, finalized) = if matches!(overflow.front(), Some(Self::Update { .. }))
                 {
+                    let mut pending = overflow.pop_front().expect("pending update");
                     let (pending_current, pending_finalized) =
-                        (*pending_current, *pending_finalized);
+                        pending.update_bounds().expect("pending update");
                     if current <= pending_current && update_finalized <= pending_finalized {
+                        overflow.push_front(pending);
                         return current == pending_current && update_finalized == pending_finalized;
                     }
+
                     let retained_finalized = update_finalized.max(pending_finalized);
-                    let front = overflow.front_mut().unwrap();
                     if current >= pending_current {
-                        *front = update;
+                        update.set_finalized(retained_finalized);
+                        overflow.push_front(update);
+                        (current, retained_finalized)
+                    } else {
+                        pending.set_finalized(retained_finalized);
+                        overflow.push_front(pending);
+                        (pending_current, retained_finalized)
                     }
-                    let Self::Update {
-                        current, finalized, ..
-                    } = front
-                    else {
-                        unreachable!("front is an update");
-                    };
-                    *finalized = retained_finalized;
-                    (*current, retained_finalized)
                 } else {
                     overflow.push_front(update);
                     (current, update_finalized)
