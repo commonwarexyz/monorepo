@@ -66,8 +66,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 (Self::Proposal(new_proposal), Self::Proposal(old_proposal)) => {
                     new_proposal.view() == old_proposal.view()
                 }
-                // Timeout reasons are equivalent for control flow; retain the first queued reason.
-                (Self::Timeout(new_view, _), Self::Timeout(old_view, _)) => new_view == old_view,
+                (Self::Timeout(new_view, _), Self::Timeout(old_view, _)) => new_view == old_view, // only retain the first queued timeout reason
                 (Self::Verified(new_certificate, _), Self::Verified(old_certificate, _)) => {
                     new_certificate.view() == old_certificate.view()
                         && matches!(
