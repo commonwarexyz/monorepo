@@ -50,8 +50,10 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(&message, Self::Verified(Certificate::Finalization(_), _)) {
             overflow.retain(|pending| {
-                !matches!(pending, Self::Verified(Certificate::Finalization(_), _))
-                    && pending.view() > new_view
+                if matches!(pending, Self::Verified(Certificate::Finalization(_), _)) {
+                    return false;
+                }
+                pending.view() > new_view
             });
             overflow.push_front(message);
             return true;
