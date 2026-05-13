@@ -1015,4 +1015,13 @@ mod tests {
                 .await;
         });
     }
+
+    #[test_traced("INFO")]
+    fn test_variable_rewind_after_reopen_repeated_key_gap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_rewind_after_reopen_repeated_key_gap(ctx, open::<mmb::Family>)
+                .await;
+        });
+    }
 }
