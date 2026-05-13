@@ -631,13 +631,20 @@ impl VrfCommitments {
         strategy: &impl Strategy,
     ) -> Map<PublicKey, Map<PublicKey, G1>> {
         // Materialize the batch up front. Each sender's `msg` must parse as a
-        // `Summary` (the format the prover passed in); senders whose `msg` is
-        // malformed are dropped before we touch the proof system.
+        // `Summary` (the format the prover passed in), and the sender must
+        // have supplied exactly one `pedersen_to_plain` proof per commitment;
+        // senders that fail either check are dropped before we touch the
+        // proof system. The per-receiver proof count is enforced here (rather
+        // than at the codec layer) because that is the first point at which
+        // we hold both the commitment map and the proof vector together.
         let outputs: Vec<(PublicKey, Bytes, Self)> = outputs
             .into_iter()
             .filter_map(|(sender, msg, commitments)| {
                 let mut buf: &[u8] = msg.as_ref();
                 let _: Summary = ReadExt::read(&mut buf).ok()?;
+                if commitments.proof.pedersen_to_plain.len() != commitments.commitments.len() {
+                    return None;
+                }
                 Some((sender, msg, commitments))
             })
             .collect();
@@ -817,6 +824,51 @@ mod tests {
 
         // Tamper with one commitment so the bulletproofs check should fail.
         commitments.perturb(&receiver_pks[0], &G1::generator());
+
+        let result = VrfCommitments::check_batch(
+            &mut rng,
+            &TEST_SETUP,
+            &outer_transcript,
+            std::iter::once((sender_pk, msg, commitments)),
+            &Sequential,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn check_batch_rejects_short_pedersen_to_plain_vector() {
+        let mut rng = test_rng();
+
+        let sender_sk = PrivateKey::random(&mut rng);
+        let sender_pk = sender_sk.public();
+        let receiver_pks: Vec<PublicKey> = (0..3)
+            .map(|_| PrivateKey::random(&mut rng).public())
+            .collect();
+
+        let nonce = Summary::random(&mut rng);
+        let msg = Bytes::copy_from_slice(nonce.as_ref());
+
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+
+        let mut prover_t = outer_transcript.fork(b"dealer vrf");
+        prover_t.commit(sender_pk.encode());
+        let (_outputs, mut commitments) = sender_sk.vrf_batch_checked(
+            &mut rng,
+            &TEST_SETUP,
+            &mut prover_t,
+            &nonce,
+            receiver_pks.iter().cloned(),
+            &Sequential,
+        );
+
+        // Drop the last `pedersen_to_plain` proof so the sender now has fewer
+        // proofs than commitments. `check_batch` must reject the sender (drop
+        // them from the result) rather than silently verifying only a prefix.
+        commitments.proof.pedersen_to_plain.pop().unwrap();
+        assert!(
+            commitments.proof.pedersen_to_plain.len() < commitments.commitments.len(),
+            "test setup expects fewer proofs than commitments",
+        );
 
         let result = VrfCommitments::check_batch(
             &mut rng,
