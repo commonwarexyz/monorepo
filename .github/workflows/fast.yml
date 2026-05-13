@@ -52,8 +52,8 @@ jobs:
     - name: Install Dylint
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
       run: |
-        cargo install cargo-dylint --version 5.0.0 --locked
-        cargo install dylint-link --version 5.0.0 --locked
+        cargo install cargo-dylint --version 6.0.0 --locked
+        cargo install dylint-link --version 6.0.0 --locked
     - name: Fmt
       run: just check-fmt
     - name: Lint
