@@ -176,7 +176,9 @@ where
         participant: Participant,
     ) -> bool {
         // Until we have tracked `skip_timeout` views, everyone stays active so startup does not
-        // immediately skip leaders whose `latest_seen` entry is still at the default view.
+        // immediately skip leaders whose `latest_seen` entry is still at the default view. This is
+        // a work-entry heuristic: skipped or coalesced updates can make `work.len()` smaller than
+        // the elapsed view span.
         if work.len() < self.skip_timeout.get() as usize {
             return true;
         }
