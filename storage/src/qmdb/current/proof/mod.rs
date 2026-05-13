@@ -303,7 +303,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
     /// Reconstruct the canonical current root, optionally collecting authenticated leaf digests
     /// while walking the embedded Merkle proof.
-    fn reconstruct_current_root<H, O, const N: usize>(
+    fn reconstruct_root<H, O, const N: usize>(
         &self,
         root_hasher: &StandardHasher<H>,
         start_loc: Location<F>,
@@ -463,7 +463,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         root: &H::Digest,
     ) -> bool {
         matches!(
-            self.reconstruct_current_root(root_hasher, start_loc, ops, chunks, None),
+            self.reconstruct_root(root_hasher, start_loc, ops, chunks, None),
             Ok(reconstructed_root) if reconstructed_root == *root
         )
     }
@@ -486,13 +486,8 @@ where
     D: Digest,
 {
     let mut collected = Vec::new();
-    let reconstructed_root = proof.reconstruct_current_root(
-        hasher,
-        start_loc,
-        operations,
-        chunks,
-        Some(&mut collected),
-    )?;
+    let reconstructed_root =
+        proof.reconstruct_root(hasher, start_loc, operations, chunks, Some(&mut collected))?;
     if reconstructed_root != *target_root {
         debug!("verification failed, root mismatch");
         return Err(merkle::Error::RootMismatch);
