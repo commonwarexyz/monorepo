@@ -691,6 +691,7 @@ impl DealerLog {
             rng,
             setup,
             &Transcript::resume(*info.summary()),
+            &info.players,
             commitments,
             strategy,
         );
