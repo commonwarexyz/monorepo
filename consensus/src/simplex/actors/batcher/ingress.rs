@@ -21,10 +21,7 @@ pub enum Message<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
-    // Overflow is kept in canonical delivery order: at most one update at the
-    // front, followed by retained constructed votes in arrival order. Updates
-    // are retained as whole snapshots so leader/proposal data stays paired with
-    // the current/finalized views that produced it.
+    // Return whether the retained update makes a constructed vote stale.
     fn prunes(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
         let view = vote.view();
         match vote {

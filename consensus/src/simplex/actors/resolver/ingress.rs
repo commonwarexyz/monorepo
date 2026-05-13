@@ -18,6 +18,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
+    // Return the message view used for pruning and deduplication.
     fn view(&self) -> View {
         match self {
             Self::Certificate(c) => c.view(),
@@ -25,6 +26,7 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
         }
     }
 
+    // Return whether this message duplicates a pending overflow message.
     fn duplicates(&self, pending: &Self) -> bool {
         match (self, pending) {
             (Self::Certificate(a), Self::Certificate(b)) if a.view() == b.view() => matches!(

@@ -24,6 +24,7 @@ pub enum Message<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
+    // Return the message view used for pruning and deduplication.
     fn view(&self) -> View {
         match self {
             Self::Proposal(p) => p.view(),
@@ -32,6 +33,7 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         }
     }
 
+    // Return whether this message duplicates a pending overflow message.
     fn duplicates(&self, pending: &Self) -> bool {
         match (self, pending) {
             (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
