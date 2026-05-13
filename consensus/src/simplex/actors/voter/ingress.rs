@@ -36,18 +36,12 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         match (self, pending) {
             (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
             (Self::Timeout(x, _), Self::Timeout(y, _)) => x == y,
-            (
-                Self::Verified(Certificate::Notarization(x), _),
-                Self::Verified(Certificate::Notarization(y), _),
-            ) => x.view() == y.view(),
-            (
-                Self::Verified(Certificate::Nullification(x), _),
-                Self::Verified(Certificate::Nullification(y), _),
-            ) => x.view() == y.view(),
-            (
-                Self::Verified(Certificate::Finalization(x), _),
-                Self::Verified(Certificate::Finalization(y), _),
-            ) => x.view() == y.view(),
+            (Self::Verified(a, _), Self::Verified(b, _)) if a.view() == b.view() => matches!(
+                (a, b),
+                (Certificate::Notarization(_), Certificate::Notarization(_))
+                    | (Certificate::Nullification(_), Certificate::Nullification(_))
+                    | (Certificate::Finalization(_), Certificate::Finalization(_))
+            ),
             _ => false,
         }
     }
@@ -60,8 +54,8 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         // order. The finalization must be delivered first because it advances
         // the voter's current/finalized view; otherwise retained higher-view
         // timeouts or proposals could be ignored as not yet current.
-        if let Self::Verified(Certificate::Finalization(finalization), from_resolver) = message {
-            let new_view = finalization.view();
+        let new_view = message.view();
+        if let Self::Verified(Certificate::Finalization(_), _) = &message {
             if matches!(
                 overflow.front(),
                 Some(Self::Verified(Certificate::Finalization(pending), _))
@@ -70,29 +64,24 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 return false;
             }
             overflow.retain(|pending| pending.view() > new_view);
-            overflow.push_front(Self::Verified(
-                Certificate::Finalization(finalization),
-                from_resolver,
-            ));
+            overflow.push_front(message);
             return true;
         }
 
-        let new_view = message.view();
         let start = match overflow.front() {
-            Some(Self::Verified(Certificate::Finalization(pending), _))
-                if pending.view() >= new_view =>
-            {
-                return false;
+            Some(Self::Verified(Certificate::Finalization(p), _)) if p.view() >= new_view => {
+                return false
             }
             Some(Self::Verified(Certificate::Finalization(_), _)) => 1,
             _ => 0,
         };
-        for pending in overflow.iter().skip(start) {
-            if message.duplicates(pending) {
-                return true;
-            }
+        if overflow
+            .iter()
+            .skip(start)
+            .any(|pending| message.duplicates(pending))
+        {
+            return true;
         }
-
         overflow.push_back(message);
         true
     }
