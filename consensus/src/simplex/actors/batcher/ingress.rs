@@ -25,19 +25,16 @@ impl<S: Scheme, D: Digest> Message<S, D> {
     // front, followed by constructed votes sorted by view and vote kind. The
     // update carries the strongest current/finalized floor seen while it is
     // pending, so later inserts only need to compare against that front item.
-    fn vote_kind(vote: &Vote<S, D>) -> u8 {
-        match vote {
+    fn vote_key(vote: &Vote<S, D>) -> (View, u8) {
+        let kind = match vote {
             Vote::Notarize(_) => 0,
             Vote::Nullify(_) => 1,
             Vote::Finalize(_) => 2,
-        }
+        };
+        (vote.view(), kind)
     }
 
-    fn vote_key(vote: &Vote<S, D>) -> (View, u8) {
-        (vote.view(), Self::vote_kind(vote))
-    }
-
-    fn prunes_vote(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
+    fn prunes(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
         let view = vote.view();
         match vote {
             // Notarize and nullify votes are only useful for the current view
@@ -46,61 +43,6 @@ impl<S: Scheme, D: Digest> Message<S, D> {
             // after the voter skips forward
             Vote::Finalize(_) => view <= finalized,
         }
-    }
-
-    // A queued update is a pruning floor for overflow. Returns true when this
-    // update would drop `vote` once the batcher actor delivers the update.
-    fn prunes(&self, vote: &Vote<S, D>) -> bool {
-        let Self::Update {
-            current, finalized, ..
-        } = self
-        else {
-            return false;
-        };
-        Self::prunes_vote(*current, *finalized, vote)
-    }
-
-    fn insert_vote(overflow: &mut VecDeque<Self>, vote: Vote<S, D>) -> bool {
-        let key = Self::vote_key(&vote);
-        let start = matches!(overflow.front(), Some(Self::Update { .. })) as usize;
-
-        // New votes usually arrive in delivery order. Check the tail first to
-        // avoid scanning overflow in the common append or duplicate case.
-        if let Some(Self::Constructed(pending)) = overflow.back() {
-            match key.cmp(&Self::vote_key(pending)) {
-                Ordering::Greater => {
-                    overflow.push_back(Self::Constructed(vote));
-                    return true;
-                }
-                Ordering::Equal => return true,
-                Ordering::Less => {}
-            }
-        }
-
-        for index in start..overflow.len() {
-            let pending = match overflow.get(index) {
-                Some(Self::Constructed(pending)) => pending,
-                _ => continue,
-            };
-            match key.cmp(&Self::vote_key(pending)) {
-                Ordering::Less => {
-                    overflow.insert(index, Self::Constructed(vote));
-                    return true;
-                }
-                Ordering::Equal => return true,
-                Ordering::Greater => {}
-            }
-        }
-
-        overflow.push_back(Self::Constructed(vote));
-        true
-    }
-
-    fn prune_votes(overflow: &mut VecDeque<Self>, current: View, finalized: View) {
-        overflow.retain(|message| match message {
-            Self::Update { .. } => true,
-            Self::Constructed(vote) => !Self::prunes_vote(current, finalized, vote),
-        });
     }
 }
 
@@ -150,15 +92,49 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 // A new update changes the pruning floor. Retain order is
                 // enough because constructed votes were already sorted.
                 if overflow.len() > 1 {
-                    Self::prune_votes(overflow, current, finalized);
+                    overflow.retain(|message| match message {
+                        Self::Update { .. } => true,
+                        Self::Constructed(vote) => !Self::prunes(current, finalized, vote),
+                    });
                 }
                 true
             }
             Self::Constructed(vote) => {
-                if overflow.front().is_some_and(|update| update.prunes(&vote)) {
+                if matches!(
+                    overflow.front(),
+                    Some(Self::Update {
+                        current,
+                        finalized,
+                        ..
+                    }) if Self::prunes(*current, *finalized, &vote)
+                ) {
                     return false;
                 }
-                Self::insert_vote(overflow, vote)
+
+                let key = Self::vote_key(&vote);
+                // New votes usually arrive in delivery order. Check the tail
+                // first to avoid searching in the common append or duplicate case.
+                if let Some(Self::Constructed(pending)) = overflow.back() {
+                    match key.cmp(&Self::vote_key(pending)) {
+                        Ordering::Greater => {
+                            overflow.push_back(Self::Constructed(vote));
+                            return true;
+                        }
+                        Ordering::Equal => return true,
+                        Ordering::Less => {}
+                    }
+                }
+
+                match overflow.binary_search_by(|pending| match pending {
+                    Self::Update { .. } => Ordering::Less,
+                    Self::Constructed(pending) => Self::vote_key(pending).cmp(&key),
+                }) {
+                    Ok(_) => true,
+                    Err(index) => {
+                        overflow.insert(index, Self::Constructed(vote));
+                        true
+                    }
+                }
             }
         }
     }

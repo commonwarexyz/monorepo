@@ -32,10 +32,6 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         }
     }
 
-    const fn is_finalization(&self) -> bool {
-        matches!(self, Self::Verified(Certificate::Finalization(_), _))
-    }
-
     fn duplicates(&self, pending: &Self) -> bool {
         match (self, pending) {
             (Self::Proposal(x), Self::Proposal(y)) => x.view() == y.view(),
@@ -55,37 +51,41 @@ impl<S: Scheme, D: Digest> Message<S, D> {
             _ => false,
         }
     }
-
-    fn front_finalization(overflow: &VecDeque<Self>) -> Option<View> {
-        match overflow.front() {
-            Some(Self::Verified(Certificate::Finalization(f), _)) => Some(f.view()),
-            _ => None,
-        }
-    }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        let new_view = message.view();
-
         // Overflow is kept in delivery order: an optional finalization pruning
         // floor at the front, then retained higher-view messages in arrival
         // order. The finalization must be delivered first because it advances
         // the voter's current/finalized view; otherwise retained higher-view
         // timeouts or proposals could be ignored as not yet current.
-        if message.is_finalization() {
-            if Self::front_finalization(overflow).is_some_and(|view| view >= new_view) {
+        if let Self::Verified(Certificate::Finalization(finalization), from_resolver) = message {
+            let new_view = finalization.view();
+            if matches!(
+                overflow.front(),
+                Some(Self::Verified(Certificate::Finalization(pending), _))
+                    if pending.view() >= new_view
+            ) {
                 return false;
             }
             overflow.retain(|pending| pending.view() > new_view);
-            overflow.push_front(message);
+            overflow.push_front(Self::Verified(
+                Certificate::Finalization(finalization),
+                from_resolver,
+            ));
             return true;
         }
 
-        let start = match Self::front_finalization(overflow) {
-            Some(view) if view >= new_view => return false,
-            Some(_) => 1,
-            None => 0,
+        let new_view = message.view();
+        let start = match overflow.front() {
+            Some(Self::Verified(Certificate::Finalization(pending), _))
+                if pending.view() >= new_view =>
+            {
+                return false;
+            }
+            Some(Self::Verified(Certificate::Finalization(_), _)) => 1,
+            _ => 0,
         };
         for pending in overflow.iter().skip(start) {
             if message.duplicates(pending) {
