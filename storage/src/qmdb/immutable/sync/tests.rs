@@ -128,7 +128,6 @@ where
             fetch_batch_size,
             target: Target {
                 root: target_root,
-                canonical_root: None,
                 range: non_empty_range!(target_oldest_retained_loc, target_op_count),
             },
             context: context.child("client"),
@@ -191,7 +190,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: target_root,
-                canonical_root: None,
                 range: non_empty_range!(target_oldest_retained_loc, target_op_count),
             },
             context: context.child("client"),
@@ -243,7 +241,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: target_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, op_count),
             },
             context: client_context.child("client"),
@@ -317,7 +314,6 @@ where
                 db_config: H::config(&format!("update_test_{}", context.next_u64()), &context),
                 target: Target {
                     root: initial_root,
-                    canonical_root: None,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
@@ -333,7 +329,7 @@ where
             loop {
                 client = match client.step().await.unwrap() {
                     NextStep::Continue(new_client) => new_client,
-                    NextStep::Complete(_) => panic!("client should not be complete"),
+                    NextStep::Complete(..) => panic!("client should not be complete"),
                 };
                 let log_size = Contiguous::size(client.journal()).await;
                 if log_size > *initial_lower_bound {
@@ -345,7 +341,6 @@ where
         update_sender
             .send(Target {
                 root: final_root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, final_upper_bound),
             })
             .await
@@ -401,7 +396,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: target_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, op_count),
             },
             context: context.child("client"),
@@ -457,7 +451,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("sync"),
@@ -511,7 +504,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("sync"),
@@ -561,7 +553,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
@@ -577,7 +568,6 @@ where
         update_sender
             .send(Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(
                     initial_lower_bound.checked_sub(1).unwrap(),
                     initial_upper_bound
@@ -624,7 +614,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
@@ -640,7 +629,6 @@ where
         update_sender
             .send(Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
             })
             .await
@@ -698,7 +686,6 @@ where
             fetch_batch_size: NZU64!(1),
             target: Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
@@ -713,7 +700,6 @@ where
         update_sender
             .send(Target {
                 root: final_root,
-                canonical_root: None,
                 range: non_empty_range!(final_lower_bound, final_upper_bound),
             })
             .await
@@ -771,7 +757,6 @@ where
             fetch_batch_size: NZU64!(100),
             target: Target {
                 root: target_root,
-                canonical_root: None,
                 range: non_empty_range!(bounds.start, bounds.end),
             },
             context: context.child("client"),
@@ -836,7 +821,6 @@ where
             fetch_batch_size: NZU64!(20),
             target: Target {
                 root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -853,7 +837,6 @@ where
         let _ = update_sender
             .send(Target {
                 root: sha256::Digest::from([2u8; 32]),
-                canonical_root: None,
                 range: non_empty_range!(lower_bound + 1, upper_bound + 1),
             })
             .await;

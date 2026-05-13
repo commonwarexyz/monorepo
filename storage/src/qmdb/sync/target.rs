@@ -15,12 +15,7 @@ use commonware_utils::range::NonEmptyRange;
 pub struct Target<F: Family, D: Digest> {
     /// The ops root the sync engine verifies streaming batches against.
     pub root: D,
-    /// The canonical (public) root, if it differs from the ops root.
-    ///
-    /// For `current` databases, this is the full canonical root that additionally commits
-    /// to the activity bitmap. For other database types, leave this as `None`.
-    pub canonical_root: Option<D>,
-    /// Range of operations to sync.
+    /// Range of operations to sync
     pub range: NonEmptyRange<Location<F>>,
 }
 
@@ -28,7 +23,6 @@ impl<F: Family, D: Digest> Clone for Target<F, D> {
     fn clone(&self) -> Self {
         Self {
             root: self.root,
-            canonical_root: self.canonical_root,
             range: self.range.clone(),
         }
     }
@@ -36,9 +30,7 @@ impl<F: Family, D: Digest> Clone for Target<F, D> {
 
 impl<F: Family, D: Digest> PartialEq for Target<F, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.root == other.root
-            && self.canonical_root == other.canonical_root
-            && self.range == other.range
+        self.root == other.root && self.range == other.range
     }
 }
 
@@ -47,14 +39,13 @@ impl<F: Family, D: Digest> Eq for Target<F, D> {}
 impl<F: Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
-        self.canonical_root.write(buf);
         self.range.write(buf);
     }
 }
 
 impl<F: Family, D: Digest> EncodeSize for Target<F, D> {
     fn encode_size(&self) -> usize {
-        self.root.encode_size() + self.canonical_root.encode_size() + self.range.encode_size()
+        self.root.encode_size() + self.range.encode_size()
     }
 }
 
@@ -63,7 +54,6 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let canonical_root = Option::<D>::read(buf)?;
         let range = NonEmptyRange::<Location<F>>::read(buf)?;
         if !range.start().is_valid() || !range.end().is_valid() {
             return Err(CodecError::Invalid(
@@ -71,11 +61,7 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
                 "range bounds out of valid range",
             ));
         }
-        Ok(Self {
-            root,
-            canonical_root,
-            range,
-        })
+        Ok(Self { root, range })
     }
 }
 
@@ -91,7 +77,6 @@ where
         let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {
             root,
-            canonical_root: None,
             range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
         })
     }
@@ -149,7 +134,6 @@ mod tests {
     fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
         Target {
             root,
-            canonical_root: None,
             range: non_empty_range!(Location::new(start), Location::new(end)),
         }
     }
@@ -177,10 +161,9 @@ mod tests {
 
     #[test]
     fn test_sync_target_read_invalid_bounds() {
-        // Manually encode root + canonical_root + two Locations to bypass the Range write panic
+        // Manually encode root + two Locations to bypass the Range write panic
         let mut buffer = Vec::new();
         sha256::Digest::from([42; 32]).write(&mut buffer);
-        Option::<sha256::Digest>::None.write(&mut buffer);
         Location::<MmrFamily>::new(100).write(&mut buffer); // start
         Location::<MmrFamily>::new(50).write(&mut buffer); // end (< start = invalid)
 
@@ -194,7 +177,6 @@ mod tests {
         let root = sha256::Digest::from([42; 32]);
         let mut buffer = Vec::new();
         root.write(&mut buffer);
-        Option::<sha256::Digest>::None.write(&mut buffer);
         (Location::<MmrFamily>::new(100)..Location::<MmrFamily>::new(100)).write(&mut buffer);
 
         let mut cursor = Cursor::new(buffer);

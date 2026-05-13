@@ -232,7 +232,6 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            canonical_root: None,
             range: non_empty_range!(sync_boundary, size),
         },
     };

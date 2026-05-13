@@ -9,8 +9,9 @@
 //! For sync, the engine internally targets the **ops root** (not the canonical root). The
 //! operations and proof format are identical to `any`; direct proof verifiers should use
 //! `qmdb::hasher`. The bitmap is reconstructed deterministically from the operations after sync
-//! completes. The [current::sync](commonware_storage::qmdb::current::sync) wrapper verifies an
-//! [OpsRootWitness] against a trusted canonical root before and after syncing.
+//! completes. The `current::sync` wrapper verifies each target's `OpsRootWitness` against its
+//! trusted canonical root, then checks the reconstructed canonical root for the target the
+//! engine finishes on.
 //!
 //! This module re-uses the same [`Operation`] type as [`super::any`] since the underlying
 //! operations log is the same.

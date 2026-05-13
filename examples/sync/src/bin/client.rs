@@ -217,15 +217,14 @@ where
 
 /// Repeatedly sync a Current database to the server's state.
 ///
-/// Uses the canonical-root-aware [current::sync::sync] wrapper. The initial target includes
-/// a canonical root and [OpsRootWitness]; the wrapper verifies the witness before starting
-/// the engine and checks the canonical root after completion. Target updates during sync
-/// use verified ops-root targets.
+/// Uses the `current::sync::sync` wrapper. The wrapper verifies each target's `OpsRootWitness`
+/// before forwarding its ops root to the shared sync engine, then checks the canonical root for the
+/// target the engine finishes on.
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
-    use commonware_storage::qmdb::{self, current as current_qmdb};
+    use commonware_storage::qmdb::current as current_qmdb;
 
     info!("starting Current database sync process");
     let mut iteration = 0u32;
@@ -242,68 +241,58 @@ where
             "received current sync target"
         );
 
-        let hasher = qmdb::hasher::<commonware_sync::Hasher>();
-        let initial_ops_target = initial_target
-            .to_engine_target(&hasher)
-            .ok_or("initial ops root witness verification failed")?;
-
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
             let resolver = resolver.clone();
-            let initial_ops_target = initial_ops_target.clone();
+            let mut current_target_root = initial_target.canonical_root;
             let target_update_interval = config.target_update_interval;
-            context.child("target_update").spawn(move |context| async move {
-                let hasher = qmdb::hasher::<commonware_sync::Hasher>();
-                let mut current_ops_target = initial_ops_target;
-                loop {
-                    context.sleep(target_update_interval).await;
-                    match resolver.get_current_sync_target().await {
-                        Ok(new_target) => {
-                            let Some(new_ops_target) = new_target.to_engine_target(&hasher) else {
-                                warn!("target update witness verification failed, skipping");
-                                continue;
-                            };
-                            if current_ops_target != new_ops_target {
-                                match update_sender.clone().try_send(new_ops_target.clone()) {
-                                    Ok(()) => {
-                                        info!("target updated");
-                                        current_ops_target = new_ops_target;
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
-                                    Err(err) => {
-                                        warn!(?err, "failed to send target update");
-                                        return Err(Error::TargetUpdateChannel {
-                                            reason: err.to_string(),
-                                        });
+            context
+                .child("target_update")
+                .spawn(move |context| async move {
+                    loop {
+                        context.sleep(target_update_interval).await;
+                        match resolver.get_current_sync_target().await {
+                            Ok(new_target) => {
+                                if current_target_root != new_target.canonical_root {
+                                    let new_root = new_target.canonical_root;
+                                    match update_sender.clone().try_send(new_target) {
+                                        Ok(()) => {
+                                            info!("target updated");
+                                            current_target_root = new_root;
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+                                        Err(err) => {
+                                            warn!(?err, "failed to send target update");
+                                            return Err(Error::TargetUpdateChannel {
+                                                reason: err.to_string(),
+                                            });
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(err) => {
-                            warn!(?err, "failed to get sync target from server");
+                            Err(err) => {
+                                warn!(?err, "failed to get sync target from server");
+                            }
                         }
                     }
-                }
-            })
+                })
         };
 
         let db_config = current::create_config(&context);
-        let database: current::Database<_> = current_qmdb::sync::sync(
-            current_qmdb::sync::Config {
-                context: context.child("sync"),
-                resolver,
-                target: initial_target,
-                max_outstanding_requests: config.max_outstanding_requests,
-                fetch_batch_size: config.batch_size,
-                apply_batch_size: 1024,
-                db_config,
-                update_rx: Some(update_receiver),
-                finish_rx: None,
-                reached_target_tx: None,
-                max_retained_roots: 8,
-            },
-        )
+        let database: current::Database<_> = current_qmdb::sync::sync(current_qmdb::sync::Config {
+            context: context.child("sync"),
+            resolver,
+            target: initial_target,
+            max_outstanding_requests: config.max_outstanding_requests,
+            fetch_batch_size: config.batch_size,
+            apply_batch_size: 1024,
+            db_config,
+            update_rx: Some(update_receiver),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
         .await?;
 
         target_update_handle.abort();

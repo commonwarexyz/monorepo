@@ -522,16 +522,15 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let client_suffix = context.next_u64().to_string();
         let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
         let target_db = std::sync::Arc::new(target_db);
-        // Supply the trusted canonical root so `build_db`'s authentication check actually
-        // runs: this is the success-path coverage for the overlay-state authentication
-        // anchor. A bad-root rejection path test belongs with the focused sync tests.
+        // This uses the shared sync engine's ops-root target directly. The focused
+        // `canonical_root_sync` tests below cover the current sync wrapper that authenticates ops
+        // roots against trusted canonical roots.
         let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
             target: crate::qmdb::sync::Target {
                 root: sync_root,
-                canonical_root: None,
                 range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -612,7 +611,6 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
 
         let stale_target = crate::qmdb::sync::Target {
             root: sync_root,
-            canonical_root: None,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
@@ -626,7 +624,6 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
 
         let matching_target = crate::qmdb::sync::Target {
             root: sync_root,
-            canonical_root: None,
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
@@ -805,6 +802,7 @@ mod canonical_root_sync {
             },
         },
     };
+    use commonware_runtime::{Clock, Spawner};
     use commonware_utils::NZU64;
 
     type Db = crate::qmdb::current::unordered::variable::Db<
@@ -818,6 +816,17 @@ mod canonical_root_sync {
         Sequential,
     >;
 
+    async fn apply_round(db: &mut Db, key: Digest, round: u64) {
+        let merkleized = db
+            .new_batch()
+            .write(key, Some(Digest::from([round as u8; 32])))
+            .merkleize(db, None)
+            .await
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+    }
+
     async fn build_target_db(context: &mut Context) -> Db {
         let suffix = context.next_u64().to_string();
         let cfg = variable_config::<crate::translator::TwoCap>(&suffix, context);
@@ -825,14 +834,7 @@ mod canonical_root_sync {
 
         let key = Digest::from([7u8; 32]);
         for round in 0..10u64 {
-            let merkleized = db
-                .new_batch()
-                .write(key, Some(Digest::from([round as u8; 32])))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
+            apply_round(&mut db, key, round).await;
         }
         db.sync().await.unwrap();
         db
@@ -889,6 +891,59 @@ mod canonical_root_sync {
     }
 
     #[test_traced("INFO")]
+    fn test_canonical_root_sync_tracks_target_update() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let mut target_db = build_target_db(&mut context).await;
+            let initial_target = make_current_target(&target_db).await;
+
+            let key = Digest::from([7u8; 32]);
+            for round in 10..20u64 {
+                apply_round(&mut target_db, key, round).await;
+            }
+            target_db.sync().await.unwrap();
+            let updated_target = make_current_target(&target_db).await;
+            let expected_root = updated_target.canonical_root;
+
+            let (update_sender, update_receiver) = commonware_utils::channel::mpsc::channel(1);
+            let (finish_sender, finish_receiver) = commonware_utils::channel::mpsc::channel(1);
+            update_sender.send(updated_target).await.unwrap();
+            drop(update_sender);
+            context.child("finish").spawn(move |context| async move {
+                context.sleep(std::time::Duration::from_millis(1)).await;
+                finish_sender.send(()).await.unwrap();
+            });
+
+            let client_suffix = context.next_u64().to_string();
+            let client_config =
+                variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+            let target_db = std::sync::Arc::new(target_db);
+
+            let synced_db: Db = current_sync::sync(current_sync::Config {
+                context: context.child("client"),
+                resolver: target_db.clone(),
+                target: initial_target,
+                max_outstanding_requests: 1,
+                fetch_batch_size: NZU64!(1),
+                apply_batch_size: 1024,
+                db_config: client_config,
+                update_rx: Some(update_receiver),
+                finish_rx: Some(finish_receiver),
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(synced_db.root(), expected_root);
+
+            synced_db.destroy().await.unwrap();
+            let target_db = std::sync::Arc::into_inner(target_db).unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_canonical_root_sync_rejects_invalid_witness() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
@@ -915,6 +970,61 @@ mod canonical_root_sync {
                 db_config: client_config,
                 update_rx: None,
                 finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            })
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(crate::qmdb::sync::Error::Engine(
+                    crate::qmdb::sync::EngineError::OpsRootWitnessInvalid
+                ))
+            ));
+
+            let target_db = std::sync::Arc::into_inner(target_db).unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_canonical_root_sync_rejects_invalid_update_witness() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let mut target_db = build_target_db(&mut context).await;
+            let initial_target = make_current_target(&target_db).await;
+
+            let key = Digest::from([7u8; 32]);
+            for round in 10..20u64 {
+                apply_round(&mut target_db, key, round).await;
+            }
+            target_db.sync().await.unwrap();
+            let mut updated_target = make_current_target(&target_db).await;
+            updated_target.witness = OpsRootWitness {
+                grafted_root: Digest::from([0xFFu8; 32]),
+                ..updated_target.witness
+            };
+
+            let (update_sender, update_receiver) = commonware_utils::channel::mpsc::channel(1);
+            let (_finish_sender, finish_receiver) = commonware_utils::channel::mpsc::channel(1);
+            update_sender.send(updated_target).await.unwrap();
+            drop(update_sender);
+
+            let client_suffix = context.next_u64().to_string();
+            let client_config =
+                variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+            let target_db = std::sync::Arc::new(target_db);
+
+            let result: Result<Db, _> = current_sync::sync(current_sync::Config {
+                context: context.child("client"),
+                resolver: target_db.clone(),
+                target: initial_target,
+                max_outstanding_requests: 1,
+                fetch_batch_size: NZU64!(1),
+                apply_batch_size: 1024,
+                db_config: client_config,
+                update_rx: Some(update_receiver),
+                finish_rx: Some(finish_receiver),
                 reached_target_tx: None,
                 max_retained_roots: 8,
             })

@@ -968,7 +968,6 @@ mod test {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: target_root,
-                    canonical_root: None,
                     range: non_empty_range!(lower_bound, upper_bound),
                 },
                 context: ctx.child("client"),

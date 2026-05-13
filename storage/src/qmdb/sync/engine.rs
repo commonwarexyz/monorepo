@@ -44,11 +44,11 @@ type Error<DB, R> =
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
-pub(crate) enum NextStep<C, D> {
+pub(crate) enum NextStep<C, D: Database> {
     /// Sync should continue with the updated client
     Continue(C),
-    /// Sync is complete with the final database
-    Complete(D),
+    /// Sync is complete with the final database and target
+    Complete(D, Target<D::Family, D::Digest>),
 }
 
 /// Events that can occur during synchronization
@@ -783,8 +783,8 @@ where
     /// 3. Handles different event types (target updates, fetch results)
     /// 4. Coordinates request scheduling and operation application
     ///
-    /// Returns `StepResult::Complete(database)` when sync is finished, or
-    /// `StepResult::Continue(self)` when more work remains.
+    /// Returns `NextStep::Complete(database, target)` when sync is finished, or
+    /// `NextStep::Continue(self)` when more work remains.
     pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
@@ -826,17 +826,7 @@ where
                 }));
             }
 
-            if let Some(expected_canonical) = self.target.canonical_root {
-                let got_canonical = database.canonical_root();
-                if got_canonical != expected_canonical {
-                    return Err(SyncError::Engine(EngineError::CanonicalRootMismatch {
-                        expected: expected_canonical,
-                        actual: got_canonical,
-                    }));
-                }
-            }
-
-            return Ok(NextStep::Complete(database));
+            return Ok(NextStep::Complete(database, self.target));
         }
 
         // Wait for the next synchronization event
@@ -850,18 +840,26 @@ where
         self.handle_event(event).await
     }
 
-    /// Run sync to completion, returning the final database when done.
+    /// Run sync to completion, returning the final database and accepted target.
     ///
     /// This method repeatedly calls `step()` until sync is complete. The `step()` method
-    /// handles building the final database and verifying the root digest.
-    pub async fn sync(mut self) -> Result<DB, Error<DB, R>> {
+    /// handles building the final database and verifying the root digest. Returning the target lets
+    /// wrappers check any metadata they attach to target updates.
+    pub(crate) async fn sync_with_target(
+        mut self,
+    ) -> Result<(DB, Target<DB::Family, DB::Digest>), Error<DB, R>> {
         // Run sync loop until completion
         loop {
             match self.step().await? {
                 NextStep::Continue(new_engine) => self = new_engine,
-                NextStep::Complete(database) => return Ok(database),
+                NextStep::Complete(database, target) => return Ok((database, target)),
             }
         }
+    }
+
+    /// Run sync to completion, returning the final database.
+    pub async fn sync(self) -> Result<DB, Error<DB, R>> {
+        self.sync_with_target().await.map(|(database, _)| database)
     }
 }
 

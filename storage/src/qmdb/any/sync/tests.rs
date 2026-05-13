@@ -156,7 +156,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: Digest::from([1u8; 32]),
-                canonical_root: None,
                 range: non_empty_range!(Location::new(0), Location::new(10)),
             },
             context: context.child("client"),
@@ -201,7 +200,6 @@ where
             context: context.child("client"),
             target: Target {
                 root: target_root,
-                canonical_root: None,
                 range: non_empty_range!(Location::new(0), Location::new(5)),
             },
             resolver,
@@ -254,7 +252,6 @@ where
             fetch_batch_size,
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, target_op_count),
             },
             context: client_context.child("client"),
@@ -337,7 +334,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
@@ -418,7 +414,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
@@ -522,7 +517,6 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
@@ -594,7 +588,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
@@ -611,7 +604,6 @@ where
         update_sender
             .send(Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(
                     initial_lower_bound.checked_sub(1).unwrap(),
                     initial_upper_bound.checked_add(1).unwrap()
@@ -665,7 +657,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
@@ -682,7 +673,6 @@ where
         update_sender
             .send(Target {
                 root: initial_root,
-                canonical_root: None,
                 range: non_empty_range!(
                     initial_lower_bound,
                     initial_upper_bound.checked_sub(1).unwrap()
@@ -750,7 +740,6 @@ where
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
-                    canonical_root: None,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
@@ -766,7 +755,6 @@ where
             update_sender
                 .send(Target {
                     root: new_sync_root,
-                    canonical_root: None,
                     range: non_empty_range!(new_lower_bound, new_upper_bound),
                 })
                 .await
@@ -824,7 +812,6 @@ where
             fetch_batch_size: NZU64!(20),
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -845,7 +832,6 @@ where
             .send(Target {
                 // Dummy target update
                 root: Digest::from([2u8; 32]),
-                canonical_root: None,
                 range: non_empty_range!(lower_bound + 1, upper_bound + 1),
             })
             .await;
@@ -893,7 +879,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root,
-                canonical_root: None,
                 range: non_empty_range!(initial_lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -908,12 +893,10 @@ where
 
         let first_target = Target {
             root,
-            canonical_root: None,
             range: non_empty_range!(initial_lower_bound.checked_add(1).unwrap(), upper_bound),
         };
         let second_target = Target {
             root,
-            canonical_root: None,
             range: non_empty_range!(initial_lower_bound.checked_add(2).unwrap(), upper_bound),
         };
         update_sender.send(first_target).await.unwrap();
@@ -948,7 +931,6 @@ where
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let initial_target = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -960,7 +942,6 @@ where
         let updated_upper_bound = target_db.bounds().await.end;
         let updated_target = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(updated_lower_bound, updated_upper_bound),
         };
         let updated_verification_root = target_db.root();
@@ -1074,7 +1055,6 @@ where
         target_db = H::apply_ops(target_db, H::create_ops(8)).await;
         let initial_target = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1084,7 +1064,6 @@ where
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
         let first_update = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1094,7 +1073,6 @@ where
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 2)).await;
         let second_update = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1199,7 +1177,6 @@ where
         let upper_bound = target_db.bounds().await.end;
         let target = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(lower_bound, upper_bound),
         };
         let verification_root = target_db.root();
@@ -1272,7 +1249,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: H::sync_target_root(&target_db),
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -1323,7 +1299,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: H::sync_target_root(&target_db),
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -1385,7 +1360,6 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 db_config: H::config(&context.next_u64().to_string(), &context),
                 target: Target {
                     root: initial_sync_root,
-                    canonical_root: None,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
@@ -1402,7 +1376,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 // Step the client until we have processed a batch of operations
                 client = match client.step().await.unwrap() {
                     NextStep::Continue(new_client) => new_client,
-                    NextStep::Complete(_) => panic!("client should not be complete"),
+                    NextStep::Complete(..) => panic!("client should not be complete"),
                 };
                 let log_size = client.journal().size().await;
                 if log_size > initial_lower_bound {
@@ -1430,7 +1404,6 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             update_sender
                 .send(Target {
                     root: new_sync_root,
-                    canonical_root: None,
                     range: non_empty_range!(new_lower_bound, new_upper_bound),
                 })
                 .await
@@ -1496,7 +1469,6 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("client"),
@@ -1564,7 +1536,6 @@ where
             fetch_batch_size: NZU64!(100),
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
@@ -1915,7 +1886,6 @@ where
             fetch_batch_size: NZU64!(100),
             target: Target {
                 root: sync_root,
-                canonical_root: None,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
@@ -2048,7 +2018,6 @@ where
 
         let old_target = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(
                 target_db.inactivity_floor_loc().await,
                 target_db.bounds().await.end
@@ -2058,7 +2027,6 @@ where
         target_db = H::apply_ops(target_db, H::create_ops_seeded(3, seed + 1)).await;
         let new_target = Target {
             root: H::sync_target_root(&target_db),
-            canonical_root: None,
             range: non_empty_range!(
                 target_db.inactivity_floor_loc().await,
                 target_db.bounds().await.end
@@ -2106,7 +2074,7 @@ where
 
         engine = match engine.step().await.unwrap() {
             NextStep::Continue(engine) => engine,
-            NextStep::Complete(_) => panic!("target update should not complete sync"),
+            NextStep::Complete(..) => panic!("target update should not complete sync"),
         };
 
         let _ = release_historical_gap_tx.send(());
@@ -2120,7 +2088,7 @@ where
                 result = next_step.as_mut() => {
                     engine = match result.unwrap() {
                         NextStep::Continue(engine) => engine,
-                        NextStep::Complete(_) => panic!("boundary retry should still be required"),
+                        NextStep::Complete(..) => panic!("boundary retry should still be required"),
                     };
                     assert_eq!(
                         engine.journal().size().await,
