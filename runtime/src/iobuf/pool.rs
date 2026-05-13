@@ -489,6 +489,18 @@ unsafe impl Send for SizeClassLease {}
 unsafe impl Sync for SizeClassLease {}
 
 impl SizeClassLease {
+    /// Returns the raw `Arc` pointer for `class`.
+    ///
+    /// `Arc::increment_strong_count` and `Arc::decrement_strong_count` require
+    /// pointers derived from `Arc::as_ptr`/`Arc::into_raw`. Building the pointer
+    /// through `&SizeClass` is equivalent for normal codegen, but loses the
+    /// provenance Miri expects for raw `Arc` refcount operations.
+    #[inline(always)]
+    fn class_ptr(class: &Arc<SizeClass>) -> ptr::NonNull<SizeClass> {
+        // SAFETY: `Arc::as_ptr` never returns null.
+        unsafe { ptr::NonNull::new_unchecked(Arc::as_ptr(class).cast_mut()) }
+    }
+
     /// Builds a lease from a banked class reference.
     ///
     /// # Safety
@@ -498,7 +510,7 @@ impl SizeClassLease {
     #[inline(always)]
     unsafe fn from_banked(class: &Arc<SizeClass>) -> Self {
         // SAFETY: guaranteed by the caller.
-        unsafe { Self::from_banked_ptr(ptr::NonNull::from(class.as_ref())) }
+        unsafe { Self::from_banked_ptr(Self::class_ptr(class)) }
     }
 
     /// Builds a lease from a banked class reference and raw class identity.
@@ -517,7 +529,7 @@ impl SizeClassLease {
     #[inline(always)]
     fn retain_banked(class: &Arc<SizeClass>) {
         // SAFETY: the pointer comes from a live `Arc<SizeClass>` borrowed above.
-        unsafe { Arc::increment_strong_count(ptr::from_ref(class.as_ref())) };
+        unsafe { Arc::increment_strong_count(Self::class_ptr(class).as_ptr()) };
     }
 
     /// Retains `class` for a buffer leaving the global freelist.
@@ -704,7 +716,7 @@ impl TlsSizeClassCache {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
-            class: ptr::NonNull::from(class.as_ref()),
+            class: SizeClassLease::class_ptr(class),
             entries,
             len: 0,
             capacity,
