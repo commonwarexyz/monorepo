@@ -293,6 +293,7 @@ impl Info {
             let mut transcript = Transcript::new(NAMESPACE);
             transcript
                 .commit(round.encode())
+                .commit(previous.encode())
                 .commit(dealers.encode())
                 .commit(players.encode());
             transcript.summarize()
