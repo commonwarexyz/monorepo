@@ -133,6 +133,7 @@ use crate::{
     merkle::{Family as _, Graftable},
 };
 pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
+use commonware_cryptography::Digest;
 
 /// MMB-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
@@ -228,6 +229,8 @@ impl merkle::Family for Family {
 }
 
 impl Graftable for Family {
+    type PendingChunk<D: Digest> = Option<D>;
+
     fn peak_birth_size(pos: Position, height: u32) -> u64 {
         if height == 0 {
             // Leaves have no merge delay; born as soon as appended.

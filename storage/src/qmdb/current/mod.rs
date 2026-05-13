@@ -3,17 +3,16 @@
 //!
 //! # Examples
 //!
-//! See [`crate::qmdb::any`] for batch API examples (forking, sequential
-//! commit, staleness). The Current layer uses the same batch API.
+//! See [`crate::qmdb::any`] for batch API examples (forking, sequential commit, staleness). The
+//! Current layer uses the same batch API.
 //!
 //! # Batch validity
 //!
 //! Current batches are branch-scoped views, not immutable snapshots.
 //!
 //! A batch remains valid only while its ancestor chain is still the committed prefix of the DB.
-//! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid
-//! objects: do not read through them, do not build children from them, and do not attempt to
-//! apply them.
+//! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid objects:
+//! do not read through them, do not build children from them, and do not attempt to apply them.
 //!
 //! A short rule of thumb:
 //! - A batch is only usable while it stays on the winning branch.
@@ -43,32 +42,32 @@
 //!
 //! A Current database ([db::Db]) wraps an Any database and adds:
 //!
-//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if
-//!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
-//!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
+//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if operation _i_
+//!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
+//!   8` bits each). `N` must be a power of two.
 //!
-//!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though
-//!   a CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
-//!   0. Maintaining this makes the chunk containing the latest commit deterministic across
-//!   init and `apply_batch`.
+//!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though a
+//!   CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
+//!   0. Maintaining this makes the chunk containing the latest commit deterministic across init and
+//!   `apply_batch`.
 //!
 //!   The bitmap lives on the inner `any::Db.bitmap`; `current::Db` reads through it for
 //!   grafted-tree leaves and proofs.
 //!
-//! - **Grafted tree**: An in-memory Merkle structure of digests at and above the
-//!   _grafting height_ in the ops tree. This is the core of how bitmap and ops state are combined
-//!   into a single authenticated structure (see below).
+//! - **Grafted tree**: An in-memory Merkle structure of digests at and above the _grafting height_
+//!   in the ops tree. This is the core of how bitmap and ops state are combined into a single
+//!   authenticated structure (see below).
 //!
-//! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed
-//!   to restore the grafted tree after pruning old bitmap chunks.
+//! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
+//!   restore the grafted tree after pruning old bitmap chunks.
 //!
 //! # Grafting: combining the activity status bitmap and the ops tree
 //!
 //! ## The problem
 //!
 //! Naively authenticating the bitmap and ops tree as two independent Merkle structures would
-//! require two separate proofs per operation -- one for the operation's value, one for its
-//! activity status. This doubles proof sizes.
+//! require two separate proofs per operation -- one for the operation's value, one for its activity
+//! status. This doubles proof sizes.
 //!
 //! ## The solution
 //!
@@ -87,14 +86,21 @@
 //! The all-zero identity means that for pruned regions (where every operation is inactive), the
 //! grafted tree is structurally identical to the ops tree at and above the grafting height.
 //!
-//! Above the grafting height, internal nodes use standard hashing over the grafted leaves.
-//! Below the grafting height, the ops tree is unchanged.
+//! Above the grafting height, internal nodes use standard hashing over the grafted leaves. Below
+//! the grafting height, the ops tree is unchanged.
+//!
+//! Not every complete chunk is graftable. A chunk is _graftable_ when its height-`h` ancestor
+//! exists as a single node in the ops tree. In MMR every complete chunk is immediately graftable.
+//! In MMB, delayed merges can leave a chunk bit-complete before its height-`h` ancestor is born;
+//! that chunk is _pending_ and its digest is hashed directly into the canonical root until the
+//! merge happens, at which point it migrates into the grafted tree. See [Pending and partial
+//! chunks](#pending-and-partial-chunks).
 //!
 //! ## Example
 //!
-//! Consider 8 operations with `N = 1` (8-bit chunks, so `h = log2(8) = 3`). But to illustrate
-//! the structure more clearly, let's use a smaller example: 8 operations with chunk size 4 bits
-//! (`h = 2`), yielding 2 complete bitmap chunks:
+//! Consider 8 operations with `N = 1` (8-bit chunks, so `h = log2(8) = 3`). But to illustrate the
+//! structure more clearly, let's use a smaller example: 8 operations with chunk size 4 bits (`h =
+//! 2`), yielding 2 complete bitmap chunks:
 //!
 //! ```text
 //! Ops tree positions (8 leaves):
@@ -122,9 +128,8 @@
 //! Position 14 (above grafting height) is a standard internal node:
 //! - `pos 14: hash(14 || digest(pos 6) || digest(pos 13))`
 //!
-//! The grafted tree stores positions 6, 13, and 14. The ops tree stores everything below
-//! (positions 0-5 and 7-12). Together they form a single virtual Merkle structure whose root
-//! authenticates
+//! The grafted tree stores positions 6, 13, and 14. The ops tree stores everything below (positions
+//! 0-5 and 7-12). Together they form a single virtual Merkle structure whose root authenticates
 //! both the operations and their activity status.
 //!
 //! ## Proof generation and verification
@@ -135,29 +140,97 @@
 //!
 //! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
 //! height, it uses standard hashing. At the grafting height, it detects the boundary and
-//! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks
-//! the grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf
-//! is the ops subtree root itself (identity optimization -- see `grafting::Verifier::node`).
-//! Above the grafting height, it resumes standard hashing. If the reconstructed root
-//! matches the expected root and bit _i_ is set in the chunk, the operation is proven active.
+//! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks the
+//! grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf is the
+//! ops subtree root itself (identity optimization -- see `grafting::Verifier::node`). Above the
+//! grafting height, it resumes standard hashing. If the reconstructed root matches the expected
+//! root and bit _i_ is set in the chunk, the operation is proven active.
 //!
 //! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
 //! proof verification at the grafting boundary.
 //!
-//! ## Partial chunks
+//! Range proofs over a window that includes the trailing pending or partial chunk additionally
+//! carry that chunk's digest in the proof and have the verifier re-derive it from the supplied
+//! chunk bytes. Graftable-chunk reconstruction is always single-peak: the height-`gh` ancestor
+//! exists in the ops tree and yields a single grafted leaf to fold against the bitmap chunk.
 //!
-//! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than
-//! `N * 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no
-//! corresponding complete subtree in the ops tree. To still authenticate these bits, the partial
-//! chunk's digest and bit count are folded into the canonical root hash:
+//! ## Pending and partial chunks
+//!
+//! Two kinds of bitmap chunk are not grafted into the overlay at height `gh`; instead, their
+//! digests are hashed into the canonical root directly alongside `ops_root` and `grafted_root`.
+//!
+//! - **Partial chunk.** The trailing bitmap chunk is usually incomplete (fewer than `N * 8` bits).
+//!   It has no grafted leaf because no corresponding subtree exists in the ops tree.
+//!
+//! - **Pending chunk.** A chunk whose bits are complete but whose height-`gh` ancestor has not yet
+//!   been born in the ops tree. Its leaves are split across multiple sub-`gh` peaks, so there is no
+//!   single ops node to graft onto. The chunk is _deferred_ until the merge happens, at which point
+//!   it migrates into the grafted tree.
+//!
+//! Pending chunks only arise in families with delayed merges (MMB). Define `birth_chunk_0` as the
+//! value of `ops_leaves` at which chunk 0's height-`gh` ancestor is first born in the ops tree.
+//! Then chunk `i` is graftable when `ops_leaves >= i * 2^gh + birth_chunk_0`.
+//!
+//! - In MMR, `birth_chunk_0 = 2^gh`, so a chunk is graftable the moment it is bit-complete and
+//!   pending chunks never exist.
+//! - In MMB, `birth_chunk_0 = 3 * 2^(gh-1) - 1`, which exceeds the chunk size `2^gh` by `2^(gh-1) -
+//!   1`. That gap is the **pending window** for chunk `i`: ops_leaves values for which chunk `i` is
+//!   bit-complete but not yet graftable.
+//!
+//! The pending window is strictly narrower than one chunk stride, so **at most one chunk is pending
+//! at any time**. The pending and partial chunks are independent: at `gh >= 3` both can be present;
+//! at `gh == 1` the pending window is empty and only a partial chunk is ever present.
+//!
+//! ### Chunk lifecycle (MMB)
 //!
 //! ```text
-//! root = hash(ops_root || grafted_root || next_bit || hash(partial_chunk))
+//!                       ops_leaves N grows --->
+//!
+//!   chunk i state:    incomplete    pending          graftable
+//!                    (bits being   (bits set;       (h=gh ancestor born;
+//!                     appended)    ancestor not      chunk grafted onto
+//!                                  yet born)         that ops node)
+//!
+//!   N reaches:                    (i+1)*2^gh     i*2^gh + birth_chunk_0
+//!                                 ^                  ^
+//!                                 |                  |
+//!                                 chunk completes    chunk becomes graftable
+//!
+//!   Where chunk i's bytes live:
+//!     incomplete -> canonical root, as partial_chunk_digest
+//!     pending    -> canonical root, as pending_chunk_digest
+//!     graftable  -> grafted tree
+//!
+//!   At any moment, the canonical root may include zero, one, or both of {pending, partial};
+//!   the grafted tree commits to every chunk in [pruned_chunks, graftable_chunks).
 //! ```
 //!
-//! where `next_bit` is the index of the next unset position in the partial chunk and
-//! `grafted_root` is the root of the grafted tree (which covers only complete chunks).
-//! When all chunks are complete, the partial chunk components are omitted.
+//! ### Worked example: pending + partial coexistence (MMB, `gh = 3`)
+//!
+//! For `gh = 3` MMB, `birth_chunk_0 = 3 * 2^(gh-1) - 1 = 11`. Chunk 0 fills at `N = 8` but
+//! does not activate until `N = 11`. The pending window is `N` in `[8, 10]`.
+//!
+//! ```text
+//!   Snapshot at N = 10 (chunk 0 bit-complete; chunk 1 has 2 of 8 bits):
+//!
+//!     chunks (8 bits each)     chunk 0       chunk 1
+//!     ops index range          0..7          8..15
+//!     bits set                 11111111      11
+//!     state                    pending       incomplete
+//!
+//!     graftable_chunks = 0      (chunk 0's h=3 ancestor is not yet born)
+//!     grafted_root           no graftable substitutions; equals ops-tree bagged root
+//!     pending_chunk_digest   = H(chunk_0_bytes)
+//!     partial_chunk_digest   = (next_bit = 2, H(chunk_1_bytes))
+//!     canonical_root         = hash(ops_root || grafted_root || pending
+//!                                                            || next_bit || partial)
+//!
+//!   At N = 11, chunk 0's h=3 ancestor is born:
+//!     graftable_chunks becomes 1, the pending slot is dropped, chunk 0 migrates
+//!     into the grafted tree.
+//! ```
+//!
+//! See [Root structure](#root-structure) below for the canonical root layout.
 //!
 //! ## Incremental updates
 //!
@@ -168,82 +241,88 @@
 //!
 //! ## Pruning
 //!
-//! Old bitmap chunks (below the inactivity floor) can be pruned. Before pruning, the grafted
-//! tree's peak digests covering the pruned region are persisted to metadata as "pinned nodes".
-//! On recovery, these pinned nodes are loaded and serve as opaque siblings during upward
-//! propagation, allowing the grafted tree to be rebuilt without the pruned chunks.
+//! Old bitmap chunks (below the inactivity floor) can be pruned. Before pruning, the grafted tree's
+//! peak digests covering the pruned region are persisted to metadata as "pinned nodes". On
+//! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
+//! allowing the grafted tree to be rebuilt without the pruned chunks.
 //!
 //! ### Delayed-merge settlement
 //!
-//! For families with delayed merges (e.g. MMB), pruning is slightly more conservative than
-//! the inactivity floor alone would allow.
+//! For families with delayed merges (e.g. MMB), pruning is slightly more conservative than the
+//! inactivity floor alone would allow.
 //!
 //! The grafted root is computed by iterating the _ops tree's_ peaks and looking up the
-//! corresponding nodes in the grafted tree. After pruning, only the grafted tree's pinned
-//! peaks are available in the pruned region; interior nodes (including individual grafted
-//! leaves) are discarded. If the ops tree has a peak that maps to a discarded grafted node,
-//! root computation fails.
+//! corresponding nodes in the grafted tree. After pruning, only the grafted tree's pinned peaks are
+//! available in the pruned region; interior nodes (including individual grafted leaves) are
+//! discarded. If the ops tree has a peak that maps to a discarded grafted node, root computation
+//! fails.
 //!
-//! In an MMR the ops tree's peaks within the pruned region always coincide with the grafted
-//! tree's pinned peaks, so this is never a problem. In an MMB, delayed merges cause the ops
-//! tree's peak structure to lag behind: a chunk pair's parent node at height `gh+1` is not
-//! created until some number of leaves after the pair's last leaf. Until that merge happens,
-//! the ops tree still has individual height-`gh` peaks for each chunk in the pair, and those
-//! map to grafted _leaves_ (height 0 in the grafted tree), which are not pinned peaks.
+//! In an MMR the ops tree's peaks within the pruned region always coincide with the grafted tree's
+//! pinned peaks, so this is never a problem. In an MMB, delayed merges cause the ops tree's peak
+//! structure to lag behind: a chunk pair's parent node at height `gh+1` is not created until some
+//! number of leaves after the pair's last leaf. Until that merge happens, the ops tree still has
+//! individual height-`gh` peaks for each chunk in the pair, and those map to grafted _leaves_
+//! (height 0 in the grafted tree), which are not pinned peaks.
 //!
-//! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose
-//! chunk-pair parent has not yet been born in the ops tree (see
-//! `Db::sync_boundary`). Once the parent is born, every ops peak within
-//! the pruned region is at height `gh+1` or above, and maps to a pinned peak or an
-//! ancestor of pinned peaks that can be reconstructed by hashing children (see
+//! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose chunk-pair
+//! parent has not yet been born in the ops tree (see `Db::sync_boundary`). Once the parent is born,
+//! every ops peak within the pruned region is at height `gh+1` or above, and maps to a pinned peak
+//! or an ancestor of pinned peaks that can be reconstructed by hashing children (see
 //! `grafting::Storage::reconstruct_grafted_node`).
 //!
-//! The same birth threshold also defines a _rewind floor_: rewinding the database to a size
-//! where the chunk-pair parent has not been born would re-expose the individual ops peaks and
-//! break reconstruction. [`Db::rewind`](db::Db::rewind) rejects targets below this floor.
-//! The floor is a pure function of the pruned chunk count and the family geometry, so it does
-//! not need to be persisted; it is recomputed on startup from the pruned chunk count stored
-//! in metadata.
+//! The same birth threshold also defines a _rewind floor_: rewinding the database to a size where
+//! the chunk-pair parent has not been born would re-expose the individual ops peaks and break
+//! reconstruction. [`Db::rewind`](db::Db::rewind) rejects targets below this floor. The floor is a
+//! pure function of the pruned chunk count and the family geometry, so it does not need to be
+//! persisted; it is recomputed on startup from the pruned chunk count stored in metadata.
 //!
-//! The pruning lag is small: at most `2^(gh+1) - 1` ops beyond the chunk boundary
-//! (just under 2 chunks for the default chunk size).
+//! The pruning lag is small: at most `2^(gh+1) - 1` ops beyond the chunk boundary (just under 2
+//! chunks for the default chunk size).
 //!
 //! # Root structure
 //!
 //! The canonical root of a `current` database is:
 //!
 //! ```text
-//! root = hash(ops_root || grafted_root [|| next_bit || hash(partial_chunk)])
+//! root = hash(
+//!     ops_root
+//!     || grafted_root
+//!     [|| pending_chunk_digest]
+//!     [|| next_bit || partial_chunk_digest]
+//! )
 //! ```
 //!
-//! where `grafted_root` is the root of the grafted tree (covering only complete
-//! bitmap chunks), `next_bit` is the index of the next unset position in the partial chunk, and
-//! `hash(partial_chunk)` is the digest of the incomplete trailing chunk. The partial chunk
-//! components are only present when the last bitmap chunk is incomplete.
-//!
-//! This combines two (or three) components into a single hash:
+//! Components:
 //!
 //! - **Ops root**: The root of the raw operations tree (the inner [crate::qmdb::any] database's
 //!   root). Used for state sync, where a client downloads operations and verifies each batch
 //!   against this root using ops-tree range proofs.
 //!
-//! - **Grafted root**: The root of the grafted tree (overlaying bitmap chunks
-//!   with ops subtree roots). Used for proofs about operation values and their activity status.
-//!   See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
+//! - **Grafted root**: The bagged root of the virtual overlay (see `grafting::Storage`) that shares
+//!   the ops-tree topology but substitutes graftable chunks at height `gh`. When no chunks are
+//!   graftable, `grafted_root` still reflects the ops-tree peak structure. Used for proofs about
+//!   operation values and their activity status. See [RangeProof](proof::RangeProof) and
+//!   [OperationProof](proof::OperationProof).
 //!
-//! - **Partial chunk** (optional): When operations arrive continuously, the last bitmap chunk is
-//!   usually incomplete. Its digest and bit count are folded into the canonical root hash.
+//! - **Pending chunk digest** (optional): `H(pending_chunk_bytes)` when a chunk's bits are complete
+//!   but its height-`gh` ancestor has not yet been born in the ops tree. Absent in MMR and in the
+//!   steady state of MMB.
 //!
-//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root).
-//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
-//! verifies batches against the ops root, not the canonical root.
+//! - **Partial chunk** (optional): When the bitmap length is not chunk-aligned, the trailing
+//!   incomplete chunk's digest and bit count are folded in.
+//!
+//! Pending and partial slots are independent. When both are present, pending hashes in before
+//! partial.
+//!
+//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
+//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
+//! against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::hasher`]. After sync, the bitmap and
 //! grafted tree are reconstructed deterministically from the operations, and the canonical root is
-//! computed.
-//! [proof::OpsRootWitness] can be used to validate that a particular ops root is committed by a
-//! trusted canonical root; the sync engine does not perform this check itself.
+//! computed. [proof::OpsRootWitness] can be used to validate that a particular ops root is
+//! committed by a trusted canonical root; the sync engine does not perform this check itself.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -362,11 +441,14 @@ where
 
     // Build the grafted tree from the bitmap and ops tree.
     let hasher = qmdb::hasher::<H>();
+    let ops_size = any.log.merkle.size();
+    let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
+        ops_leaves,
         &strategy,
     )
     .await?;
@@ -384,6 +466,7 @@ where
         &hasher,
         any.bitmap.as_ref(),
         &storage,
+        ops_leaves,
         partial_chunk,
         any.inactivity_floor_loc,
         &ops_root,

@@ -27,14 +27,15 @@ pub mod storage;
 pub mod verification;
 
 use alloc::vec::Vec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Read, Write};
+use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
 #[cfg(test)]
 pub(crate) use proof::build_range_proof;
 pub use proof::Proof;
-#[cfg(feature = "std")]
-pub(crate) use proof::{build_range_collection_proof, range_collection_nodes};
 pub use read::Readable;
 use thiserror::Error;
 
@@ -146,11 +147,88 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     fn pos_to_height(pos: Position<Self>) -> u32;
 }
 
+/// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Unused;
+
+impl Write for Unused {
+    #[inline]
+    fn write(&self, _: &mut impl BufMut) {}
+}
+
+impl EncodeSize for Unused {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        0
+    }
+}
+
+impl Read for Unused {
+    type Cfg = ();
+
+    #[inline]
+    fn read_cfg(_: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self)
+    }
+}
+
+impl<D: Digest> TryFrom<Option<D>> for Unused {
+    type Error = commonware_codec::Error;
+
+    #[inline]
+    fn try_from(value: Option<D>) -> Result<Self, Self::Error> {
+        match value {
+            None => Ok(Self),
+            Some(_) => Err(commonware_codec::Error::Invalid(
+                "PendingChunk",
+                "pending chunk present for family without pending chunks",
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Unused {
+    fn arbitrary(_: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self)
+    }
+}
+
+/// The pending-chunk slot carried by a [Graftable] family's proof and witness types.
+pub trait PendingChunk<D: Digest>:
+    Clone
+    + Debug
+    + Eq
+    + Write
+    + EncodeSize
+    + Read<Cfg = ()>
+    + Send
+    + Sync
+    + TryFrom<Option<D>, Error: Debug>
+{
+    /// View the slot as an `Option<&D>`.
+    fn as_ref(&self) -> Option<&D> {
+        None
+    }
+}
+
+impl<D: Digest> PendingChunk<D> for Option<D> {
+    #[inline]
+    fn as_ref(&self) -> Option<&D> {
+        Self::as_ref(self)
+    }
+}
+
+impl<D: Digest> PendingChunk<D> for Unused {}
+
 /// Extension of [`Family`] with methods needed for grafting bitmap chunks onto a Merkle structure.
 /// Grafting combines an activity bitmap with an ops Merkle structure by hashing bitmap chunks
 /// together with ops subtree roots. These methods provide the coordinate conversions and
 /// chunk-to-peak mappings required by that process.
 pub trait Graftable: Family {
+    /// The pending-chunk slot type for this family's proofs and witnesses.
+    type PendingChunk<D: Digest>: PendingChunk<D>;
+
     /// Return the nodes that collectively cover the leaf range of a bitmap chunk in a structure of
     /// the given `size`.
     ///
