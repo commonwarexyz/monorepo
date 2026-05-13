@@ -620,6 +620,7 @@ pub fn play<M: Faults>(
 ///
 /// Use [`SignedDealerLog::identify`] to verify the signature and extract the
 /// dealer's public key and log.
+#[derive(Clone)]
 pub struct SignedDealerLog {
     dealer: PublicKey,
     signature: Signature,
