@@ -17,6 +17,22 @@ runs:
         echo "CARGO_TARGET_DIR=/mnt/target" >> "$GITHUB_ENV"
         echo "CARGO_HOME=/mnt/.cargo" >> "$GITHUB_ENV"
         echo "/mnt/.cargo/bin" >> "$GITHUB_PATH"
+    - name: Relocate Cargo directories on macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        cargo_home="${RUNNER_TEMP}/.cargo"
+        mkdir -p "${cargo_home}/bin"
+        echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+        echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+    - name: Relocate Cargo directories on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $cargoHome = Join-Path $env:RUNNER_TEMP ".cargo"
+        New-Item -ItemType Directory -Force -Path (Join-Path $cargoHome "bin")
+        "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+        "$(Join-Path $cargoHome "bin")" >> $env:GITHUB_PATH
     - name: Normalize cache key
       id: cache-key
       shell: bash
