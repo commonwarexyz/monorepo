@@ -451,8 +451,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 /// Verify that a [RangeProof] is valid for a range of operations and extract all digests (and
 /// their positions) in the range of the proof.
 ///
-/// This is the Current equivalent of [`crate::qmdb::verify::verify_proof_and_extract_digests`].
-/// It also validates the supplied bitmap chunks, pending/partial chunk metadata, grafted chunk
+/// Also validates the supplied bitmap chunks, pending/partial chunk metadata, grafted chunk
 /// hashing, and final canonical root composition.
 pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
     hasher: &StandardHasher<H>,
