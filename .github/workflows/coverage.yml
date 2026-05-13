@@ -36,6 +36,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
+        additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
     - name: Remove fuzz
       run: |
@@ -53,8 +54,6 @@ jobs:
     - name: Remove fuzz targets from Cargo.toml
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml
-    - name: Install nightly Rust toolchain
-      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Install coverage tooling
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:

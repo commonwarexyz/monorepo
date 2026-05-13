@@ -56,8 +56,6 @@ jobs:
             benchmark_name: "commonware-utils"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-      - name: Install nightly Rust toolchain
-        run: rustup toolchain install nightly
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Compile benchmarks
