@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_actor::mailbox::{Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use std::{cmp::Ordering, collections::VecDeque};
+use std::collections::VecDeque;
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
@@ -91,12 +91,10 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
 
                 // A new update changes the pruning floor. Retain order is
                 // enough because constructed votes were already sorted.
-                if overflow.len() > 1 {
-                    overflow.retain(|message| match message {
-                        Self::Update { .. } => true,
-                        Self::Constructed(vote) => !Self::prunes(current, finalized, vote),
-                    });
-                }
+                overflow.retain(|message| match message {
+                    Self::Update { .. } => true,
+                    Self::Constructed(vote) => !Self::prunes(current, finalized, vote),
+                });
                 true
             }
             Self::Constructed(vote) => {
@@ -112,21 +110,8 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 }
 
                 let key = Self::vote_key(&vote);
-                // New votes usually arrive in delivery order. Check the tail
-                // first to avoid searching in the common append or duplicate case.
-                if let Some(Self::Constructed(pending)) = overflow.back() {
-                    match key.cmp(&Self::vote_key(pending)) {
-                        Ordering::Greater => {
-                            overflow.push_back(Self::Constructed(vote));
-                            return true;
-                        }
-                        Ordering::Equal => return true,
-                        Ordering::Less => {}
-                    }
-                }
-
                 match overflow.binary_search_by(|pending| match pending {
-                    Self::Update { .. } => Ordering::Less,
+                    Self::Update { .. } => std::cmp::Ordering::Less,
                     Self::Constructed(pending) => Self::vote_key(pending).cmp(&key),
                 }) {
                     Ok(_) => true,
