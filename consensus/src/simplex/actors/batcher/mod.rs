@@ -332,7 +332,6 @@ mod tests {
             let view = View::new(1);
             batcher_mailbox.update(view, Participant::new(0), View::zero(), None);
 
-
             // Build certificates
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
@@ -504,7 +503,6 @@ mod tests {
             batcher_mailbox
                 .update(target_view, Participant::new(0), View::zero(), None);
 
-
             // Build certificates for the same target view.
             let round = Round::new(epoch, target_view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
@@ -530,7 +528,6 @@ mod tests {
             // Simulate voter-driven view advance after nullification to V+1.
             batcher_mailbox
                 .update(target_view.next(), Participant::new(1), View::zero(), None);
-
 
             // Send old notarization for V after moving current view forward.
             injector_sender
@@ -660,7 +657,6 @@ mod tests {
             let view = View::new(1);
             let leader = Participant::new(1);
             batcher_mailbox.update(view, leader, View::zero(), None);
-
 
             // Build proposal and votes
             let round = Round::new(epoch, view);

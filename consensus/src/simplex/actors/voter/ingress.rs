@@ -50,10 +50,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(&message, Self::Verified(Certificate::Finalization(_), _)) {
             overflow.retain(|old_message| {
-                if matches!(
-                    old_message,
-                    Self::Verified(Certificate::Finalization(_), _)
-                ) {
+                if matches!(old_message, Self::Verified(Certificate::Finalization(_), _)) {
                     return false;
                 }
                 old_message.view() > new_view
@@ -63,23 +60,26 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         }
 
         // Ignore the message if it is a duplicate
-        if overflow.iter().any(|old_message| match (&message, old_message) {
-            (Self::Proposal(new_proposal), Self::Proposal(old_proposal)) => {
-                new_proposal.view() == old_proposal.view()
-            }
-            // Timeout reasons are equivalent for control flow; retain the first queued reason.
-            (Self::Timeout(new_view, _), Self::Timeout(old_view, _)) => new_view == old_view,
-            (Self::Verified(new_certificate, _), Self::Verified(old_certificate, _)) => {
-                new_certificate.view() == old_certificate.view()
-                    && matches!(
-                        (new_certificate, old_certificate),
-                        (Certificate::Notarization(_), Certificate::Notarization(_))
-                            | (Certificate::Nullification(_), Certificate::Nullification(_))
-                            | (Certificate::Finalization(_), Certificate::Finalization(_))
-                    )
-            }
-            _ => false,
-        }) {
+        if overflow
+            .iter()
+            .any(|old_message| match (&message, old_message) {
+                (Self::Proposal(new_proposal), Self::Proposal(old_proposal)) => {
+                    new_proposal.view() == old_proposal.view()
+                }
+                // Timeout reasons are equivalent for control flow; retain the first queued reason.
+                (Self::Timeout(new_view, _), Self::Timeout(old_view, _)) => new_view == old_view,
+                (Self::Verified(new_certificate, _), Self::Verified(old_certificate, _)) => {
+                    new_certificate.view() == old_certificate.view()
+                        && matches!(
+                            (new_certificate, old_certificate),
+                            (Certificate::Notarization(_), Certificate::Notarization(_))
+                                | (Certificate::Nullification(_), Certificate::Nullification(_))
+                                | (Certificate::Finalization(_), Certificate::Finalization(_))
+                        )
+                }
+                _ => false,
+            })
+        {
             return true;
         }
         overflow.push_back(message);

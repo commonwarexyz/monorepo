@@ -5,12 +5,12 @@ mod slot;
 mod state;
 
 use crate::{
-    CertifiableAutomaton, Relay, Reporter,
-    simplex::{Plan, elector::Config as Elector, types::Activity},
+    simplex::{elector::Config as Elector, types::Activity, Plan},
     types::{Epoch, ViewDelta},
+    CertifiableAutomaton, Relay, Reporter,
 };
 pub use actor::Actor;
-use commonware_cryptography::{Digest, certificate::Scheme};
+use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::paged::CacheRef;
 pub use ingress::Mailbox;
@@ -50,7 +50,6 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
-        Viewable,
         simplex::{
             actors::{
                 batcher,
@@ -60,8 +59,8 @@ mod tests {
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
-                Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf,
-                ed25519, secp256r1,
+                bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+                secp256r1, Scheme,
             },
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -69,24 +68,25 @@ mod tests {
             },
         },
         types::{Participant, Round, View},
+        Viewable,
     };
     use commonware_actor::mailbox;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
-        Hasher as _, Sha256,
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
+        Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
-        telemetry::traces::collector::TraceStorage,
+        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
+        Runner, Supervisor as _,
     };
-    use commonware_utils::{NZU16, NZUsize, sync::Mutex};
+    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},

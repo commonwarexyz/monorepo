@@ -1059,7 +1059,12 @@ impl<
 
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
-                    batcher.update(current_view, leader, self.state.last_finalized(), forwardable_proposal);
+                    batcher.update(
+                        current_view,
+                        leader,
+                        self.state.last_finalized(),
+                        forwardable_proposal,
+                    );
                 }
             },
         }
