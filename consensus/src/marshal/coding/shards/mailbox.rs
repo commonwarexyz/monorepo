@@ -202,10 +202,7 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
-    pub fn subscribe_by_digest(
-        &self,
-        digest: B::Digest,
-    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeByDigest {
             digest,

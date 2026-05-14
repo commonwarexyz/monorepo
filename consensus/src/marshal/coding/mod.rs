@@ -452,8 +452,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
+            shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
             // Block A at view 5 (height 2) - create with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -663,8 +662,7 @@ mod tests {
             let non_boundary_commitment = coded_non_boundary.commitment();
 
             // Make the non-boundary block available
-            shards
-                .proposed(non_boundary_round, coded_non_boundary);
+            shards.proposed(non_boundary_round, coded_non_boundary);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -792,8 +790,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
+            shards.proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
 
             // Build a block with context A (commitment hash uses this context).
             let round_a = Round::new(Epoch::zero(), View::new(2));
@@ -1154,8 +1151,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
+            shards.proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let block_ctx = CodingCtx {
@@ -1166,8 +1162,7 @@ mod tests {
             let block = make_coding_block(block_ctx, parent_digest, Height::new(20), 2000);
             let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
             let block_commitment = coded_block.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
+            shards.proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1267,8 +1262,7 @@ mod tests {
             let parent_digest = honest_parent.digest();
             let coded_parent = CodedBlock::new(honest_parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
+            shards.proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
 
             // Byzantine proposer broadcasts malicious block at height 35
             // The block has the correct context (matching what consensus will provide)

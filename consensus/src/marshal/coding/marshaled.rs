@@ -844,12 +844,11 @@ where
         }
 
         // Inform the shard engine of an externally proposed commitment.
-        self.shards
-            .discovered(
-                payload,
-                consensus_context.leader.clone(),
-                consensus_context.round,
-            );
+        self.shards.discovered(
+            payload,
+            consensus_context.leader.clone(),
+            consensus_context.round,
+        );
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
@@ -988,12 +987,11 @@ where
             }
 
             // Inform the shard engine of an externally proposed commitment.
-            shards
-                .discovered(
-                    payload,
-                    embedded_context.leader.clone(),
-                    embedded_context.round,
-                );
+            shards.discovered(
+                payload,
+                embedded_context.leader.clone(),
+                embedded_context.round,
+            );
 
             // Use the block's embedded context for verification, passing the
             // prefetched block to avoid fetching it again inside deferred_verify.

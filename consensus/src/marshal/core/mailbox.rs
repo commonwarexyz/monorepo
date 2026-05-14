@@ -947,10 +947,7 @@ mod tests {
         assert!(has_durable(&overflow, 8));
         assert!(proposed_ack.try_recv().is_ok());
         assert!(verified_ack.try_recv().is_ok());
-        assert!(matches!(
-            certified_ack.try_recv(),
-            Err(TryRecvError::Empty)
-        ));
+        assert!(matches!(certified_ack.try_recv(), Err(TryRecvError::Empty)));
 
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(9)));
         assert!(!has_durable(&overflow, 8));
