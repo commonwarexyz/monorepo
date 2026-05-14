@@ -15,7 +15,7 @@ use commonware_actor::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use std::{collections::VecDeque, future::Future};
+use std::collections::VecDeque;
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -611,17 +611,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
 
-    #[allow(clippy::manual_async_fn)]
-    fn fetch_block(
-        self,
-        digest: <V::Block as Digestible>::Digest,
-    ) -> impl Future<Output = Option<Self::Block>> + Send {
-        async move {
-            self.subscribe_by_digest(None, digest)
-                .await
-                .ok()
-                .map(V::into_inner)
-        }
+    async fn fetch_block(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
+        self.subscribe_by_digest(None, digest)
+            .await
+            .ok()
+            .map(V::into_inner)
     }
 }
 
@@ -632,10 +626,7 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
         let message = match activity {
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
-            _ => {
-                // Ignore other activity types
-                return Feedback::Ok;
-            }
+            _ => return Feedback::Dropped,
         };
         self.sender.enqueue(message)
     }
