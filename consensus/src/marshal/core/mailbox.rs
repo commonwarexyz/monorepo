@@ -249,10 +249,6 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.floor.into_iter().chain(self.prune).max()
     }
 
-    fn drops_at_or_below(&self, height: Height) -> bool {
-        self.height().is_some_and(|current| height <= current)
-    }
-
     fn retain_message(message: &mut Message<S, V>, height: Option<Height>) -> bool {
         if message.response_closed() {
             false
@@ -287,12 +283,12 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     }
 
     fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) -> bool {
-        if self.drops_at_or_below(height) {
+        let current = self.height();
+        if current.is_some_and(|current| height <= current) {
             self.retain_useful();
             return false;
         }
 
-        let current = self.height();
         let mut targets = Some(targets);
 
         self.messages.retain_mut(|message| {
@@ -328,40 +324,20 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         true
     }
 
-    fn push_message(&mut self, mut message: Message<S, V>) -> bool {
-        self.retain_useful();
-
-        if message.stale(self.height()) {
-            message.handle_stale();
-            return false;
-        }
-
-        self.messages.push_back(message);
-        true
-    }
-
-    fn restore_front(&mut self, message: Message<S, V>) {
-        match message {
-            Message::SetFloor { height } => {
-                self.floor = Some(height);
-            }
-            Message::Prune { height } => {
-                self.prune = Some(height);
-            }
-            message => {
-                self.messages.push_front(message);
-            }
-        }
-    }
-
     fn drain_one<F>(&mut self, message: Message<S, V>, push: &mut F) -> bool
     where
         F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
     {
-        push(message).is_none_or(|message| {
-            self.restore_front(message);
-            false
-        })
+        let Some(message) = push(message) else {
+            return true;
+        };
+
+        match message {
+            Message::SetFloor { height } => self.floor = Some(height),
+            Message::Prune { height } => self.prune = Some(height),
+            message => self.messages.push_front(message),
+        }
+        false
     }
 }
 
@@ -407,7 +383,15 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::HintFinalized { height, targets } => overflow.hint_finalized(height, targets),
             Self::SetFloor { height } => overflow.set_floor(height),
             Self::Prune { height } => overflow.prune(height),
-            message => overflow.push_message(message),
+            mut message => {
+                overflow.retain_useful();
+                if message.stale(overflow.height()) {
+                    message.handle_stale();
+                    return false;
+                }
+                overflow.messages.push_back(message);
+                true
+            }
         }
     }
 }
