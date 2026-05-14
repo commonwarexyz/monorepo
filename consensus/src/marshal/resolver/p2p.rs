@@ -7,7 +7,7 @@ use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
 use commonware_utils::channel::mpsc;
 use rand::Rng;
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
 pub struct Config<P, C, B>
@@ -28,7 +28,7 @@ where
     pub blocker: B,
 
     /// The size of the request mailbox backlog.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Initial expected performance for new participants.
     pub initial: Duration,
@@ -64,7 +64,7 @@ where
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (sender, receiver) = mpsc::channel(config.mailbox_size);
+    let (sender, receiver) = mpsc::channel(config.mailbox_size.get());
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         context,

@@ -6,9 +6,9 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
+    use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;
-    use commonware_utils::{vec::NonEmptyVec, Span};
-    use std::future::Future;
+    use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
 
     pub mod p2p;
 
@@ -22,9 +22,9 @@ commonware_macros::stability_scope!(BETA {
 
         /// Deliver data to the consumer.
         ///
-        /// Returns `true` if the data is valid.
+        /// Returns a receiver that resolves to `true` if the data is valid.
         ///
-        /// The returned future may be dropped before completion if the
+        /// The returned receiver may be dropped before completion if the
         /// application cancels the fetch via [`Resolver::cancel`],
         /// [`Resolver::clear`], or [`Resolver::retain`]. When this happens,
         /// the resolver discards the validation result.
@@ -35,7 +35,7 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             key: Self::Key,
             value: Self::Value,
-        ) -> impl Future<Output = bool> + Send;
+        ) -> oneshot::Receiver<bool>;
     }
 
     /// Responsible for fetching data and notifying a `Consumer`.
@@ -47,10 +47,10 @@ commonware_macros::stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Initiate a fetch request for a single key.
-        fn fetch(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
+        fn fetch(&mut self, key: Self::Key) -> Feedback;
 
         /// Initiate a fetch request for a batch of keys.
-        fn fetch_all(&mut self, keys: Vec<Self::Key>) -> impl Future<Output = ()> + Send;
+        fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Feedback;
 
         /// Initiate a fetch request restricted to specific target peers.
         ///
@@ -72,7 +72,7 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             key: Self::Key,
             targets: NonEmptyVec<Self::PublicKey>,
-        ) -> impl Future<Output = ()> + Send;
+        ) -> Feedback;
 
         /// Initiate fetch requests for multiple keys, each with their own targets.
         ///
@@ -80,20 +80,20 @@ commonware_macros::stability_scope!(BETA {
         fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> impl Future<Output = ()> + Send;
+        ) -> Feedback;
 
         /// Cancel a fetch request.
         ///
-        /// If response validation is in progress, cancellation may drop the
-        /// [`Consumer::deliver`] future before it reports whether the data was
+        /// If response validation is in progress, cancellation may drop the receiver
+        /// returned by [`Consumer::deliver`] before it reports whether the data was
         /// valid.
-        fn cancel(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
+        fn cancel(&mut self, key: Self::Key) -> Feedback;
 
         /// Cancel all fetch requests.
         ///
         /// See [`cancel`](Self::cancel) for how cancellation affects
         /// in-progress response validation.
-        fn clear(&mut self) -> impl Future<Output = ()> + Send;
+        fn clear(&mut self) -> Feedback;
 
         /// Retain only the fetch requests that satisfy the predicate.
         ///
@@ -102,6 +102,6 @@ commonware_macros::stability_scope!(BETA {
         fn retain(
             &mut self,
             predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
-        ) -> impl Future<Output = ()> + Send;
+        ) -> Feedback;
     }
 });

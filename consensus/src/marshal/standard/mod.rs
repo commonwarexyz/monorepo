@@ -67,6 +67,7 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Reporter,
     };
     use bytes::Bytes;
+    use commonware_actor::Feedback;
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
@@ -1703,20 +1704,45 @@ mod tests {
         type Key = handler::Request<D>;
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, _key: Self::Key) {}
-        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
-        async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
-            self.targeted.lock().push((key, targets));
+        fn fetch(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
         }
-        async fn fetch_all_targeted(
+
+        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn fetch_targeted(
+            &mut self,
+            key: Self::Key,
+            targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            self.targeted.lock().push((key, targets));
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) {
+        ) -> Feedback {
             self.targeted.lock().extend(requests);
+            Feedback::Ok
         }
-        async fn cancel(&mut self, _key: Self::Key) {}
-        async fn clear(&mut self) {}
-        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+
+        fn cancel(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn clear(&mut self) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
     }
 
     /// Poll `cond` on a 10ms tick until it returns true, panicking on timeout.

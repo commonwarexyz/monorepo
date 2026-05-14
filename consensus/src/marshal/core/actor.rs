@@ -590,8 +590,7 @@ where
                         } else {
                             debug!(?round, "notarized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Notarized { round })
-                                .await;
+                                .fetch(Request::<V::Commitment>::Notarized { round });
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -629,8 +628,7 @@ where
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Block(commitment))
-                                .await;
+                                .fetch(Request::<V::Commitment>::Block(commitment));
                         }
                     }
                     Message::GetBlock {
@@ -672,7 +670,7 @@ where
 
                         // Trigger a targeted fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
-                        resolver.fetch_targeted(request, targets).await;
+                        resolver.fetch_targeted(request, targets);
                     }
                     Message::SubscribeByDigest {
                         round,
@@ -904,8 +902,7 @@ where
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
             resolver
-                .fetch(Request::<V::Commitment>::Notarized { round })
-                .await;
+                .fetch(Request::<V::Commitment>::Notarized { round });
         }
 
         // Register subscriber.
@@ -1321,8 +1318,7 @@ where
 
         // Cancel any useless requests
         resolver
-            .cancel(Request::<V::Commitment>::Block(commitment))
-            .await;
+            .cancel(Request::<V::Commitment>::Block(commitment));
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -1341,8 +1337,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(Request::<V::Commitment>::Notarized { round }.predicate())
-                .await;
+                .retain(Request::<V::Commitment>::Notarized { round }.predicate());
         }
     }
 
@@ -1627,8 +1622,7 @@ where
                 } else {
                     // Request the missing block.
                     resolver
-                        .fetch(Request::<V::Commitment>::Block(commitment))
-                        .await;
+                        .fetch(Request::<V::Commitment>::Block(commitment));
                 }
             }
         }
@@ -1678,8 +1672,7 @@ where
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
                     resolver
-                        .fetch(Request::<V::Commitment>::Block(parent_commitment))
-                        .await;
+                        .fetch(Request::<V::Commitment>::Block(parent_commitment));
                     break 'cache_repair;
                 }
             }
@@ -1698,7 +1691,7 @@ where
             .map(|height| Request::<V::Commitment>::Finalized { height })
             .collect();
         if !requests.is_empty() {
-            resolver.fetch_all(requests).await
+            resolver.fetch_all(requests);
         }
         wrote
     }
@@ -1718,8 +1711,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(Request::<V::Commitment>::Finalized { height }.predicate())
-            .await;
+            .retain(Request::<V::Commitment>::Finalized { height }.predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.

@@ -4,7 +4,7 @@ use commonware_actor::mailbox::{Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    channel::{mpsc, oneshot},
     sequence::U64,
 };
 use std::collections::VecDeque;
@@ -133,31 +133,26 @@ impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
-        self.sender
-            .request_or(
-                |response| HandlerMessage::Deliver {
-                    view: View::new(key.into()),
-                    data: value,
-                    response,
-                },
-                false,
-            )
-            .await
+    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.try_send(HandlerMessage::Deliver {
+            view: View::new(key.into()),
+            data: value,
+            response,
+        });
+        receiver
     }
 }
 
 impl Producer for Handler {
     type Key = U64;
 
-    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(HandlerMessage::Produce {
-                view: View::new(key.into()),
-                response,
-            })
-            .await;
+        let _ = self.sender.try_send(HandlerMessage::Produce {
+            view: View::new(key.into()),
+            response,
+        });
         receiver
     }
 }

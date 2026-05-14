@@ -99,14 +99,14 @@ where
     }
 
     /// Begin a consumer delivery for the entry, attaching the abort handle.
-    /// Spawns `consumer.deliver(key, value)` as an in-flight future and records
-    /// the result for later handling.
+    /// Waits for the receiver returned by `consumer.deliver(key, value)` and
+    /// records the validation result for later handling.
     pub(super) fn deliver(&mut self, key: Key, peer: P, value: Con::Value) {
         let lookup_key = key.clone();
         let deliver_key = key.clone();
         let mut consumer = self.consumer.clone();
         let aborter = self.deliveries.push(async move {
-            let valid = consumer.deliver(deliver_key, value).await;
+            let valid = consumer.deliver(deliver_key, value).await.unwrap_or(false);
             (peer, key, valid)
         });
         let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");

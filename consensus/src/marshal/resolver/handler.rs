@@ -59,34 +59,31 @@ impl<D: Digest> Consumer for Handler<D> {
     type Key = Request<D>;
     type Value = Bytes;
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
-            .send(Message::Deliver {
+            .try_send(Message::Deliver {
                 key,
                 value,
                 response,
             })
-            .await
             .is_err()
         {
             error!("failed to send deliver message to actor: receiver dropped");
-            return false;
         }
-        receiver.await.unwrap_or(false)
+        receiver
     }
 }
 
 impl<D: Digest> Producer for Handler<D> {
     type Key = Request<D>;
 
-    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
         if self
             .sender
-            .send(Message::Produce { key, response })
-            .await
+            .try_send(Message::Produce { key, response })
             .is_err()
         {
             error!("failed to send produce message to actor: receiver dropped");

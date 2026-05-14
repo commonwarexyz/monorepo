@@ -3,7 +3,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Blocker, Provider};
 use commonware_utils::Span;
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the peer actor.
 pub struct Config<
@@ -29,7 +29,7 @@ pub struct Config<
     pub producer: Pro,
 
     /// The maximum size of the mailbox backlog
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Local identity of the participant (if any).
     pub me: Option<P>,
