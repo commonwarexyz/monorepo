@@ -72,11 +72,11 @@ impl<T> Overflow<T> for VecDeque<T> {
     where
         F: FnMut(T) -> Option<T>,
     {
-        while let Some(message) = self.pop_front() {
-            if let Some(message) = push(message) {
-                self.push_front(message);
-                break;
-            }
+        let Some(message) = self.pop_front() else {
+            return;
+        };
+        if let Some(message) = push(message) {
+            self.push_front(message);
         }
     }
 }
@@ -320,10 +320,12 @@ impl<T: Policy> OverflowState<T> {
         // releasing the lock)
         let mut drained = Vec::new();
         let mut queue = lock(&self.queue);
-        queue.drain(|message| {
-            drained.push(message);
-            None
-        });
+        while !queue.is_empty() {
+            queue.drain(|message| {
+                drained.push(message);
+                None
+            });
+        }
         mutation.publish(queue.is_empty());
         drop(queue);
         drop(drained);
@@ -629,6 +631,23 @@ mod tests {
         fn wake_by_ref(arc_self: &Arc<Self>) {
             arc_self.wakes.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    #[test]
+    fn vecdeque_overflow_drain_stops_after_accepting_message() {
+        let mut overflow = VecDeque::from([Message::Vote(1), Message::Vote(2), Message::Vote(3)]);
+        let mut drained = VecDeque::new();
+
+        Overflow::drain(&mut overflow, |message| {
+            drained.push_back(message);
+            None
+        });
+
+        assert_eq!(drained, VecDeque::from([Message::Vote(1)]));
+        assert_eq!(
+            overflow,
+            VecDeque::from([Message::Vote(2), Message::Vote(3)])
+        );
     }
 
     #[test_async]

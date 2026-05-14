@@ -66,13 +66,10 @@ impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
                 continue;
             }
 
-            let Some(message) = push(message) else {
-                continue;
-            };
-            if !message.response_closed() {
+            if let Some(message) = push(message) {
                 self.0.push_front(message);
-                break;
-            }
+            };
+            break;
         }
     }
 }

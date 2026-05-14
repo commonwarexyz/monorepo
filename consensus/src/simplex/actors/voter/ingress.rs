@@ -61,14 +61,13 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
         if let Some(finalization) = self.finalization.take() {
             if let Some(finalization) = push(finalization) {
                 self.finalization = Some(finalization);
-                return;
             }
+            return;
         }
 
-        while let Some(message) = self.messages.pop_front() {
+        if let Some(message) = self.messages.pop_front() {
             if let Some(message) = push(message) {
                 self.messages.push_front(message);
-                break;
             }
         }
     }
@@ -220,10 +219,12 @@ mod tests {
         mut overflow: Pending<TestScheme, Sha256Digest>,
     ) -> VecDeque<Message<TestScheme, Sha256Digest>> {
         let mut messages = VecDeque::new();
-        Overflow::drain(&mut overflow, |message| {
-            messages.push_back(message);
-            None
-        });
+        while !overflow.is_empty() {
+            Overflow::drain(&mut overflow, |message| {
+                messages.push_back(message);
+                None
+            });
+        }
         messages
     }
 

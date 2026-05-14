@@ -71,17 +71,16 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
         if let Some(update) = self.update.take() {
             if let Some(update) = push(update) {
                 self.update = Some(update);
-                return;
             }
+            return;
         }
 
-        while let Some(vote) = self.constructed.pop_front() {
+        if let Some(vote) = self.constructed.pop_front() {
             if let Some(message) = push(Message::Constructed(vote)) {
                 let Message::Constructed(vote) = message else {
                     unreachable!("ready returned a different message");
                 };
                 self.constructed.push_front(vote);
-                break;
             }
         }
     }
@@ -233,10 +232,12 @@ mod tests {
         mut overflow: Pending<TestScheme, Sha256Digest>,
     ) -> VecDeque<Message<TestScheme, Sha256Digest>> {
         let mut messages = VecDeque::new();
-        Overflow::drain(&mut overflow, |message| {
-            messages.push_back(message);
-            None
-        });
+        while !overflow.is_empty() {
+            Overflow::drain(&mut overflow, |message| {
+                messages.push_back(message);
+                None
+            });
+        }
         messages
     }
 

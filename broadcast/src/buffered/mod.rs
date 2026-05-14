@@ -205,10 +205,12 @@ mod tests {
         );
 
         let mut drained = VecDeque::new();
-        overflow.drain(|message| {
-            drained.push_back(message);
-            None
-        });
+        while !overflow.is_empty() {
+            overflow.drain(|message| {
+                drained.push_back(message);
+                None
+            });
+        }
 
         assert_eq!(drained.len(), 2);
         assert!(drained.iter().any(|message| matches!(
@@ -221,6 +223,111 @@ mod tests {
             Message::Get { digest, responder }
                 if *digest == open_get.digest() && !responder.is_closed()
         )));
+    }
+
+    #[test]
+    fn policy_drain_stops_after_accepting_message() {
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let first = TestMessage::shared(b"first");
+        let second = TestMessage::shared(b"second");
+
+        let (closed_responder, closed_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Subscribe {
+                digest: TestMessage::shared(b"closed").digest(),
+                responder: closed_responder,
+            },
+        );
+        drop(closed_receiver);
+
+        let (first_responder, _first_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: first.digest(),
+                responder: first_responder,
+            },
+        );
+        let (second_responder, _second_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: second.digest(),
+                responder: second_responder,
+            },
+        );
+
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            &drained[0],
+            Message::Get { digest, responder }
+                if *digest == first.digest() && !responder.is_closed()
+        ));
+
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        assert_eq!(drained.len(), 2);
+        assert!(matches!(
+            &drained[1],
+            Message::Get { digest, responder }
+                if *digest == second.digest() && !responder.is_closed()
+        ));
+    }
+
+    #[test]
+    fn policy_drain_stops_after_returned_message_closes() {
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let first = TestMessage::shared(b"first");
+        let second = TestMessage::shared(b"second");
+
+        let (first_responder, first_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: first.digest(),
+                responder: first_responder,
+            },
+        );
+        let (second_responder, _second_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: second.digest(),
+                responder: second_responder,
+            },
+        );
+
+        let mut first_receiver = Some(first_receiver);
+        let mut attempts = 0;
+        overflow.drain(|message| {
+            attempts += 1;
+            drop(first_receiver.take());
+            Some(message)
+        });
+        assert_eq!(attempts, 1);
+
+        let mut drained = VecDeque::new();
+        while !overflow.is_empty() {
+            overflow.drain(|message| {
+                drained.push_back(message);
+                None
+            });
+        }
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            &drained[0],
+            Message::Get { digest, responder }
+                if *digest == second.digest() && !responder.is_closed()
+        ));
     }
 
     async fn spawn_peer_engines(

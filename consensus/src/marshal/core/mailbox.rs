@@ -341,7 +341,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     {
         // Receiver accepted; the message is consumed
         let Some(message) = push(message) else {
-            return true;
+            return false;
         };
 
         // Receiver rejected; restore so the next drain retries from the same point
@@ -349,7 +349,6 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
             Message::SetFloor { height } => self.set_floor(height),
             Message::Prune { height } => self.prune(height),
             Message::HintFinalized { height, targets } => self.restore_hint(height, targets),
-            message if message.response_closed() => return true,
             message => self.messages.push_front(PendingMessage::Message(message)),
         }
         false
@@ -845,10 +844,12 @@ mod tests {
 
     fn drain(overflow: &mut TestPending) -> VecDeque<TestMessage> {
         let mut drained = VecDeque::new();
-        overflow.drain(|message| {
-            drained.push_back(message);
-            None
-        });
+        while !overflow.is_empty() {
+            overflow.drain(|message| {
+                drained.push_back(message);
+                None
+            });
+        }
         drained
     }
 
@@ -1001,6 +1002,35 @@ mod tests {
             pending_open_rx.try_recv(),
             Err(TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn policy_drain_stops_after_returned_response_closes() {
+        let mut overflow = pending();
+        let (first, first_rx) = get_block(1);
+        let (second, mut second_rx) = get_info(2);
+        overflow.messages.push_back(PendingMessage::Message(first));
+        overflow.messages.push_back(PendingMessage::Message(second));
+
+        let mut first_rx = Some(first_rx);
+        let mut attempts = 0;
+        overflow.drain(|message| {
+            attempts += 1;
+            drop(first_rx.take());
+            Some(message)
+        });
+        assert_eq!(attempts, 1);
+
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            &drained[0],
+            TestMessage::GetInfo {
+                identifier: Identifier::Height(height),
+                response,
+            } if *height == Height::new(2) && !response.is_closed()
+        ));
+        assert!(matches!(second_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]
