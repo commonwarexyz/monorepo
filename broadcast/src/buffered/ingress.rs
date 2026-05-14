@@ -1,5 +1,8 @@
 use crate::Broadcaster;
-use commonware_actor::mailbox::{Policy, Sender};
+use commonware_actor::{
+    mailbox::{Policy, Sender},
+    Feedback,
+};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
@@ -9,12 +12,9 @@ use std::collections::VecDeque;
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: PublicKey, M: Digestible> {
     /// Broadcast a [crate::Broadcaster::Message] to the network.
-    ///
-    /// The responder will be sent a list of peers that received the message.
     Broadcast {
         recipients: Recipients<P>,
         message: M,
-        responder: oneshot::Sender<Vec<P>>,
     },
 
     /// Subscribe to receive a message by digest.
@@ -95,22 +95,18 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
 impl<P: PublicKey, M: Digestible + Codec> Broadcaster for Mailbox<P, M> {
     type Recipients = Recipients<P>;
     type Message = M;
-    type Response = Vec<P>;
 
     /// Broadcast a message to recipients.
     ///
-    /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
+    /// If the engine has shut down, returns [`Feedback::Closed`].
     fn broadcast(
         &self,
         recipients: Self::Recipients,
         message: Self::Message,
-    ) -> oneshot::Receiver<Self::Response> {
-        let (sender, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Broadcast {
+    ) -> Feedback {
+        self.sender.enqueue(Message::Broadcast {
             recipients,
             message,
-            responder: sender,
-        });
-        receiver
+        })
     }
 }

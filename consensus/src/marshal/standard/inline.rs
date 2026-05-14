@@ -921,14 +921,16 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone()),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for parent should be accepted"
+            );
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone()),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for child should be accepted"
+            );
 
             // Inline verify runs full validation inline and returns true only
             // after `marshal.verified` is enqueued. With the persistence-ack
@@ -1034,14 +1036,16 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone()),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for parent should be accepted"
+            );
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone()),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             let certify_result = inline
@@ -1127,14 +1131,16 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), parent),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for parent should be accepted"
+            );
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), child),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             verify_started

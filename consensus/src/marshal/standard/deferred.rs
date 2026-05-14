@@ -1190,14 +1190,16 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), parent),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for parent should be accepted"
+            );
+            assert_eq!(
+                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), child),
+                commonware_actor::Feedback::Ok,
+                "buffer broadcast for child should be accepted"
+            );
 
             // Kick off the optimistic verify, which spawns `deferred_verify`.
             // Its gated `app.verify` blocks until we release it, giving us a

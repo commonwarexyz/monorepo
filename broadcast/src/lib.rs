@@ -6,8 +6,8 @@
 )]
 
 commonware_macros::stability_scope!(BETA {
+    use commonware_actor::Feedback;
     use commonware_codec::Codec;
-    use commonware_utils::channel::oneshot;
 
     pub mod buffered;
 
@@ -23,16 +23,14 @@ commonware_macros::stability_scope!(BETA {
         /// - deserialized upon reception
         type Message: Codec + Clone + Send + 'static;
 
-        /// The type of data that is returned once the message is broadcasted.
-        ///
-        /// It may also indicate the success or failure of the broadcast attempt.
-        type Response: Clone + Send + 'static;
-
         /// Attempt to broadcast a message to the associated recipients.
+        ///
+        /// Feedback indicates whether the local broadcast request was accepted for processing. It
+        /// does not indicate whether recipients received the message.
         fn broadcast(
             &self,
             recipients: Self::Recipients,
             message: Self::Message,
-        ) -> oneshot::Receiver<Self::Response>;
+        ) -> Feedback;
     }
 });
