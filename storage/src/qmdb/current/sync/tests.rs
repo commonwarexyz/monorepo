@@ -525,7 +525,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         // This uses the shared sync engine's ops-root target directly. The focused
         // `canonical_root_sync` tests below cover the current sync wrapper that authenticates ops
         // roots against trusted canonical roots.
-        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
+        let synced_db: Db = Box::pin(crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
@@ -540,7 +540,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,
-        })
+        }))
         .await
         .unwrap();
 
@@ -866,7 +866,7 @@ mod canonical_root_sync {
                 variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
 
             let target_db = std::sync::Arc::new(target_db);
-            let synced_db: Db = current_sync::sync(current_sync::Config {
+            let synced_db: Db = Box::pin(current_sync::sync(current_sync::Config {
                 context: context.child("client"),
                 resolver: target_db.clone(),
                 target,
@@ -878,7 +878,7 @@ mod canonical_root_sync {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
-            })
+            }))
             .await
             .unwrap();
 
@@ -919,7 +919,7 @@ mod canonical_root_sync {
                 variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
             let target_db = std::sync::Arc::new(target_db);
 
-            let synced_db: Db = current_sync::sync(current_sync::Config {
+            let synced_db: Db = Box::pin(current_sync::sync(current_sync::Config {
                 context: context.child("client"),
                 resolver: target_db.clone(),
                 target: initial_target,
@@ -931,7 +931,7 @@ mod canonical_root_sync {
                 finish_rx: Some(finish_receiver),
                 reached_target_tx: None,
                 max_retained_roots: 8,
-            })
+            }))
             .await
             .unwrap();
 
@@ -960,7 +960,7 @@ mod canonical_root_sync {
                 variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
 
             let target_db = std::sync::Arc::new(target_db);
-            let result: Result<Db, _> = current_sync::sync(current_sync::Config {
+            let result: Result<Db, _> = Box::pin(current_sync::sync(current_sync::Config {
                 context: context.child("client"),
                 resolver: target_db.clone(),
                 target,
@@ -972,7 +972,7 @@ mod canonical_root_sync {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
-            })
+            }))
             .await;
 
             assert!(matches!(
@@ -1015,7 +1015,7 @@ mod canonical_root_sync {
                 variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
             let target_db = std::sync::Arc::new(target_db);
 
-            let result: Result<Db, _> = current_sync::sync(current_sync::Config {
+            let result: Result<Db, _> = Box::pin(current_sync::sync(current_sync::Config {
                 context: context.child("client"),
                 resolver: target_db.clone(),
                 target: initial_target,
@@ -1027,7 +1027,7 @@ mod canonical_root_sync {
                 finish_rx: Some(finish_receiver),
                 reached_target_tx: None,
                 max_retained_roots: 8,
-            })
+            }))
             .await;
 
             assert!(matches!(

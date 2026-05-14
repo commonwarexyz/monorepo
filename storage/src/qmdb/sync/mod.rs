@@ -50,5 +50,5 @@ where
     DB::Op: Encode,
     R: DbResolver<DB>,
 {
-    Engine::new(config).await?.sync().await
+    Box::pin(Engine::new(config).await?.sync()).await
 }

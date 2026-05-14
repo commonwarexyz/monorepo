@@ -247,6 +247,7 @@ where
     let (database, final_target) = if let Some(mut update_rx) = config.update_rx {
         let update_tx = engine_update_tx.expect("engine update sender must exist");
         let forward_fut = Box::pin(async {
+            let update_tx = update_tx;
             while let Some(current_target) = update_rx.recv().await {
                 let Some(engine_target) = current_target.to_engine_target(&hasher) else {
                     tracing::warn!("target update witness verification failed");

@@ -785,7 +785,11 @@ where
     ///
     /// Returns `NextStep::Complete(database, target)` when sync is finished, or
     /// `NextStep::Continue(self)` when more work remains.
-    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+    pub(crate) async fn step(self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+        Box::pin(Self::step_inner(self)).await
+    }
+
+    async fn step_inner(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
         // Check if sync is complete
@@ -848,7 +852,6 @@ where
     pub(crate) async fn sync_with_target(
         mut self,
     ) -> Result<(DB, Target<DB::Family, DB::Digest>), Error<DB, R>> {
-        // Run sync loop until completion
         loop {
             match self.step().await? {
                 NextStep::Continue(new_engine) => self = new_engine,
