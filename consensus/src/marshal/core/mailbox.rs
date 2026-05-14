@@ -6,7 +6,7 @@ use crate::{
     },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
-    Reporter,
+    Heightable, Reporter,
 };
 use commonware_actor::{
     mailbox::{Policy, Sender},
@@ -213,6 +213,9 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 ..
             }
             | Self::GetFinalization { height, .. } => cutoff.drops_below(*height),
+            Self::Proposed { block, .. }
+            | Self::Verified { block, .. }
+            | Self::Certified { block, .. } => cutoff.drops_below(block.height()),
             Self::HintFinalized { height, .. } => cutoff.drops_at_or_below(*height),
             Self::GetBlock {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
@@ -223,6 +226,18 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 ..
             } => false,
             _ => false,
+        }
+    }
+
+    fn ack_stale_durable(self) {
+        match self {
+            Self::Proposed { ack, .. }
+            | Self::Verified { ack, .. }
+            | Self::Certified { ack, .. } => {
+                // Stale durable work no longer needs storage, so wake waiters as complete.
+                let _ = ack.send(());
+            }
+            _ => {}
         }
     }
 }
@@ -269,10 +284,12 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::SetFloor { height } => {
                 let mut cutoff = Cutoff::new(height);
                 let mut append = true;
+                let len = overflow.len();
 
                 // Use the incoming floor to drop obsolete work before appending it.
-                overflow.retain_mut(|message| {
-                    let keep = match message {
+                for _ in 0..len {
+                    let message = overflow.pop_front().expect("overflow length fixed");
+                    let keep = match &message {
                         Self::SetFloor {
                             height: existing_height,
                         } => {
@@ -286,12 +303,17 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
                         _ => true,
                     };
                     if !keep {
-                        return false;
+                        continue;
                     }
 
-                    cutoff.observe(message);
-                    !message.stale(cutoff)
-                });
+                    cutoff.observe(&message);
+                    let stale = message.stale(cutoff);
+                    if stale {
+                        message.ack_stale_durable();
+                    } else {
+                        overflow.push_back(message);
+                    }
+                }
 
                 if append {
                     overflow.push_back(Self::SetFloor { height });
@@ -300,10 +322,12 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::Prune { height } => {
                 let mut cutoff = Cutoff::new(height);
                 let mut append = true;
+                let len = overflow.len();
 
                 // Use the incoming prune to drop obsolete work before appending it.
-                overflow.retain_mut(|message| {
-                    let keep = match message {
+                for _ in 0..len {
+                    let message = overflow.pop_front().expect("overflow length fixed");
+                    let keep = match &message {
                         Self::Prune {
                             height: existing_height,
                         } => {
@@ -317,12 +341,17 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
                         _ => true,
                     };
                     if !keep {
-                        return false;
+                        continue;
                     }
 
-                    cutoff.observe(message);
-                    !message.stale(cutoff)
-                });
+                    cutoff.observe(&message);
+                    let stale = message.stale(cutoff);
+                    if stale {
+                        message.ack_stale_durable();
+                    } else {
+                        overflow.push_back(message);
+                    }
+                }
 
                 if append {
                     overflow.push_back(Self::Prune { height });
@@ -334,6 +363,7 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
                     cutoff.observe(existing);
                     message.stale(cutoff)
                 }) {
+                    message.ack_stale_durable();
                     return false;
                 }
 
@@ -599,13 +629,25 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marshal::{mocks::harness, standard::Standard};
-    use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
+    use crate::{
+        marshal::{mocks::harness, standard::Standard},
+        types::{Epoch, View},
+    };
+    use commonware_cryptography::{ed25519::PrivateKey, Digest as _, Signer as _};
+    use commonware_utils::channel::oneshot::error::TryRecvError;
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
 
     fn public_key(seed: u64) -> harness::K {
         PrivateKey::from_seed(seed).public_key()
+    }
+
+    fn round(height: u64) -> Round {
+        Round::new(Epoch::zero(), View::new(height))
+    }
+
+    fn block(height: u64) -> harness::B {
+        harness::make_raw_block(harness::D::EMPTY, Height::new(height), height)
     }
 
     fn get_info(height: u64) -> TestMessage {
@@ -614,6 +656,42 @@ mod tests {
             identifier: Identifier::Height(Height::new(height)),
             response,
         }
+    }
+
+    fn proposed(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+        let (ack, receiver) = oneshot::channel();
+        (
+            TestMessage::Proposed {
+                round: round(height),
+                block: block(height),
+                ack,
+            },
+            receiver,
+        )
+    }
+
+    fn verified(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+        let (ack, receiver) = oneshot::channel();
+        (
+            TestMessage::Verified {
+                round: round(height),
+                block: block(height),
+                ack,
+            },
+            receiver,
+        )
+    }
+
+    fn certified(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+        let (ack, receiver) = oneshot::channel();
+        (
+            TestMessage::Certified {
+                round: round(height),
+                block: block(height),
+                ack,
+            },
+            receiver,
+        )
     }
 
     fn get_block(height: u64) -> TestMessage {
@@ -691,6 +769,18 @@ mod tests {
                 message,
                 TestMessage::HintFinalized { height: found, .. }
                     if *found == Height::new(height)
+            )
+        })
+    }
+
+    fn has_durable(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
+        overflow.iter().any(|message| {
+            matches!(
+                message,
+                TestMessage::Proposed { block, .. }
+                    | TestMessage::Verified { block, .. }
+                    | TestMessage::Certified { block, .. }
+                    if block.height() == Height::new(height)
             )
         })
     }
@@ -838,5 +928,41 @@ mod tests {
         assert!(has_get_info(&overflow, 7));
         assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(7)));
         assert!(has_get_block(&overflow, 7));
+    }
+
+    #[test]
+    fn policy_drops_stale_durable_messages_and_acks_waiters() {
+        let mut overflow = VecDeque::new();
+
+        let (proposed_message, mut proposed_ack) = proposed(4);
+        let (verified_message, mut verified_ack) = verified(6);
+        let (certified_message, mut certified_ack) = certified(8);
+        overflow.push_back(proposed_message);
+        overflow.push_back(verified_message);
+        overflow.push_back(certified_message);
+
+        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(7)));
+        assert!(!has_durable(&overflow, 4));
+        assert!(!has_durable(&overflow, 6));
+        assert!(has_durable(&overflow, 8));
+        assert!(proposed_ack.try_recv().is_ok());
+        assert!(verified_ack.try_recv().is_ok());
+        assert!(matches!(
+            certified_ack.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+
+        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(9)));
+        assert!(!has_durable(&overflow, 8));
+        assert!(certified_ack.try_recv().is_ok());
+
+        let (stale, mut stale_ack) = proposed(8);
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, stale));
+        assert!(stale_ack.try_recv().is_ok());
+
+        let (current, mut current_ack) = verified(9);
+        assert!(<TestMessage as Policy>::handle(&mut overflow, current));
+        assert!(has_durable(&overflow, 9));
+        assert!(matches!(current_ack.try_recv(), Err(TryRecvError::Empty)));
     }
 }
