@@ -105,7 +105,7 @@ where
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
-            _ => false,
+            Self::Proposed { .. } | Self::Discovered { .. } | Self::Prune { .. } => false,
         }
     }
 }

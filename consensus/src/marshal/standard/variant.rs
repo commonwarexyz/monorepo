@@ -86,6 +86,6 @@ where
     }
 
     fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
-        let _ = Broadcaster::broadcast(self, recipients, block);
+        Broadcaster::broadcast(self, recipients, block);
     }
 }
