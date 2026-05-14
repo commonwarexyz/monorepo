@@ -4519,6 +4519,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         handle1
             .mailbox
             .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()));
+
         // Wait for the fetch to complete
         while handle1
             .mailbox
