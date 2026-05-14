@@ -3,10 +3,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
-    sequence::U64,
-};
+use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 
 /// Messages sent to the resolver actor from the voter.
@@ -157,13 +154,35 @@ pub enum HandlerMessage {
     },
 }
 
+impl HandlerMessage {
+    /// Returns true if the requester stopped waiting for this response.
+    pub(crate) fn response_closed(&self) -> bool {
+        match self {
+            Self::Deliver { response, .. } => response.is_closed(),
+            Self::Produce { response, .. } => response.is_closed(),
+        }
+    }
+}
+
+impl Policy for HandlerMessage {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        if message.response_closed() {
+            return;
+        }
+        overflow.retain(|message| !message.response_closed());
+        overflow.push_back(message);
+    }
+}
+
 #[derive(Clone)]
 pub struct Handler {
-    sender: mpsc::Sender<HandlerMessage>,
+    sender: Sender<HandlerMessage>,
 }
 
 impl Handler {
-    pub const fn new(sender: mpsc::Sender<HandlerMessage>) -> Self {
+    pub const fn new(sender: Sender<HandlerMessage>) -> Self {
         Self { sender }
     }
 }
@@ -172,31 +191,30 @@ impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
-        self.sender
-            .request_or(
-                |response| HandlerMessage::Deliver {
-                    view: View::new(key.into()),
-                    data: value,
-                    response,
-                },
-                false,
-            )
-            .await
+    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .enqueue(HandlerMessage::Deliver {
+                view: View::new(key.into()),
+                data: value,
+                response,
+            });
+        receiver
     }
 }
 
 impl Producer for Handler {
     type Key = U64;
 
-    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(HandlerMessage::Produce {
+        let _ = self
+            .sender
+            .enqueue(HandlerMessage::Produce {
                 view: View::new(key.into()),
                 response,
-            })
-            .await;
+            });
         receiver
     }
 }

@@ -1,17 +1,15 @@
 use crate::types::{Height, Round};
 use bytes::{Buf, BufMut, Bytes};
+use commonware_actor::mailbox::{Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    Span,
-};
+use commonware_utils::{channel::oneshot, Span};
 use std::{
+    collections::VecDeque,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
 };
-use tracing::error;
 
 /// The subject of a backfill request.
 const BLOCK_REQUEST: u8 = 0;
@@ -49,18 +47,30 @@ impl<D: Digest> Message<D> {
     }
 }
 
+impl<D: Digest> Policy for Message<D> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        if message.response_closed() {
+            return;
+        }
+        overflow.retain(|message| !message.response_closed());
+        overflow.push_back(message);
+    }
+}
+
 /// A handler that forwards requests from the resolver to the marshal actor.
 ///
 /// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
 pub struct Handler<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+    sender: Sender<Message<D>>,
 }
 
 impl<D: Digest> Handler<D> {
     /// Creates a new handler.
-    pub const fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+    pub const fn new(sender: Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
@@ -69,38 +79,23 @@ impl<D: Digest> Consumer for Handler<D> {
     type Key = Request<D>;
     type Value = Bytes;
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Deliver {
-                key,
-                value,
-                response,
-            })
-            .await
-            .is_err()
-        {
-            error!("failed to send deliver message to actor: receiver dropped");
-            return false;
-        }
-        receiver.await.unwrap_or(false)
+        let _ = self.sender.enqueue(Message::Deliver {
+            key,
+            value,
+            response,
+        });
+        receiver
     }
 }
 
 impl<D: Digest> Producer for Handler<D> {
     type Key = Request<D>;
 
-    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Produce { key, response })
-            .await
-            .is_err()
-        {
-            error!("failed to send produce message to actor: receiver dropped");
-        }
+        let _ = self.sender.enqueue(Message::Produce { key, response });
         receiver
     }
 }

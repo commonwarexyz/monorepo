@@ -54,7 +54,6 @@
 
 use bytes::Bytes;
 use commonware_utils::{channel::oneshot, Span};
-use std::future::Future;
 
 mod config;
 pub use config::Config;
@@ -76,7 +75,7 @@ pub trait Producer: Clone + Send + 'static {
     type Key: Span;
 
     /// Serve a request received from the network.
-    fn produce(&mut self, key: Self::Key) -> impl Future<Output = oneshot::Receiver<Bytes>> + Send;
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes>;
 }
 
 #[cfg(test)]
@@ -98,7 +97,7 @@ mod tests {
     };
     use commonware_runtime::{
         deterministic, telemetry::metrics::count_running_tasks, Clock, Metrics as _, Quota, Runner,
-        Supervisor as _,
+        Spawner as _, Supervisor as _,
     };
     use commonware_utils::{
         channel::{fallible::FallibleExt, mpsc, oneshot},
@@ -264,6 +263,7 @@ mod tests {
 
     #[derive(Clone)]
     struct BlockingConsumer {
+        context: Arc<deterministic::Context>,
         sender: mpsc::UnboundedSender<(Key, Bytes)>,
         started: mpsc::UnboundedSender<Key>,
         gates: DeliveryGates,
@@ -271,6 +271,7 @@ mod tests {
 
     impl BlockingConsumer {
         fn new(
+            context: deterministic::Context,
             gates: Vec<DeliveryGate>,
         ) -> (
             Self,
@@ -281,6 +282,7 @@ mod tests {
             let (started, started_receiver) = mpsc::unbounded_channel();
             (
                 Self {
+                    context: Arc::new(context),
                     sender,
                     started,
                     gates: Arc::new(Mutex::new(gates.into())),
@@ -295,22 +297,33 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
 
-        async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+        fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
             self.started.send_lossy(key.clone());
             let (gate, valid) = self
                 .gates
                 .lock()
                 .pop_front()
                 .map_or((None, true), |(gate, valid)| (Some(gate), valid));
-            if let Some(gate) = gate {
-                if gate.await.is_err() {
-                    return false;
+            let (mut response, receiver) = oneshot::channel();
+            let sender = self.sender.clone();
+            self.context.child("delivery").spawn(move |_| async move {
+                if let Some(gate) = gate {
+                    select! {
+                        _ = response.closed() => return,
+                        result = gate => {
+                            if result.is_err() {
+                                let _ = response.send(false);
+                                return;
+                            }
+                        },
+                    }
                 }
-            }
-            if valid {
-                self.sender.send_lossy((key, value));
-            }
-            valid
+                if valid {
+                    sender.send_lossy((key, value));
+                }
+                let _ = response.send(valid);
+            });
+            receiver
         }
     }
 
@@ -417,7 +430,10 @@ mod tests {
             let (gate_sender1, gate_receiver1) = oneshot::channel();
             let (gate_sender2, gate_receiver2) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) =
-                BlockingConsumer::new(vec![(gate_receiver1, true), (gate_receiver2, true)]);
+                BlockingConsumer::new(
+                    context.child("consumer"),
+                    vec![(gate_receiver1, true), (gate_receiver2, true)],
+                );
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -494,10 +510,10 @@ mod tests {
 
             let (mut first_gate_sender, first_gate_receiver) = oneshot::channel();
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(vec![
-                (first_gate_receiver, true),
-                (second_gate_receiver, true),
-            ]);
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![(first_gate_receiver, true), (second_gate_receiver, true)],
+            );
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -564,10 +580,10 @@ mod tests {
 
             let (first_gate_sender, first_gate_receiver) = oneshot::channel();
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(vec![
-                (first_gate_receiver, false),
-                (second_gate_receiver, true),
-            ]);
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+            );
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -647,7 +663,7 @@ mod tests {
 
         let (mut gate_sender, gate_receiver) = oneshot::channel();
         let (cons1, mut cons_out1, mut started) =
-            BlockingConsumer::new(vec![(gate_receiver, false)]);
+            BlockingConsumer::new(context.child("consumer"), vec![(gate_receiver, false)]);
 
         let scheme = schemes.remove(0);
         let mut mailbox1 = setup_and_spawn_actor(
@@ -2574,7 +2590,7 @@ mod tests {
 
             let (mut gate_sender, gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) =
-                BlockingConsumer::new(vec![(gate_receiver, true)]);
+                BlockingConsumer::new(context.child("consumer"), vec![(gate_receiver, true)]);
 
             let actor_context = context.child("actor");
 

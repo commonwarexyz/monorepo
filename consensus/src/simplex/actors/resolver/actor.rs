@@ -21,7 +21,7 @@ use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc},
+    channel::fallible::OneshotExt,
     ordered::Quorum,
     sequence::U64,
 };
@@ -102,7 +102,7 @@ impl<
             .and_then(|index| participants.key(index))
             .cloned();
 
-        let (handler_tx, mut handler_rx) = mpsc::channel(self.mailbox_size.get());
+        let (handler_tx, mut handler_rx) = mailbox::new(self.mailbox_size);
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
@@ -144,6 +144,9 @@ impl<
                 }
             },
             Some(message) = handler_rx.recv() else break => {
+                if message.response_closed() {
+                    continue;
+                }
                 self.handle_resolver(message, &mut voter, &mut resolver);
             },
         }

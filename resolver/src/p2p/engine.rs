@@ -378,8 +378,8 @@ impl<
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
         let timer = self.metrics.serve_duration.timer(self.context.as_ref());
+        let receiver = producer.produce(key);
         self.serves.push(async move {
-            let receiver = producer.produce(key).await;
             let result = receiver.await;
             Serve {
                 timer,

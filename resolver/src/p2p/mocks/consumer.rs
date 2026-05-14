@@ -1,5 +1,5 @@
 use crate::Span;
-use commonware_utils::channel::{fallible::FallibleExt, mpsc};
+use commonware_utils::channel::{fallible::FallibleExt, mpsc, oneshot};
 use std::collections::HashMap;
 
 /// A consumer that can be used for testing
@@ -56,11 +56,13 @@ impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consume
     /// Deliver data to the consumer.
     ///
     /// Returns `true` if the value is expected for the key or if there is no expected value.
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+        let (sender, receiver) = oneshot::channel();
         let valid = self.expected.get(&key).is_none_or(|v| v == &value);
         if valid {
             self.sender.send_lossy((key, value));
         }
-        valid
+        let _ = sender.send(valid);
+        receiver
     }
 }

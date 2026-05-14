@@ -67,7 +67,7 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Reporter,
     };
     use bytes::Bytes;
-    use commonware_actor::Feedback;
+    use commonware_actor::{mailbox, Feedback};
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
@@ -92,7 +92,7 @@ mod tests {
     };
     use commonware_utils::{
         acknowledgement::Exact,
-        channel::{fallible::OneshotExt, mpsc, oneshot},
+        channel::{fallible::OneshotExt, oneshot},
         sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
@@ -1681,11 +1681,11 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingResolver {
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
-        _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
+        _keepalive: Option<mailbox::Sender<handler::Message<D>>>,
     }
 
     impl RecordingResolver {
-        fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
+        fn holding(sender: mailbox::Sender<handler::Message<D>>) -> Self {
             Self {
                 targeted: Arc::new(Mutex::new(Vec::new())),
                 _keepalive: Some(sender),
@@ -1894,7 +1894,7 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_tx, resolver_rx) = mpsc::channel(100);
+        let (resolver_tx, resolver_rx) = mailbox::new(NZUsize!(100));
         let resolver = RecordingResolver::holding(resolver_tx);
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
@@ -1991,7 +1991,7 @@ mod tests {
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
+            let (resolver_tx, resolver_rx) = mailbox::new(NZUsize!(100));
 
             let (actor, _mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -2010,30 +2010,28 @@ mod tests {
             // provider has no verifier, so the marshal cannot decode it and
             // must ack (true) rather than blame the peer (false).
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(resolver_tx
+                .enqueue(handler::Message::Deliver {
                     key: handler::Request::Finalized {
                         height: Height::new(5),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .await
-                .unwrap();
+                .accepted());
             assert!(response_rx.await.unwrap());
 
             // Same for a Notarized delivery.
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(resolver_tx
+                .enqueue(handler::Message::Deliver {
                     key: handler::Request::Notarized {
                         round: Round::new(Epoch::zero(), View::new(1)),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .await
-                .unwrap();
+                .accepted());
             assert!(response_rx.await.unwrap());
         });
     }
