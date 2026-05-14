@@ -1146,6 +1146,9 @@ mod tests {
             verify_started
                 .await
                 .expect("verify should reach application before marshal abort");
+
+            // Wait for marshal shutdown to complete before releasing `app.verify`.
+            // This makes the later persistence ack fail deterministically.
             marshal_actor_handle.abort();
             let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());

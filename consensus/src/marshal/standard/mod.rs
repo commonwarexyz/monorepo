@@ -91,6 +91,7 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
+        acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot},
         sync::Mutex,
         vec::NonEmptyVec,
@@ -1736,33 +1737,37 @@ mod tests {
         }
     }
 
-    /// A reporter that signals when application delivery starts.
+    /// A reporter that signals when application delivery starts and holds the
+    /// block acknowledgement open.
     #[derive(Clone)]
-    struct GatedBlockReporter {
+    struct HoldingBlockReporter {
         started: Arc<Mutex<Option<oneshot::Sender<Height>>>>,
+        pending: Arc<Mutex<Vec<Exact>>>,
     }
 
-    impl GatedBlockReporter {
+    impl HoldingBlockReporter {
         fn new() -> (Self, oneshot::Receiver<Height>) {
             let (started_tx, started_rx) = oneshot::channel();
             (
                 Self {
                     started: Arc::new(Mutex::new(Some(started_tx))),
+                    pending: Arc::new(Mutex::new(Vec::new())),
                 },
                 started_rx,
             )
         }
     }
 
-    impl Reporter for GatedBlockReporter {
+    impl Reporter for HoldingBlockReporter {
         type Activity = Update<B>;
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
             match activity {
-                Update::Block(block, _ack) => {
+                Update::Block(block, ack) => {
                     if let Some(started) = self.started.lock().take() {
                         started.send_lossy(block.height());
                     }
+                    self.pending.lock().push(ack);
                 }
                 Update::Tip(_, _, _) => {}
             }
@@ -2012,9 +2017,9 @@ mod tests {
     }
 
     /// Regression: application delivery of a finalized block must only happen
-    /// after the finalized archives are durably synced. Otherwise a crash in
-    /// the delivery callback can expose a block to another subsystem that then
-    /// persists derived state ahead of marshal's height-indexed finalization.
+    /// after the finalized archives are durably synced. Otherwise a crash after
+    /// the application observes the block, but before it acknowledges it, can
+    /// expose derived state ahead of marshal's height-indexed finalization.
     #[test_traced("WARN")]
     fn test_standard_dispatches_finalized_blocks_after_sync() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2034,7 +2039,7 @@ mod tests {
                 QUORUM,
             );
 
-            let (application, started) = GatedBlockReporter::new();
+            let (application, started) = HoldingBlockReporter::new();
             let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
