@@ -94,7 +94,7 @@ fn bench_write_at_sync(c: &mut Criterion) {
 
     for method in [Method::WriteThenSync, Method::WriteAtSync] {
         group.bench_function(
-            &format!("method={} io_size={io_size}", method.name()),
+            format!("method={} io_size={io_size}", method.name()),
             |b| b.iter_custom(|iters| run(method, io_size, iters)),
         );
     }
