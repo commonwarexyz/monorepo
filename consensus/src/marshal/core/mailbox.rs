@@ -341,7 +341,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     {
         // Receiver accepted; the message is consumed
         let Some(message) = push(message) else {
-            return false;
+            return true;
         };
 
         // Receiver rejected; restore so the next drain retries from the same point

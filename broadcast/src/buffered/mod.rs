@@ -226,10 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn policy_drain_stops_after_accepting_message() {
+    fn policy_drain_continues_until_rejected_message() {
         let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
         let first = TestMessage::shared(b"first");
         let second = TestMessage::shared(b"second");
+        let third = TestMessage::shared(b"third");
 
         let (closed_responder, closed_receiver) = commonware_utils::channel::oneshot::channel();
         <Message<PublicKey, TestMessage> as Policy>::handle(
@@ -257,29 +258,46 @@ mod tests {
                 responder: second_responder,
             },
         );
+        let (third_responder, _third_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: third.digest(),
+                responder: third_responder,
+            },
+        );
 
         let mut drained = VecDeque::new();
         overflow.drain(|message| {
             drained.push_back(message);
-            None
+            if drained.len() == 3 {
+                drained.pop_back()
+            } else {
+                None
+            }
         });
 
-        assert_eq!(drained.len(), 1);
+        assert_eq!(drained.len(), 2);
         assert!(matches!(
             &drained[0],
             Message::Get { digest, responder }
                 if *digest == first.digest() && !responder.is_closed()
+        ));
+        assert!(matches!(
+            &drained[1],
+            Message::Get { digest, responder }
+                if *digest == second.digest() && !responder.is_closed()
         ));
 
         overflow.drain(|message| {
             drained.push_back(message);
             None
         });
-        assert_eq!(drained.len(), 2);
+        assert_eq!(drained.len(), 3);
         assert!(matches!(
-            &drained[1],
+            &drained[2],
             Message::Get { digest, responder }
-                if *digest == second.digest() && !responder.is_closed()
+                if *digest == third.digest() && !responder.is_closed()
         ));
     }
 

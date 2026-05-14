@@ -71,16 +71,17 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
         if let Some(update) = self.update.take() {
             if let Some(update) = push(update) {
                 self.update = Some(update);
+                return;
             }
-            return;
         }
 
-        if let Some(vote) = self.constructed.pop_front() {
+        while let Some(vote) = self.constructed.pop_front() {
             if let Some(message) = push(Message::Constructed(vote)) {
                 let Message::Constructed(vote) = message else {
                     unreachable!("ready returned a different message");
                 };
                 self.constructed.push_front(vote);
+                break;
             }
         }
     }

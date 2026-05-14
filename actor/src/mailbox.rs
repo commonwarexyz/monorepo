@@ -54,7 +54,8 @@ pub trait Overflow<T>: Default {
     /// Return whether the retained message set is empty.
     fn is_empty(&self) -> bool;
 
-    /// Drain retained messages into `push` in delivery order.
+    /// Drain retained messages into `push` in delivery order until `push`
+    /// rejects a message.
     ///
     /// If `push` returns `Some`, the undelivered message and any later messages
     /// must remain retained for a future drain.
@@ -72,11 +73,11 @@ impl<T> Overflow<T> for VecDeque<T> {
     where
         F: FnMut(T) -> Option<T>,
     {
-        let Some(message) = self.pop_front() else {
-            return;
-        };
-        if let Some(message) = push(message) {
-            self.push_front(message);
+        while let Some(message) = self.pop_front() {
+            if let Some(message) = push(message) {
+                self.push_front(message);
+                break;
+            }
         }
     }
 }
@@ -320,12 +321,10 @@ impl<T: Policy> OverflowState<T> {
         // releasing the lock)
         let mut drained = Vec::new();
         let mut queue = lock(&self.queue);
-        while !queue.is_empty() {
-            queue.drain(|message| {
-                drained.push(message);
-                None
-            });
-        }
+        queue.drain(|message| {
+            drained.push(message);
+            None
+        });
         mutation.publish(queue.is_empty());
         drop(queue);
         drop(drained);
@@ -634,13 +633,17 @@ mod tests {
     }
 
     #[test]
-    fn vecdeque_overflow_drain_stops_after_accepting_message() {
+    fn vecdeque_overflow_drain_stops_after_rejected_message() {
         let mut overflow = VecDeque::from([Message::Vote(1), Message::Vote(2), Message::Vote(3)]);
         let mut drained = VecDeque::new();
 
         Overflow::drain(&mut overflow, |message| {
             drained.push_back(message);
-            None
+            if drained.len() == 2 {
+                drained.pop_back()
+            } else {
+                None
+            }
         });
 
         assert_eq!(drained, VecDeque::from([Message::Vote(1)]));

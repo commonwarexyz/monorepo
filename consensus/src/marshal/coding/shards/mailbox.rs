@@ -151,8 +151,8 @@ where
 
             if let Some(message) = push(message) {
                 self.0.push_front(message);
+                break;
             }
-            break;
         }
     }
 }

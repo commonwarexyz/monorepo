@@ -54,13 +54,14 @@ impl<S: Scheme, D: Digest> Overflow<MailboxMessage<S, D>> for Pending<S, D> {
         if let Some(finalization) = self.finalization.take() {
             if let Some(finalization) = push(finalization) {
                 self.finalization = Some(finalization);
+                return;
             }
-            return;
         }
 
-        if let Some(message) = self.messages.pop_front() {
+        while let Some(message) = self.messages.pop_front() {
             if let Some(message) = push(message) {
                 self.messages.push_front(message);
+                break;
             }
         }
     }
