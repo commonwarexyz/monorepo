@@ -199,7 +199,7 @@ fn main() {
             application::Config {
                 hasher: Sha256::default(),
                 scheme,
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
             },
         );
 

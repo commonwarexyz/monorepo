@@ -38,12 +38,12 @@ use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
-    num::{NonZero, NonZeroU16},
+    num::{NonZero, NonZeroU16, NonZeroUsize},
     time::Instant,
 };
 use tracing::{error, info, warn};
 
-const MAILBOX_SIZE: usize = 1024;
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
 const DEQUE_SIZE: usize = 10;
 const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
@@ -302,8 +302,8 @@ where
                 provider,
                 marshal: marshal_mailbox,
                 strategy: config.strategy.clone(),
-                muxer_size: MAILBOX_SIZE,
-                mailbox_size: MAILBOX_SIZE,
+                muxer_size: MAILBOX_SIZE.get(),
+                mailbox_size: MAILBOX_SIZE.get(),
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 _phantom: PhantomData,
             },

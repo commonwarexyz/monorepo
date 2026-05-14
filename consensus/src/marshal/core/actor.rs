@@ -17,6 +17,7 @@ use crate::{
     Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
+use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -69,6 +70,16 @@ enum PendingVerification<S: CertificateScheme, V: Variant> {
         block: V::Block,
         response: oneshot::Sender<bool>,
     },
+}
+
+impl<S: CertificateScheme, V: Variant> PendingVerification<S, V> {
+    fn response_closed(&self) -> bool {
+        match self {
+            Self::Notarized { response, .. } | Self::Finalized { response, .. } => {
+                response.is_closed()
+            }
+        }
+    }
 }
 
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
@@ -218,7 +229,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<P::Scheme, V>>,
+    mailbox: mailbox::Receiver<Message<P::Scheme, V>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -324,7 +335,7 @@ where
         let _ = processed_height.try_set(last_processed_height.get());
 
         // Initialize mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -389,7 +400,7 @@ where
         // Get tip and send to application
         let tip = self.get_latest().await;
         if let Some((height, digest, round)) = tip {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -477,7 +488,7 @@ where
                 }
 
                 // Inform the buffer of the last acknowledged commitment (anything below this is safe to prune).
-                buffer.finalized(last_acked_commitment).await;
+                buffer.finalized(last_acked_commitment);
 
                 // Fill the pipeline
                 self.try_dispatch_blocks(&mut application).await;
@@ -487,6 +498,10 @@ where
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
+                if message.response_closed() {
+                    continue;
+                }
+
                 match message {
                     Message::GetInfo {
                         identifier,
@@ -538,7 +553,7 @@ where
                                 block
                             }
                         };
-                        buffer.send(round, block, recipients).await;
+                        buffer.send(round, block, recipients);
                     }
                     Message::Proposed { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -553,7 +568,7 @@ where
                         // overwritten.
                         let commitment = V::commitment(&block);
                         self.last_proposed_block = Some((round, commitment, block));
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Verified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -561,7 +576,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_verified(round, block.digest(), block).await;
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Certified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -569,7 +584,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_block(round, block.digest(), block).await;
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Notarization { notarization } => {
                         let round = notarization.round();
@@ -654,7 +669,7 @@ where
                             };
                             response.send_lossy(block);
                         }
-                    },
+                    }
                     Message::GetFinalization { height, response } => {
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
@@ -763,12 +778,18 @@ where
                 // Drain up to max_repair messages: blocks handled immediately,
                 // certificates batched for verification, produces deferred.
                 let mut needs_sync = false;
+                let mut handled = false;
                 let mut produces = Vec::new();
                 let mut delivers = Vec::new();
                 for msg in std::iter::once(message)
                     .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
                     .take(self.max_repair.get())
                 {
+                    if msg.response_closed() {
+                        continue;
+                    }
+                    handled = true;
+
                     match msg {
                         handler::Message::Produce { key, response } => {
                             produces.push((key, response));
@@ -789,6 +810,9 @@ where
                                 .await;
                         }
                     }
+                }
+                if !handled {
+                    continue;
                 }
 
                 // Batch verify and process all delivers.
@@ -923,11 +947,9 @@ where
             }
             Entry::Vacant(entry) => {
                 let rx = match key {
-                    BlockSubscriptionKey::Digest(digest) => {
-                        buffer.subscribe_by_digest(digest).await
-                    }
+                    BlockSubscriptionKey::Digest(digest) => buffer.subscribe_by_digest(digest),
                     BlockSubscriptionKey::Commitment(commitment) => {
-                        buffer.subscribe_by_commitment(commitment).await
+                        buffer.subscribe_by_commitment(commitment)
                     }
                 };
                 let waiter_key = key;
@@ -1073,6 +1095,7 @@ where
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
+        delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
             return false;
         }
@@ -1295,9 +1318,7 @@ where
 
             let (height, commitment) = (block.height(), V::commitment(&block));
             let (ack, ack_waiter) = A::handle();
-            application
-                .report(Update::Block(V::into_inner(block), ack))
-                .await;
+            application.report(Update::Block(V::into_inner(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
@@ -1496,7 +1517,7 @@ where
 
         // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }

@@ -229,7 +229,7 @@ fn main() {
                 hasher: Sha256::default(),
                 this_network,
                 other_network,
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
             },
         );
 

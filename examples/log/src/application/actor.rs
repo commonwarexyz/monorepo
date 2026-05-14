@@ -3,11 +3,11 @@ use super::{
     reporter::Reporter,
     Config, Scheme,
 };
+use commonware_actor::mailbox::{self, Receiver};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::channel::mpsc;
 use rand::Rng;
 use tracing::info;
 
@@ -18,7 +18,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng + Spawner, H: Hasher> {
     context: ContextCell<R>,
     hasher: H,
-    mailbox: mpsc::Receiver<Message<H::Digest>>,
+    mailbox: Receiver<Message<H::Digest>>,
 }
 
 impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
@@ -28,16 +28,18 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
         context: R,
         config: Config<H>,
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, receiver) = mailbox::new(config.mailbox_size);
+        let mailbox = Mailbox::new(sender);
+        let reporter = Reporter::new();
         (
             Self {
                 context: ContextCell::new(context),
                 hasher: config.hasher,
-                mailbox,
+                mailbox: receiver,
             },
             config.scheme,
-            Reporter::new(),
-            Mailbox::new(sender),
+            reporter,
+            mailbox,
         )
     }
 

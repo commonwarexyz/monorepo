@@ -5,8 +5,7 @@
 //! The mailbox is split into two queues: a bounded `ready` queue
 //! that producers push to and the receiver pops from, and an unbounded
 //! `overflow` queue that holds messages displaced when ready is full. A
-//! [`Policy`] decides how overflow is updated and what feedback is returned
-//! when overflow is contended.
+//! [`Policy`] decides how overflow is updated when overflow is contended.
 //!
 //! ```text
 //!                          senders
@@ -55,7 +54,8 @@ pub trait Overflow<T>: Default {
     /// Return whether the retained message set is empty.
     fn is_empty(&self) -> bool;
 
-    /// Drain retained messages into `push` in delivery order.
+    /// Drain retained messages into `push` in delivery order until `push`
+    /// rejects a message.
     ///
     /// If `push` returns `Some`, the undelivered message and any later messages
     /// must remain retained for a future drain.
@@ -93,10 +93,6 @@ pub trait Policy: Sized {
     /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
     /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
     ///
-    /// The returned value is feedback for this enqueue attempt after the policy has made any
-    /// overflow changes. Return `true` to report [`Feedback::Backoff`] or
-    /// `false` to report [`Feedback::Dropped`].
-    ///
     /// # Warning
     ///
     /// Do not enqueue into the same mailbox from this method or from destructors triggered by
@@ -106,7 +102,7 @@ pub trait Policy: Sized {
     /// This method should not unwind after mutating `overflow`. A panic, including one from a
     /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
     /// the mailbox.
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
+    fn handle(overflow: &mut Self::Overflow, message: Self);
 }
 
 // `activity` packs the published overflow state and in-flight overflow
@@ -299,13 +295,9 @@ impl<T: Policy> OverflowState<T> {
         };
 
         // Preserve overflow order, or handle a still-full ready queue.
-        let feedback = if T::handle(&mut queue, message) {
-            Feedback::Backoff
-        } else {
-            Feedback::Dropped
-        };
+        T::handle(&mut queue, message);
         mutation.publish(queue.is_empty());
-        feedback
+        Feedback::Backoff
     }
 
     fn refill(&self, ready: &Ready<T>) {
@@ -318,6 +310,28 @@ impl<T: Policy> OverflowState<T> {
         let mut queue = lock(&self.queue);
         queue.drain(|message| ready.push(message).err());
         mutation.publish(queue.is_empty());
+    }
+
+    fn drain(&self, ready: &Ready<T>) {
+        // Attempt to drain all messages from ready
+        let mutation = Mutation::begin(&self.activity);
+        while ready.pop().is_some() {}
+
+        // Attempt to drain all messages from overflow (storing messages to drop after
+        // releasing the lock)
+        let mut drained = Vec::new();
+        let mut queue = lock(&self.queue);
+        queue.drain(|message| {
+            drained.push(message);
+            None
+        });
+        mutation.publish(queue.is_empty());
+        drop(queue);
+        drop(drained);
+
+        // A sender may have passed the fast-path activity check before this
+        // mutation began, so we drain again
+        while ready.pop().is_some() {}
     }
 }
 
@@ -406,6 +420,10 @@ impl<T: Policy> Sender<T> {
         // Common case: publish directly to ready without taking overflow lock.
         let message = match self.state.overflow.try_ready(&self.state.ready, message) {
             Ok(()) => {
+                if self.state.closed.load(Ordering::Acquire) {
+                    self.state.overflow.drain(&self.state.ready);
+                    return Feedback::Closed;
+                }
                 self.state.waker.wake();
                 return Feedback::Ok;
             }
@@ -417,11 +435,10 @@ impl<T: Policy> Sender<T> {
             self.state.closed.load(Ordering::Acquire)
         });
 
-        // Wake on any handled enqueue rather than interpreting policy feedback:
-        // a policy may retain overflow while reporting `Dropped`, and a
-        // receiver may have skipped refill while this overflow mutation was
-        // active. By the time we wake, the mutation has published its overflow
-        // state. Spurious wakes are acceptable.
+        // Wake on any handled enqueue because a receiver may have skipped
+        // refill while this overflow mutation was active. By the time we wake,
+        // the mutation has published its overflow state. Spurious wakes are
+        // acceptable.
         if feedback != Feedback::Closed {
             self.state.waker.wake();
         }
@@ -431,9 +448,7 @@ impl<T: Policy> Sender<T> {
 
 /// Receiver half of a mailbox.
 ///
-/// Dropping the receiver closes the mailbox but does not drain buffered messages.
-/// Messages already in ready or overflow, or racing through an in-flight enqueue,
-/// remain owned by shared mailbox state until the last sender is dropped.
+/// Dropping the receiver closes the mailbox and drains buffered messages.
 ///
 /// Dropping the last sender disconnects the mailbox, but the receiver continues
 /// returning buffered messages until ready and overflow are empty.
@@ -509,8 +524,8 @@ impl<T: Policy> Receiver<T> {
 
 impl<T: Policy> Drop for Receiver<T> {
     fn drop(&mut self) {
-        // Publish closure so future sends stop accepting messages.
         self.state.closed.store(true, Ordering::Release);
+        self.state.overflow.drain(&self.state.ready);
     }
 }
 
@@ -535,7 +550,7 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
 mod tests {
     use super::*;
     use commonware_macros::test_async;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{channel::oneshot, NZUsize};
     use futures::{
         pin_mut,
         task::{waker_ref, ArcWake},
@@ -559,7 +574,7 @@ mod tests {
     impl Policy for Message {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             match message {
                 Self::Update(value) => {
                     if let Some(index) = overflow
@@ -569,25 +584,34 @@ mod tests {
                         overflow.remove(index);
                     }
                     overflow.push_back(Self::Update(value));
-                    true
                 }
                 Self::Required(_) | Self::Buffered(_) => {
                     overflow.push_back(message);
-                    true
                 }
                 Self::Hint(value) => {
                     let Some(index) = overflow
                         .iter()
                         .rposition(|pending| matches!(pending, Self::Update(_)))
                     else {
-                        return false;
+                        return;
                     };
                     overflow.remove(index);
                     overflow.push_back(Self::Hint(value));
-                    true
                 }
-                Self::Vote(_) => false,
+                Self::Vote(_) => {}
             }
+        }
+    }
+
+    struct Ack {
+        _sender: oneshot::Sender<()>,
+    }
+
+    impl Policy for Ack {
+        type Overflow = VecDeque<Self>;
+
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+            overflow.push_back(message);
         }
     }
 
@@ -606,6 +630,27 @@ mod tests {
         fn wake_by_ref(arc_self: &Arc<Self>) {
             arc_self.wakes.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    #[test]
+    fn vecdeque_overflow_drain_stops_after_rejected_message() {
+        let mut overflow = VecDeque::from([Message::Vote(1), Message::Vote(2), Message::Vote(3)]);
+        let mut drained = VecDeque::new();
+
+        Overflow::drain(&mut overflow, |message| {
+            drained.push_back(message);
+            if drained.len() == 2 {
+                drained.pop_back()
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(drained, VecDeque::from([Message::Vote(1)]));
+        assert_eq!(
+            overflow,
+            VecDeque::from([Message::Vote(2), Message::Vote(3)])
+        );
     }
 
     #[test_async]
@@ -636,7 +681,7 @@ mod tests {
     async fn full_inbox_rejects_non_replaceable_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Dropped);
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Backoff);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
@@ -766,7 +811,7 @@ mod tests {
     async fn full_inbox_rejects_hint() {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Dropped);
+        assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Backoff);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
@@ -860,6 +905,25 @@ mod tests {
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Closed);
     }
 
+    #[test_async]
+    async fn receiver_drop_cancels_buffered_responders() {
+        let (sender, receiver) = new(NZUsize!(1));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (overflow_tx, overflow_rx) = oneshot::channel();
+
+        assert_eq!(sender.enqueue(Ack { _sender: ready_tx }), Feedback::Ok);
+        assert_eq!(
+            sender.enqueue(Ack {
+                _sender: overflow_tx
+            }),
+            Feedback::Backoff
+        );
+        drop(receiver);
+
+        assert!(ready_rx.await.is_err());
+        assert!(overflow_rx.await.is_err());
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum ClearingMessage {
         FillReady,
@@ -869,10 +933,9 @@ mod tests {
     impl Policy for ClearingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
             overflow.clear();
-            true
         }
     }
 
@@ -893,22 +956,21 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq)]
-    enum SpillAndDropMessage {
+    enum SpillMessage {
         FillReady,
-        SpillAndDrop,
+        Spill,
     }
 
-    impl Policy for SpillAndDropMessage {
+    impl Policy for SpillMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            false
         }
     }
 
     #[test]
-    fn pending_recv_wakes_when_policy_spills_and_reports_dropped() {
+    fn pending_recv_wakes_when_policy_spills() {
         let (sender, mut receiver) = new(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
@@ -917,18 +979,12 @@ mod tests {
         assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
-        assert_eq!(
-            sender.state.ready.push(SpillAndDropMessage::FillReady),
-            Ok(())
-        );
-        assert_eq!(
-            sender.enqueue(SpillAndDropMessage::SpillAndDrop),
-            Feedback::Dropped
-        );
+        assert_eq!(sender.state.ready.push(SpillMessage::FillReady), Ok(()));
+        assert_eq!(sender.enqueue(SpillMessage::Spill), Feedback::Backoff);
 
         assert_eq!(wakes.count(), 1);
-        assert_eq!(receiver.try_recv(), Ok(SpillAndDropMessage::FillReady));
-        assert_eq!(receiver.try_recv(), Ok(SpillAndDropMessage::SpillAndDrop));
+        assert_eq!(receiver.try_recv(), Ok(SpillMessage::FillReady));
+        assert_eq!(receiver.try_recv(), Ok(SpillMessage::Spill));
     }
 }
 
@@ -967,15 +1023,41 @@ mod loom_tests {
         Replace(u8),
     }
 
+    struct TrackedMessage {
+        drops: Arc<AtomicUsize>,
+    }
+
+    struct CyclicMessage {
+        _sender: Sender<Self>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl TrackedMessage {
+        const fn new(drops: Arc<AtomicUsize>) -> Self {
+            Self { drops }
+        }
+    }
+
+    impl Drop for TrackedMessage {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl Drop for CyclicMessage {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     impl Policy for Message {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             match message {
-                Self::Drop(_) => false,
+                Self::Drop(_) => {}
                 Self::Spill(_) => {
                     overflow.push_back(message);
-                    true
                 }
             }
         }
@@ -984,7 +1066,7 @@ mod loom_tests {
     impl Policy for OrderedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             let gate = match &message {
                 Self::Item(_) => None,
                 Self::Coordinated(_, gate) => Some(gate.clone()),
@@ -996,16 +1078,15 @@ mod loom_tests {
                     thread::yield_now();
                 }
             }
-            true
         }
     }
 
     impl Policy for ReplacingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             match message {
-                Self::FillReady => false,
+                Self::FillReady => {}
                 Self::Replace(_) => {
                     if let Some(pending) = overflow
                         .iter_mut()
@@ -1016,9 +1097,24 @@ mod loom_tests {
                     } else {
                         overflow.push_back(message);
                     }
-                    true
                 }
             }
+        }
+    }
+
+    impl Policy for TrackedMessage {
+        type Overflow = VecDeque<Self>;
+
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+            overflow.push_back(message);
+        }
+    }
+
+    impl Policy for CyclicMessage {
+        type Overflow = VecDeque<Self>;
+
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+            overflow.push_back(message);
         }
     }
 
@@ -1210,12 +1306,139 @@ mod loom_tests {
             let feedback = sender.enqueue(Message::Spill(0));
             close.join().unwrap();
 
-            match feedback {
-                Feedback::Ok | Feedback::Backoff => assert!(wakes.load(Ordering::Acquire) > 0),
-                Feedback::Closed => {}
-                feedback => panic!("unexpected feedback: {feedback:?}"),
+            if feedback.accepted() {
+                assert!(wakes.load(Ordering::Acquire) > 0);
+            } else {
+                assert_eq!(feedback, Feedback::Closed);
             }
             assert_eq!(sender.enqueue(Message::Spill(1)), Feedback::Closed);
+        });
+    }
+
+    #[test]
+    fn receiver_drop_racing_ready_enqueue_drops_message() {
+        loom::model(|| {
+            let (sender, receiver) = new::<TrackedMessage>(NZUsize!(1));
+            let drops = Arc::new(AtomicUsize::new(0));
+
+            let close = thread::spawn(move || {
+                drop(receiver);
+            });
+            let _ = sender.enqueue(TrackedMessage::new(drops.clone()));
+            close.join().unwrap();
+
+            assert_eq!(drops.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn receiver_drop_racing_overflow_enqueue_drops_messages() {
+        loom::model(|| {
+            let (sender, receiver) = new::<TrackedMessage>(NZUsize!(1));
+            let ready_drops = Arc::new(AtomicUsize::new(0));
+            let overflow_drops = Arc::new(AtomicUsize::new(0));
+
+            assert_eq!(
+                sender.enqueue(TrackedMessage::new(ready_drops.clone())),
+                Feedback::Ok
+            );
+            let close = thread::spawn(move || {
+                drop(receiver);
+            });
+            let _ = sender.enqueue(TrackedMessage::new(overflow_drops.clone()));
+            close.join().unwrap();
+
+            assert_eq!(ready_drops.load(Ordering::Acquire), 1);
+            assert_eq!(overflow_drops.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn receiver_drop_drains_ready_message_published_under_overflow_lock() {
+        loom::model(|| {
+            let (sender, receiver) = new::<TrackedMessage>(NZUsize!(1));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let mutation = Mutation::begin(&sender.state.overflow.activity);
+            let queue = lock(&sender.state.overflow.queue);
+
+            let close = thread::spawn(move || {
+                drop(receiver);
+            });
+
+            assert!(sender
+                .state
+                .ready
+                .push(TrackedMessage::new(drops.clone()))
+                .is_ok());
+            mutation.publish(queue.is_empty());
+            drop(queue);
+            drop(mutation);
+            close.join().unwrap();
+
+            assert_eq!(drops.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn receiver_drop_drains_overflow_message_published_under_overflow_lock() {
+        loom::model(|| {
+            let (sender, receiver) = new::<TrackedMessage>(NZUsize!(1));
+            let ready_drops = Arc::new(AtomicUsize::new(0));
+            let overflow_drops = Arc::new(AtomicUsize::new(0));
+
+            assert_eq!(
+                sender.enqueue(TrackedMessage::new(ready_drops.clone())),
+                Feedback::Ok
+            );
+
+            let mutation = Mutation::begin(&sender.state.overflow.activity);
+            let mut queue = lock(&sender.state.overflow.queue);
+            let close = thread::spawn(move || {
+                drop(receiver);
+            });
+
+            queue.push_back(TrackedMessage::new(overflow_drops.clone()));
+            mutation.publish(queue.is_empty());
+            drop(queue);
+            drop(mutation);
+            close.join().unwrap();
+
+            assert_eq!(ready_drops.load(Ordering::Acquire), 1);
+            assert_eq!(overflow_drops.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn receiver_drop_breaks_message_sender_cycle() {
+        loom::model(|| {
+            let (sender, receiver) = new::<CyclicMessage>(NZUsize!(1));
+            let drops = Arc::new(AtomicUsize::new(0));
+
+            assert_eq!(
+                sender.enqueue(CyclicMessage {
+                    _sender: sender.clone(),
+                    drops: drops.clone(),
+                }),
+                Feedback::Ok
+            );
+            assert_eq!(
+                sender.enqueue(CyclicMessage {
+                    _sender: sender.clone(),
+                    drops: drops.clone(),
+                }),
+                Feedback::Backoff
+            );
+
+            drop(receiver);
+
+            assert_eq!(drops.load(Ordering::Acquire), 2);
+            assert_eq!(
+                sender.enqueue(CyclicMessage {
+                    _sender: sender.clone(),
+                    drops,
+                }),
+                Feedback::Closed
+            );
         });
     }
 
@@ -1270,7 +1493,7 @@ mod loom_tests {
             let seen = Arc::new(AtomicUsize::new(0));
             let enqueue = thread::spawn(move || {
                 let feedback = sender.enqueue(Message::Spill(1));
-                assert!(matches!(feedback, Feedback::Ok | Feedback::Backoff));
+                assert!(feedback.accepted());
             });
 
             let seen_by_receiver = seen.clone();
@@ -1306,14 +1529,8 @@ mod loom_tests {
 
             let seen = Arc::new(AtomicUsize::new(0));
 
-            assert!(matches!(
-                enqueue_1.join().unwrap(),
-                Feedback::Ok | Feedback::Backoff
-            ));
-            assert!(matches!(
-                enqueue_2.join().unwrap(),
-                Feedback::Ok | Feedback::Backoff
-            ));
+            assert!(enqueue_1.join().unwrap().accepted());
+            assert!(enqueue_2.join().unwrap().accepted());
 
             while let Ok(message) = receiver.try_recv() {
                 record(&seen, message);
@@ -1393,7 +1610,7 @@ mod loom_tests {
             let mut observed = vec![value(receiver.try_recv().unwrap())];
             gate.store(2, Ordering::Release);
             let feedback = sender.enqueue(OrderedMessage::Item(3));
-            assert!(matches!(feedback, Feedback::Ok | Feedback::Backoff));
+            assert!(feedback.accepted());
 
             overflow.join().unwrap();
             while let Ok(message) = receiver.try_recv() {
@@ -1412,17 +1629,16 @@ mod loom_tests {
             assert_eq!(sender.enqueue(OrderedMessage::Item(1)), Feedback::Backoff);
 
             let gate = Arc::new(AtomicUsize::new(0));
-            let overflow_sender = sender.clone();
             let overflow_gate = gate.clone();
             let overflow = thread::spawn(move || {
-                overflow_sender.enqueue(OrderedMessage::Coordinated(2, overflow_gate))
+                sender.enqueue(OrderedMessage::Coordinated(2, overflow_gate))
             });
 
             while gate.load(Ordering::Acquire) == 0 {
                 thread::yield_now();
             }
 
-            let release_gate = gate.clone();
+            let release_gate = gate;
             let release = thread::spawn(move || {
                 release_gate.store(2, Ordering::Release);
             });
@@ -1459,10 +1675,9 @@ mod loom_tests {
                     thread::yield_now();
                 }
 
-                let overflow_sender = sender.clone();
                 let overflow_gate = gate.clone();
                 let overflow = thread::spawn(move || {
-                    overflow_sender.enqueue(OrderedMessage::Coordinated(1, overflow_gate))
+                    sender.enqueue(OrderedMessage::Coordinated(1, overflow_gate))
                 });
 
                 while gate.load(Ordering::Acquire) == 0 {

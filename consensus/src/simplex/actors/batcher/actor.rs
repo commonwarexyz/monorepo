@@ -349,8 +349,7 @@ where
                     // Add the message to the verifier
                     work.entry(view)
                         .or_insert_with(|| self.new_round())
-                        .add_constructed(message)
-                        .await;
+                        .add_constructed(message);
                     self.added.inc();
                     updated_view = view;
                 }

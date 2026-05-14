@@ -90,26 +90,26 @@ where
         self.get(commitment).await
     }
 
-    async fn subscribe_by_digest(
+    fn subscribe_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
     ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
-        self.subscribe_by_digest(digest).await
+        self.subscribe_by_digest(digest)
     }
 
-    async fn subscribe_by_commitment(
+    fn subscribe_by_commitment(
         &self,
         commitment: Commitment,
     ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
-        self.subscribe(commitment).await
+        self.subscribe(commitment)
     }
 
-    async fn finalized(&self, commitment: Commitment) {
-        self.prune(commitment).await;
+    fn finalized(&self, commitment: Commitment) {
+        self.prune(commitment);
     }
 
-    async fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
+    fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
-        self.proposed(round, block).await;
+        self.proposed(round, block);
     }
 }

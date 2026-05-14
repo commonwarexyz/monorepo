@@ -59,6 +59,7 @@ use crate::{
     types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -404,9 +405,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal
-                .subscribe_by_digest(Some(context.round), digest)
-                .await;
+            let block_request = marshal.subscribe_by_digest(Some(context.round), digest);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -494,7 +493,7 @@ where
         }
 
         // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -544,7 +543,7 @@ where
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients).await;
+        self.marshal.forward(round, digest, recipients);
     }
 }
 
@@ -560,13 +559,13 @@ where
     type Activity = A::Activity;
 
     /// Forwards consensus activity to the wrapped application reporter.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         if let Update::Tip(tip_round, _, _) = &update {
             self.available_blocks
                 .lock()
                 .retain(|(round, _)| round > tip_round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 
@@ -922,16 +921,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             // Inline verify runs full validation inline and returns true only
             // after `marshal.verified` is enqueued. With the persistence-ack
@@ -1037,16 +1038,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             let certify_result = inline
@@ -1132,22 +1135,28 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             verify_started
                 .await
                 .expect("verify should reach application before marshal abort");
+
+            // Wait for marshal shutdown to complete before releasing `app.verify`.
+            // This makes the later persistence ack fail deterministically.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());
 
             select! {

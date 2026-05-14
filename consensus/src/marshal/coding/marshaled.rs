@@ -98,6 +98,7 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -375,9 +376,7 @@ where
                 (parent, block)
             } else {
                 // No prefetched block, fetch both parent and block
-                let block_request = marshal
-                    .subscribe_by_commitment(Some(round), commitment)
-                    .await;
+                let block_request = marshal.subscribe_by_commitment(Some(round), commitment);
                 let block_requests = try_join(parent_request, block_request);
 
                 select! {
@@ -773,8 +772,7 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(Some(consensus_context.round), payload)
-                .await;
+                .subscribe_by_commitment(Some(consensus_context.round), payload);
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
@@ -841,13 +839,11 @@ where
         }
 
         // Inform the shard engine of an externally proposed commitment.
-        self.shards
-            .discovered(
-                payload,
-                consensus_context.leader.clone(),
-                consensus_context.round,
-            )
-            .await;
+        self.shards.discovered(
+            payload,
+            consensus_context.leader.clone(),
+            consensus_context.round,
+        );
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
@@ -864,7 +860,7 @@ where
                 // assigned index has been verified. Reconstructing the block
                 // from peer gossip is useful for certification later, but is
                 // not enough to emit a notarize vote.
-                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
+                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload);
                 let (tx, rx) = oneshot::channel();
                 let context = self
                     .context
@@ -926,10 +922,7 @@ where
             ?payload,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_commitment(Some(round), payload)
-            .await;
+        let block_rx = self.marshal.subscribe_by_commitment(Some(round), payload);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -989,13 +982,11 @@ where
             }
 
             // Inform the shard engine of an externally proposed commitment.
-            shards
-                .discovered(
-                    payload,
-                    embedded_context.leader.clone(),
-                    embedded_context.round,
-                )
-                .await;
+            shards.discovered(
+                payload,
+                embedded_context.leader.clone(),
+                embedded_context.round,
+            );
 
             // Use the block's embedded context for verification, passing the
             // prefetched block to avoid fetching it again inside deferred_verify.
@@ -1037,9 +1028,7 @@ where
         let Plan::Propose { round } = plan else {
             return;
         };
-        self.marshal
-            .forward(round, commitment, Recipients::All)
-            .await;
+        self.marshal.forward(round, commitment, Recipients::All);
     }
 }
 
@@ -1061,12 +1050,12 @@ where
     type Activity = A::Activity;
 
     /// Relays a report to the underlying [`Application`] and cleans up old verification data.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         // Clean up verification tasks and contexts for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 
@@ -1110,11 +1099,7 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        Either::Right(
-            marshal
-                .subscribe_by_commitment(parent_round, parent_commitment)
-                .await,
-        )
+        Either::Right(marshal.subscribe_by_commitment(parent_round, parent_commitment))
     }
 }
 

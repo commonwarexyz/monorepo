@@ -90,6 +90,7 @@ use crate::{
     types::{Epoch, Epocher, Round},
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -481,7 +482,8 @@ where
             .child("optimistic_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
-                let block_request = marshal.subscribe_by_digest(Some(context.round), digest).await;
+                let block_request = marshal
+                    .subscribe_by_digest(Some(context.round), digest);
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -597,7 +599,7 @@ where
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -682,7 +684,7 @@ where
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients).await;
+        self.marshal.forward(round, digest, recipients);
     }
 }
 
@@ -698,12 +700,12 @@ where
     type Activity = A::Activity;
 
     /// Relays a report to the underlying [`Application`] and cleans up old verification tasks.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         // Clean up verification tasks for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 
@@ -1188,16 +1190,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             // Kick off the optimistic verify, which spawns `deferred_verify`.
             // Its gated `app.verify` blocks until we release it, giving us a
@@ -1207,7 +1211,11 @@ mod tests {
             verify_started
                 .await
                 .expect("verify should reach application before marshal abort");
+
+            // Wait for marshal shutdown to complete before releasing `app.verify`.
+            // This makes the later persistence ack fail deterministically.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());
 
             select! {

@@ -8,6 +8,7 @@ use crate::{
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
+use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
@@ -33,9 +34,9 @@ use commonware_runtime::{
     Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage as RuntimeStorage,
 };
-use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
+use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand_core::CryptoRngCore;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use tracing::{debug, info, warn};
 
 /// Per-peer label.
@@ -100,7 +101,7 @@ impl<V: Variant, P: PublicKey> Read for Message<V, P> {
 pub struct Config<C: Signer, P> {
     pub manager: P,
     pub signer: C,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub partition_prefix: String,
     pub peer_config: PeerConfig<C::PublicKey>,
     pub max_supported_mode: ModeVersion,
@@ -116,7 +117,7 @@ where
 {
     context: ContextCell<E>,
     manager: P,
-    mailbox: mpsc::Receiver<MailboxMessage<H, C, V>>,
+    mailbox: ActorReceiver<MailboxMessage<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
     partition_prefix: String,
@@ -142,7 +143,7 @@ where
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(config.mailbox_size);
 
         // Create metrics
         let successful_epochs = context.counter("successful_epochs", "successful epochs");
@@ -659,7 +660,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{channel::mpsc, N3f1, TryCollect, NZU32};
+    use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32};
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
 
@@ -772,7 +773,7 @@ mod tests {
                 Config {
                     manager: NoopManager::<Ed25519PublicKey>::default(),
                     signer,
-                    mailbox_size: 8,
+                    mailbox_size: NZUsize!(8),
                     partition_prefix,
                     peer_config: peer_config.clone(),
                     max_supported_mode: crate::dkg::MAX_SUPPORTED_MODE,

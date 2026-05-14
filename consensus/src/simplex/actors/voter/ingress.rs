@@ -77,7 +77,7 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     type Overflow = Pending<S, D>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
@@ -86,7 +86,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
             Some(Self::Verified(Certificate::Finalization(old_finalized), _))
                 if old_finalized.view() >= new_view
         ) {
-            return false;
+            return;
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
@@ -95,7 +95,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 .messages
                 .retain(|old_message| old_message.view() > new_view);
             overflow.finalization = Some(message);
-            return true;
+            return;
         }
 
         // Ignore the message if it is a duplicate
@@ -119,10 +119,9 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 _ => false,
             })
         {
-            return true;
+            return;
         }
         overflow.messages.push_back(message);
-        true
     }
 }
 
@@ -231,26 +230,20 @@ mod tests {
     #[test]
     fn finalization_prunes_stale_overflow() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(2))));
+        Message::handle(
             &mut overflow,
-            Message::Proposal(proposal(View::new(2)))
-        ));
-        assert!(Message::handle(
+            Message::Timeout(View::new(2), TimeoutReason::LeaderTimeout),
+        );
+        Message::handle(
             &mut overflow,
-            Message::Timeout(View::new(2), TimeoutReason::LeaderTimeout)
-        ));
-        assert!(Message::handle(
+            Message::Verified(nullification(View::new(2)), false),
+        );
+        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(
             &mut overflow,
-            Message::Verified(nullification(View::new(2)), false)
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Proposal(proposal(View::new(4)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Verified(finalization(View::new(3)), false)
-        ));
+            Message::Verified(finalization(View::new(3)), false),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
@@ -269,14 +262,8 @@ mod tests {
     fn duplicate_certificate_is_ignored() {
         let mut overflow = Pending::default();
         let certificate = nullification(View::new(5));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Verified(certificate.clone(), false)
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Verified(certificate, true)
-        ));
+        Message::handle(&mut overflow, Message::Verified(certificate.clone(), false));
+        Message::handle(&mut overflow, Message::Verified(certificate, true));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -290,31 +277,25 @@ mod tests {
     #[test]
     fn queued_finalization_rejects_covered_messages() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), false)
-        ));
+            Message::Verified(finalization(View::new(3)), false),
+        );
 
-        assert!(!Message::handle(
+        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(3))));
+        Message::handle(
             &mut overflow,
-            Message::Proposal(proposal(View::new(3)))
-        ));
-        assert!(!Message::handle(
+            Message::Timeout(View::new(2), TimeoutReason::LeaderTimeout),
+        );
+        Message::handle(
             &mut overflow,
-            Message::Timeout(View::new(2), TimeoutReason::LeaderTimeout)
-        ));
-        assert!(!Message::handle(
+            Message::Verified(nullification(View::new(2)), false),
+        );
+        Message::handle(
             &mut overflow,
-            Message::Verified(nullification(View::new(2)), false)
-        ));
-        assert!(!Message::handle(
-            &mut overflow,
-            Message::Verified(finalization(View::new(2)), false)
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Proposal(proposal(View::new(4)))
-        ));
+            Message::Verified(finalization(View::new(2)), false),
+        );
+        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
@@ -332,14 +313,14 @@ mod tests {
     #[test]
     fn duplicate_finalization_is_dropped() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), false)
-        ));
-        assert!(!Message::handle(
+            Message::Verified(finalization(View::new(3)), false),
+        );
+        Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), true)
-        ));
+            Message::Verified(finalization(View::new(3)), true),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -353,18 +334,15 @@ mod tests {
     #[test]
     fn newer_finalization_replaces_older_pruning_floor() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Verified(finalization(View::new(3)), false)
-        ));
-        assert!(Message::handle(
+            Message::Verified(finalization(View::new(3)), false),
+        );
+        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(
             &mut overflow,
-            Message::Proposal(proposal(View::new(4)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Verified(finalization(View::new(5)), false)
-        ));
+            Message::Verified(finalization(View::new(5)), false),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -378,22 +356,16 @@ mod tests {
     #[test]
     fn duplicate_proposals_and_timeouts_are_deduplicated() {
         let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
-        assert!(Message::handle(
+        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(&mut overflow, Message::Proposal(proposal(View::new(4))));
+        Message::handle(
             &mut overflow,
-            Message::Proposal(proposal(View::new(4)))
-        ));
-        assert!(Message::handle(
+            Message::Timeout(View::new(4), TimeoutReason::LeaderTimeout),
+        );
+        Message::handle(
             &mut overflow,
-            Message::Proposal(proposal(View::new(4)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Timeout(View::new(4), TimeoutReason::LeaderTimeout)
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Timeout(View::new(4), TimeoutReason::Inactivity)
-        ));
+            Message::Timeout(View::new(4), TimeoutReason::Inactivity),
+        );
 
         let overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);

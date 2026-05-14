@@ -513,9 +513,7 @@ impl<
         )
         .await;
         // Surface the event to the application for observability.
-        self.reporter
-            .report(Activity::Notarization(notarization))
-            .await;
+        self.reporter.report(Activity::Notarization(notarization));
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
@@ -564,9 +562,7 @@ impl<
         )
         .await;
         // Surface the event to the application for observability.
-        self.reporter
-            .report(Activity::Nullification(nullification))
-            .await;
+        self.reporter.report(Activity::Nullification(nullification));
     }
 
     /// Broadcast a finalize vote if the round provides a candidate.
@@ -632,9 +628,7 @@ impl<
         )
         .await;
         // Surface the event to the application for observability.
-        self.reporter
-            .report(Activity::Finalization(finalization))
-            .await;
+        self.reporter.report(Activity::Finalization(finalization));
     }
 
     /// Emits any votes or certificates that became available for `view`.
@@ -724,14 +718,12 @@ impl<
                 match artifact {
                     Artifact::Notarize(notarize) => {
                         self.handle_notarize(notarize.clone()).await;
-                        self.reporter.report(Activity::Notarize(notarize)).await;
+                        self.reporter.report(Activity::Notarize(notarize));
                     }
                     Artifact::Notarization(notarization) => {
                         self.handle_notarization(notarization.clone()).await;
                         resolver.updated(Certificate::Notarization(notarization.clone()));
-                        self.reporter
-                            .report(Activity::Notarization(notarization))
-                            .await;
+                        self.reporter.report(Activity::Notarization(notarization));
                     }
                     Artifact::Certification(round, success) => {
                         let Some(notarization) =
@@ -741,32 +733,26 @@ impl<
                         };
                         resolver.certified(round.view(), success);
                         if success {
-                            self.reporter
-                                .report(Activity::Certification(notarization))
-                                .await;
+                            self.reporter.report(Activity::Certification(notarization));
                         }
                     }
                     Artifact::Nullify(nullify) => {
                         self.handle_nullify(nullify.clone()).await;
-                        self.reporter.report(Activity::Nullify(nullify)).await;
+                        self.reporter.report(Activity::Nullify(nullify));
                     }
                     Artifact::Nullification(nullification) => {
                         self.handle_nullification(nullification.clone()).await;
                         resolver.updated(Certificate::Nullification(nullification.clone()));
-                        self.reporter
-                            .report(Activity::Nullification(nullification))
-                            .await;
+                        self.reporter.report(Activity::Nullification(nullification));
                     }
                     Artifact::Finalize(finalize) => {
                         self.handle_finalize(finalize.clone()).await;
-                        self.reporter.report(Activity::Finalize(finalize)).await;
+                        self.reporter.report(Activity::Finalize(finalize));
                     }
                     Artifact::Finalization(finalization) => {
                         self.handle_finalization(finalization.clone()).await;
                         resolver.updated(Certificate::Finalization(finalization.clone()));
-                        self.reporter
-                            .report(Activity::Finalization(finalization))
-                            .await;
+                        self.reporter.report(Activity::Finalization(finalization));
                     }
                 }
 
@@ -947,8 +933,7 @@ impl<
                         resolver.certified(view, certified);
                         if certified {
                             self.reporter
-                                .report(Activity::Certification(notarization))
-                                .await;
+                                .report(Activity::Certification(notarization));
                         }
                     }
                     Err(err) => {

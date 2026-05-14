@@ -39,6 +39,16 @@ pub enum Message<D: Digest> {
     },
 }
 
+impl<D: Digest> Message<D> {
+    /// Returns true if the requester has stopped waiting for this response.
+    pub(crate) fn response_closed(&self) -> bool {
+        match self {
+            Self::Deliver { response, .. } => response.is_closed(),
+            Self::Produce { response, .. } => response.is_closed(),
+        }
+    }
+}
+
 /// A handler that forwards requests from the resolver to the marshal actor.
 ///
 /// This struct implements the [Consumer] and [Producer] traits from the

@@ -5,14 +5,16 @@ use crate::{
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
+use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
+use commonware_utils::channel::oneshot;
+use std::collections::VecDeque;
 
 /// A message that can be sent to the coding [`Engine`].
 ///
 /// [`Engine`]: super::Engine
-pub enum Message<B, C, H, P>
+pub(crate) enum Message<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
@@ -88,6 +90,91 @@ where
     },
 }
 
+impl<B, C, H, P> Message<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    pub(crate) fn response_closed(&self) -> bool {
+        match self {
+            Self::GetByCommitment { response, .. } | Self::GetByDigest { response, .. } => {
+                response.is_closed()
+            }
+            Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
+            Self::SubscribeByCommitment { response, .. }
+            | Self::SubscribeByDigest { response, .. } => response.is_closed(),
+            Self::Proposed { .. } | Self::Discovered { .. } | Self::Prune { .. } => false,
+        }
+    }
+}
+
+pub(crate) struct Pending<B, C, H, P>(VecDeque<Message<B, C, H, P>>)
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey;
+
+impl<B, C, H, P> Default for Pending<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn default() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+impl<B, C, H, P> Overflow<Message<B, C, H, P>> for Pending<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<B, C, H, P>) -> Option<Message<B, C, H, P>>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.response_closed() {
+                continue;
+            }
+
+            if let Some(message) = push(message) {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
+impl<B, C, H, P> Policy for Message<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    type Overflow = Pending<B, C, H, P>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        if message.response_closed() {
+            return;
+        }
+
+        overflow.0.push_back(message);
+    }
+}
+
 /// A mailbox for sending messages to the [`Engine`].
 ///
 /// [`Engine`]: super::Engine
@@ -99,7 +186,7 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    pub(super) sender: mpsc::Sender<Message<B, C, H, P>>,
+    pub(super) sender: Sender<Message<B, C, H, P>>,
 }
 
 impl<B, C, H, P> Mailbox<B, C, H, P>
@@ -110,46 +197,41 @@ where
     P: PublicKey,
 {
     /// Create a new [`Mailbox`] with the given sender.
-    pub const fn new(sender: mpsc::Sender<Message<B, C, H, P>>) -> Self {
+    pub(crate) const fn new(sender: Sender<Message<B, C, H, P>>) -> Self {
         Self { sender }
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
-    pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
-        let msg = Message::Proposed { block, round };
-        self.sender.send_lossy(msg).await;
+    pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
+        let _ = self.sender.enqueue(Message::Proposed { block, round });
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
-    pub async fn discovered(&self, commitment: Commitment, leader: P, round: Round) {
-        let msg = Message::Discovered {
+    pub fn discovered(&self, commitment: Commitment, leader: P, round: Round) {
+        let _ = self.sender.enqueue(Message::Discovered {
             commitment,
             leader,
             round,
-        };
-        self.sender.send_lossy(msg).await;
+        });
     }
 
     /// Request a reconstructed block by its [`Commitment`].
     pub async fn get(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
-        self.sender
-            .request(|tx| Message::GetByCommitment {
-                commitment,
-                response: tx,
-            })
-            .await
-            .flatten()
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetByCommitment {
+            commitment,
+            response,
+        });
+        receiver.await.ok().flatten()
     }
 
     /// Request a reconstructed block by its digest.
     pub async fn get_by_digest(&self, digest: B::Digest) -> Option<CodedBlock<B, C, H>> {
-        self.sender
-            .request(|tx| Message::GetByDigest {
-                digest,
-                response: tx,
-            })
-            .await
-            .flatten()
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .enqueue(Message::GetByDigest { digest, response });
+        receiver.await.ok().flatten()
     }
 
     /// Subscribe to assigned shard verification for a commitment.
@@ -162,50 +244,42 @@ where
     ///
     /// For proposers, this resolves immediately after the locally built block
     /// is cached because they trivially have all shards.
-    pub async fn subscribe_assigned_shard_verified(
+    pub fn subscribe_assigned_shard_verified(
         &self,
         commitment: Commitment,
     ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeAssignedShardVerified {
-            commitment,
-            response: responder,
-        };
-        self.sender.send_lossy(msg).await;
+        let _ = self
+            .sender
+            .enqueue(Message::SubscribeAssignedShardVerified {
+                commitment,
+                response: responder,
+            });
         receiver
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
-    pub async fn subscribe(
-        &self,
-        commitment: Commitment,
-    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe(&self, commitment: Commitment) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeByCommitment {
+        let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,
             response: responder,
-        };
-        self.sender.send_lossy(msg).await;
+        });
         receiver
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
-    pub async fn subscribe_by_digest(
-        &self,
-        digest: B::Digest,
-    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeByDigest {
+        let _ = self.sender.enqueue(Message::SubscribeByDigest {
             digest,
             response: responder,
-        };
-        self.sender.send_lossy(msg).await;
+        });
         receiver
     }
 
     /// Request to prune all caches at and below the given commitment.
-    pub async fn prune(&self, through: Commitment) {
-        let msg = Message::Prune { through };
-        self.sender.send_lossy(msg).await;
+    pub fn prune(&self, through: Commitment) {
+        let _ = self.sender.enqueue(Message::Prune { through });
     }
 }

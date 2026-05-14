@@ -3,16 +3,17 @@
 //! [Actor]: super::Actor
 
 use crate::application::Block;
+use commonware_actor::{
+    mailbox::{Policy, Sender},
+    Feedback,
+};
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Hasher, Signer,
 };
-use commonware_utils::{
-    acknowledgement::Exact,
-    channel::{mpsc, oneshot},
-    Acknowledgement,
-};
+use commonware_utils::{acknowledgement::Exact, channel::oneshot, Acknowledgement};
+use std::collections::VecDeque;
 use tracing::error;
 
 /// A message that can be sent to the [Actor].
@@ -37,6 +38,20 @@ where
     Finalized { block: Block<H, C, V>, response: A },
 }
 
+impl<H, C, V, A> Policy for Message<H, C, V, A>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+    A: Acknowledgement,
+{
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        overflow.push_back(message);
+    }
+}
+
 /// Inbox for sending messages to the DKG [Actor].
 ///
 /// [Actor]: super::Actor
@@ -48,7 +63,7 @@ where
     V: Variant,
     A: Acknowledgement,
 {
-    sender: mpsc::Sender<Message<H, C, V, A>>,
+    sender: Sender<Message<H, C, V, A>>,
 }
 
 impl<H, C, V, A> Mailbox<H, C, V, A>
@@ -59,7 +74,7 @@ where
     A: Acknowledgement,
 {
     /// Create a new mailbox.
-    pub const fn new(sender: mpsc::Sender<Message<H, C, V, A>>) -> Self {
+    pub const fn new(sender: Sender<Message<H, C, V, A>>) -> Self {
         Self { sender }
     }
 
@@ -68,11 +83,14 @@ where
     /// [Actor]: super::Actor
     pub async fn act(&mut self) -> Option<SignedDealerLog<V, C>> {
         let (response_tx, response_rx) = oneshot::channel();
-        let message = Message::Act {
-            response: response_tx,
-        };
-        if let Err(err) = self.sender.send(message).await {
-            error!(?err, "failed to send act message");
+        if !self
+            .sender
+            .enqueue(Message::Act {
+                response: response_tx,
+            })
+            .accepted()
+        {
+            error!("failed to send act message");
             return None;
         }
 
@@ -95,18 +113,15 @@ where
 {
     type Activity = Update<Block<H, C, V>, A>;
 
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         // Report the finalized block to the DKG actor on a best-effort basis.
         let Update::Block(block, ack_tx) = update else {
             // We ignore any other updates sent by marshal.
-            return;
+            return Feedback::Ok;
         };
-        let _ = self
-            .sender
-            .send(Message::Finalized {
-                block,
-                response: ack_tx,
-            })
-            .await;
+        self.sender.enqueue(Message::Finalized {
+            block,
+            response: ack_tx,
+        })
     }
 }

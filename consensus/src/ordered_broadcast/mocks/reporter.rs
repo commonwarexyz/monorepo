@@ -5,13 +5,17 @@ use crate::{
     },
     types::{Epoch, Height},
 };
+use commonware_actor::{
+    mailbox::{self, Policy, Receiver, Sender},
+    Feedback,
+};
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::{channel::oneshot, NZUsize};
 use rand_core::CryptoRngCore;
-use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: PublicKey, S: Scheme, D: Digest> {
@@ -22,9 +26,17 @@ enum Message<C: PublicKey, S: Scheme, D: Digest> {
     Get(C, Height, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
+impl<C: PublicKey, S: Scheme, D: Digest> Policy for Message<C, S, D> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        overflow.push_back(message);
+    }
+}
+
 pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
     context: ContextCell<R>,
-    mailbox: mpsc::Receiver<Message<C, S, D>>,
+    mailbox: Receiver<Message<C, S, D>>,
 
     // Verifier for node signatures.
     chunk_verifier: ChunkVerifier,
@@ -59,7 +71,7 @@ where
         scheme: S,
         limit_misses: Option<usize>,
     ) -> (Self, Mailbox<C, S, D>) {
-        let (sender, receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mailbox::new(NZUsize!(1024));
         (
             Self {
                 context: ContextCell::new(rng),
@@ -191,26 +203,16 @@ where
 
 #[derive(Clone)]
 pub struct Mailbox<C: PublicKey, S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<C, S, D>>,
+    sender: Sender<Message<C, S, D>>,
 }
 
 impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
     type Activity = Activity<C, S, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
-            Activity::Tip(proposal) => {
-                self.sender
-                    .send(Message::Proposal(proposal))
-                    .await
-                    .expect("Failed to send proposal");
-            }
-            Activity::Lock(lock) => {
-                self.sender
-                    .send(Message::Locked(lock))
-                    .await
-                    .expect("Failed to send locked");
-            }
+            Activity::Tip(proposal) => self.sender.enqueue(Message::Proposal(proposal)),
+            Activity::Lock(lock) => self.sender.enqueue(Message::Locked(lock)),
         }
     }
 }
@@ -218,28 +220,34 @@ impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
 impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
     pub async fn get_tip(&mut self, sequencer: C) -> Option<(Height, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::GetTip(sequencer, sender))
-            .await
-            .unwrap();
+        assert!(
+            self.sender
+                .enqueue(Message::GetTip(sequencer, sender))
+                .accepted(),
+            "Failed to send get tip"
+        );
         receiver.await.unwrap()
     }
 
     pub async fn get_contiguous_tip(&mut self, sequencer: C) -> Option<Height> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::GetContiguousTip(sequencer, sender))
-            .await
-            .unwrap();
+        assert!(
+            self.sender
+                .enqueue(Message::GetContiguousTip(sequencer, sender))
+                .accepted(),
+            "Failed to send get contiguous tip"
+        );
         receiver.await.unwrap()
     }
 
     pub async fn get(&mut self, sequencer: C, height: Height) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Get(sequencer, height, sender))
-            .await
-            .unwrap();
+        assert!(
+            self.sender
+                .enqueue(Message::Get(sequencer, height, sender))
+                .accepted(),
+            "Failed to send get"
+        );
         receiver.await.unwrap()
     }
 }

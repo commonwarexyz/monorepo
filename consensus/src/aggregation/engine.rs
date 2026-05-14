@@ -549,7 +549,7 @@ impl<
         let certified = Activity::Certified(certificate);
         self.record(certified.clone()).await;
         self.sync(height).await;
-        self.reporter.report(certified).await;
+        self.reporter.report(certified);
 
         // Increase the tip if needed
         if height == self.tip {
@@ -777,7 +777,7 @@ impl<
         // Add tip to journal
         self.record(Activity::Tip(tip)).await;
         self.sync(tip).await;
-        self.reporter.report(Activity::Tip(tip)).await;
+        self.reporter.report(Activity::Tip(tip));
 
         // Prune journal with buffer, ignoring errors
         let section = self.get_journal_section(activity_threshold);
@@ -811,15 +811,15 @@ impl<
             match activity {
                 Activity::Tip(height) => {
                     tip = max(tip, height);
-                    self.reporter.report(Activity::Tip(height)).await;
+                    self.reporter.report(Activity::Tip(height));
                 }
                 Activity::Certified(certificate) => {
                     certified.push(certificate.clone());
-                    self.reporter.report(Activity::Certified(certificate)).await;
+                    self.reporter.report(Activity::Certified(certificate));
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack.clone());
-                    self.reporter.report(Activity::Ack(ack)).await;
+                    self.reporter.report(Activity::Ack(ack));
                 }
             }
         }
