@@ -66,24 +66,6 @@ jobs:
         with:
           toolchain: nightly
 
-      - name: Run temporary storage sync benchmark
-        if: github.event_name == 'pull_request'
-        run: |
-          cargo bench -p commonware-runtime --bench storage_sync -- \
-            --sample-size 10 \
-            --measurement-time 2 \
-            --warm-up-time 1 \
-            --output-format bencher \
-            | tee storage-sync-benchmark.txt
-
-          {
-            echo "## Temporary Storage Sync Benchmark"
-            echo
-            echo '```text'
-            cat storage-sync-benchmark.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Run benchmark tracking
         id: run
         run: |
