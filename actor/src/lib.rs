@@ -17,7 +17,9 @@ commonware_macros::stability_scope!(BETA {
         Ok,
         /// The submission was handled but requests sender backoff.
         Backoff,
-        /// The work was dropped.
+        /// The work was dropped because the endpoint did not have capacity.
+        ///
+        /// Ignored work should report [`Feedback::Ok`] instead.
         Dropped,
         /// The endpoint is closed.
         Closed,

@@ -108,8 +108,8 @@ impl<
             && !activity.verified()
             && !activity.verify(&mut *self.rng.lock(), &self.scheme, &self.strategy)
         {
-            // Drop unverified peer activity
-            return Feedback::Dropped;
+            // Ignore unverified peer activity.
+            return Feedback::Ok;
         }
 
         // Filter based on scheme attributability
@@ -121,8 +121,8 @@ impl<
                 | Activity::ConflictingNotarize(_)
                 | Activity::ConflictingFinalize(_)
                 | Activity::NullifyFinalize(_) => {
-                    // Drop per-validator peer activity for non-attributable scheme
-                    return Feedback::Dropped;
+                    // Ignore per-validator peer activity for non-attributable schemes.
+                    return Feedback::Ok;
                 }
                 Activity::Notarization(_)
                 | Activity::Certification(_)
@@ -199,8 +199,8 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_peer_activity_dropped() {
-        // Invalid peer activities should be dropped when verification is enabled
+    fn test_invalid_peer_activity_ignored() {
+        // Invalid peer activities should be ignored when verification is enabled.
         let mut rng = test_rng();
         let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
 
@@ -230,13 +230,13 @@ mod tests {
             attestation,
         };
 
-        // Report it
+        // Report it.
         assert_eq!(
             reporter.report(Activity::Notarize(notarize)),
-            Feedback::Dropped
+            Feedback::Ok
         );
 
-        // Should be dropped
+        // Should be ignored.
         assert_eq!(mock.count(), 0);
     }
 
@@ -369,7 +369,7 @@ mod tests {
         // Report peer per-validator activity
         assert_eq!(
             reporter.report(Activity::Notarize(notarize)),
-            Feedback::Dropped
+            Feedback::Ok
         );
 
         // Must be filtered

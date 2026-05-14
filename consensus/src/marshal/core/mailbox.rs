@@ -626,7 +626,7 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
         let message = match activity {
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
-            _ => return Feedback::Dropped,
+            _ => return Feedback::Ok,
         };
         self.sender.enqueue(message)
     }

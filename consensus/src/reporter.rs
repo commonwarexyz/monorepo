@@ -7,13 +7,13 @@ use std::marker::PhantomData;
 /// An implementation of [Reporter] for an optional [Reporter].
 ///
 /// This is useful for reporting activity to a [Reporter] that may not be present.
-/// Reporting is dropped if the [Reporter] is `None`.
+/// Reporting is ignored if the [Reporter] is `None`.
 impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
     type Activity = A;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let Some(reporter) = self else {
-            return Feedback::Dropped;
+            return Feedback::Ok;
         };
         reporter.report(activity)
     }
@@ -132,10 +132,10 @@ mod tests {
     }
 
     #[test]
-    fn absent_reporter_drops_activity() {
+    fn absent_reporter_ignores_activity() {
         let mut reporter = Option::<SimpleAcknowledger>::None;
         let (ack, waiter) = Exact::handle();
-        assert_eq!(reporter.report(ack), Feedback::Dropped);
+        assert_eq!(reporter.report(ack), Feedback::Ok);
         assert!(waiter.now_or_never().unwrap().is_err());
     }
 }
