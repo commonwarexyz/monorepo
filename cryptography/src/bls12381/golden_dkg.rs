@@ -58,8 +58,8 @@
 //! dealer's public key and [`DealerLog`].
 //!
 //! Then:
-//! - Observers call [`observe`] with the verified logs to compute the public [`Sharing`]
-//! - Players call [`play`] with their private key to compute both the public [`Sharing`]
+//! - Observers call [`observe`] with the verified logs to compute the public [`Output`]
+//! - Players call [`play`] with their private key to compute both the public [`Output`]
 //!   and their private share
 //!
 //! Both functions select a quorum of valid dealings, filtering out invalid ones.
@@ -118,10 +118,10 @@
 //! }
 //!
 //! // Observer computes the public output.
-//! let sharing = observe(&mut rng, &setup, &info, logs.clone(), &Sequential)?;
+//! let output = observe(&mut rng, &setup, &info, logs.clone(), &Sequential)?;
 //!
 //! // Player computes their share and the public output.
-//! let (sharing, share) = play(&mut rng, &setup, &info, logs, &player_keys[0], &Sequential)?;
+//! let (output, share) = play(&mut rng, &setup, &info, logs, &player_keys[0], &Sequential)?;
 //! ```
 
 mod evrf;
