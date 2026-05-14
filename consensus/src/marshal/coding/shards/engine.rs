@@ -2436,6 +2436,7 @@ mod tests {
                     leader_a.clone(),
                     Round::new(Epoch::zero(), View::new(1)),
                 );
+
                 // Conflicting update should be ignored.
                 peers[2].mailbox.discovered(
                     commitment,
