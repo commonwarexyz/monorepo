@@ -3898,6 +3898,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
         let sub3_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block3));
         let sub4_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block4));
         let sub5_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block5));
+
         // Block1: Broadcasted by the actor
         H::propose(
             &mut handle,
