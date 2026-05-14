@@ -849,8 +849,7 @@ where
                 payload,
                 consensus_context.leader.clone(),
                 consensus_context.round,
-            )
-            .await;
+            );
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
@@ -867,7 +866,7 @@ where
                 // assigned index has been verified. Reconstructing the block
                 // from peer gossip is useful for certification later, but is
                 // not enough to emit a notarize vote.
-                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
+                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload);
                 let (tx, rx) = oneshot::channel();
                 let context = self
                     .context
@@ -994,8 +993,7 @@ where
                     payload,
                     embedded_context.leader.clone(),
                     embedded_context.round,
-                )
-                .await;
+                );
 
             // Use the block's embedded context for verification, passing the
             // prefetched block to avoid fetching it again inside deferred_verify.
