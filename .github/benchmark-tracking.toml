@@ -54,15 +54,3 @@ variants = [
   "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false",
   "qmdb::merkleize/variant=current::ordered::fixed::mmb chunk=256 keys=10000 ch=true sync=false",
 ]
-
-[[packages]]
-name = "commonware-runtime"
-baseline_suite = "commonware-runtime-storage-sync"
-
-[[packages.benchmarks]]
-name = "storage_sync"
-criterion_args = ["--sample-size", "10", "--measurement-time", "2", "--warm-up-time", "1"]
-variants = [
-  "storage_sync::write_at_sync/method=write_then_sync io_size=4096",
-  "storage_sync::write_at_sync/method=write_at_sync io_size=4096",
-]
