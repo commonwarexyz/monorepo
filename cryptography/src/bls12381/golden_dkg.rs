@@ -27,8 +27,10 @@
 //!
 //! ## Core Types
 //!
-//! * [`Info`]: Configuration for a DKG/Reshare round (dealers, players, optional previous output)
-//! * [`Output`]: The public result of a successful round (public polynomial, participant sets)
+//! * [`Info`]: Configuration for a DKG/Reshare round (application namespace,
+//!   dealers, players, optional previous output, authenticated threshold semantics)
+//! * [`Output`]: The public result of a successful round (public polynomial,
+//!   participant sets, authoritative quorum)
 //! * [`PrivateKey`] / [`PublicKey`]: Key pair used for dealing and share recovery
 //! * [`SignedDealerLog`]: A dealer's signed dealing, ready for broadcast
 //! * [`DealerLog`]: The verified contents of a dealer's dealing
@@ -38,6 +40,7 @@
 //! ### Step 1: Initialize Round
 //!
 //! Create an [`Info`] using [`Info::new`] with:
+//! - Application namespace
 //! - Round number
 //! - Optional previous [`Output`] (for resharing)
 //! - Set of dealers
@@ -51,7 +54,8 @@
 //! ### Step 3: Verification and Finalization
 //!
 //! Collected [`SignedDealerLog`]s are verified via [`SignedDealerLog::identify`], which
-//! checks the signature and extracts the dealer's public key and [`DealerLog`].
+//! checks the signature against the specific round [`Info`] and extracts the
+//! dealer's public key and [`DealerLog`].
 //!
 //! Then:
 //! - Observers call [`observe`] with the verified logs to compute the public [`Sharing`]
@@ -82,6 +86,10 @@
 //!   dealer in the current round's [`Info`] must appear in the previous [`Output`]'s
 //!   player set. Configurations that violate this requirement cannot produce a valid
 //!   subset interpolator and will fail.
+//! - **Callers must treat [`Output::quorum`] as the round's authoritative threshold.**
+//!   [`Info::new`] authenticates the exact threshold semantics used for this round,
+//!   so downstream code should reuse [`Output::quorum`] instead of re-deriving a
+//!   threshold from the public sharing with an arbitrary fault model.
 //!
 //! # Example
 //!
@@ -203,6 +211,10 @@ pub struct Output<P> {
 }
 
 impl<P: Ord + Clone> Output<P> {
+    /// Construct a validated round output.
+    ///
+    /// The exported quorum must not exceed the number of exported players, and
+    /// the public sharing must have the same participant count as the player set.
     pub fn new(
         summary: Summary,
         public: Sharing<MinPk>,
@@ -239,7 +251,12 @@ impl<P: Ord + Clone> Output<P> {
         })
     }
 
-    /// Return the quorum, i.e. the number of players needed to reconstruct the key.
+    /// Return the authoritative quorum for this round, i.e. the number of
+    /// players needed to reconstruct the key.
+    ///
+    /// This value is authenticated in [`Info::summary`] and serialized in
+    /// [`Output`]. Prefer it over re-deriving a quorum from [`Self::public`] with
+    /// a caller-chosen fault model.
     pub const fn quorum(&self) -> NonZeroU32 {
         self.quorum
     }
@@ -771,9 +788,10 @@ impl Read for SignedDealerLog {
 }
 
 impl SignedDealerLog {
-    /// Verify the signature and extract the dealer's public key and log.
+    /// Verify the signature against a specific round [`Info`] and extract the
+    /// dealer's public key and log.
     ///
-    /// Returns `None` if the signature is invalid.
+    /// Returns `None` if the signature is invalid for that round's summary.
     pub fn identify(self, info: &Info) -> Option<(PublicKey, DealerLog)> {
         let msg = Self::signature_message(info, &self.log);
         if !self.dealer.verify(NAMESPACE, &msg, &self.signature) {
