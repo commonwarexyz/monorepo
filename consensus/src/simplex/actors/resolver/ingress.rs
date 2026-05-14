@@ -49,17 +49,17 @@ impl<S: Scheme, D: Digest> Overflow<MailboxMessage<S, D>> for Pending<S, D> {
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(MailboxMessage<S, D>) -> Result<(), MailboxMessage<S, D>>,
+        F: FnMut(MailboxMessage<S, D>) -> Option<MailboxMessage<S, D>>,
     {
         if let Some(finalization) = self.finalization.take() {
-            if let Err(finalization) = push(finalization) {
+            if let Some(finalization) = push(finalization) {
                 self.finalization = Some(finalization);
                 return;
             }
         }
 
         while let Some(message) = self.messages.pop_front() {
-            if let Err(message) = push(message) {
+            if let Some(message) = push(message) {
                 self.messages.push_front(message);
                 break;
             }
@@ -267,7 +267,7 @@ mod tests {
         let mut messages = VecDeque::new();
         Overflow::drain(&mut overflow, |message| {
             messages.push_back(message);
-            Ok(())
+            None
         });
         messages
     }

@@ -57,11 +57,11 @@ pub trait Overflow<T>: Default {
 
     /// Drain retained messages into `push` in delivery order.
     ///
-    /// If `push` returns `Err`, the undelivered message and any later messages
+    /// If `push` returns `Some`, the undelivered message and any later messages
     /// must remain retained for a future drain.
     fn drain<F>(&mut self, push: F)
     where
-        F: FnMut(T) -> Result<(), T>;
+        F: FnMut(T) -> Option<T>;
 }
 
 impl<T> Overflow<T> for VecDeque<T> {
@@ -71,10 +71,10 @@ impl<T> Overflow<T> for VecDeque<T> {
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(T) -> Result<(), T>,
+        F: FnMut(T) -> Option<T>,
     {
         while let Some(message) = self.pop_front() {
-            if let Err(message) = push(message) {
+            if let Some(message) = push(message) {
                 self.push_front(message);
                 break;
             }
@@ -316,7 +316,7 @@ impl<T: Policy> OverflowState<T> {
 
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
-        queue.drain(|message| ready.push(message));
+        queue.drain(|message| ready.push(message).err());
         mutation.publish(queue.is_empty());
     }
 }

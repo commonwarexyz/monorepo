@@ -66,17 +66,17 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(Message<S, D>) -> Result<(), Message<S, D>>,
+        F: FnMut(Message<S, D>) -> Option<Message<S, D>>,
     {
         if let Some(update) = self.update.take() {
-            if let Err(update) = push(update) {
+            if let Some(update) = push(update) {
                 self.update = Some(update);
                 return;
             }
         }
 
         while let Some(vote) = self.constructed.pop_front() {
-            if let Err(message) = push(Message::Constructed(vote)) {
+            if let Some(message) = push(Message::Constructed(vote)) {
                 let Message::Constructed(vote) = message else {
                     unreachable!("ready returned a different message");
                 };
@@ -237,7 +237,7 @@ mod tests {
         let mut messages = VecDeque::new();
         Overflow::drain(&mut overflow, |message| {
             messages.push_back(message);
-            Ok(())
+            None
         });
         messages
     }
