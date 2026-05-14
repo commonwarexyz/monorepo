@@ -925,8 +925,7 @@ where
             // If this is a valid view, this request should be fine to keep open
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
-            resolver
-                .fetch(Request::<V::Commitment>::Notarized { round });
+            resolver.fetch(Request::<V::Commitment>::Notarized { round });
         }
 
         // Register subscriber.
@@ -1338,8 +1337,7 @@ where
         self.update_processed_height(height, resolver);
 
         // Cancel any useless requests
-        resolver
-            .cancel(Request::<V::Commitment>::Block(commitment));
+        resolver.cancel(Request::<V::Commitment>::Block(commitment));
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -1357,8 +1355,7 @@ where
             self.last_processed_round = round;
 
             // Cancel useless requests
-            resolver
-                .retain(Request::<V::Commitment>::Notarized { round }.predicate());
+            resolver.retain(Request::<V::Commitment>::Notarized { round }.predicate());
         }
     }
 
@@ -1642,8 +1639,7 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    resolver
-                        .fetch(Request::<V::Commitment>::Block(commitment));
+                    resolver.fetch(Request::<V::Commitment>::Block(commitment));
                 }
             }
         }
@@ -1692,8 +1688,7 @@ where
                     // SAFETY: We can rely on this derived parent commitment because
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
-                    resolver
-                        .fetch(Request::<V::Commitment>::Block(parent_commitment));
+                    resolver.fetch(Request::<V::Commitment>::Block(parent_commitment));
                     break 'cache_repair;
                 }
             }
@@ -1731,8 +1726,7 @@ where
             .try_set(self.last_processed_height.get());
 
         // Cancel any existing requests below the new floor.
-        resolver
-            .retain(Request::<V::Commitment>::Finalized { height }.predicate());
+        resolver.retain(Request::<V::Commitment>::Finalized { height }.predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.

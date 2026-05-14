@@ -273,11 +273,7 @@ mod tests {
         messages
     }
 
-    fn assert_fetch(
-        message: &Message<u8, u8>,
-        expected_key: u8,
-        expected_targets: Option<&[u8]>,
-    ) {
+    fn assert_fetch(message: &Message<u8, u8>, expected_key: u8, expected_targets: Option<&[u8]>) {
         let Message::Fetch(requests) = message else {
             panic!("expected fetch");
         };

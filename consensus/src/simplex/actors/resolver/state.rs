@@ -276,10 +276,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all_targeted(
-            &mut self,
-            requests: Vec<(U64, NonEmptyVec<PublicKey>)>,
-        ) -> Feedback {
+        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Feedback {
             // For testing, just treat targeted fetch the same as regular fetch
             for (key, _targets) in requests {
                 self.outstanding.lock().insert(key);
@@ -365,12 +362,11 @@ mod tests {
         let mut resolver = MockResolver::default();
 
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
-        state
-            .handle(
-                Certificate::Nullification(nullification_v4.clone()),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Nullification(nullification_v4.clone()),
+            None,
+            &mut resolver,
+        );
         assert_eq!(state.current_view, View::new(4));
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
@@ -378,12 +374,11 @@ mod tests {
         assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
-        state
-            .handle(
-                Certificate::Nullification(nullification_v2.clone()),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Nullification(nullification_v2.clone()),
+            None,
+            &mut resolver,
+        );
         assert_eq!(state.current_view, View::new(4));
         assert!(
             matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
@@ -391,12 +386,11 @@ mod tests {
         assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
-        state
-            .handle(
-                Certificate::Nullification(nullification_v1.clone()),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Nullification(nullification_v1.clone()),
+            None,
+            &mut resolver,
+        );
         assert_eq!(state.current_view, View::new(4));
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == &nullification_v1)
@@ -412,24 +406,18 @@ mod tests {
 
         for view in 4..=6 {
             let nullification = build_nullification(&schemes, &verifier, View::new(view));
-            state
-                .handle(
-                    Certificate::Nullification(nullification),
-                    None,
-                    &mut resolver,
-                );
+            state.handle(
+                Certificate::Nullification(nullification),
+                None,
+                &mut resolver,
+            );
         }
         assert_eq!(state.current_view, View::new(6));
         assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
         // Notarization does not set floor or prune
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
-        state
-            .handle(
-                Certificate::Notarization(notarization),
-                None,
-                &mut resolver,
-            );
+        state.handle(Certificate::Notarization(notarization), None, &mut resolver);
 
         assert!(state.floor.is_none());
         assert_eq!(state.nullifications.len(), 3); // nullifications remain
@@ -437,12 +425,11 @@ mod tests {
 
         // Finalization sets floor and prunes
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
-        state
-            .handle(
-                Certificate::Finalization(finalization.clone()),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Finalization(finalization.clone()),
+            None,
+            &mut resolver,
+        );
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization)
         );
@@ -456,12 +443,11 @@ mod tests {
 
         // Finalization sets floor
         let finalization = build_finalization(&schemes, &verifier, View::new(3));
-        state
-            .handle(
-                Certificate::Finalization(finalization.clone()),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Finalization(finalization.clone()),
+            None,
+            &mut resolver,
+        );
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
@@ -471,12 +457,11 @@ mod tests {
 
         // New nullification is kept
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
-        state
-            .handle(
-                Certificate::Nullification(nullification_v4.clone()),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Nullification(nullification_v4.clone()),
+            None,
+            &mut resolver,
+        );
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
@@ -486,12 +471,11 @@ mod tests {
 
         // Old nullification is ignored
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
-        state
-            .handle(
-                Certificate::Nullification(nullification_v1),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Nullification(nullification_v1),
+            None,
+            &mut resolver,
+        );
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
@@ -515,12 +499,11 @@ mod tests {
 
         // Notarization at view 5 satisfies request for view 2
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        state
-            .handle(
-                Certificate::Notarization(notarization_v5),
-                Some(View::new(2)),
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Notarization(notarization_v5),
+            Some(View::new(2)),
+            &mut resolver,
+        );
 
         // Verify tracking
         assert!(state.satisfied_by.contains_key(&View::new(5)));
@@ -528,8 +511,7 @@ mod tests {
         assert!(!state.is_failed(View::new(5)));
 
         // Certification fails for view 5
-        state
-            .handle_certified(View::new(5), false, &mut resolver);
+        state.handle_certified(View::new(5), false, &mut resolver);
 
         // View 5 should be marked as failed
         assert!(state.is_failed(View::new(5)));
@@ -549,18 +531,16 @@ mod tests {
 
         // Notarization at view 5 satisfies request for view 2
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        state
-            .handle(
-                Certificate::Notarization(notarization_v5.clone()),
-                Some(View::new(2)),
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Notarization(notarization_v5.clone()),
+            Some(View::new(2)),
+            &mut resolver,
+        );
 
         assert!(state.satisfied_by.contains_key(&View::new(5)));
 
         // Certification succeeds for view 5
-        state
-            .handle_certified(View::new(5), true, &mut resolver);
+        state.handle_certified(View::new(5), true, &mut resolver);
 
         // Floor should be set
         assert!(
@@ -580,14 +560,12 @@ mod tests {
 
         // Create and certify a notarization at view 5
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        state
-            .handle(
-                Certificate::Notarization(notarization_v5.clone()),
-                None,
-                &mut resolver,
-            );
-        state
-            .handle_certified(View::new(5), true, &mut resolver);
+        state.handle(
+            Certificate::Notarization(notarization_v5.clone()),
+            None,
+            &mut resolver,
+        );
+        state.handle_certified(View::new(5), true, &mut resolver);
 
         // Floor should be the notarization at view 5
         assert!(
@@ -597,12 +575,11 @@ mod tests {
 
         // A finalization at the same view should upgrade the floor
         let finalization_v5 = build_finalization(&schemes, &verifier, View::new(5));
-        state
-            .handle(
-                Certificate::Finalization(finalization_v5.clone()),
-                None,
-                &mut resolver,
-            );
+        state.handle(
+            Certificate::Finalization(finalization_v5.clone()),
+            None,
+            &mut resolver,
+        );
 
         // Floor should now be the finalization (stronger proof)
         assert!(

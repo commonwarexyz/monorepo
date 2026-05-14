@@ -602,11 +602,10 @@ mod tests {
                 prod3,
             );
 
-            mailbox1
-                .fetch_targeted(
-                    key.clone(),
-                    non_empty_vec![peers[1].clone(), peers[2].clone()],
-                );
+            mailbox1.fetch_targeted(
+                key.clone(),
+                non_empty_vec![peers[1].clone(), peers[2].clone()],
+            );
             let started_key = started.recv().await.expect("delivery did not start");
             assert_eq!(started_key, key);
 
@@ -1390,11 +1389,10 @@ mod tests {
             // Start fetch with targets for both peer 2 (invalid data) and peer 3 (valid data)
             // When peer 2 returns invalid data, only peer 2 should be removed from targets
             // Peer 3 should still be tried as a target and succeed
-            mailbox1
-                .fetch_targeted(
-                    key.clone(),
-                    non_empty_vec![peers[1].clone(), peers[2].clone()],
-                );
+            mailbox1.fetch_targeted(
+                key.clone(),
+                non_empty_vec![peers[1].clone(), peers[2].clone()],
+            );
 
             // Should eventually succeed from peer 3
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -1484,11 +1482,10 @@ mod tests {
 
             // Start fetch with targets for peers 2 and 3 (both don't have data)
             // Peer 4 has data but is NOT a target - it should NEVER be tried
-            mailbox1
-                .fetch_targeted(
-                    key.clone(),
-                    non_empty_vec![peers[1].clone(), peers[2].clone()],
-                );
+            mailbox1.fetch_targeted(
+                key.clone(),
+                non_empty_vec![peers[1].clone(), peers[2].clone()],
+            );
 
             // Wait enough time for targets to fail and retry multiple times
             // The fetch should not succeed because peer 4 (which has data) is not targeted
@@ -1587,11 +1584,10 @@ mod tests {
             // - key1 targeted to peer 2 (has data) -> should succeed from target
             // - key2 targeted to peer 4 (has data) -> should succeed from target
             // - key3 no targeting -> fetched from any peer (peer 3 has it)
-            mailbox1
-                .fetch_all_targeted(vec![
-                    (key1.clone(), non_empty_vec![peers[1].clone()]), // peer 2 has key1
-                    (key2.clone(), non_empty_vec![peers[3].clone()]), // peer 4 has key2
-                ]);
+            mailbox1.fetch_all_targeted(vec![
+                (key1.clone(), non_empty_vec![peers[1].clone()]), // peer 2 has key1
+                (key2.clone(), non_empty_vec![peers[3].clone()]), // peer 4 has key2
+            ]);
             mailbox1.fetch(key3.clone()); // no targeting for key3
 
             // Collect all three events
@@ -1674,8 +1670,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch with target for peer 2 only (who doesn't have data)
-            mailbox1
-                .fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
+            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
 
             // Wait for the targeted fetch to fail a few times
             context.sleep(Duration::from_millis(500)).await;
@@ -1753,8 +1748,7 @@ mod tests {
 
             // Call fetch_targeted with peer 2 only (who doesn't have data)
             // This should NOT restrict the existing "all" fetch
-            mailbox1
-                .fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
+            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
 
             // Should still succeed from peer 3 (who has data but wasn't in the targeted call)
             // because the original fetch was "all" and shouldn't be restricted
@@ -2556,8 +2550,7 @@ mod tests {
                 Producer::default(),
             );
 
-            mailbox2
-                .fetch_targeted(key.clone(), non_empty_vec![peers[0].clone()]);
+            mailbox2.fetch_targeted(key.clone(), non_empty_vec![peers[0].clone()]);
 
             let (key_actual, value) = cons_out2.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -2757,8 +2750,7 @@ mod tests {
             mailboxes[0].retain(|_| true);
 
             // Fetch targeted should not panic
-            mailboxes[0]
-                .fetch_targeted(Key(3), non_empty_vec![peers[1].clone()]);
+            mailboxes[0].fetch_targeted(Key(3), non_empty_vec![peers[1].clone()]);
         });
     }
 

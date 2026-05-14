@@ -19,11 +19,7 @@ use commonware_runtime::{
     telemetry::metrics::{histogram, status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::oneshot,
-    futures::Pool as FuturesPool,
-    Span,
-};
+use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
 use futures::future::{self, Either};
 use rand::Rng;
 use std::marker::PhantomData;
