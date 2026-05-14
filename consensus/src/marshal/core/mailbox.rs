@@ -201,7 +201,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         }
     }
 
-    fn durable(&self) -> bool {
+    const fn durable(&self) -> bool {
         matches!(
             self,
             Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. }
