@@ -6,7 +6,7 @@ use crate::{
     },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
-    Heightable, Reporter,
+    Reporter,
 };
 use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
@@ -166,12 +166,14 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 }
 
 impl<S: Scheme, V: Variant> Message<S, V> {
-    fn stale_below(current: Option<Height>, height: Height) -> bool {
-        current.is_some_and(|current| height < current)
-    }
-
-    fn stale_at_or_below(current: Option<Height>, height: Height) -> bool {
-        current.is_some_and(|current| height <= current)
+    fn stale_below(current: Option<Height>, height: Height, inclusive: bool) -> bool {
+        current.is_some_and(|current| {
+            if inclusive {
+                height <= current
+            } else {
+                height < current
+            }
+        })
     }
 
     fn stale(&self, current: Option<Height>) -> bool {
@@ -184,11 +186,9 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Height(height),
                 ..
             }
-            | Self::GetFinalization { height, .. } => Self::stale_below(current, *height),
-            Self::Proposed { block, .. }
-            | Self::Verified { block, .. }
-            | Self::Certified { block, .. } => Self::stale_below(current, block.height()),
-            Self::HintFinalized { height, .. } => Self::stale_at_or_below(current, *height),
+            | Self::GetFinalization { height, .. } => Self::stale_below(current, *height, false),
+            Self::HintFinalized { height, .. } => Self::stale_below(current, *height, true),
+            Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. } => false, // durable methods cannot be stale
             Self::GetBlock {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
@@ -199,13 +199,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             } => false,
             _ => false,
         }
-    }
-
-    const fn durable(&self) -> bool {
-        matches!(
-            self,
-            Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. }
-        )
     }
 
     pub(crate) fn response_closed(&self) -> bool {
@@ -246,7 +239,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         if message.response_closed() {
             false
         } else {
-            !message.stale(height) || message.durable()
+            !message.stale(height)
         }
     }
 
@@ -381,7 +374,7 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             }
             message => {
                 overflow.retain_useful();
-                if message.stale(overflow.height()) && !message.durable() {
+                if message.stale(overflow.height()) {
                     return;
                 }
                 overflow.messages.push_back(message);
@@ -645,6 +638,7 @@ mod tests {
     use crate::{
         marshal::{mocks::harness, standard::Standard},
         types::{Epoch, View},
+        Heightable,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Digest as _, Signer as _};
     use commonware_utils::channel::oneshot::error::TryRecvError;
@@ -849,7 +843,7 @@ mod tests {
         hint_targets(overflow, height).is_some()
     }
 
-    fn has_durable(overflow: &TestPending, height: u64) -> bool {
+    fn has_block_message(overflow: &TestPending, height: u64) -> bool {
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
@@ -1105,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_keeps_stale_durable_messages_and_waiters() {
+    fn policy_keeps_block_messages_and_waiters() {
         let mut overflow = pending();
 
         let (proposed_message, mut proposed_ack) = proposed(4);
@@ -1116,25 +1110,25 @@ mod tests {
         overflow.messages.push_back(certified_message);
 
         <TestMessage as Policy>::handle(&mut overflow, set_floor(7));
-        assert!(has_durable(&overflow, 4));
-        assert!(has_durable(&overflow, 6));
-        assert!(has_durable(&overflow, 8));
+        assert!(has_block_message(&overflow, 4));
+        assert!(has_block_message(&overflow, 6));
+        assert!(has_block_message(&overflow, 8));
         assert!(matches!(proposed_ack.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(verified_ack.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(certified_ack.try_recv(), Err(TryRecvError::Empty)));
 
         <TestMessage as Policy>::handle(&mut overflow, prune(9));
-        assert!(has_durable(&overflow, 8));
+        assert!(has_block_message(&overflow, 8));
         assert!(matches!(certified_ack.try_recv(), Err(TryRecvError::Empty)));
 
         let (stale, mut stale_ack) = proposed(8);
         <TestMessage as Policy>::handle(&mut overflow, stale);
-        assert!(has_durable(&overflow, 8));
+        assert!(has_block_message(&overflow, 8));
         assert!(matches!(stale_ack.try_recv(), Err(TryRecvError::Empty)));
 
         let (current, mut current_ack) = verified(9);
         <TestMessage as Policy>::handle(&mut overflow, current);
-        assert!(has_durable(&overflow, 9));
+        assert!(has_block_message(&overflow, 9));
         assert!(matches!(current_ack.try_recv(), Err(TryRecvError::Empty)));
 
         let drained = drain(&mut overflow);
