@@ -139,7 +139,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     /// Notify the buffer that a block has been finalized.
     ///
     /// This allows the buffer to perform variant-specific cleanup operations.
-    fn finalized(&self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
+    fn finalized(&self, commitment: V::Commitment);
 
     /// Send a block to peers.
     fn send(
@@ -147,5 +147,5 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
         round: Round,
         block: V::Block,
         recipients: Recipients<Self::PublicKey>,
-    ) -> impl Future<Output = ()> + Send;
+    );
 }

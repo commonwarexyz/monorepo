@@ -104,11 +104,11 @@ where
         self.subscribe(commitment)
     }
 
-    async fn finalized(&self, commitment: Commitment) {
+    fn finalized(&self, commitment: Commitment) {
         self.prune(commitment);
     }
 
-    async fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
+    fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
         self.proposed(round, block);
     }

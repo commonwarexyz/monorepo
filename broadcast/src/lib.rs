@@ -8,7 +8,6 @@
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::Codec;
     use commonware_utils::channel::oneshot;
-    use std::future::Future;
 
     pub mod buffered;
 
@@ -34,6 +33,6 @@ commonware_macros::stability_scope!(BETA {
             &self,
             recipients: Self::Recipients,
             message: Self::Message,
-        ) -> impl Future<Output = oneshot::Receiver<Self::Response>> + Send;
+        ) -> oneshot::Receiver<Self::Response>;
     }
 });

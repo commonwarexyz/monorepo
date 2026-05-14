@@ -81,11 +81,11 @@ where
         self.subscribe_by_digest(commitment)
     }
 
-    async fn finalized(&self, _commitment: B::Digest) {
+    fn finalized(&self, _commitment: B::Digest) {
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    async fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
-        let _peers = Broadcaster::broadcast(self, recipients, block).await;
+    fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
+        drop(Broadcaster::broadcast(self, recipients, block));
     }
 }

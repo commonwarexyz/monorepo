@@ -249,7 +249,7 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
-                        drop(mailbox.broadcast(resolved_recipients, message).await);
+                        drop(mailbox.broadcast(resolved_recipients, message));
                     }
                 }
                 BroadcastAction::Subscribe { peer_index, digest } => {

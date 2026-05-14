@@ -100,7 +100,7 @@ impl<P: PublicKey, M: Digestible + Codec> Broadcaster for Mailbox<P, M> {
     /// Broadcast a message to recipients.
     ///
     /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
-    async fn broadcast(
+    fn broadcast(
         &self,
         recipients: Self::Recipients,
         message: Self::Message,

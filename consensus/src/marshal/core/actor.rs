@@ -478,7 +478,7 @@ where
                 }
 
                 // Inform the buffer of the last acknowledged commitment (anything below this is safe to prune).
-                buffer.finalized(last_acked_commitment).await;
+                buffer.finalized(last_acked_commitment);
 
                 // Fill the pipeline
                 self.try_dispatch_blocks(&mut application).await;
@@ -539,7 +539,7 @@ where
                                 block
                             }
                         };
-                        buffer.send(round, block, recipients).await;
+                        buffer.send(round, block, recipients);
                     }
                     Message::Proposed { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,

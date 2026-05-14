@@ -1193,11 +1193,9 @@ mod tests {
             buffer
                 .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
                 .await
-                .await
                 .expect("buffer broadcast for parent should ack");
             buffer
                 .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
                 .await
                 .expect("buffer broadcast for child should ack");
 

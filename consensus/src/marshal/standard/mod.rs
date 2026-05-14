@@ -1663,9 +1663,9 @@ mod tests {
             receiver
         }
 
-        async fn finalized(&self, _commitment: D) {}
+        fn finalized(&self, _commitment: D) {}
 
-        async fn send(&self, round: Round, block: B, recipients: Recipients<PublicKey>) {
+        fn send(&self, round: Round, block: B, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));
         }
     }
