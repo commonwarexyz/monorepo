@@ -145,22 +145,37 @@ mod tests {
     }
 
     #[test]
-    fn policy_drops_closed_subscriptions() {
+    fn policy_drops_closed_responders() {
         let mut overflow = VecDeque::new();
-        let pending = TestMessage::shared(b"pending");
-        let open = TestMessage::shared(b"open");
-        let current = TestMessage::shared(b"current");
+        let pending_subscribe = TestMessage::shared(b"pending_subscribe");
+        let pending_get = TestMessage::shared(b"pending_get");
+        let open_subscribe = TestMessage::shared(b"open_subscribe");
+        let open_get = TestMessage::shared(b"open_get");
+        let current_get = TestMessage::shared(b"current_get");
 
         let (closed_responder, closed_receiver) = commonware_utils::channel::oneshot::channel();
         drop(closed_receiver);
         overflow.push_back(Message::Subscribe {
-            digest: pending.digest(),
+            digest: pending_subscribe.digest(),
             responder: closed_responder,
         });
 
         let (open_responder, _open_receiver) = commonware_utils::channel::oneshot::channel();
         overflow.push_back(Message::Subscribe {
-            digest: open.digest(),
+            digest: open_subscribe.digest(),
+            responder: open_responder,
+        });
+
+        let (closed_responder, closed_receiver) = commonware_utils::channel::oneshot::channel();
+        drop(closed_receiver);
+        overflow.push_back(Message::Get {
+            digest: pending_get.digest(),
+            responder: closed_responder,
+        });
+
+        let (open_responder, _open_receiver) = commonware_utils::channel::oneshot::channel();
+        overflow.push_back(Message::Get {
+            digest: open_get.digest(),
             responder: open_responder,
         });
 
@@ -168,18 +183,23 @@ mod tests {
         drop(current_receiver);
         <Message<PublicKey, TestMessage> as Policy>::handle(
             &mut overflow,
-            Message::Subscribe {
-                digest: current.digest(),
+            Message::Get {
+                digest: current_get.digest(),
                 responder: current_responder,
             },
         );
 
-        assert_eq!(overflow.len(), 1);
-        assert!(matches!(
-            &overflow[0],
+        assert_eq!(overflow.len(), 2);
+        assert!(overflow.iter().any(|message| matches!(
+            message,
             Message::Subscribe { digest, responder }
-                if *digest == open.digest() && !responder.is_closed()
-        ));
+                if *digest == open_subscribe.digest() && !responder.is_closed()
+        )));
+        assert!(overflow.iter().any(|message| matches!(
+            message,
+            Message::Get { digest, responder }
+                if *digest == open_get.digest() && !responder.is_closed()
+        )));
     }
 
     async fn spawn_peer_engines(

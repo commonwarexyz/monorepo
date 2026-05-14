@@ -36,7 +36,11 @@ pub enum Message<P: PublicKey, M: Digestible> {
 
 impl<P: PublicKey, M: Digestible> Message<P, M> {
     fn response_closed(&self) -> bool {
-        matches!(self, Self::Subscribe { responder, .. } if responder.is_closed())
+        match self {
+            Self::Subscribe { responder, .. } => responder.is_closed(),
+            Self::Get { responder, .. } => responder.is_closed(),
+            Self::Broadcast { .. } => false,
+        }
     }
 }
 

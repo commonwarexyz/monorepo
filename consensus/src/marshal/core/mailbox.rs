@@ -201,18 +201,11 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         }
     }
 
-    fn handle_stale(&mut self) {
-        match self {
-            Self::Proposed { ack, .. }
-            | Self::Verified { ack, .. }
-            | Self::Certified { ack, .. } => {
-                // Stale durable work no longer needs storage, so wake waiters as complete.
-                if let Some(ack) = ack.take() {
-                    let _ = ack.send(());
-                }
-            }
-            _ => {}
-        }
+    fn durable(&self) -> bool {
+        matches!(
+            self,
+            Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. }
+        )
     }
 
     pub(crate) fn response_closed(&self) -> bool {
@@ -249,21 +242,18 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.floor.into_iter().chain(self.prune).max()
     }
 
-    fn retain_message(message: &mut Message<S, V>, height: Option<Height>) -> bool {
+    fn retain_message(message: &Message<S, V>, height: Option<Height>) -> bool {
         if message.response_closed() {
             false
-        } else if message.stale(height) {
-            message.handle_stale();
-            false
         } else {
-            true
+            !message.stale(height) || message.durable()
         }
     }
 
     fn retain_useful(&mut self) {
         let height = self.height();
         self.messages
-            .retain_mut(|message| Self::retain_message(message, height));
+            .retain(|message| Self::retain_message(message, height));
     }
 
     fn set_floor(&mut self, height: Height) -> bool {
@@ -389,10 +379,9 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::Prune { height } => {
                 overflow.prune(height);
             }
-            mut message => {
+            message => {
                 overflow.retain_useful();
-                if message.stale(overflow.height()) {
-                    message.handle_stale();
+                if message.stale(overflow.height()) && !message.durable() {
                     return;
                 }
                 overflow.messages.push_back(message);
@@ -1116,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_drops_stale_durable_messages_and_acks_waiters() {
+    fn policy_keeps_stale_durable_messages_and_waiters() {
         let mut overflow = pending();
 
         let (proposed_message, mut proposed_ack) = proposed(4);
@@ -1127,24 +1116,29 @@ mod tests {
         overflow.messages.push_back(certified_message);
 
         <TestMessage as Policy>::handle(&mut overflow, set_floor(7));
-        assert!(!has_durable(&overflow, 4));
-        assert!(!has_durable(&overflow, 6));
+        assert!(has_durable(&overflow, 4));
+        assert!(has_durable(&overflow, 6));
         assert!(has_durable(&overflow, 8));
-        assert!(proposed_ack.try_recv().is_ok());
-        assert!(verified_ack.try_recv().is_ok());
+        assert!(matches!(proposed_ack.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(verified_ack.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(certified_ack.try_recv(), Err(TryRecvError::Empty)));
 
         <TestMessage as Policy>::handle(&mut overflow, prune(9));
-        assert!(!has_durable(&overflow, 8));
-        assert!(certified_ack.try_recv().is_ok());
+        assert!(has_durable(&overflow, 8));
+        assert!(matches!(certified_ack.try_recv(), Err(TryRecvError::Empty)));
 
         let (stale, mut stale_ack) = proposed(8);
         <TestMessage as Policy>::handle(&mut overflow, stale);
-        assert!(stale_ack.try_recv().is_ok());
+        assert!(has_durable(&overflow, 8));
+        assert!(matches!(stale_ack.try_recv(), Err(TryRecvError::Empty)));
 
         let (current, mut current_ack) = verified(9);
         <TestMessage as Policy>::handle(&mut overflow, current);
         assert!(has_durable(&overflow, 9));
         assert!(matches!(current_ack.try_recv(), Err(TryRecvError::Empty)));
+
+        let drained = drain(&mut overflow);
+        assert!(matches!(drained[0], TestMessage::SetFloor { .. }));
+        assert!(matches!(drained[1], TestMessage::Prune { .. }));
     }
 }
