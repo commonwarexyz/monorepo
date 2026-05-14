@@ -166,13 +166,13 @@ mod tests {
 
         let (current_responder, current_receiver) = commonware_utils::channel::oneshot::channel();
         drop(current_receiver);
-        assert!(!<Message<PublicKey, TestMessage> as Policy>::handle(
+        <Message<PublicKey, TestMessage> as Policy>::handle(
             &mut overflow,
             Message::Subscribe {
                 digest: current.digest(),
                 responder: current_responder,
-            }
-        ));
+            },
+        );
 
         assert_eq!(overflow.len(), 1);
         assert!(matches!(

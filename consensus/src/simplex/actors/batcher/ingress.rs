@@ -90,7 +90,7 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     type Overflow = Pending<S, D>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         match message {
             update @ Self::Update {
                 current: new_current,
@@ -107,7 +107,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     let old = (*old_current, *old_finalized);
                     let new = (new_current, new_finalized);
                     if new <= old {
-                        return new == old;
+                        return;
                     }
                 }
                 overflow.update = Some(update);
@@ -116,7 +116,6 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 overflow
                     .constructed
                     .retain(|vote| !Self::prunes(new_current, new_finalized, vote));
-                true
             }
             Self::Constructed(new_vote) => {
                 // Ignore the constructed vote if it is stale
@@ -125,7 +124,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     Some(Self::Update { current: old_current, finalized: old_finalized, .. })
                         if Self::prunes(*old_current, *old_finalized, &new_vote)
                 ) {
-                    return false;
+                    return;
                 }
 
                 // Ignore the constructed vote if it is a duplicate
@@ -134,10 +133,9 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     .iter()
                     .any(|old_vote| Self::similar(old_vote, &new_vote))
                 {
-                    return true;
+                    return;
                 }
                 overflow.constructed.push_back(new_vote);
-                true
             }
         }
     }
@@ -245,14 +243,11 @@ mod tests {
     #[test]
     fn update_prunes_stale_constructed_messages() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Constructed(nullify_vote(View::new(2)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(3), View::new(1))
-        ));
+            Message::Constructed(nullify_vote(View::new(2))),
+        );
+        Message::handle(&mut overflow, update(View::new(3), View::new(1)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -269,14 +264,11 @@ mod tests {
     #[test]
     fn constructed_message_after_update_is_dropped_when_stale() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(&mut overflow, update(View::new(3), View::new(1)));
+        Message::handle(
             &mut overflow,
-            update(View::new(3), View::new(1))
-        ));
-        assert!(!Message::handle(
-            &mut overflow,
-            Message::Constructed(nullify_vote(View::new(2)))
-        ));
+            Message::Constructed(nullify_vote(View::new(2))),
+        );
 
         let overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -285,18 +277,12 @@ mod tests {
     #[test]
     fn update_replaces_older_update_and_keeps_current_constructed_message() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(&mut overflow, update(View::new(2), View::new(1)));
+        Message::handle(
             &mut overflow,
-            update(View::new(2), View::new(1))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Constructed(nullify_vote(View::new(3)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(3), View::new(1))
-        ));
+            Message::Constructed(nullify_vote(View::new(3))),
+        );
+        Message::handle(&mut overflow, update(View::new(3), View::new(1)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
@@ -313,14 +299,8 @@ mod tests {
     #[test]
     fn stale_update_is_dropped_when_newer_update_is_queued() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(5), View::new(4))
-        ));
-        assert!(!Message::handle(
-            &mut overflow,
-            update(View::new(4), View::new(3))
-        ));
+        Message::handle(&mut overflow, update(View::new(5), View::new(4)));
+        Message::handle(&mut overflow, update(View::new(4), View::new(3)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -333,14 +313,8 @@ mod tests {
     #[test]
     fn update_replaces_same_current_when_finalized_advances() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(5), View::new(3))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(5), View::new(4))
-        ));
+        Message::handle(&mut overflow, update(View::new(5), View::new(3)));
+        Message::handle(&mut overflow, update(View::new(5), View::new(4)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -357,14 +331,14 @@ mod tests {
     #[test]
     fn duplicate_constructed_message_is_ignored() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Constructed(nullify_vote(View::new(5)))
-        ));
-        assert!(Message::handle(
+            Message::Constructed(nullify_vote(View::new(5))),
+        );
+        Message::handle(
             &mut overflow,
-            Message::Constructed(nullify_vote(View::new(5)))
-        ));
+            Message::Constructed(nullify_vote(View::new(5))),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -378,18 +352,12 @@ mod tests {
     #[test]
     fn lower_current_update_is_dropped_without_merging_finalized() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(&mut overflow, update(View::new(5), View::zero()));
+        Message::handle(
             &mut overflow,
-            update(View::new(5), View::zero())
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            Message::Constructed(finalize_vote(View::new(3)))
-        ));
-        assert!(!Message::handle(
-            &mut overflow,
-            update(View::new(4), View::new(4))
-        ));
+            Message::Constructed(finalize_vote(View::new(3))),
+        );
+        Message::handle(&mut overflow, update(View::new(4), View::new(4)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
@@ -411,14 +379,11 @@ mod tests {
     #[test]
     fn update_keeps_constructed_finalization_above_finalized() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Constructed(finalize_vote(View::new(4)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(5), View::new(3))
-        ));
+            Message::Constructed(finalize_vote(View::new(4))),
+        );
+        Message::handle(&mut overflow, update(View::new(5), View::new(3)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
@@ -436,18 +401,15 @@ mod tests {
     #[test]
     fn constructed_finalizations_remain_in_arrival_order_after_update() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Constructed(finalize_vote(View::new(4)))
-        ));
-        assert!(Message::handle(
+            Message::Constructed(finalize_vote(View::new(4))),
+        );
+        Message::handle(
             &mut overflow,
-            Message::Constructed(finalize_vote(View::new(2)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(3), View::new(1))
-        ));
+            Message::Constructed(finalize_vote(View::new(2))),
+        );
+        Message::handle(&mut overflow, update(View::new(3), View::new(1)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 3);
@@ -470,14 +432,11 @@ mod tests {
     #[test]
     fn update_prunes_constructed_notarization_below_current() {
         let mut overflow = Pending::default();
-        assert!(Message::handle(
+        Message::handle(
             &mut overflow,
-            Message::Constructed(notarize_vote(View::new(4)))
-        ));
-        assert!(Message::handle(
-            &mut overflow,
-            update(View::new(5), View::new(3))
-        ));
+            Message::Constructed(notarize_vote(View::new(4))),
+        );
+        Message::handle(&mut overflow, update(View::new(5), View::new(3)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);

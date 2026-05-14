@@ -70,7 +70,7 @@ impl<S: Scheme, D: Digest> Overflow<MailboxMessage<S, D>> for Pending<S, D> {
 impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
     type Overflow = Pending<S, D>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
@@ -79,7 +79,7 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             Some(Self::Certificate(Certificate::Finalization(old_finalized)))
                 if old_finalized.view() >= new_view
         ) {
-            return false;
+            return;
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
@@ -88,7 +88,7 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                 .messages
                 .retain(|old_message| old_message.view() > new_view);
             overflow.finalization = Some(message);
-            return true;
+            return;
         }
 
         // Ignore the message if it is a duplicate
@@ -112,10 +112,9 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                 _ => false,
             })
         {
-            return true;
+            return;
         }
         overflow.messages.push_back(message);
-        true
     }
 }
 
@@ -275,32 +274,32 @@ mod tests {
     #[test]
     fn finalization_prunes_stale_certificates_and_results() {
         let mut overflow = Pending::default();
-        assert!(MailboxMessage::handle(
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(2)))
-        ));
-        assert!(MailboxMessage::handle(
+            MailboxMessage::Certificate(nullification(View::new(2))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
                 view: View::new(2),
                 success: false,
-            }
-        ));
-        assert!(MailboxMessage::handle(
+            },
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(5)))
-        ));
-        assert!(MailboxMessage::handle(
+            MailboxMessage::Certificate(nullification(View::new(5))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
                 view: View::new(5),
                 success: false,
-            }
-        ));
-        assert!(MailboxMessage::handle(
+            },
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3)))
-        ));
+            MailboxMessage::Certificate(finalization(View::new(3))),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 3);
@@ -326,20 +325,20 @@ mod tests {
     #[test]
     fn duplicate_certified_result_is_ignored() {
         let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
-        assert!(MailboxMessage::handle(
+        MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
                 view: View::new(4),
                 success: false,
-            }
-        ));
-        assert!(MailboxMessage::handle(
+            },
+        );
+        MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
                 view: View::new(4),
                 success: true,
-            }
-        ));
+            },
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -355,30 +354,30 @@ mod tests {
     #[test]
     fn queued_finalization_rejects_covered_messages() {
         let mut overflow = Pending::default();
-        assert!(MailboxMessage::handle(
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3)))
-        ));
+            MailboxMessage::Certificate(finalization(View::new(3))),
+        );
 
-        assert!(!MailboxMessage::handle(
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(2)))
-        ));
-        assert!(!MailboxMessage::handle(
+            MailboxMessage::Certificate(nullification(View::new(2))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
                 view: View::new(2),
                 success: false,
-            }
-        ));
-        assert!(!MailboxMessage::handle(
+            },
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(2)))
-        ));
-        assert!(MailboxMessage::handle(
+            MailboxMessage::Certificate(finalization(View::new(2))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4)))
-        ));
+            MailboxMessage::Certificate(nullification(View::new(4))),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
@@ -397,14 +396,14 @@ mod tests {
     #[test]
     fn duplicate_finalization_is_dropped() {
         let mut overflow = Pending::default();
-        assert!(MailboxMessage::handle(
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3)))
-        ));
-        assert!(!MailboxMessage::handle(
+            MailboxMessage::Certificate(finalization(View::new(3))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3)))
-        ));
+            MailboxMessage::Certificate(finalization(View::new(3))),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -418,25 +417,25 @@ mod tests {
     #[test]
     fn newer_finalization_replaces_older_pruning_floor() {
         let mut overflow = Pending::default();
-        assert!(MailboxMessage::handle(
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(3)))
-        ));
-        assert!(MailboxMessage::handle(
+            MailboxMessage::Certificate(finalization(View::new(3))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4)))
-        ));
-        assert!(MailboxMessage::handle(
+            MailboxMessage::Certificate(nullification(View::new(4))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
                 view: View::new(4),
                 success: false,
-            }
-        ));
-        assert!(MailboxMessage::handle(
+            },
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(finalization(View::new(5)))
-        ));
+            MailboxMessage::Certificate(finalization(View::new(5))),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -450,21 +449,21 @@ mod tests {
     #[test]
     fn duplicate_certificate_is_ignored() {
         let mut overflow = Pending::default();
-        assert!(MailboxMessage::handle(
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4)))
-        ));
-        assert!(MailboxMessage::handle(
+            MailboxMessage::Certificate(nullification(View::new(4))),
+        );
+        MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
                 view: View::new(4),
                 success: true,
-            }
-        ));
-        assert!(MailboxMessage::handle(
+            },
+        );
+        MailboxMessage::handle(
             &mut overflow,
-            MailboxMessage::Certificate(nullification(View::new(4)))
-        ));
+            MailboxMessage::Certificate(nullification(View::new(4))),
+        );
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);

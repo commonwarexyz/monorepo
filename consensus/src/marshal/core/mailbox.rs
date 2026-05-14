@@ -373,24 +373,29 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
             overflow.retain_useful();
-            return false;
+            return;
         }
 
         match message {
-            Self::HintFinalized { height, targets } => overflow.hint_finalized(height, targets),
-            Self::SetFloor { height } => overflow.set_floor(height),
-            Self::Prune { height } => overflow.prune(height),
+            Self::HintFinalized { height, targets } => {
+                overflow.hint_finalized(height, targets);
+            }
+            Self::SetFloor { height } => {
+                overflow.set_floor(height);
+            }
+            Self::Prune { height } => {
+                overflow.prune(height);
+            }
             mut message => {
                 overflow.retain_useful();
                 if message.stale(overflow.height()) {
                     message.handle_stale();
-                    return false;
+                    return;
                 }
                 overflow.messages.push_back(message);
-                true
             }
         }
     }
@@ -895,18 +900,9 @@ mod tests {
         let first = public_key(1);
         let second = public_key(2);
 
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            hint_finalized(10, first.clone())
-        ));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            hint_finalized(10, first.clone())
-        ));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            hint_finalized(10, second.clone())
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
 
         assert_eq!(overflow.messages.len(), 1);
         let targets = hint_targets(&overflow, 10).expect("expected hint");
@@ -928,10 +924,7 @@ mod tests {
 
         let (current_closed, current_closed_rx) = subscribe_by_digest(3);
         drop(current_closed_rx);
-        assert!(!<TestMessage as Policy>::handle(
-            &mut overflow,
-            current_closed
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, current_closed);
 
         assert!(!has_subscription(&overflow, 1));
         assert!(has_subscription(&overflow, 2));
@@ -955,10 +948,7 @@ mod tests {
 
         let (current_closed, current_closed_rx) = get_finalization(3);
         drop(current_closed_rx);
-        assert!(!<TestMessage as Policy>::handle(
-            &mut overflow,
-            current_closed
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, current_closed);
 
         assert!(!has_get_block(&overflow, 1));
         assert!(has_get_info(&overflow, 2));
@@ -977,16 +967,10 @@ mod tests {
         let (get_block_9, _get_block_9_rx) = get_block(9);
         let (get_info_11, _get_info_11_rx) = get_info(11);
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block_9));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            hint_finalized(10, first.clone())
-        ));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info_11));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            hint_finalized(10, second.clone())
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, get_block_9);
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
+        <TestMessage as Policy>::handle(&mut overflow, get_info_11);
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
 
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);
@@ -1017,12 +1001,12 @@ mod tests {
     fn policy_keeps_highest_floor_and_prune() {
         let mut overflow = pending();
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(5)));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(3)));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(8)));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(4)));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(2)));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(5));
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(3));
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
+        <TestMessage as Policy>::handle(&mut overflow, prune(4));
+        <TestMessage as Policy>::handle(&mut overflow, prune(2));
+        <TestMessage as Policy>::handle(&mut overflow, prune(7));
 
         assert_eq!(overflow.floor, Some(Height::new(8)));
         assert_eq!(overflow.prune, Some(Height::new(7)));
@@ -1054,7 +1038,7 @@ mod tests {
             .messages
             .push_back(hint_finalized(8, public_key(1)));
         overflow.messages.push_back(get_block_8);
-        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(8)));
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
         assert_eq!(overflow.floor, Some(Height::new(8)));
         assert!(!has_get_info(&overflow, 4));
         assert!(!has_get_block(&overflow, 7));
@@ -1078,7 +1062,7 @@ mod tests {
             .messages
             .push_back(hint_finalized(6, public_key(2)));
         overflow.messages.push_back(get_block_7);
-        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
+        <TestMessage as Policy>::handle(&mut overflow, prune(7));
         assert_eq!(overflow.prune, Some(Height::new(7)));
         assert!(!has_get_finalization(&overflow, 4));
         assert!(!has_get_block(&overflow, 6));
@@ -1106,40 +1090,28 @@ mod tests {
         let (get_finalization_4, _get_finalization_4_rx) = get_finalization(4);
         let (get_finalization_6, _get_finalization_6_rx) = get_finalization(6);
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(5)));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info_4));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info_5));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block_4));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block_5));
-        assert!(!<TestMessage as Policy>::handle(
-            &mut overflow,
-            get_finalization_4
-        ));
-        assert!(!<TestMessage as Policy>::handle(
-            &mut overflow,
-            hint_finalized(5, public_key(1))
-        ));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            hint_finalized(6, public_key(2))
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(5));
+        <TestMessage as Policy>::handle(&mut overflow, get_info_4);
+        <TestMessage as Policy>::handle(&mut overflow, get_info_5);
+        <TestMessage as Policy>::handle(&mut overflow, get_block_4);
+        <TestMessage as Policy>::handle(&mut overflow, get_block_5);
+        <TestMessage as Policy>::handle(&mut overflow, get_finalization_4);
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(5, public_key(1)));
+        <TestMessage as Policy>::handle(&mut overflow, hint_finalized(6, public_key(2)));
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
+        <TestMessage as Policy>::handle(&mut overflow, prune(7));
         assert!(!has_get_info(&overflow, 5));
         assert!(!has_get_block(&overflow, 5));
         assert!(!has_hint(&overflow, 5));
         assert!(!has_hint(&overflow, 6));
         assert!(has_prune(&overflow, 7));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info_6));
-        assert!(!<TestMessage as Policy>::handle(
-            &mut overflow,
-            get_finalization_6
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, get_info_6);
+        <TestMessage as Policy>::handle(&mut overflow, get_finalization_6);
         assert!(!has_get_finalization(&overflow, 6));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block_6));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info_7));
+        <TestMessage as Policy>::handle(&mut overflow, get_block_6);
+        <TestMessage as Policy>::handle(&mut overflow, get_info_7);
         assert!(has_get_info(&overflow, 7));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block_7));
+        <TestMessage as Policy>::handle(&mut overflow, get_block_7);
         assert!(has_get_block(&overflow, 7));
     }
 
@@ -1154,7 +1126,7 @@ mod tests {
         overflow.messages.push_back(verified_message);
         overflow.messages.push_back(certified_message);
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(7)));
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(7));
         assert!(!has_durable(&overflow, 4));
         assert!(!has_durable(&overflow, 6));
         assert!(has_durable(&overflow, 8));
@@ -1162,16 +1134,16 @@ mod tests {
         assert!(verified_ack.try_recv().is_ok());
         assert!(matches!(certified_ack.try_recv(), Err(TryRecvError::Empty)));
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(9)));
+        <TestMessage as Policy>::handle(&mut overflow, prune(9));
         assert!(!has_durable(&overflow, 8));
         assert!(certified_ack.try_recv().is_ok());
 
         let (stale, mut stale_ack) = proposed(8);
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, stale));
+        <TestMessage as Policy>::handle(&mut overflow, stale);
         assert!(stale_ack.try_recv().is_ok());
 
         let (current, mut current_ack) = verified(9);
-        assert!(<TestMessage as Policy>::handle(&mut overflow, current));
+        <TestMessage as Policy>::handle(&mut overflow, current);
         assert!(has_durable(&overflow, 9));
         assert!(matches!(current_ack.try_recv(), Err(TryRecvError::Empty)));
     }

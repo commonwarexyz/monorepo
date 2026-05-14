@@ -15,18 +15,14 @@ commonware_macros::stability_scope!(BETA {
     pub enum Feedback {
         /// The work was accepted within the configured capacity.
         Ok,
-        /// The submission was handled but requests sender backoff.
+        /// The submission was handled outside the configured capacity and requests sender backoff.
         Backoff,
-        /// The work was dropped because the endpoint did not have capacity.
-        ///
-        /// Ignored work should report [`Feedback::Ok`] instead.
-        Dropped,
         /// The endpoint is closed.
         Closed,
     }
 
     impl Feedback {
-        /// Returns `true` when work was accepted by the endpoint.
+        /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             matches!(self, Self::Ok | Self::Backoff)
         }

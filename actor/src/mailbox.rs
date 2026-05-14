@@ -5,8 +5,7 @@
 //! The mailbox is split into two queues: a bounded `ready` queue
 //! that producers push to and the receiver pops from, and an unbounded
 //! `overflow` queue that holds messages displaced when ready is full. A
-//! [`Policy`] decides how overflow is updated and what feedback is returned
-//! when overflow is contended.
+//! [`Policy`] decides how overflow is updated when overflow is contended.
 //!
 //! ```text
 //!                          senders
@@ -93,10 +92,6 @@ pub trait Policy: Sized {
     /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
     /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
     ///
-    /// The returned value is feedback for this enqueue attempt after the policy has made any
-    /// overflow changes. Return `true` to report [`Feedback::Backoff`] or
-    /// `false` to report [`Feedback::Dropped`].
-    ///
     /// # Warning
     ///
     /// Do not enqueue into the same mailbox from this method or from destructors triggered by
@@ -106,7 +101,7 @@ pub trait Policy: Sized {
     /// This method should not unwind after mutating `overflow`. A panic, including one from a
     /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
     /// the mailbox.
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
+    fn handle(overflow: &mut Self::Overflow, message: Self);
 }
 
 // `activity` packs the published overflow state and in-flight overflow
@@ -299,13 +294,9 @@ impl<T: Policy> OverflowState<T> {
         };
 
         // Preserve overflow order, or handle a still-full ready queue.
-        let feedback = if T::handle(&mut queue, message) {
-            Feedback::Backoff
-        } else {
-            Feedback::Dropped
-        };
+        T::handle(&mut queue, message);
         mutation.publish(queue.is_empty());
-        feedback
+        Feedback::Backoff
     }
 
     fn refill(&self, ready: &Ready<T>) {
@@ -417,11 +408,10 @@ impl<T: Policy> Sender<T> {
             self.state.closed.load(Ordering::Acquire)
         });
 
-        // Wake on any handled enqueue rather than interpreting policy feedback:
-        // a policy may retain overflow while reporting `Dropped`, and a
-        // receiver may have skipped refill while this overflow mutation was
-        // active. By the time we wake, the mutation has published its overflow
-        // state. Spurious wakes are acceptable.
+        // Wake on any handled enqueue because a receiver may have skipped
+        // refill while this overflow mutation was active. By the time we wake,
+        // the mutation has published its overflow state. Spurious wakes are
+        // acceptable.
         if feedback != Feedback::Closed {
             self.state.waker.wake();
         }
@@ -559,7 +549,7 @@ mod tests {
     impl Policy for Message {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             match message {
                 Self::Update(value) => {
                     if let Some(index) = overflow
@@ -569,24 +559,21 @@ mod tests {
                         overflow.remove(index);
                     }
                     overflow.push_back(Self::Update(value));
-                    true
                 }
                 Self::Required(_) | Self::Buffered(_) => {
                     overflow.push_back(message);
-                    true
                 }
                 Self::Hint(value) => {
                     let Some(index) = overflow
                         .iter()
                         .rposition(|pending| matches!(pending, Self::Update(_)))
                     else {
-                        return false;
+                        return;
                     };
                     overflow.remove(index);
                     overflow.push_back(Self::Hint(value));
-                    true
                 }
-                Self::Vote(_) => false,
+                Self::Vote(_) => {}
             }
         }
     }
@@ -636,7 +623,7 @@ mod tests {
     async fn full_inbox_rejects_non_replaceable_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Dropped);
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Backoff);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
@@ -766,7 +753,7 @@ mod tests {
     async fn full_inbox_rejects_hint() {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Dropped);
+        assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Backoff);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
@@ -869,10 +856,9 @@ mod tests {
     impl Policy for ClearingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
             overflow.clear();
-            true
         }
     }
 
@@ -893,22 +879,21 @@ mod tests {
     }
 
     #[derive(Debug, PartialEq, Eq)]
-    enum SpillAndDropMessage {
+    enum SpillMessage {
         FillReady,
-        SpillAndDrop,
+        Spill,
     }
 
-    impl Policy for SpillAndDropMessage {
+    impl Policy for SpillMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            false
         }
     }
 
     #[test]
-    fn pending_recv_wakes_when_policy_spills_and_reports_dropped() {
+    fn pending_recv_wakes_when_policy_spills() {
         let (sender, mut receiver) = new(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
@@ -917,18 +902,12 @@ mod tests {
         assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
-        assert_eq!(
-            sender.state.ready.push(SpillAndDropMessage::FillReady),
-            Ok(())
-        );
-        assert_eq!(
-            sender.enqueue(SpillAndDropMessage::SpillAndDrop),
-            Feedback::Dropped
-        );
+        assert_eq!(sender.state.ready.push(SpillMessage::FillReady), Ok(()));
+        assert_eq!(sender.enqueue(SpillMessage::Spill), Feedback::Backoff);
 
         assert_eq!(wakes.count(), 1);
-        assert_eq!(receiver.try_recv(), Ok(SpillAndDropMessage::FillReady));
-        assert_eq!(receiver.try_recv(), Ok(SpillAndDropMessage::SpillAndDrop));
+        assert_eq!(receiver.try_recv(), Ok(SpillMessage::FillReady));
+        assert_eq!(receiver.try_recv(), Ok(SpillMessage::Spill));
     }
 }
 
@@ -970,12 +949,11 @@ mod loom_tests {
     impl Policy for Message {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             match message {
-                Self::Drop(_) => false,
+                Self::Drop(_) => {}
                 Self::Spill(_) => {
                     overflow.push_back(message);
-                    true
                 }
             }
         }
@@ -984,7 +962,7 @@ mod loom_tests {
     impl Policy for OrderedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             let gate = match &message {
                 Self::Item(_) => None,
                 Self::Coordinated(_, gate) => Some(gate.clone()),
@@ -996,16 +974,15 @@ mod loom_tests {
                     thread::yield_now();
                 }
             }
-            true
         }
     }
 
     impl Policy for ReplacingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             match message {
-                Self::FillReady => false,
+                Self::FillReady => {}
                 Self::Replace(_) => {
                     if let Some(pending) = overflow
                         .iter_mut()
@@ -1016,7 +993,6 @@ mod loom_tests {
                     } else {
                         overflow.push_back(message);
                     }
-                    true
                 }
             }
         }

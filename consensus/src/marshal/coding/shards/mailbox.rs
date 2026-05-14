@@ -119,16 +119,15 @@ where
 {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
         let useful = !message.response_closed();
 
         overflow.retain(|message| !message.response_closed());
         if !useful {
-            return false;
+            return;
         }
 
         overflow.push_back(message);
-        true
     }
 }
 
