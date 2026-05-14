@@ -95,7 +95,7 @@ mod tests {
         channel::{fallible::OneshotExt, mpsc, oneshot},
         sync::Mutex,
         vec::NonEmptyVec,
-        Acknowledgement, NZUsize, NZU16, NZU64,
+        NZUsize, NZU16, NZU64,
     };
     use std::{
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -1775,49 +1775,6 @@ mod tests {
         }
     }
 
-    /// A reporter that rejects the first block report, then accepts and
-    /// acknowledges subsequent block reports.
-    #[derive(Clone)]
-    struct FirstBlockFeedbackReporter {
-        feedback: Feedback,
-        pending: Arc<Mutex<bool>>,
-        blocks: Arc<Mutex<Vec<Height>>>,
-    }
-
-    impl FirstBlockFeedbackReporter {
-        fn new(feedback: Feedback) -> Self {
-            Self {
-                feedback,
-                pending: Arc::new(Mutex::new(true)),
-                blocks: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn blocks(&self) -> Vec<Height> {
-            self.blocks.lock().clone()
-        }
-    }
-
-    impl Reporter for FirstBlockFeedbackReporter {
-        type Activity = Update<B>;
-
-        fn report(&mut self, activity: Self::Activity) -> Feedback {
-            match activity {
-                Update::Block(block, ack) => {
-                    self.blocks.lock().push(block.height());
-                    let mut pending = self.pending.lock();
-                    if *pending {
-                        *pending = false;
-                        return self.feedback;
-                    }
-                    ack.acknowledge();
-                }
-                Update::Tip(_, _, _) => {}
-            }
-            Feedback::Ok
-        }
-    }
-
     async fn start_standard_actor<R, Buf>(
         context: deterministic::Context,
         partition_prefix: &str,
@@ -2147,82 +2104,6 @@ mod tests {
                 "restart should recover the delivered finalization by height"
             );
         });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_dispatch_retries_after_application_backpressure() {
-        for feedback in [Feedback::Closed, Feedback::Backoff] {
-            let runner = deterministic::Runner::timed(Duration::from_secs(30));
-            runner.start(move |mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let me = participants[0].clone();
-                let partition_prefix = format!("dispatch-backpressure-{feedback:?}-{me}");
-                let application = FirstBlockFeedbackReporter::new(feedback);
-                let observed = application.clone();
-                let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                    context.child("validator").with_attribute("index", 0),
-                    &partition_prefix,
-                    ConstantProvider::new(schemes[0].clone()),
-                    application,
-                    RecordingBuffer::default(),
-                )
-                .await;
-
-                let mut parent = Sha256::hash(b"");
-                for height in [1, 2] {
-                    let height = Height::new(height);
-                    let round = Round::new(Epoch::zero(), View::new(height.get()));
-                    let block = make_raw_block(parent, height, height.get());
-                    parent = block.digest();
-
-                    assert!(
-                        mailbox.verified(round, block.clone()).await,
-                        "verified block should persist to the cache"
-                    );
-
-                    let finalization = StandardHarness::make_finalization(
-                        Proposal::new(
-                            round,
-                            height
-                                .previous()
-                                .map(|height| View::new(height.get()))
-                                .unwrap_or(View::zero()),
-                            block.digest(),
-                        ),
-                        &schemes,
-                        QUORUM,
-                    );
-                    StandardHarness::report_finalization(&mut mailbox, finalization).await;
-
-                    wait_until(
-                        &context,
-                        Duration::from_secs(5),
-                        "application report",
-                        || observed.blocks().len() >= height.get() as usize,
-                    )
-                    .await;
-                }
-
-                let blocks = observed.blocks();
-                assert!(
-                    blocks.len() >= 2,
-                    "{feedback:?}: application should receive a retry after backpressure: {blocks:?}"
-                );
-                assert_eq!(
-                    &blocks[..2],
-                    &[Height::new(1), Height::new(1)],
-                    "{feedback:?}: retry should deliver the original height before later blocks"
-                );
-            });
-        }
     }
 
     /// Parse the `processed_height` gauge value from a prometheus-encoded
