@@ -178,6 +178,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
 
     fn stale(&self, current: Option<Height>) -> bool {
         match self {
+            // Height-targeted reads below the floor can never be served
             Self::GetInfo {
                 identifier: Identifier::Height(height),
                 ..
@@ -187,8 +188,11 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 ..
             }
             | Self::GetFinalization { height, .. } => Self::stale_below(current, *height, false),
+            // Hints only inform the actor about heights strictly above the floor
             Self::HintFinalized { height, .. } => Self::stale_below(current, *height, true),
-            Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. } => false, // durable methods cannot be stale
+            // Durability acks cannot be dropped: callers depend on them
+            Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. } => false,
+            // Digest and Latest lookups are not bound to a specific height
             Self::GetBlock {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
@@ -231,6 +235,7 @@ impl<S: Scheme, V: Variant> Default for Pending<S, V> {
 }
 
 impl<S: Scheme, V: Variant> Pending<S, V> {
+    // The effective floor for staleness checks is the max of both pending advances
     fn height(&self) -> Option<Height> {
         self.floor.into_iter().chain(self.prune).max()
     }
@@ -250,6 +255,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     }
 
     fn set_floor(&mut self, height: Height) -> bool {
+        // Floor only moves up: ignore a regression
         if self.floor.is_none_or(|current| height > current) {
             self.floor = Some(height);
         }
@@ -258,6 +264,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     }
 
     fn prune(&mut self, height: Height) -> bool {
+        // Prune only moves up: ignore a regression
         if self.prune.is_none_or(|current| height > current) {
             self.prune = Some(height);
         }
@@ -266,19 +273,18 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     }
 
     fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) -> bool {
+        // Hint is already covered by floor/prune; drop it and sweep stale neighbors
         let current = self.height();
         if current.is_some_and(|current| height <= current) {
             self.retain_useful();
             return false;
         }
-
         let mut targets = Some(targets);
-
         self.messages.retain_mut(|message| {
+            // Sweep stale or closed messages while we walk the queue
             if !Self::retain_message(message, current) {
                 return false;
             }
-
             let Message::HintFinalized {
                 height: existing,
                 targets: pending,
@@ -290,6 +296,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
                 return true;
             }
 
+            // Found an existing hint at this height: union the target sets
             if let Some(targets) = targets.take() {
                 for target in targets {
                     if !pending.contains(&target) {
@@ -300,6 +307,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
             true
         });
 
+        // No matching hint was found; append a fresh one
         if let Some(targets) = targets {
             self.messages
                 .push_back(Message::HintFinalized { height, targets });
@@ -311,10 +319,12 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     where
         F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
     {
+        // Receiver accepted; the message is consumed
         let Some(message) = push(message) else {
             return true;
         };
 
+        // Receiver rejected; restore so the next drain retries from the same point
         match message {
             Message::SetFloor { height } => self.floor = Some(height),
             Message::Prune { height } => self.prune = Some(height),
@@ -333,18 +343,20 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     where
         F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
     {
+        // Drain floor and prune first so the actor advances its floor before
+        // it sees the height-bounded reads that follow
         if let Some(height) = self.floor.take() {
             if !self.drain_one(Message::SetFloor { height }, &mut push) {
                 return;
             }
         }
-
         if let Some(height) = self.prune.take() {
             if !self.drain_one(Message::Prune { height }, &mut push) {
                 return;
             }
         }
 
+        // Drain the remaining queued messages in FIFO order
         while let Some(message) = self.messages.pop_front() {
             if !self.drain_one(message, &mut push) {
                 break;
@@ -357,21 +369,24 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
+        // A closed responder cannot be served; sweep any other closed entries too
         if message.response_closed() {
             overflow.retain_useful();
             return;
         }
-
         match message {
+            // Coalesce hints: a single entry per height with a unioned target set
             Self::HintFinalized { height, targets } => {
                 overflow.hint_finalized(height, targets);
             }
+            // Floor and prune collapse to the highest height seen
             Self::SetFloor { height } => {
                 overflow.set_floor(height);
             }
             Self::Prune { height } => {
                 overflow.prune(height);
             }
+            // Sweep stale entries first, then queue if the new message is still useful
             message => {
                 overflow.retain_useful();
                 if message.stale(overflow.height()) {
