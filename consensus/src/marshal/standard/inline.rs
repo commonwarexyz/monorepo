@@ -59,6 +59,7 @@ use crate::{
     types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -560,13 +561,13 @@ where
     type Activity = A::Activity;
 
     /// Forwards consensus activity to the wrapped application reporter.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         if let Update::Tip(tip_round, _, _) = &update {
             self.available_blocks
                 .lock()
                 .retain(|(round, _)| round > tip_round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 

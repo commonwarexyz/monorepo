@@ -8,6 +8,7 @@ use crate::{
     setup::PeerConfig,
     BLOCKS_PER_EPOCH,
 };
+use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
@@ -33,9 +34,9 @@ use commonware_runtime::{
     Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage as RuntimeStorage,
 };
-use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
+use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use rand_core::CryptoRngCore;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use tracing::{debug, info, warn};
 
 /// Per-peer label.
@@ -116,7 +117,7 @@ where
 {
     context: ContextCell<E>,
     manager: P,
-    mailbox: mpsc::Receiver<MailboxMessage<H, C, V>>,
+    mailbox: ActorReceiver<MailboxMessage<H, C, V>>,
     signer: C,
     peer_config: PeerConfig<C::PublicKey>,
     partition_prefix: String,
@@ -142,7 +143,9 @@ where
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(
+            NonZeroUsize::new(config.mailbox_size).expect("mailbox size must be non-zero"),
+        );
 
         // Create metrics
         let successful_epochs = context.counter("successful_epochs", "successful epochs");

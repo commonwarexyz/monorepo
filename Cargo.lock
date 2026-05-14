@@ -1024,6 +1024,7 @@ name = "commonware-bridge"
 version = "2026.4.0"
 dependencies = [
  "clap",
+ "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -1433,6 +1434,7 @@ version = "2026.4.0"
 dependencies = [
  "chrono",
  "clap",
+ "commonware-actor",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-formatting",
@@ -1560,6 +1562,7 @@ version = "2026.4.0"
 dependencies = [
  "anyhow",
  "clap",
+ "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-consensus",

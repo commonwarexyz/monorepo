@@ -17,6 +17,7 @@ use crate::{
     Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
+use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -218,7 +219,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<P::Scheme, V>>,
+    mailbox: actor_mailbox::Receiver<Message<P::Scheme, V>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -324,7 +325,9 @@ where
         let _ = processed_height.try_set(last_processed_height.get());
 
         // Initialize mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = actor_mailbox::new(
+            NonZeroUsize::new(config.mailbox_size).expect("mailbox size must be non-zero"),
+        );
         (
             Self {
                 context: ContextCell::new(context),
@@ -389,7 +392,7 @@ where
         // Get tip and send to application
         let tip = self.get_latest().await;
         if let Some((height, digest, round)) = tip {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -1296,8 +1299,7 @@ where
             let (height, commitment) = (block.height(), V::commitment(&block));
             let (ack, ack_waiter) = A::handle();
             application
-                .report(Update::Block(V::into_inner(block), ack))
-                .await;
+                .report(Update::Block(V::into_inner(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
@@ -1496,7 +1498,7 @@ where
 
         // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }

@@ -1,14 +1,15 @@
 use super::{
     ingress::{Mailbox, Message},
-    reporter::Reporter,
+    reporter::{self, Reporter},
     Config, Scheme,
 };
+use commonware_actor::mailbox::{self, Receiver};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::channel::mpsc;
 use rand::Rng;
+use std::num::NonZeroUsize;
 use tracing::info;
 
 /// Genesis message to use during initialization.
@@ -18,7 +19,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng + Spawner, H: Hasher> {
     context: ContextCell<R>,
     hasher: H,
-    mailbox: mpsc::Receiver<Message<H::Digest>>,
+    mailbox: Receiver<Message<H::Digest>>,
 }
 
 impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
@@ -28,16 +29,20 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
         context: R,
         config: Config<H>,
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, receiver) = mailbox::new(
+            NonZeroUsize::new(config.mailbox_size).expect("mailbox size must be non-zero"),
+        );
+        let mailbox = Mailbox::new(sender);
+        let reporter = Reporter::new(&mailbox);
         (
             Self {
                 context: ContextCell::new(context),
                 hasher: config.hasher,
-                mailbox,
+                mailbox: receiver,
             },
             config.scheme,
-            Reporter::new(),
-            Mailbox::new(sender),
+            reporter,
+            mailbox,
         )
     }
 
@@ -82,6 +87,9 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
                     // If we linked payloads to their parent, we would verify
                     // the parent included in the payload matches the provided context.
                     let _ = response.send(true);
+                }
+                Message::Report { activity } => {
+                    reporter::log(activity);
                 }
             }
         }

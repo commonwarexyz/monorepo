@@ -67,6 +67,7 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Reporter,
     };
     use bytes::Bytes;
+    use commonware_actor::Feedback;
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
@@ -1735,25 +1736,20 @@ mod tests {
         }
     }
 
-    /// A reporter that blocks inside `Update::Block` so tests can abort marshal
-    /// exactly when application delivery starts.
+    /// A reporter that signals when application delivery starts.
     #[derive(Clone)]
     struct GatedBlockReporter {
         started: Arc<Mutex<Option<oneshot::Sender<Height>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     }
 
     impl GatedBlockReporter {
-        fn new() -> (Self, oneshot::Receiver<Height>, oneshot::Sender<()>) {
+        fn new() -> (Self, oneshot::Receiver<Height>) {
             let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
             (
                 Self {
                     started: Arc::new(Mutex::new(Some(started_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
                 },
                 started_rx,
-                release_tx,
             )
         }
     }
@@ -1761,19 +1757,16 @@ mod tests {
     impl Reporter for GatedBlockReporter {
         type Activity = Update<B>;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
             match activity {
                 Update::Block(block, _ack) => {
                     if let Some(started) = self.started.lock().take() {
                         started.send_lossy(block.height());
                     }
-                    let release = self.release.lock().take();
-                    if let Some(release) = release {
-                        let _ = release.await;
-                    }
                 }
                 Update::Tip(_, _, _) => {}
             }
+            Feedback::Ok
         }
     }
 
@@ -2041,7 +2034,7 @@ mod tests {
                 QUORUM,
             );
 
-            let (application, started, release) = GatedBlockReporter::new();
+            let (application, started) = GatedBlockReporter::new();
             let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
@@ -2071,7 +2064,6 @@ mod tests {
             }
 
             actor_handle.abort();
-            let _ = release.send_lossy(());
             drop(mailbox);
 
             // Yield once so the aborted actor drops its storage handles before restart.

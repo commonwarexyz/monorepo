@@ -1,19 +1,22 @@
-use super::Scheme;
+use super::{
+    ingress::{Mailbox, Message},
+    Scheme,
+};
+use commonware_actor::{mailbox::Sender, Feedback};
 use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::Digest;
-use std::marker::PhantomData;
 use tracing::info;
 
 /// Implementation of `commonware-consensus::Reporter`.
 #[derive(Clone)]
 pub struct Reporter<D: Digest> {
-    _phantom: PhantomData<D>,
+    sender: Sender<Message<D>>,
 }
 
 impl<D: Digest> Reporter<D> {
-    pub const fn new() -> Self {
+    pub(super) fn new(mailbox: &Mailbox<D>) -> Self {
         Self {
-            _phantom: PhantomData,
+            sender: mailbox.sender.clone(),
         }
     }
 }
@@ -21,19 +24,23 @@ impl<D: Digest> Reporter<D> {
 impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
     type Activity = Activity<Scheme, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        let view = activity.view();
-        match activity {
-            Activity::Notarization(notarization) => {
-                info!(%view, payload = ?notarization.proposal.payload, "notarized");
-            }
-            Activity::Finalization(finalization) => {
-                info!(%view, payload = ?finalization.proposal.payload, "finalized");
-            }
-            Activity::Nullification(_) => {
-                info!(%view, "nullified");
-            }
-            _ => {}
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        self.sender.enqueue(Message::Report { activity })
+    }
+}
+
+pub(super) fn log<D: Digest>(activity: Activity<Scheme, D>) {
+    let view = activity.view();
+    match activity {
+        Activity::Notarization(notarization) => {
+            info!(%view, payload = ?notarization.proposal.payload, "notarized");
         }
+        Activity::Finalization(finalization) => {
+            info!(%view, payload = ?finalization.proposal.payload, "finalized");
+        }
+        Activity::Nullification(_) => {
+            info!(%view, "nullified");
+        }
+        _ => {}
     }
 }

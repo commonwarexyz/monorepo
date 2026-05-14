@@ -1,7 +1,7 @@
 //! Reporter implementations for various standard types.
 
 use crate::Reporter;
-use futures::join;
+use commonware_actor::Feedback;
 use std::marker::PhantomData;
 
 /// An implementation of [Reporter] for an optional [Reporter].
@@ -11,11 +11,11 @@ use std::marker::PhantomData;
 impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
     type Activity = A;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let Some(reporter) = self else {
-            return;
+            return Feedback::Ok;
         };
-        reporter.report(activity).await;
+        reporter.report(activity)
     }
 }
 
@@ -36,14 +36,23 @@ where
 {
     type Activity = A;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         // This approach avoids cloning activity, if possible.
         match (&mut self.r1, &mut self.r2) {
-            (Some(r1), Some(r2)) => join!(r1.report(activity.clone()), r2.report(activity)),
-            (Some(r1), None) => (r1.report(activity).await, ()),
-            (None, Some(r2)) => ((), r2.report(activity).await),
-            (None, None) => ((), ()),
-        };
+            (Some(r1), Some(r2)) => combine(r1.report(activity.clone()), r2.report(activity)),
+            (Some(r1), None) => r1.report(activity),
+            (None, Some(r2)) => r2.report(activity),
+            (None, None) => Feedback::Ok,
+        }
+    }
+}
+
+fn combine(a: Feedback, b: Feedback) -> Feedback {
+    match (a, b) {
+        (Feedback::Closed, _) | (_, Feedback::Closed) => Feedback::Closed,
+        (Feedback::Backoff, _) | (_, Feedback::Backoff) => Feedback::Backoff,
+        (Feedback::Dropped, _) | (_, Feedback::Dropped) => Feedback::Dropped,
+        (Feedback::Ok, Feedback::Ok) => Feedback::Ok,
     }
 }
 
@@ -90,7 +99,7 @@ impl<A, R1, R2> From<(R1, R2)> for Reporters<A, R1, R2> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_macros::test_async;
+    use commonware_actor::Feedback;
     use commonware_utils::acknowledgement::{Acknowledgement, Exact};
     use futures::FutureExt;
 
@@ -100,20 +109,21 @@ mod tests {
     impl crate::Reporter for SimpleAcknowledger {
         type Activity = Exact;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
             activity.acknowledge();
+            Feedback::Ok
         }
     }
 
-    #[test_async]
-    async fn optional_branch_acknowledges() {
+    #[test]
+    fn optional_branch_acknowledges() {
         let mut reporters = Reporters::<Exact, SimpleAcknowledger, SimpleAcknowledger>::from((
             Some(SimpleAcknowledger),
             None,
         ));
 
         let (ack, waiter) = Exact::handle();
-        reporters.report(ack).await;
+        assert_eq!(reporters.report(ack), Feedback::Ok);
 
         assert!(
             waiter.now_or_never().unwrap().is_ok(),

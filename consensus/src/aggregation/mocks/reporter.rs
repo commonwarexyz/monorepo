@@ -6,12 +6,16 @@ use crate::{
     types::{Epoch, Height},
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
+use commonware_actor::{
+    mailbox::{self, Policy, Receiver, Sender},
+    Feedback,
+};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::{channel::oneshot, NZUsize};
 use rand_core::CryptoRngCore;
-use std::collections::{btree_map::Entry, BTreeMap, HashSet};
+use std::collections::{btree_map::Entry, BTreeMap, HashSet, VecDeque};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<S: Scheme, D: Digest> {
@@ -23,12 +27,19 @@ enum Message<S: Scheme, D: Digest> {
     Get(Height, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
+impl<S: Scheme, D: Digest> Policy for Message<S, D> {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        overflow.push_back(message);
+        true
+    }
+}
+
 pub struct Reporter<R: CryptoRngCore, S: Scheme, D: Digest> {
     // RNG used for signature verification
     context: ContextCell<R>,
 
     // Messages from the engine
-    mailbox: mpsc::Receiver<Message<S, D>>,
+    mailbox: Receiver<Message<S, D>>,
 
     // Signing scheme for verification
     scheme: S,
@@ -56,7 +67,7 @@ where
     D: Digest,
 {
     pub fn new(rng: R, scheme: S) -> (Self, Mailbox<S, D>) {
-        let (sender, receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mailbox::new(NZUsize!(1024));
         (
             Self {
                 context: ContextCell::new(rng),
@@ -163,7 +174,7 @@ where
 
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<S, D>>,
+    sender: Sender<Message<S, D>>,
 }
 
 impl<S, D> crate::Reporter for Mailbox<S, D>
@@ -173,26 +184,11 @@ where
 {
     type Activity = Activity<S, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
-            Activity::Ack(ack) => {
-                self.sender
-                    .send(Message::Ack(ack))
-                    .await
-                    .expect("Failed to send ack");
-            }
-            Activity::Certified(certificate) => {
-                self.sender
-                    .send(Message::Certified(certificate))
-                    .await
-                    .expect("Failed to send certified signature");
-            }
-            Activity::Tip(height) => {
-                self.sender
-                    .send(Message::Tip(height))
-                    .await
-                    .expect("Failed to send tip");
-            }
+            Activity::Ack(ack) => self.sender.enqueue(Message::Ack(ack)),
+            Activity::Certified(certificate) => self.sender.enqueue(Message::Certified(certificate)),
+            Activity::Tip(height) => self.sender.enqueue(Message::Tip(height)),
         }
     }
 }
@@ -204,25 +200,31 @@ where
 {
     pub async fn get_tip(&mut self) -> Option<(Height, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        self.sender.send(Message::GetTip(sender)).await.unwrap();
+        assert_ne!(
+            self.sender.enqueue(Message::GetTip(sender)),
+            Feedback::Closed,
+            "Failed to send get tip"
+        );
         receiver.await.unwrap()
     }
 
     pub async fn get_contiguous_tip(&mut self) -> Option<Height> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::GetContiguousTip(sender))
-            .await
-            .unwrap();
+        assert_ne!(
+            self.sender.enqueue(Message::GetContiguousTip(sender)),
+            Feedback::Closed,
+            "Failed to send get contiguous tip"
+        );
         receiver.await.unwrap()
     }
 
     pub async fn get(&mut self, height: Height) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Get(height, sender))
-            .await
-            .unwrap();
+        assert_ne!(
+            self.sender.enqueue(Message::Get(height, sender)),
+            Feedback::Closed,
+            "Failed to send get"
+        );
         receiver.await.unwrap()
     }
 }
