@@ -48,10 +48,8 @@ impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        let useful = !message.response_closed();
-
         overflow.retain(|message| !message.response_closed());
-        if !useful {
+        if message.response_closed() {
             return;
         }
 
