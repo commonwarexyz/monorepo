@@ -1,7 +1,7 @@
 //! Position-based journal for variable-length items.
 //!
 //! The data journal is the source of truth. The offsets journal provides indexed access and a
-//! durable watermark that identifies the suffix which may require replay after a crash.
+//! recovery watermark that identifies the suffix which may require replay after a crash.
 
 use super::Reader as _;
 use crate::{
@@ -213,9 +213,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// data.bounds().start. This should never occur because we always prune the data journal
 /// before the offsets journal.
 ///
-/// ## 2. Offsets Durable Watermark
+/// ## 2. Offsets Recovery Watermark
 ///
-/// The offsets journal's durable watermark records the logical size that can be reopened without
+/// The offsets journal's recovery watermark records the logical size that can be reopened without
 /// replay. Items appended after that point may still survive a crash, but init may need to replay
 /// the data journal suffix and rebuild matching offset entries.
 pub struct Journal<E: Context, V: Codec> {
@@ -1050,20 +1050,21 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let offsets_reader = offsets.reader().await;
             offsets_reader.bounds()
         };
-        let durable_size = offsets.durable_size().await;
+        let recovery_watermark = offsets.recovery_watermark().await;
 
-        let recovery_start =
-            if durable_size < offsets_bounds.start || durable_size > offsets_bounds.end {
-                warn!(
-                durable_size,
+        let recovery_start = if recovery_watermark < offsets_bounds.start
+            || recovery_watermark > offsets_bounds.end
+        {
+            warn!(
+                recovery_watermark,
                 start = offsets_bounds.start,
                 end = offsets_bounds.end,
-                "crash repair: offsets durable size is inconsistent, rebuilding from offsets start"
+                "crash repair: offsets recovery watermark is inconsistent, rebuilding from offsets start"
             );
-                offsets_bounds.start
-            } else {
-                durable_size
-            };
+            offsets_bounds.start
+        } else {
+            recovery_watermark
+        };
 
         let data_size = match Self::rebuild_offsets_from_anchor(
             data,
@@ -1077,9 +1078,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             Some(size) => size,
             None if recovery_start != offsets_bounds.start => {
                 warn!(
-                    durable_size = recovery_start,
+                    recovery_watermark = recovery_start,
                     pruning_boundary = offsets_bounds.start,
-                    "crash repair: data journal shorter than durable boundary, rebuilding from pruning boundary"
+                    "crash repair: data journal shorter than recovery watermark, rebuilding from pruning boundary"
                 );
                 Self::rebuild_offsets_from_anchor(
                     data,
