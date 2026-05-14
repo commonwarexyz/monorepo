@@ -487,13 +487,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         if needs_metadata_update {
             if pruning_boundary.is_multiple_of(items_per_blob) {
                 metadata.remove(&PRUNING_BOUNDARY_KEY);
+                metadata.sync().await?;
             } else {
-                metadata.put(
-                    PRUNING_BOUNDARY_KEY,
-                    pruning_boundary.to_be_bytes().to_vec(),
-                );
+                metadata
+                    .put_sync(
+                        PRUNING_BOUNDARY_KEY,
+                        pruning_boundary.to_be_bytes().to_vec(),
+                    )
+                    .await?;
             }
-            metadata.sync().await?;
         }
 
         // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
@@ -779,14 +781,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // the tail section above.
         let mut inner = inner.upgrade().await;
         if put {
-            inner.metadata.put(
-                PRUNING_BOUNDARY_KEY,
-                pruning_boundary.to_be_bytes().to_vec(),
-            );
+            inner
+                .metadata
+                .put_sync(
+                    PRUNING_BOUNDARY_KEY,
+                    pruning_boundary.to_be_bytes().to_vec(),
+                )
+                .await?;
         } else {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
+            inner.metadata.sync().await?;
         }
-        inner.metadata.sync().await?;
 
         Ok(())
     }
