@@ -429,11 +429,10 @@ mod tests {
 
             let (gate_sender1, gate_receiver1) = oneshot::channel();
             let (gate_sender2, gate_receiver2) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) =
-                BlockingConsumer::new(
-                    context.child("consumer"),
-                    vec![(gate_receiver1, true), (gate_receiver2, true)],
-                );
+            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
+                context.child("consumer"),
+                vec![(gate_receiver1, true), (gate_receiver2, true)],
+            );
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(

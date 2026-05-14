@@ -386,10 +386,7 @@ where
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
-        (mut resolver_rx, mut resolver): (
-            mailbox::Receiver<handler::Message<V::Commitment>>,
-            R,
-        ),
+        (mut resolver_rx, mut resolver): (mailbox::Receiver<handler::Message<V::Commitment>>, R),
     ) where
         R: Resolver<
             Key = handler::Request<V::Commitment>,

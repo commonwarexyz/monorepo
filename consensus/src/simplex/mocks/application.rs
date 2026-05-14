@@ -8,11 +8,11 @@ use crate::{
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;
+use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use commonware_actor::Feedback;
 use commonware_utils::channel::{
     fallible::{AsyncFallibleExt, OneshotExt},
     mpsc, oneshot,

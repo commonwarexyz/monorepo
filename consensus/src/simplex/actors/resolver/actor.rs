@@ -20,11 +20,7 @@ use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{
-    channel::fallible::OneshotExt,
-    ordered::Quorum,
-    sequence::U64,
-};
+use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
