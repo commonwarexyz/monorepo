@@ -237,6 +237,10 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
                 // Coalesce same-height hints into one request with all known targets.
                 for message in overflow.iter_mut() {
                     cutoff.observe(message);
+                    if cutoff.drops_at_or_below(height) {
+                        return false;
+                    }
+
                     if let Self::HintFinalized {
                         height: existing_height,
                         targets: existing_targets,
@@ -326,11 +330,11 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             }
             message => {
                 let mut cutoff = Cutoff::default();
-                for existing in overflow.iter() {
+                if overflow.iter().any(|existing| {
                     cutoff.observe(existing);
-                    if message.stale(cutoff) {
-                        return false;
-                    }
+                    message.stale(cutoff)
+                }) {
+                    return false;
                 }
 
                 // Preserve ordinary FIFO overflow behavior for other messages.
