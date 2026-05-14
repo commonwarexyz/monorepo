@@ -419,10 +419,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
-    pub async fn get_finalization(
-        &self,
-        height: Height,
-    ) -> Option<Finalization<S, V::Commitment>> {
+    pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender

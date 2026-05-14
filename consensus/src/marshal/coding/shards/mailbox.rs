@@ -156,10 +156,7 @@ where
     }
 
     /// Request a reconstructed block by its digest.
-    pub async fn get_by_digest(
-        &self,
-        digest: B::Digest,
-    ) -> Option<CodedBlock<B, C, H>> {
+    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<CodedBlock<B, C, H>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
@@ -191,7 +188,10 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
-    pub fn subscribe(&self, commitment: Commitment) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe(
+        &self,
+        commitment: Commitment,
+    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeByCommitment {
             commitment,

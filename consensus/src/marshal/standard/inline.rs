@@ -310,10 +310,7 @@ where
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
                 let digest = parent.digest();
-                if !marshal
-                    .verified(consensus_context.round, parent)
-                    .await
-                {
+                if !marshal.verified(consensus_context.round, parent).await {
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
@@ -361,10 +358,7 @@ where
             build_timer.observe(&runtime_context);
 
             let digest = built_block.digest();
-            if !marshal
-                .proposed(consensus_context.round, built_block)
-                .await
-            {
+            if !marshal.proposed(consensus_context.round, built_block).await {
                 debug!(
                     round = ?consensus_context.round,
                     ?digest,
@@ -411,8 +405,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal
-                .subscribe_by_digest(Some(context.round), digest);
+            let block_request = marshal.subscribe_by_digest(Some(context.round), digest);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {

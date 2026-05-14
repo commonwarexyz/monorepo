@@ -376,8 +376,7 @@ where
                 (parent, block)
             } else {
                 // No prefetched block, fetch both parent and block
-                let block_request = marshal
-                    .subscribe_by_commitment(Some(round), commitment);
+                let block_request = marshal.subscribe_by_commitment(Some(round), commitment);
                 let block_requests = try_join(parent_request, block_request);
 
                 select! {
@@ -570,10 +569,7 @@ where
             // parent and cannot be broadcast under the current header, so
             // drop the receiver and let the voter nullify the view via
             // timeout.
-            if let Some(block) = marshal
-                .get_verified(consensus_context.round)
-                .await
-            {
+            if let Some(block) = marshal.get_verified(consensus_context.round).await {
                 let block_context = block.context();
                 if block_context != consensus_context {
                     debug!(
@@ -926,9 +922,7 @@ where
             ?payload,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_commitment(Some(round), payload);
+        let block_rx = self.marshal.subscribe_by_commitment(Some(round), payload);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -1034,8 +1028,7 @@ where
         let Plan::Propose { round } = plan else {
             return;
         };
-        self.marshal
-            .forward(round, commitment, Recipients::All);
+        self.marshal.forward(round, commitment, Recipients::All);
     }
 }
 
@@ -1106,10 +1099,7 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        Either::Right(
-            marshal
-                .subscribe_by_commitment(parent_round, parent_commitment),
-        )
+        Either::Right(marshal.subscribe_by_commitment(parent_round, parent_commitment))
     }
 }
 

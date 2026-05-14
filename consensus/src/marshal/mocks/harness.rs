@@ -372,16 +372,8 @@ async fn wait_for_validator_height<H: TestHarness>(
     label: &str,
 ) {
     loop {
-        let block = validator
-            .handle
-            .mailbox
-            .get_block(height)
-            .await;
-        let finalization = validator
-            .handle
-            .mailbox
-            .get_finalization(height)
-            .await;
+        let block = validator.handle.mailbox.get_block(height).await;
+        let finalization = validator.handle.mailbox.get_finalization(height).await;
         if let (Some(block), Some(finalization)) = (block, finalization) {
             assert_eq!(
                 block.digest(),
@@ -490,11 +482,7 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
 
     if let Some((height, digest, _)) = canonical.last() {
         assert_eq!(
-            validator
-                .handle
-                .mailbox
-                .get_info(Identifier::Latest)
-                .await,
+            validator.handle.mailbox.get_info(Identifier::Latest).await,
             Some((*height, *digest)),
             "{label}: latest info should match the canonical tip",
         );
@@ -947,17 +935,18 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted
-                            .mailbox
-                            .get_verified(round)
-                            .await
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "marshal.proposed() returning true must imply \
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_verified(round)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.proposed() returning true must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
-                                )
-                            });
+                                    )
+                                });
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -965,11 +954,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                              (seed={seed}, cycle={cycle})"
                         );
                         assert!(
-                            restarted
-                                .mailbox
-                                .get_block(&digest)
-                                .await
-                                .is_some(),
+                            restarted.mailbox.get_block(&digest).await.is_some(),
                             "get_block(&digest) must also recover the proposed block \
                              (seed={seed}, cycle={cycle})"
                         );
@@ -1060,17 +1045,18 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted
-                            .mailbox
-                            .get_verified(round)
-                            .await
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "marshal.verified() returning true must imply \
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_verified(round)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.verified() returning true must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
-                                )
-                            });
+                                    )
+                                });
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1078,11 +1064,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                              (seed={seed}, cycle={cycle})"
                         );
                         assert!(
-                            restarted
-                                .mailbox
-                                .get_block(&digest)
-                                .await
-                                .is_some(),
+                            restarted.mailbox.get_block(&digest).await.is_some(),
                             "get_block(&digest) must also recover the verified block \
                              (seed={seed}, cycle={cycle})"
                         );
@@ -1180,17 +1162,18 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted
-                            .mailbox
-                            .get_block(&digest)
-                            .await
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "marshal.certified() returning true must imply \
+                        let recovered =
+                            restarted
+                                .mailbox
+                                .get_block(&digest)
+                                .await
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "marshal.certified() returning true must imply \
                                      get_block(&digest) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
-                                )
-                            });
+                                    )
+                                });
                         assert_eq!(
                             recovered.digest(),
                             digest,
@@ -1288,11 +1271,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // Verify `orphan` at its own distinct view V=2 (no certify).
         H::verify(&mut handle, v_orphan, &orphan, &mut peers).await;
         assert!(
-            handle
-                .mailbox
-                .get_block(&orphan_digest)
-                .await
-                .is_some(),
+            handle.mailbox.get_block(&orphan_digest).await.is_some(),
             "negative control assumes `orphan` is present before pruning; \
              if it is not, the V=2 write was dropped and the post-prune \
              assertion would pass vacuously"
@@ -1337,20 +1316,13 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // proves retention pruning actually evicted the early-view entries at
         // the expected floor.
         assert!(
-            handle
-                .mailbox
-                .get_block(&orphan_digest)
-                .await
-                .is_none(),
+            handle.mailbox.get_block(&orphan_digest).await.is_none(),
             "verify-only block at V=2 must be evicted by retention pruning"
         );
 
         // The repeated block must still be retrievable: verified_blocks[V=1]
         // has been pruned, but notarized_blocks[V=25] still holds it.
-        let recovered = handle
-            .mailbox
-            .get_block(&repeated_digest)
-            .await;
+        let recovered = handle.mailbox.get_block(&repeated_digest).await;
         assert!(
             recovered.is_some(),
             "block certified at V=25 must survive retention pruning of V=1"
@@ -1537,14 +1509,10 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted
-                            .mailbox
-                            .get_block(Height::new(1))
-                            .await
-                            .expect(
-                                "delivered finalized block must be recoverable after restart \
+                        let recovered = restarted.mailbox.get_block(Height::new(1)).await.expect(
+                            "delivered finalized block must be recoverable after restart \
                              (seed={seed}, cycle={cycle})",
-                            );
+                        );
                         assert_eq!(
                             recovered.height(),
                             Height::new(1),
@@ -3385,17 +3353,11 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         for i in 1..=20u64 {
             assert!(
-                mailbox
-                    .get_block(Height::new(i))
-                    .await
-                    .is_some(),
+                mailbox.get_block(Height::new(i)).await.is_some(),
                 "block {i} should exist before pruning"
             );
             assert!(
-                mailbox
-                    .get_finalization(Height::new(i))
-                    .await
-                    .is_some(),
+                mailbox.get_finalization(Height::new(i)).await.is_some(),
                 "finalization {i} should exist before pruning"
             );
         }
@@ -3404,10 +3366,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         context.sleep(Duration::from_millis(50)).await;
         for i in 1..=20u64 {
             assert!(
-                mailbox
-                    .get_block(Height::new(i))
-                    .await
-                    .is_some(),
+                mailbox.get_block(Height::new(i)).await.is_some(),
                 "block {i} should still exist after pruning above floor"
             );
         }
@@ -3416,34 +3375,22 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         context.sleep(Duration::from_millis(100)).await;
         for i in 1..10u64 {
             assert!(
-                mailbox
-                    .get_block(Height::new(i))
-                    .await
-                    .is_none(),
+                mailbox.get_block(Height::new(i)).await.is_none(),
                 "block {i} should be pruned"
             );
             assert!(
-                mailbox
-                    .get_finalization(Height::new(i))
-                    .await
-                    .is_none(),
+                mailbox.get_finalization(Height::new(i)).await.is_none(),
                 "finalization {i} should be pruned"
             );
         }
 
         for i in 10..=20u64 {
             assert!(
-                mailbox
-                    .get_block(Height::new(i))
-                    .await
-                    .is_some(),
+                mailbox.get_block(Height::new(i)).await.is_some(),
                 "block {i} should still exist after pruning"
             );
             assert!(
-                mailbox
-                    .get_finalization(Height::new(i))
-                    .await
-                    .is_some(),
+                mailbox.get_finalization(Height::new(i)).await.is_some(),
                 "finalization {i} should still exist after pruning"
             );
         }
@@ -3452,33 +3399,21 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         context.sleep(Duration::from_millis(100)).await;
         for i in 10..20u64 {
             assert!(
-                mailbox
-                    .get_block(Height::new(i))
-                    .await
-                    .is_none(),
+                mailbox.get_block(Height::new(i)).await.is_none(),
                 "block {i} should be pruned after second prune"
             );
             assert!(
-                mailbox
-                    .get_finalization(Height::new(i))
-                    .await
-                    .is_none(),
+                mailbox.get_finalization(Height::new(i)).await.is_none(),
                 "finalization {i} should be pruned after second prune"
             );
         }
 
         assert!(
-            mailbox
-                .get_block(Height::new(20))
-                .await
-                .is_some(),
+            mailbox.get_block(Height::new(20)).await.is_some(),
             "block 20 should still exist"
         );
         assert!(
-            mailbox
-                .get_finalization(Height::new(20))
-                .await
-                .is_some(),
+            mailbox.get_finalization(Height::new(20)).await.is_some(),
             "finalization 20 should still exist"
         );
 
@@ -3488,33 +3423,21 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         for i in 1..20u64 {
             assert!(
-                mailbox
-                    .get_block(Height::new(i))
-                    .await
-                    .is_none(),
+                mailbox.get_block(Height::new(i)).await.is_none(),
                 "block {i} should still be pruned after restart"
             );
             assert!(
-                mailbox
-                    .get_finalization(Height::new(i))
-                    .await
-                    .is_none(),
+                mailbox.get_finalization(Height::new(i)).await.is_none(),
                 "finalization {i} should still be pruned after restart"
             );
         }
 
         assert!(
-            mailbox
-                .get_block(Height::new(20))
-                .await
-                .is_some(),
+            mailbox.get_block(Height::new(20)).await.is_some(),
             "block 20 should still exist after restart"
         );
         assert!(
-            mailbox
-                .get_finalization(Height::new(20))
-                .await
-                .is_some(),
+            mailbox.get_finalization(Height::new(20)).await.is_some(),
             "finalization 20 should still exist after restart"
         );
     })
@@ -3634,10 +3557,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         );
 
         assert!(
-            victim_mailbox
-                .get_block(stale_height)
-                .await
-                .is_none(),
+            victim_mailbox.get_block(stale_height).await.is_none(),
             "stale block below floor must not be persisted"
         );
         assert!(
@@ -3973,21 +3893,11 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             n,
         );
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(None, H::digest(&block1));
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(None, H::digest(&block2));
-        let sub3_rx = handle
-            .mailbox
-            .subscribe_by_digest(None, H::digest(&block3));
-        let sub4_rx = handle
-            .mailbox
-            .subscribe_by_digest(None, H::digest(&block4));
-        let sub5_rx = handle
-            .mailbox
-            .subscribe_by_digest(None, H::digest(&block5));
+        let sub1_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block1));
+        let sub2_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block2));
+        let sub3_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block3));
+        let sub4_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block4));
+        let sub5_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block5));
         // Block1: Broadcasted by the actor
         H::propose(
             &mut handle,
@@ -4135,18 +4045,10 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         };
 
         // Initially, no latest
-        assert!(handle
-            .mailbox
-            .get_info(Identifier::Latest)
-            .await
-            .is_none());
+        assert!(handle.mailbox.get_info(Identifier::Latest).await.is_none());
 
         // Before finalization, specific height returns None
-        assert!(handle
-            .mailbox
-            .get_info(Height::new(1))
-            .await
-            .is_none());
+        assert!(handle.mailbox.get_info(Height::new(1)).await.is_none());
 
         // Create and verify a block, then finalize it
         let parent = Sha256::hash(b"");
@@ -4175,10 +4077,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
 
         // Latest should now be the finalized block
         assert_eq!(
-            handle
-                .mailbox
-                .get_info(Identifier::Latest)
-                .await,
+            handle.mailbox.get_info(Identifier::Latest).await,
             Some((Height::new(1), digest))
         );
 
@@ -4195,19 +4094,11 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         );
 
         // Missing height
-        assert!(handle
-            .mailbox
-            .get_info(Height::new(2))
-            .await
-            .is_none());
+        assert!(handle.mailbox.get_info(Height::new(2)).await.is_none());
 
         // Missing commitment
         let missing = Sha256::hash(b"missing");
-        assert!(handle
-            .mailbox
-            .get_info(&missing)
-            .await
-            .is_none());
+        assert!(handle.mailbox.get_info(&missing).await.is_none());
     })
 }
 
@@ -4269,10 +4160,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
 
             // Latest should always point to most recently finalized
             assert_eq!(
-                handle
-                    .mailbox
-                    .get_info(Identifier::Latest)
-                    .await,
+                handle.mailbox.get_info(Identifier::Latest).await,
                 Some((Height::new(i), digest))
             );
 
@@ -4327,11 +4215,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             .get_block(Identifier::Height(Height::new(1)))
             .await
             .is_none());
-        assert!(handle
-            .mailbox
-            .get_block(Identifier::Latest)
-            .await
-            .is_none());
+        assert!(handle.mailbox.get_block(Identifier::Latest).await.is_none());
 
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
@@ -4378,11 +4262,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         }
 
         // Latest should be last block
-        let latest = handle
-            .mailbox
-            .get_block(Identifier::Latest)
-            .await
-            .unwrap();
+        let latest = handle.mailbox.get_block(Identifier::Latest).await.unwrap();
         assert_eq!(latest.digest(), blocks[2].0);
         assert_eq!(latest.height(), Height::new(3));
 
@@ -4450,21 +4330,13 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         // Get by commitment
-        let fetched = handle
-            .mailbox
-            .get_block(&digest)
-            .await
-            .unwrap();
+        let fetched = handle.mailbox.get_block(&digest).await.unwrap();
         assert_eq!(fetched.digest(), digest);
         assert_eq!(fetched.height(), Height::new(1));
 
         // Missing commitment
         let missing = Sha256::hash(b"missing");
-        assert!(handle
-            .mailbox
-            .get_block(&missing)
-            .await
-            .is_none());
+        assert!(handle.mailbox.get_block(&missing).await.is_none());
     })
 }
 
@@ -4727,11 +4599,7 @@ pub fn ancestry_stream<H: TestHarness>() {
         }
 
         // Stream from latest -> height 1
-        let (_, commitment) = handle
-            .mailbox
-            .get_info(Identifier::Latest)
-            .await
-            .unwrap();
+        let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
         let ancestry = handle.mailbox.ancestry((None, commitment)).await.unwrap();
         let blocks = ancestry.collect::<Vec<_>>().await;
 
@@ -4820,16 +4688,8 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         context.sleep(Duration::from_millis(100)).await;
 
         // Verify both validators stored the block correctly
-        let block0 = handles[0]
-            .mailbox
-            .get_block(Height::new(1))
-            .await
-            .unwrap();
-        let block1 = handles[1]
-            .mailbox
-            .get_block(Height::new(1))
-            .await
-            .unwrap();
+        let block0 = handles[0].mailbox.get_block(Height::new(1)).await.unwrap();
+        let block1 = handles[1].mailbox.get_block(Height::new(1)).await.unwrap();
         assert_eq!(block0.digest(), digest);
         assert_eq!(block1.digest(), digest);
 
@@ -4853,17 +4713,11 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 
         // Both validators can retrieve block by height
         assert_eq!(
-            handles[0]
-                .mailbox
-                .get_info(Height::new(1))
-                .await,
+            handles[0].mailbox.get_info(Height::new(1)).await,
             Some((Height::new(1), digest))
         );
         assert_eq!(
-            handles[1]
-                .mailbox
-                .get_info(Height::new(1))
-                .await,
+            handles[1].mailbox.get_info(Height::new(1)).await,
             Some((Height::new(1), digest))
         );
 

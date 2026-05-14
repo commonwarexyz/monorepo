@@ -3086,11 +3086,7 @@ mod tests {
                     "shard subscription should not resolve before leader announcement"
                 );
                 assert!(
-                    peers[receiver_idx]
-                        .mailbox
-                        .get(commitment)
-                        .await
-                        .is_none(),
+                    peers[receiver_idx].mailbox.get(commitment).await.is_none(),
                     "block should not reconstruct before leader announcement"
                 );
 
@@ -3110,11 +3106,7 @@ mod tests {
 
                 context.sleep(config.link.latency * 2).await;
                 assert!(
-                    peers[receiver_idx]
-                        .mailbox
-                        .get(commitment)
-                        .await
-                        .is_some(),
+                    peers[receiver_idx].mailbox.get(commitment).await.is_some(),
                     "block should reconstruct after buffered shards are ingested"
                 );
 
@@ -3547,11 +3539,7 @@ mod tests {
                 )
                 .await;
                 assert!(
-                    peers[receiver_idx]
-                        .mailbox
-                        .get(commitment1)
-                        .await
-                        .is_none(),
+                    peers[receiver_idx].mailbox.get(commitment1).await.is_none(),
                     "block should not reconstruct with only 3 checked shards"
                 );
 

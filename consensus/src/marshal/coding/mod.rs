@@ -356,19 +356,11 @@ mod tests {
             // Wait until the descendant is archived: that proves finalization processing
             // has completed, at which point the parent must already have been repaired
             // from the shard buffer.
-            while handle
-                .mailbox
-                .get_block(Height::new(2))
-                .await
-                .is_none()
-            {
+            while handle.mailbox.get_block(Height::new(2)).await.is_none() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let parent = handle
-                .mailbox
-                .get_block(Height::new(1))
-                .await;
+            let parent = handle.mailbox.get_block(Height::new(1)).await;
             assert!(
                 parent.is_some(),
                 "parent must be archived from shard buffer before height-prune evicts it"
@@ -448,8 +440,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
+            shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
             // Block A at view 5 (height 2) - create with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -787,8 +778,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
+            shards.proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
 
             // Build a block with context A (commitment hash uses this context).
             let round_a = Round::new(Epoch::zero(), View::new(2));
@@ -1031,8 +1021,7 @@ mod tests {
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
-            let block_rx = marshal
-                .subscribe_by_commitment(Some(round), missing_commitment);
+            let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
 
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
@@ -1151,8 +1140,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
+            shards.proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let block_ctx = CodingCtx {
@@ -1163,8 +1151,7 @@ mod tests {
             let block = make_coding_block(block_ctx, parent_digest, Height::new(20), 2000);
             let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
             let block_commitment = coded_block.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
+            shards.proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1264,8 +1251,7 @@ mod tests {
             let parent_digest = honest_parent.digest();
             let coded_parent = CodedBlock::new(honest_parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
+            shards.proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
 
             // Byzantine proposer broadcasts malicious block at height 35
             // The block has the correct context (matching what consensus will provide)
@@ -1654,9 +1640,7 @@ mod tests {
 
             // Validator 1 proposes coded_block_b (same inner block, different coding).
             // This stores it in v1's shard engine and actor cache.
-            assert!(v1_mailbox
-                .verified(round1, coded_block_b.clone())
-                .await);
+            assert!(v1_mailbox.verified(round1, coded_block_b.clone()).await);
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
@@ -1685,9 +1669,7 @@ mod tests {
             );
 
             // Without the block, finalization should not be persisted by height yet.
-            let stored_finalization = v0_mailbox
-                .get_finalization(Height::new(1))
-                .await;
+            let stored_finalization = v0_mailbox.get_finalization(Height::new(1)).await;
             assert!(
                 stored_finalization.is_none(),
                 "finalization should not be archived until matching block is available"

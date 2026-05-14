@@ -231,10 +231,7 @@ where
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))
     } else {
-        Either::Right(
-            marshal
-                .subscribe_by_digest(parent_round, parent_digest),
-        )
+        Either::Right(marshal.subscribe_by_digest(parent_round, parent_digest))
     }
 }
 

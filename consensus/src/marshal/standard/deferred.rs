@@ -339,10 +339,7 @@ where
             // cached block was built against a different parent and cannot be
             // broadcast under the current header, so drop the receiver
             // and let the voter nullify the view via timeout.
-            if let Some(block) = marshal
-                .get_verified(consensus_context.round)
-                .await
-            {
+            if let Some(block) = marshal.get_verified(consensus_context.round).await {
                 let block_context = block.context();
                 if block_context != consensus_context {
                     debug!(
@@ -402,10 +399,7 @@ where
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
                 let digest = parent.digest();
-                if !marshal
-                    .verified(consensus_context.round, parent)
-                    .await
-                {
+                if !marshal.verified(consensus_context.round, parent).await {
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
@@ -453,10 +447,7 @@ where
             build_timer.observe(&runtime_context);
 
             let digest = built_block.digest();
-            if !marshal
-                .proposed(consensus_context.round, built_block)
-                .await
-            {
+            if !marshal.proposed(consensus_context.round, built_block).await {
                 debug!(
                     round = ?consensus_context.round,
                     ?digest,
@@ -784,9 +775,11 @@ mod tests {
             // Create parent block at height 1
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal
-                .verified(Round::new(Epoch::new(0), View::new(1)), parent.clone())
-                .await);
+            assert!(
+                marshal
+                    .verified(Round::new(Epoch::new(0), View::new(1)), parent.clone())
+                    .await
+            );
 
             // Block A at view 5 (height 2)
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -922,10 +915,12 @@ mod tests {
             let parent =
                 B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
             let parent_digest = parent.digest();
-            assert!(marshal
-                .clone()
-                .verified(Round::new(Epoch::zero(), View::new(19)), parent.clone())
-                .await);
+            assert!(
+                marshal
+                    .clone()
+                    .verified(Round::new(Epoch::zero(), View::new(19)), parent.clone())
+                    .await
+            );
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let unsupported_round = Round::new(Epoch::new(1), View::new(20));
@@ -941,10 +936,12 @@ mod tests {
                 2000,
             );
             let block_commitment = block.digest();
-            assert!(marshal
-                .clone()
-                .verified(unsupported_round, block.clone())
-                .await);
+            assert!(
+                marshal
+                    .clone()
+                    .verified(unsupported_round, block.clone())
+                    .await
+            );
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1014,10 +1011,12 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_commitment = parent.digest();
-            assert!(marshal
-                .clone()
-                .verified(Round::new(Epoch::zero(), View::new(1)), parent.clone())
-                .await);
+            assert!(
+                marshal
+                    .clone()
+                    .verified(Round::new(Epoch::zero(), View::new(1)), parent.clone())
+                    .await
+            );
 
             // Build a block with context A (embedded in the block).
             let round_a = Round::new(Epoch::zero(), View::new(2));
