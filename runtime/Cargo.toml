@@ -90,6 +90,11 @@ harness = false
 path = "src/storage/benches/main.rs"
 
 [[bench]]
+name = "storage_sync"
+harness = false
+path = "src/storage/benches/sync.rs"
+
+[[bench]]
 name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"

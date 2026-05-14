@@ -522,6 +522,8 @@ pub(super) struct WriteAtRequest {
     pub(super) written: usize,
     /// Write cursor and buffers that still need to be written.
     pub(super) write: WriteBuffers,
+    /// Per-write flags passed to the kernel.
+    pub(super) rw_flags: libc::c_int,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
     pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
@@ -545,6 +547,7 @@ impl WriteAtRequest {
                         .expect("single-buffer SQE length exceeds u32"),
                 )
                 .offset(offset)
+                .rw_flags(self.rw_flags)
                 .build()
             }
             WriteBuffers::Vectored { bufs, iovecs } => {
@@ -563,6 +566,7 @@ impl WriteAtRequest {
 
                 opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len)
                     .offset(offset)
+                    .rw_flags(self.rw_flags)
                     .build()
             }
         }
@@ -1175,6 +1179,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });
@@ -1187,6 +1192,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });
@@ -1207,6 +1213,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: vectored.into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });
@@ -1224,6 +1231,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });
@@ -1240,6 +1248,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });
@@ -1257,6 +1266,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });
@@ -1408,6 +1418,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });
@@ -1492,6 +1503,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            rw_flags: 0,
             result: None,
             sender: tx,
         });

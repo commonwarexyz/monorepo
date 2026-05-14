@@ -773,6 +773,18 @@ stability_scope!(BETA {
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
+        /// Write `bufs` to the blob at the given offset and durably persist the write.
+        fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            async move {
+                self.write_at(offset, bufs).await?;
+                self.sync().await
+            }
+        }
+
         /// Resize the blob to the given length.
         ///
         /// If the length is greater than the current length, the blob is extended with zeros.
