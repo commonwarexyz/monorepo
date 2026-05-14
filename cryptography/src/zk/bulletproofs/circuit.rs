@@ -1438,6 +1438,13 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
         ipa_proof,
         p_big: p,
     } = proof;
+    // Reject malformed claims whose commitment arity does not match the
+    // circuit. Without this check, an over-long claim could verify because
+    // commitments past `committed_vars` are bound to the transcript but
+    // never enter the algebraic commitment relation.
+    if claim.commitments.len() != circuit.committed_vars {
+        return None;
+    }
     circuit.commit(transcript);
     transcript.commit(claim.encode());
     transcript.commit(m_big.encode());
@@ -1608,7 +1615,7 @@ pub mod fuzz {
         a * &x * &x + &(b * &x) + &c
     }
 
-    fn quadratic_circuit(a: F, b: F, c: F) -> Circuit<F> {
+    pub(super) fn quadratic_circuit(a: F, b: F, c: F) -> Circuit<F> {
         let mut weights = SparseMatrix::default();
 
         // Bind l_0 = x.
@@ -1741,13 +1748,18 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, r1cs_to_circuit, Circuit, R1cs, Setup, SparseMatrix, Witness};
+    use super::{
+        fuzz, prove, r1cs_to_circuit, verify, Circuit, R1cs, Setup, SparseMatrix, Witness,
+    };
+    use crate::transcript::Transcript;
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
-        algebra::{Additive, Ring},
+        algebra::{Additive, CryptoGroup, Ring},
         test::{F, G},
     };
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_random_r1cs_minifuzz() {
@@ -1878,6 +1890,73 @@ mod test {
             !malicious.is_satisfied(&circuit),
             "circuit derived from an R1CS that depends on the constant \
              column must reject witnesses corresponding to z_0 != 1"
+        );
+    }
+
+    /// Regression test for an arity bug in `verify`: an over-long claim
+    /// (with more commitments than `Circuit::committed_vars()`) must be
+    /// rejected. Without the explicit arity check, the extra commitments
+    /// would be bound to the transcript but ignored by the algebraic
+    /// commitment relation, letting a malformed claim verify against a
+    /// proof generated against that same malformed claim.
+    #[test]
+    fn verify_rejects_over_long_claim() {
+        let setup = fuzz::test_setup();
+
+        // Use the existing 2-committed-value quadratic circuit:
+        // y = a x^2 + b x + c, with x = 3, a = b = c = 1, so y = 13.
+        let a = F::one();
+        let b = F::one();
+        let c = F::one();
+        let x = F::from(3u8);
+        let y = a * &x * &x + &(b * &x) + &c;
+        let circuit = fuzz::quadratic_circuit(a, b, c);
+
+        let witness = Witness::new(
+            vec![x, y],
+            vec![F::zero(), F::zero()],
+            vec![x],
+            vec![x],
+            vec![x * &x],
+        )
+        .expect("witness vector lengths must be consistent");
+
+        // Build an honest claim, then append a junk commitment so that
+        // `claim.commitments.len() == 3` while `circuit.committed_vars() == 2`.
+        let mut claim = witness.claim(setup);
+        claim.commitments.push(G::generator() * &F::from(9u8));
+
+        let mut rng = test_rng();
+        let mut prover_transcript = Transcript::new(b"verify-rejects-over-long-claim");
+        let proof = prove(
+            &mut rng,
+            &mut prover_transcript,
+            setup,
+            &circuit,
+            &claim,
+            &witness,
+            &Sequential,
+        )
+        .expect("prove still produces a proof against the malformed claim");
+
+        let mut verifier_transcript = Transcript::new(b"verify-rejects-over-long-claim");
+        let verified = setup.eval(
+            |vs| {
+                verify(
+                    &mut rng,
+                    &mut verifier_transcript,
+                    vs,
+                    &circuit,
+                    &claim,
+                    proof,
+                    &Sequential,
+                )
+            },
+            &Sequential,
+        );
+        assert!(
+            verified.is_none(),
+            "verify must reject a claim whose commitment arity does not match the circuit"
         );
     }
 }
