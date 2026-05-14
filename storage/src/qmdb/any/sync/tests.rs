@@ -265,7 +265,7 @@ where
         };
 
         // Perform sync
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state (root hash is the key verification)
         assert_eq!(synced_db.bounds().await.end, target_op_count);
@@ -346,7 +346,7 @@ where
             max_retained_roots: 8,
         };
 
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify the synced database has the correct range of operations
         assert_eq!(synced_db.sync_boundary().await, lower_bound);
@@ -428,7 +428,7 @@ where
         // Heap-pin the sync future so its (large, monomorphized-per-variant) state
         // machine doesn't inflate this test's outer state machine and overflow the
         // test thread stack.
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state
         let bounds = synced_db.bounds().await;
@@ -528,7 +528,7 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state
         let bounds = synced_db.bounds().await;
@@ -761,7 +761,7 @@ where
                 .unwrap();
 
             // Complete the sync
-            let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+            let synced_db: H::Db = sync::sync(config).await.unwrap();
 
             // Verify the synced database has the expected final state
             assert_eq!(synced_db.root(), new_verification_root);
@@ -824,7 +824,7 @@ where
         };
 
         // Complete the sync
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Attempt to apply a target update after sync is complete to verify
         // we don't panic
@@ -1259,7 +1259,7 @@ where
             max_retained_roots: 1,
         };
 
-        let result: Result<H::Db, _> = Box::pin(sync::sync(config)).await;
+        let result: Result<H::Db, _> = sync::sync(config).await;
         assert!(matches!(
             result,
             Err(sync::Error::Engine(sync::EngineError::FinishChannelClosed))
@@ -1479,7 +1479,7 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify initial sync worked
         assert_eq!(synced_db.root(), verification_root);
@@ -1546,7 +1546,7 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         let root_after_sync = synced_db.root();
 
@@ -1899,7 +1899,7 @@ where
 
         // Sync should succeed on the second attempt after the first corrupted pinned nodes
         // are rejected.
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
         assert_eq!(synced_db.root(), sync_root);
         synced_db.destroy().await.unwrap();
     });

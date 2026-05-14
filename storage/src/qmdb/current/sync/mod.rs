@@ -154,6 +154,12 @@ impl<F: Graftable, D: Digest> commonware_codec::Read for Target<F, D> {
         let ops_root = D::read(buf)?;
         let witness = OpsRootWitness::<F, D>::read(buf)?;
         let range = NonEmptyRange::<Location<F>>::read(buf)?;
+        if !range.start().is_valid() || !range.end().is_valid() {
+            return Err(commonware_codec::Error::Invalid(
+                "storage::qmdb::current::sync::Target",
+                "range bounds out of valid range",
+            ));
+        }
         Ok(Self {
             canonical_root,
             ops_root,
