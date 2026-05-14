@@ -3,7 +3,7 @@ use crate::{
     types::{Participant, View},
     Viewable,
 };
-use commonware_actor::mailbox::{Overflow as MailboxOverflow, Policy, Sender};
+use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use std::collections::VecDeque;
 
@@ -57,7 +57,7 @@ impl<S: Scheme, D: Digest> Default for Pending<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> MailboxOverflow<Message<S, D>> for Pending<S, D> {
+impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
     fn is_empty(&self) -> bool {
         self.update.is_none() && self.constructed.is_empty()
     }
@@ -231,7 +231,7 @@ mod tests {
         mut overflow: Pending<TestScheme, Sha256Digest>,
     ) -> VecDeque<Message<TestScheme, Sha256Digest>> {
         let mut messages = VecDeque::new();
-        MailboxOverflow::drain(&mut overflow, |message| {
+        Overflow::drain(&mut overflow, |message| {
             messages.push_back(message);
             Ok(())
         });

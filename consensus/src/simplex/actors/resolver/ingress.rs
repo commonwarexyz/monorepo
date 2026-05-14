@@ -1,6 +1,6 @@
 use crate::{simplex::types::Certificate, types::View, Viewable};
 use bytes::Bytes;
-use commonware_actor::mailbox::{Overflow as MailboxOverflow, Policy, Sender};
+use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
@@ -42,7 +42,7 @@ impl<S: Scheme, D: Digest> Default for Pending<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> MailboxOverflow<MailboxMessage<S, D>> for Pending<S, D> {
+impl<S: Scheme, D: Digest> Overflow<MailboxMessage<S, D>> for Pending<S, D> {
     fn is_empty(&self) -> bool {
         self.finalization.is_none() && self.messages.is_empty()
     }
@@ -265,7 +265,7 @@ mod tests {
         mut overflow: Pending<TestScheme, Sha256Digest>,
     ) -> VecDeque<MailboxMessage<TestScheme, Sha256Digest>> {
         let mut messages = VecDeque::new();
-        MailboxOverflow::drain(&mut overflow, |message| {
+        Overflow::drain(&mut overflow, |message| {
             messages.push_back(message);
             Ok(())
         });
