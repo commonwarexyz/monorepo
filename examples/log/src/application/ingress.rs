@@ -1,3 +1,4 @@
+use super::Scheme;
 use commonware_actor::{
     mailbox::{Policy, Sender},
     Feedback,
@@ -13,8 +14,6 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519::PublicKey, Digest};
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
-
-use super::Scheme;
 
 pub enum Message<D: Digest> {
     Genesis {

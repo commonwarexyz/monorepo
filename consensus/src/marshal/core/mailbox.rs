@@ -264,10 +264,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
-                round,
-                digest,
-                response: tx,
-            });
+            round,
+            digest,
+            response: tx,
+        });
         rx
     }
 
@@ -287,10 +287,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
-                round,
-                commitment,
-                response: tx,
-            });
+            round,
+            commitment,
+            response: tx,
+        });
         rx
     }
 
@@ -341,7 +341,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Certified { round, block, ack });
+        let _ = self
+            .sender
+            .enqueue(Message::Certified { round, block, ack });
         receiver.await.is_ok()
     }
 
@@ -377,10 +379,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         recipients: Recipients<S::PublicKey>,
     ) {
         let _ = self.sender.enqueue(Message::Forward {
-                round,
-                commitment,
-                recipients,
-            });
+            round,
+            commitment,
+            recipients,
+        });
     }
 }
 

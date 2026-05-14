@@ -5,11 +5,11 @@ use crate::{
     },
     types::{Epoch, Height},
 };
-use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_actor::{
     mailbox::{self, Policy, Receiver, Sender},
     Feedback,
 };
+use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};

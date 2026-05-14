@@ -535,11 +535,10 @@ impl<
         }
 
         // Emit the activity
-        self.reporter
-            .report(Activity::Tip(Proposal::new(
-                tip.chunk.clone(),
-                tip.signature.clone(),
-            )));
+        self.reporter.report(Activity::Tip(Proposal::new(
+            tip.chunk.clone(),
+            tip.signature.clone(),
+        )));
 
         // Get the validator scheme for the current epoch
         let Some(scheme) = self.validators_provider.scoped(self.epoch) else {

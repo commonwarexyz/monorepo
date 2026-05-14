@@ -5,11 +5,11 @@ use crate::{
     },
     types::{Epoch, Height},
 };
-use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_actor::{
     mailbox::{self, Policy, Receiver, Sender},
     Feedback,
 };
+use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
@@ -187,7 +187,9 @@ where
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
             Activity::Ack(ack) => self.sender.enqueue(Message::Ack(ack)),
-            Activity::Certified(certificate) => self.sender.enqueue(Message::Certified(certificate)),
+            Activity::Certified(certificate) => {
+                self.sender.enqueue(Message::Certified(certificate))
+            }
             Activity::Tip(height) => self.sender.enqueue(Message::Tip(height)),
         }
     }
