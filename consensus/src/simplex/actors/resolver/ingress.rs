@@ -1,6 +1,6 @@
 use crate::{simplex::types::Certificate, types::View, Viewable};
 use bytes::Bytes;
-use commonware_actor::mailbox::{Policy, Sender};
+use commonware_actor::mailbox::{Overflow as MailboxOverflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
@@ -27,13 +27,55 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
     }
 }
 
+/// Pending resolver messages retained after the mailbox fills.
+pub struct Pending<S: Scheme, D: Digest> {
+    finalization: Option<MailboxMessage<S, D>>,
+    messages: VecDeque<MailboxMessage<S, D>>,
+}
+
+impl<S: Scheme, D: Digest> Default for Pending<S, D> {
+    fn default() -> Self {
+        Self {
+            finalization: None,
+            messages: VecDeque::new(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> MailboxOverflow<MailboxMessage<S, D>> for Pending<S, D> {
+    fn is_empty(&self) -> bool {
+        self.finalization.is_none() && self.messages.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(MailboxMessage<S, D>) -> Result<(), MailboxMessage<S, D>>,
+    {
+        if let Some(finalization) = self.finalization.take() {
+            if let Err(finalization) = push(finalization) {
+                self.finalization = Some(finalization);
+                return;
+            }
+        }
+
+        while let Some(message) = self.messages.pop_front() {
+            if let Err(message) = push(message) {
+                self.messages.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+    type Overflow = Pending<S, D>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
         if matches!(
-            overflow.front(),
+            overflow.finalization.as_ref(),
             Some(Self::Certificate(Certificate::Finalization(old_finalized)))
                 if old_finalized.view() >= new_view
         ) {
@@ -42,18 +84,16 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(&message, Self::Certificate(Certificate::Finalization(_))) {
-            overflow.retain(|old_message| {
-                if matches!(old_message, Self::Certificate(Certificate::Finalization(_))) {
-                    return false;
-                }
-                old_message.view() > new_view
-            });
-            overflow.push_front(message);
+            overflow
+                .messages
+                .retain(|old_message| old_message.view() > new_view);
+            overflow.finalization = Some(message);
             return true;
         }
 
         // Ignore the message if it is a duplicate
         if overflow
+            .messages
             .iter()
             .any(|old_message| match (&message, old_message) {
                 (Self::Certificate(new_certificate), Self::Certificate(old_certificate)) => {
@@ -74,7 +114,7 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         {
             return true;
         }
-        overflow.push_back(message);
+        overflow.messages.push_back(message);
         true
     }
 }
@@ -221,9 +261,20 @@ mod tests {
         )
     }
 
+    fn drain(
+        mut overflow: Pending<TestScheme, Sha256Digest>,
+    ) -> VecDeque<MailboxMessage<TestScheme, Sha256Digest>> {
+        let mut messages = VecDeque::new();
+        MailboxOverflow::drain(&mut overflow, |message| {
+            messages.push_back(message);
+            Ok(())
+        });
+        messages
+    }
+
     #[test]
     fn finalization_prunes_stale_certificates_and_results() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certificate(nullification(View::new(2)))
@@ -251,6 +302,7 @@ mod tests {
             MailboxMessage::Certificate(finalization(View::new(3)))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 3);
         assert!(matches!(
             overflow.pop_front(),
@@ -273,7 +325,7 @@ mod tests {
 
     #[test]
     fn duplicate_certified_result_is_ignored() {
-        let mut overflow: VecDeque<MailboxMessage<TestScheme, Sha256Digest>> = VecDeque::new();
+        let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
         assert!(MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certified {
@@ -289,6 +341,7 @@ mod tests {
             }
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -301,7 +354,7 @@ mod tests {
 
     #[test]
     fn queued_finalization_rejects_covered_messages() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certificate(finalization(View::new(3)))
@@ -327,6 +380,7 @@ mod tests {
             MailboxMessage::Certificate(nullification(View::new(4)))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
@@ -342,7 +396,7 @@ mod tests {
 
     #[test]
     fn duplicate_finalization_is_dropped() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certificate(finalization(View::new(3)))
@@ -352,6 +406,7 @@ mod tests {
             MailboxMessage::Certificate(finalization(View::new(3)))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -362,7 +417,7 @@ mod tests {
 
     #[test]
     fn newer_finalization_replaces_older_pruning_floor() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certificate(finalization(View::new(3)))
@@ -383,6 +438,7 @@ mod tests {
             MailboxMessage::Certificate(finalization(View::new(5)))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -393,7 +449,7 @@ mod tests {
 
     #[test]
     fn duplicate_certificate_is_ignored() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(MailboxMessage::handle(
             &mut overflow,
             MailboxMessage::Certificate(nullification(View::new(4)))
@@ -410,6 +466,7 @@ mod tests {
             MailboxMessage::Certificate(nullification(View::new(4)))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),

@@ -6,7 +6,7 @@ use crate::{
     types::View,
     Viewable,
 };
-use commonware_actor::mailbox::{Policy, Sender};
+use commonware_actor::mailbox::{Overflow as MailboxOverflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use std::collections::VecDeque;
 
@@ -34,13 +34,55 @@ impl<S: Scheme, D: Digest> Message<S, D> {
     }
 }
 
+/// Pending voter messages retained after the mailbox fills.
+pub struct Pending<S: Scheme, D: Digest> {
+    finalization: Option<Message<S, D>>,
+    messages: VecDeque<Message<S, D>>,
+}
+
+impl<S: Scheme, D: Digest> Default for Pending<S, D> {
+    fn default() -> Self {
+        Self {
+            finalization: None,
+            messages: VecDeque::new(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> MailboxOverflow<Message<S, D>> for Pending<S, D> {
+    fn is_empty(&self) -> bool {
+        self.finalization.is_none() && self.messages.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<S, D>) -> Result<(), Message<S, D>>,
+    {
+        if let Some(finalization) = self.finalization.take() {
+            if let Err(finalization) = push(finalization) {
+                self.finalization = Some(finalization);
+                return;
+            }
+        }
+
+        while let Some(message) = self.messages.pop_front() {
+            if let Err(message) = push(message) {
+                self.messages.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+    type Overflow = Pending<S, D>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
         if matches!(
-            overflow.front(),
+            overflow.finalization.as_ref(),
             Some(Self::Verified(Certificate::Finalization(old_finalized), _))
                 if old_finalized.view() >= new_view
         ) {
@@ -49,18 +91,16 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(&message, Self::Verified(Certificate::Finalization(_), _)) {
-            overflow.retain(|old_message| {
-                if matches!(old_message, Self::Verified(Certificate::Finalization(_), _)) {
-                    return false;
-                }
-                old_message.view() > new_view
-            });
-            overflow.push_front(message);
+            overflow
+                .messages
+                .retain(|old_message| old_message.view() > new_view);
+            overflow.finalization = Some(message);
             return true;
         }
 
         // Ignore the message if it is a duplicate
         if overflow
+            .messages
             .iter()
             .any(|old_message| match (&message, old_message) {
                 (Self::Proposal(new_proposal), Self::Proposal(old_proposal)) => {
@@ -81,7 +121,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
         {
             return true;
         }
-        overflow.push_back(message);
+        overflow.messages.push_back(message);
         true
     }
 }
@@ -177,9 +217,20 @@ mod tests {
         )
     }
 
+    fn drain(
+        mut overflow: Pending<TestScheme, Sha256Digest>,
+    ) -> VecDeque<Message<TestScheme, Sha256Digest>> {
+        let mut messages = VecDeque::new();
+        MailboxOverflow::drain(&mut overflow, |message| {
+            messages.push_back(message);
+            Ok(())
+        });
+        messages
+    }
+
     #[test]
     fn finalization_prunes_stale_overflow() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Proposal(proposal(View::new(2)))
@@ -201,6 +252,7 @@ mod tests {
             Message::Verified(finalization(View::new(3)), false)
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
@@ -215,7 +267,7 @@ mod tests {
 
     #[test]
     fn duplicate_certificate_is_ignored() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         let certificate = nullification(View::new(5));
         assert!(Message::handle(
             &mut overflow,
@@ -226,6 +278,7 @@ mod tests {
             Message::Verified(certificate, true)
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -236,7 +289,7 @@ mod tests {
 
     #[test]
     fn queued_finalization_rejects_covered_messages() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Verified(finalization(View::new(3)), false)
@@ -263,6 +316,7 @@ mod tests {
             Message::Proposal(proposal(View::new(4)))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
@@ -277,7 +331,7 @@ mod tests {
 
     #[test]
     fn duplicate_finalization_is_dropped() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Verified(finalization(View::new(3)), false)
@@ -287,6 +341,7 @@ mod tests {
             Message::Verified(finalization(View::new(3)), true)
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -297,7 +352,7 @@ mod tests {
 
     #[test]
     fn newer_finalization_replaces_older_pruning_floor() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Verified(finalization(View::new(3)), false)
@@ -311,6 +366,7 @@ mod tests {
             Message::Verified(finalization(View::new(5)), false)
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -321,7 +377,7 @@ mod tests {
 
     #[test]
     fn duplicate_proposals_and_timeouts_are_deduplicated() {
-        let mut overflow: VecDeque<Message<TestScheme, Sha256Digest>> = VecDeque::new();
+        let mut overflow = Pending::<TestScheme, Sha256Digest>::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Proposal(proposal(View::new(4)))
@@ -339,6 +395,7 @@ mod tests {
             Message::Timeout(View::new(4), TimeoutReason::Inactivity)
         ));
 
+        let overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
     }
 }

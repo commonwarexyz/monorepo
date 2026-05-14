@@ -3,7 +3,7 @@ use crate::{
     types::{Participant, View},
     Viewable,
 };
-use commonware_actor::mailbox::{Policy, Sender};
+use commonware_actor::mailbox::{Overflow as MailboxOverflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use std::collections::VecDeque;
 
@@ -31,10 +31,64 @@ impl<S: Scheme, D: Digest> Message<S, D> {
             Vote::Finalize(_) => view <= finalized,
         }
     }
+
+    const fn same_kind(a: &Vote<S, D>, b: &Vote<S, D>) -> bool {
+        matches!(
+            (a, b),
+            (Vote::Notarize(_), Vote::Notarize(_))
+                | (Vote::Nullify(_), Vote::Nullify(_))
+                | (Vote::Finalize(_), Vote::Finalize(_))
+        )
+    }
+}
+
+/// Pending batcher messages retained after the mailbox fills.
+pub struct Pending<S: Scheme, D: Digest> {
+    update: Option<Message<S, D>>,
+    constructed: VecDeque<Vote<S, D>>,
+}
+
+impl<S: Scheme, D: Digest> Default for Pending<S, D> {
+    fn default() -> Self {
+        Self {
+            update: None,
+            constructed: VecDeque::new(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> MailboxOverflow<Message<S, D>> for Pending<S, D> {
+    fn is_empty(&self) -> bool {
+        self.update.is_none() && self.constructed.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<S, D>) -> Result<(), Message<S, D>>,
+    {
+        if let Some(update) = self.update.take() {
+            if let Err(update) = push(update) {
+                self.update = Some(update);
+                return;
+            }
+        }
+
+        while let Some(vote) = self.constructed.pop_front() {
+            if let Err(message) = push(Message::Constructed(vote)) {
+                let Message::Constructed(vote) = message else {
+                    unreachable!("ready returned a different message");
+                };
+                self.constructed.push_front(vote);
+                break;
+            }
+        }
+    }
 }
 
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+    type Overflow = Pending<S, D>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         match message {
             update @ Self::Update {
                 current: new_current,
@@ -46,28 +100,26 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     current: old_current,
                     finalized: old_finalized,
                     ..
-                }) = overflow.front()
+                }) = overflow.update.as_ref()
                 {
                     let old = (*old_current, *old_finalized);
                     let new = (new_current, new_finalized);
                     if new <= old {
                         return new == old;
                     }
-                    overflow.pop_front();
                 }
-                overflow.push_front(update);
+                overflow.update = Some(update);
 
                 // Retain only the newest update and any constructed votes still useful after it
-                overflow.retain(|message| match message {
-                    Self::Update { .. } => true,
-                    Self::Constructed(vote) => !Self::prunes(new_current, new_finalized, vote),
-                });
+                overflow
+                    .constructed
+                    .retain(|vote| !Self::prunes(new_current, new_finalized, vote));
                 true
             }
             Self::Constructed(new_vote) => {
                 // Ignore the constructed vote if it is stale
                 if matches!(
-                    overflow.front(),
+                    overflow.update.as_ref(),
                     Some(Self::Update { current: old_current, finalized: old_finalized, .. })
                         if Self::prunes(*old_current, *old_finalized, &new_vote)
                 ) {
@@ -75,18 +127,12 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 }
 
                 // Ignore the constructed vote if it is a duplicate
-                if overflow.iter().any(|old_message| match old_message {
-                    Self::Constructed(old_vote) if old_vote.view() == new_vote.view() => matches!(
-                        (old_vote, &new_vote),
-                        (Vote::Notarize(_), Vote::Notarize(_))
-                            | (Vote::Nullify(_), Vote::Nullify(_))
-                            | (Vote::Finalize(_), Vote::Finalize(_))
-                    ),
-                    _ => false,
+                if overflow.constructed.iter().any(|old_vote| {
+                    old_vote.view() == new_vote.view() && Self::same_kind(old_vote, &new_vote)
                 }) {
                     return true;
                 }
-                overflow.push_back(Self::Constructed(new_vote));
+                overflow.constructed.push_back(new_vote);
                 true
             }
         }
@@ -181,9 +227,20 @@ mod tests {
         }
     }
 
+    fn drain(
+        mut overflow: Pending<TestScheme, Sha256Digest>,
+    ) -> VecDeque<Message<TestScheme, Sha256Digest>> {
+        let mut messages = VecDeque::new();
+        MailboxOverflow::drain(&mut overflow, |message| {
+            messages.push_back(message);
+            Ok(())
+        });
+        messages
+    }
+
     #[test]
     fn update_prunes_stale_constructed_messages() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Constructed(nullify_vote(View::new(2)))
@@ -193,6 +250,7 @@ mod tests {
             update(View::new(3), View::new(1))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -206,7 +264,7 @@ mod tests {
 
     #[test]
     fn constructed_message_after_update_is_dropped_when_stale() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             update(View::new(3), View::new(1))
@@ -216,12 +274,13 @@ mod tests {
             Message::Constructed(nullify_vote(View::new(2)))
         ));
 
+        let overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
     }
 
     #[test]
     fn update_replaces_older_update_and_keeps_current_constructed_message() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             update(View::new(2), View::new(1))
@@ -235,6 +294,7 @@ mod tests {
             update(View::new(3), View::new(1))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
@@ -248,7 +308,7 @@ mod tests {
 
     #[test]
     fn stale_update_is_dropped_when_newer_update_is_queued() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             update(View::new(5), View::new(4))
@@ -258,6 +318,7 @@ mod tests {
             update(View::new(4), View::new(3))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -267,7 +328,7 @@ mod tests {
 
     #[test]
     fn update_replaces_same_current_when_finalized_advances() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             update(View::new(5), View::new(3))
@@ -277,6 +338,7 @@ mod tests {
             update(View::new(5), View::new(4))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -290,7 +352,7 @@ mod tests {
 
     #[test]
     fn duplicate_constructed_message_is_ignored() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Constructed(nullify_vote(View::new(5)))
@@ -300,6 +362,7 @@ mod tests {
             Message::Constructed(nullify_vote(View::new(5)))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
@@ -310,7 +373,7 @@ mod tests {
 
     #[test]
     fn lower_current_update_is_dropped_without_merging_finalized() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             update(View::new(5), View::zero())
@@ -324,6 +387,7 @@ mod tests {
             update(View::new(4), View::new(4))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
@@ -342,7 +406,7 @@ mod tests {
 
     #[test]
     fn update_keeps_constructed_finalization_above_finalized() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Constructed(finalize_vote(View::new(4)))
@@ -352,6 +416,7 @@ mod tests {
             update(View::new(5), View::new(3))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
@@ -366,7 +431,7 @@ mod tests {
 
     #[test]
     fn constructed_finalizations_remain_in_arrival_order_after_update() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Constructed(finalize_vote(View::new(4)))
@@ -380,6 +445,7 @@ mod tests {
             update(View::new(3), View::new(1))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 3);
         assert!(matches!(
             overflow.pop_front(),
@@ -399,7 +465,7 @@ mod tests {
 
     #[test]
     fn update_prunes_constructed_notarization_below_current() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = Pending::default();
         assert!(Message::handle(
             &mut overflow,
             Message::Constructed(notarize_vote(View::new(4)))
@@ -409,6 +475,7 @@ mod tests {
             update(View::new(5), View::new(3))
         ));
 
+        let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
