@@ -180,10 +180,9 @@ mod tests {
             // Send a single broadcast message from the first peer
             let message = TestMessage::shared(b"hello world test message");
             let first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            assert_eq!(
-                first_mailbox.broadcast(Recipients::All, message.clone()),
-                Feedback::Ok
-            );
+            assert!(first_mailbox
+                .broadcast(Recipients::All, message.clone())
+                .accepted());
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
@@ -199,10 +198,9 @@ mod tests {
 
             // Send another message
             let message = TestMessage::shared(b"hello world again");
-            assert_eq!(
-                first_mailbox.broadcast(Recipients::All, message.clone()),
-                Feedback::Ok
-            );
+            assert!(first_mailbox
+                .broadcast(Recipients::All, message.clone())
+                .accepted());
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
@@ -247,10 +245,9 @@ mod tests {
             let receiver_before = mailbox_a.subscribe(digest_m1);
 
             // Broadcast the message
-            assert_eq!(
-                mailbox_a.broadcast(Recipients::All, m1.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox_a
+                .broadcast(Recipients::All, m1.clone())
+                .accepted());
 
             // Wait for the pre-broadcast retrieval to complete
             let msg_before = receiver_before
@@ -297,10 +294,9 @@ mod tests {
             let digest = message.digest();
             for i in 0..100 {
                 // Broadcast the message
-                assert_eq!(
-                    first_mailbox.broadcast(Recipients::All, message.clone()),
-                    Feedback::Ok
-                );
+                assert!(first_mailbox
+                    .broadcast(Recipients::All, message.clone())
+                    .accepted());
                 context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
                 // Check if all peers received the message
@@ -337,10 +333,9 @@ mod tests {
             // Broadcast a message
             let message = TestMessage::shared(b"cached message");
             let first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
-            assert_eq!(
-                first_mailbox.broadcast(Recipients::All, message.clone()),
-                Feedback::Ok
-            );
+            assert!(first_mailbox
+                .broadcast(Recipients::All, message.clone())
+                .accepted());
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -380,10 +375,9 @@ mod tests {
             drop(dummy2);
 
             // Broadcast the message
-            assert_eq!(
-                mailbox1.broadcast(Recipients::All, message.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox1
+                .broadcast(Recipients::All, message.clone())
+                .accepted());
 
             // Wait for propagation
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -410,10 +404,9 @@ mod tests {
                 messages.push(TestMessage::shared(format!("message {i}").as_bytes()));
             }
             for message in messages.iter() {
-                assert_eq!(
-                    mailbox.broadcast(Recipients::All, message.clone()),
-                    Feedback::Ok
-                );
+                assert!(mailbox
+                    .broadcast(Recipients::All, message.clone())
+                    .accepted());
             }
 
             // Wait for propagation
@@ -454,17 +447,15 @@ mod tests {
             // Create and broadcast message M1 from A
             let m1 = TestMessage::shared(b"message M1");
             let digest_m1 = m1.digest();
-            assert_eq!(
-                mailbox_a.broadcast(Recipients::All, m1.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox_a
+                .broadcast(Recipients::All, m1.clone())
+                .accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Broadcast M1 from C
-            assert_eq!(
-                mailbox_c.broadcast(Recipients::All, m1.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox_c
+                .broadcast(Recipients::All, m1.clone())
+                .accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // M1 is now in A's and C's deques in B's engine
@@ -475,10 +466,9 @@ mod tests {
                 new_messages_a.push(TestMessage::shared(format!("A{i}").as_bytes()));
             }
             for msg in &new_messages_a {
-                assert_eq!(
-                    mailbox_a.broadcast(Recipients::All, msg.clone()),
-                    Feedback::Ok
-                );
+                assert!(mailbox_a
+                    .broadcast(Recipients::All, msg.clone())
+                    .accepted());
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
@@ -493,10 +483,9 @@ mod tests {
                 new_messages_c.push(TestMessage::shared(format!("C{i}").as_bytes()));
             }
             for msg in &new_messages_c {
-                assert_eq!(
-                    mailbox_c.broadcast(Recipients::All, msg.clone()),
-                    Feedback::Ok
-                );
+                assert!(mailbox_c
+                    .broadcast(Recipients::All, msg.clone())
+                    .accepted());
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
@@ -526,10 +515,9 @@ mod tests {
             let sender_mb = mailboxes.get(&sender_pk).unwrap().clone();
 
             let msg = TestMessage::shared(b"selective-broadcast");
-            assert_eq!(
-                sender_mb.broadcast(Recipients::One(target_peer.clone()), msg.clone()),
-                Feedback::Ok
-            );
+            assert!(sender_mb
+                .broadcast(Recipients::One(target_peer.clone()), msg.clone())
+                .accepted());
 
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
