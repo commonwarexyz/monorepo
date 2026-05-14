@@ -32,13 +32,15 @@ impl<S: Scheme, D: Digest> Message<S, D> {
         }
     }
 
-    const fn same_kind(a: &Vote<S, D>, b: &Vote<S, D>) -> bool {
-        matches!(
-            (a, b),
-            (Vote::Notarize(_), Vote::Notarize(_))
-                | (Vote::Nullify(_), Vote::Nullify(_))
-                | (Vote::Finalize(_), Vote::Finalize(_))
-        )
+    // Return whether two votes would produce the same retained actor action.
+    fn similar(a: &Vote<S, D>, b: &Vote<S, D>) -> bool {
+        a.view() == b.view()
+            && matches!(
+                (a, b),
+                (Vote::Notarize(_), Vote::Notarize(_))
+                    | (Vote::Nullify(_), Vote::Nullify(_))
+                    | (Vote::Finalize(_), Vote::Finalize(_))
+            )
     }
 }
 
@@ -127,9 +129,11 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                 }
 
                 // Ignore the constructed vote if it is a duplicate
-                if overflow.constructed.iter().any(|old_vote| {
-                    old_vote.view() == new_vote.view() && Self::same_kind(old_vote, &new_vote)
-                }) {
+                if overflow
+                    .constructed
+                    .iter()
+                    .any(|old_vote| Self::similar(old_vote, &new_vote))
+                {
                     return true;
                 }
                 overflow.constructed.push_back(new_vote);
