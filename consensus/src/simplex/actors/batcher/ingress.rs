@@ -233,12 +233,10 @@ mod tests {
         mut overflow: Pending<TestScheme, Sha256Digest>,
     ) -> VecDeque<Message<TestScheme, Sha256Digest>> {
         let mut messages = VecDeque::new();
-        while !overflow.is_empty() {
-            Overflow::drain(&mut overflow, |message| {
-                messages.push_back(message);
-                None
-            });
-        }
+        Overflow::drain(&mut overflow, |message| {
+            messages.push_back(message);
+            None
+        });
         messages
     }
 

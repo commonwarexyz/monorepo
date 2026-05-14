@@ -205,12 +205,10 @@ mod tests {
         );
 
         let mut drained = VecDeque::new();
-        while !overflow.is_empty() {
-            overflow.drain(|message| {
-                drained.push_back(message);
-                None
-            });
-        }
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
 
         assert_eq!(drained.len(), 2);
         assert!(drained.iter().any(|message| matches!(
@@ -334,12 +332,10 @@ mod tests {
         assert_eq!(attempts, 1);
 
         let mut drained = VecDeque::new();
-        while !overflow.is_empty() {
-            overflow.drain(|message| {
-                drained.push_back(message);
-                None
-            });
-        }
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
         assert_eq!(drained.len(), 1);
         assert!(matches!(
             &drained[0],

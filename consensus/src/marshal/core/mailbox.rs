@@ -844,12 +844,10 @@ mod tests {
 
     fn drain(overflow: &mut TestPending) -> VecDeque<TestMessage> {
         let mut drained = VecDeque::new();
-        while !overflow.is_empty() {
-            overflow.drain(|message| {
-                drained.push_back(message);
-                None
-            });
-        }
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
         drained
     }
 
