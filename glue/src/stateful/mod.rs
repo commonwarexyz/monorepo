@@ -146,13 +146,15 @@ where
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
-    fn propose<A: BlockProvider<Block = Self::Block>>(
+    fn propose<A>(
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: &mut Self::InputProvider,
-    ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
+    ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send
+    where
+        A: BlockProvider<Block = Self::Block> + Send + Sync;
 
     /// Verify a block received from a peer, relative to its ancestry.
     ///
@@ -167,12 +169,14 @@ where
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
-    fn verify<A: BlockProvider<Block = Self::Block>>(
+    fn verify<A>(
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
+    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send
+    where
+        A: BlockProvider<Block = Self::Block> + Send + Sync;
 
     /// Apply a previously certified block to reconstruct its merkleized state.
     ///

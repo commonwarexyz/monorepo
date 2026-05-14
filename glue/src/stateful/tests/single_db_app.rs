@@ -199,13 +199,16 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
         self.genesis.clone()
     }
 
-    async fn propose<A: BlockProvider<Block = Self::Block>>(
+    async fn propose<A>(
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: &mut Self::InputProvider,
-    ) -> Option<Proposed<Self, E>> {
+    ) -> Option<Proposed<Self, E>>
+    where
+        A: BlockProvider<Block = Self::Block> + Send + Sync,
+    {
         let parent = ancestry.peek()?;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, batches).await;
@@ -220,12 +223,15 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify<A: BlockProvider<Block = Self::Block>>(
+    async fn verify<A>(
         &mut self,
         _context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized>
+    where
+        A: BlockProvider<Block = Self::Block> + Send + Sync,
+    {
         let tip = ancestry.peek()?;
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
@@ -524,7 +530,7 @@ impl EngineDefinition for SingleDbEngine {
             reporter: marshal_mailbox.clone(),
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(3),
             epoch: Epoch::zero(),
             replay_buffer: IO_BUFFER_SIZE,
             write_buffer: IO_BUFFER_SIZE,
@@ -535,7 +541,7 @@ impl EngineDefinition for SingleDbEngine {
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_timeout: Duration::from_secs(2),
-            fetch_concurrent: 3,
+            fetch_concurrent: NZUsize!(3),
             forwarding: ForwardingPolicy::Disabled,
         };
 

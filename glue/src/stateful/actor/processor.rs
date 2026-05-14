@@ -891,13 +891,16 @@ mod tests {
             self.genesis.clone()
         }
 
-        async fn propose<A: BlockProvider<Block = Self::Block>>(
+        async fn propose<A>(
             &mut self,
             context: (deterministic::Context, Self::Context),
             ancestry: AncestorStream<A, Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: &mut Self::InputProvider,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Option<Proposed<Self, deterministic::Context>>
+        where
+            A: BlockProvider<Block = Self::Block> + Send + Sync,
+        {
             let parent = ancestry.peek()?;
             let context = context.1.clone();
             let view = context.round.view();
@@ -913,12 +916,15 @@ mod tests {
             Some(Proposed { block, merkleized })
         }
 
-        async fn verify<A: BlockProvider<Block = Self::Block>>(
+        async fn verify<A>(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             ancestry: AncestorStream<A, Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized>
+        where
+            A: BlockProvider<Block = Self::Block> + Send + Sync,
+        {
             let block = ancestry.peek()?;
             let merkleized =
                 Self::execute(block.height(), block.context.round.view(), batches).await;
