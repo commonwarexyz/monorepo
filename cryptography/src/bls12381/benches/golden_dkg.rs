@@ -69,8 +69,7 @@ fn bench_golden_dkg_deal(c: &mut Criterion) {
                 },
                 |(info, me, mut rng)| {
                     black_box(
-                        golden_dkg::deal(&mut rng, &SETUP, &info, &me, None, &Sequential)
-                            .unwrap(),
+                        golden_dkg::deal(&mut rng, &SETUP, &info, &me, None, &Sequential).unwrap(),
                     );
                 },
                 BatchSize::SmallInput,
@@ -97,8 +96,7 @@ fn bench_golden_dkg_verify(c: &mut Criterion) {
                     let mut logs = BTreeMap::<PublicKey, DealerLog>::new();
                     logs.insert(pk, log);
                     black_box(
-                        golden_dkg::observe(&mut rng, &SETUP, &info, logs, &Sequential)
-                            .unwrap(),
+                        golden_dkg::observe(&mut rng, &SETUP, &info, logs, &Sequential).unwrap(),
                     );
                 },
                 BatchSize::SmallInput,

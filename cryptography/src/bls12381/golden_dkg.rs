@@ -310,7 +310,8 @@ impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
     ) -> Result<Self, commonware_codec::Error> {
         let max_usize = max_participants.get() as usize;
         let summary: Summary = ReadExt::read(buf)?;
-        let public: Sharing<MinPk> = Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
+        let public: Sharing<MinPk> =
+            Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
         let quorum: NonZeroU32 = ReadExt::read(buf)?;
         let dealers: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
         let players: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
@@ -327,7 +328,10 @@ impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
                 "quorum must not exceed players length",
             ));
         }
-        if revealed.iter().any(|player| players.position(player).is_none()) {
+        if revealed
+            .iter()
+            .any(|player| players.position(player).is_none())
+        {
             return Err(commonware_codec::Error::Invalid(
                 "Output",
                 "revealed players must be a subset of players",
@@ -1631,8 +1635,8 @@ mod tests {
             .map(|k| k.public())
             .try_collect()
             .unwrap();
-        let info = Info::new::<N3f1>(TEST_NAMESPACE, 0, None, dealer_set.clone(), player_set)
-            .unwrap();
+        let info =
+            Info::new::<N3f1>(TEST_NAMESPACE, 0, None, dealer_set.clone(), player_set).unwrap();
 
         // Deal honestly, but corrupt one dealer's signature so identify() drops it.
         let mut logs = std::collections::BTreeMap::new();
@@ -1918,7 +1922,9 @@ mod tests {
         let decoded = SignedDealerLog::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
 
         // The decoded log should identify successfully and produce a valid DKG.
-        let (pk, log) = decoded.identify(&info).expect("signature should verify after roundtrip");
+        let (pk, log) = decoded
+            .identify(&info)
+            .expect("signature should verify after roundtrip");
         assert_eq!(pk, dealer_keys[0].public());
 
         let mut logs = std::collections::BTreeMap::new();
@@ -1928,8 +1934,7 @@ mod tests {
             let (pk, log) = signed.identify(&info).unwrap();
             logs.insert(pk, log);
         }
-        observe(&mut rng, &TEST_SETUP, &info, logs, &Sequential)
-            .expect("observe should succeed");
+        observe(&mut rng, &TEST_SETUP, &info, logs, &Sequential).expect("observe should succeed");
     }
 
     #[test]
@@ -2144,7 +2149,8 @@ mod tests {
     #[test]
     fn info_rejects_reshare_dealer_outside_previous_players() {
         let mut rng = commonware_utils::test_rng();
-        let previous_players: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let previous_players: Vec<PrivateKey> =
+            (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
         let previous_dealers: Set<PublicKey> = previous_players
             .iter()
             .map(|dealer| dealer.public())
@@ -2180,7 +2186,8 @@ mod tests {
     #[test]
     fn info_rejects_reshare_with_too_few_dealers() {
         let mut rng = commonware_utils::test_rng();
-        let previous_players: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let previous_players: Vec<PrivateKey> =
+            (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
         let previous_dealers: Set<PublicKey> = previous_players
             .iter()
             .map(|dealer| dealer.public())
@@ -2221,7 +2228,8 @@ mod tests {
         let player = PrivateKey::random(&mut rng);
         let dealers: Set<PublicKey> = std::iter::once(dealer.public()).try_collect().unwrap();
         let players: Set<PublicKey> = std::iter::once(player.public()).try_collect().unwrap();
-        let info = Info::new::<N3f1>(TEST_NAMESPACE, 0, None, dealers.clone(), players.clone()).unwrap();
+        let info =
+            Info::new::<N3f1>(TEST_NAMESPACE, 0, None, dealers.clone(), players.clone()).unwrap();
         let next_round = Info::new::<N3f1>(TEST_NAMESPACE, 1, None, dealers, players).unwrap();
 
         let signed = deal(&mut rng, &TEST_SETUP, &info, &dealer, None, &Sequential).unwrap();
@@ -2234,14 +2242,28 @@ mod tests {
         let mut rng = commonware_utils::test_rng();
         let dealers: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
         let players: Vec<PrivateKey> = (0..2).map(|_| PrivateKey::random(&mut rng)).collect();
-        let dealer_set: Set<PublicKey> = dealers.iter().map(|dealer| dealer.public()).try_collect().unwrap();
-        let player_set: Set<PublicKey> = players.iter().map(|player| player.public()).try_collect().unwrap();
-        let info =
-            Info::new::<N3f1>(TEST_NAMESPACE, 0, None, dealer_set.clone(), player_set.clone())
-                .unwrap();
+        let dealer_set: Set<PublicKey> = dealers
+            .iter()
+            .map(|dealer| dealer.public())
+            .try_collect()
+            .unwrap();
+        let player_set: Set<PublicKey> = players
+            .iter()
+            .map(|player| player.public())
+            .try_collect()
+            .unwrap();
+        let info = Info::new::<N3f1>(
+            TEST_NAMESPACE,
+            0,
+            None,
+            dealer_set.clone(),
+            player_set.clone(),
+        )
+        .unwrap();
         let other_namespace =
             Info::new::<N3f1>(b"other", 0, None, dealer_set.clone(), player_set.clone()).unwrap();
-        let other_faults = Info::new::<N5f1>(TEST_NAMESPACE, 0, None, dealer_set, player_set).unwrap();
+        let other_faults =
+            Info::new::<N5f1>(TEST_NAMESPACE, 0, None, dealer_set, player_set).unwrap();
 
         let signed = deal(&mut rng, &TEST_SETUP, &info, &dealers[0], None, &Sequential).unwrap();
         assert!(signed.clone().identify(&info).is_some());
