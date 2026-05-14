@@ -148,7 +148,7 @@ where
             dkg::Config {
                 manager: config.manager.clone(),
                 signer: config.signer.clone(),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: NZUsize!(MAILBOX_SIZE),
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
@@ -268,7 +268,7 @@ where
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: NZUsize!(MAILBOX_SIZE),
                 view_retention_timeout: ViewDelta::new(
                     ACTIVITY_TIMEOUT
                         .get()

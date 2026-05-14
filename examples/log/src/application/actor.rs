@@ -9,7 +9,6 @@ use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use rand::Rng;
-use std::num::NonZeroUsize;
 use tracing::info;
 
 /// Genesis message to use during initialization.
@@ -29,9 +28,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
         context: R,
         config: Config<H>,
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
-        let (sender, receiver) = mailbox::new(
-            NonZeroUsize::new(config.mailbox_size).expect("mailbox size must be non-zero"),
-        );
+        let (sender, receiver) = mailbox::new(config.mailbox_size);
         let mailbox = Mailbox::new(sender);
         let reporter = Reporter::new(&mailbox);
         (

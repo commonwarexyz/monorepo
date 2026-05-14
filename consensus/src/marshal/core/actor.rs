@@ -17,7 +17,7 @@ use crate::{
     Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
-use commonware_actor::mailbox as actor_mailbox;
+use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -219,7 +219,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: actor_mailbox::Receiver<Message<P::Scheme, V>>,
+    mailbox: mailbox::Receiver<Message<P::Scheme, V>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -325,9 +325,7 @@ where
         let _ = processed_height.try_set(last_processed_height.get());
 
         // Initialize mailbox
-        let (sender, mailbox) = actor_mailbox::new(
-            NonZeroUsize::new(config.mailbox_size).expect("mailbox size must be non-zero"),
-        );
+        let (sender, mailbox) = mailbox::new(config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),

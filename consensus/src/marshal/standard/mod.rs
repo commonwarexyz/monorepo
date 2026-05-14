@@ -1789,7 +1789,7 @@ mod tests {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -1904,7 +1904,7 @@ mod tests {
             let config = Config {
                 provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                mailbox_size: 100,
+                mailbox_size: NZUsize!(100),
                 view_retention_timeout: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),

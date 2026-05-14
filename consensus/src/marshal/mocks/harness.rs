@@ -1582,7 +1582,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
@@ -1601,7 +1601,7 @@ impl TestHarness for StandardHarness {
             public_key: validator.clone(),
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
-            mailbox_size: config.mailbox_size,
+            mailbox_size: config.mailbox_size.get(),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
@@ -1612,7 +1612,7 @@ impl TestHarness for StandardHarness {
 
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
+            mailbox_size: config.mailbox_size.get(),
             deque_size: 10,
             priority: false,
             codec_config: (),
@@ -1818,7 +1818,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -1837,7 +1837,7 @@ impl TestHarness for StandardHarness {
             public_key: validator.clone(),
             peer_provider: oracle.manager(),
             blocker: control.clone(),
-            mailbox_size: config.mailbox_size,
+            mailbox_size: config.mailbox_size.get(),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
@@ -1848,7 +1848,7 @@ impl TestHarness for StandardHarness {
 
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
+            mailbox_size: config.mailbox_size.get(),
             deque_size: 10,
             priority: false,
             codec_config: (),
@@ -2387,7 +2387,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
@@ -2407,7 +2407,7 @@ impl TestHarness for CodingHarness {
             public_key: validator.clone(),
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
-            mailbox_size: config.mailbox_size,
+            mailbox_size: config.mailbox_size.get(),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
@@ -2656,7 +2656,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -2675,7 +2675,7 @@ impl TestHarness for CodingHarness {
             public_key: validator.clone(),
             peer_provider: oracle.manager(),
             blocker: control.clone(),
-            mailbox_size: config.mailbox_size,
+            mailbox_size: config.mailbox_size.get(),
             initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),

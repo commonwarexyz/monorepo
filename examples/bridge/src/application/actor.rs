@@ -22,7 +22,6 @@ use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
 use rand::Rng;
 use rand_core::CryptoRngCore;
-use std::num::NonZeroUsize;
 use tracing::{debug, info};
 
 /// Genesis message to use during initialization.
@@ -41,9 +40,7 @@ pub struct Application<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stre
 impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
     pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
-        let (sender, mailbox) = mailbox::new(
-            NonZeroUsize::new(config.mailbox_size).expect("mailbox size must be non-zero"),
-        );
+        let (sender, mailbox) = mailbox::new(config.mailbox_size);
         let this_network = *config.this_network.identity();
         (
             Self {

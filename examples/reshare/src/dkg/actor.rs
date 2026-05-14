@@ -101,7 +101,7 @@ impl<V: Variant, P: PublicKey> Read for Message<V, P> {
 pub struct Config<C: Signer, P> {
     pub manager: P,
     pub signer: C,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub partition_prefix: String,
     pub peer_config: PeerConfig<C::PublicKey>,
     pub max_supported_mode: ModeVersion,
@@ -143,9 +143,7 @@ where
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
-        let (sender, mailbox) = mailbox::new(
-            NonZeroUsize::new(config.mailbox_size).expect("mailbox size must be non-zero"),
-        );
+        let (sender, mailbox) = mailbox::new(config.mailbox_size);
 
         // Create metrics
         let successful_epochs = context.counter("successful_epochs", "successful epochs");
@@ -662,7 +660,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{channel::mpsc, N3f1, TryCollect, NZU32};
+    use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32};
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
 
@@ -775,7 +773,7 @@ mod tests {
                 Config {
                     manager: NoopManager::<Ed25519PublicKey>::default(),
                     signer,
-                    mailbox_size: 8,
+                    mailbox_size: NZUsize!(8),
                     partition_prefix,
                     peer_config: peer_config.clone(),
                     max_supported_mode: crate::dkg::MAX_SUPPORTED_MODE,
