@@ -197,9 +197,12 @@ mod tests {
                 assert_eq!(received_message.unwrap(), message.clone());
             }
 
-            // Ignore broadcast feedback
+            // Send another message
             let message = TestMessage::shared(b"hello world again");
-            let _ = first_mailbox.broadcast(Recipients::All, message.clone());
+            assert_eq!(
+                first_mailbox.broadcast(Recipients::All, message.clone()),
+                Feedback::Ok
+            );
 
             // Allow time for propagation
             context.sleep(Duration::from_secs(1)).await;
@@ -1414,9 +1417,15 @@ mod tests {
             let msg = TestMessage::shared(b"shared-msg");
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
             let mailbox_c = mailboxes.get(&peer_c).unwrap().clone();
-            let _ = mailbox_a.broadcast(Recipients::All, msg.clone());
+            assert_eq!(
+                mailbox_a.broadcast(Recipients::All, msg.clone()),
+                Feedback::Ok
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-            let _ = mailbox_c.broadcast(Recipients::All, msg.clone());
+            assert_eq!(
+                mailbox_c.broadcast(Recipients::All, msg.clone()),
+                Feedback::Ok
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // B has the message in both A's and C's deques (ref count = 2).
