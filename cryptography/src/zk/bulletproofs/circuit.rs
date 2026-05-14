@@ -524,11 +524,13 @@ pub fn r1cs_to_circuit<F: Ring>(r1cs: R1cs<F>, committed_indices: &[usize]) -> C
     r1cs_to_circuit_maybe_witness(r1cs, committed_indices, None).0
 }
 
-/// Convert an R1CS and full R1CS assignment into a circuit and witness.
+/// Convert an R1CS and full Ark assignment into a circuit and witness.
 ///
-/// The witness vector is the Ark R1CS witness assignment, excluding the
-/// constant `1`. The returned witness commits to the values at
-/// `committed_indices`.
+/// `witness` must be the full Ark column-aligned assignment
+/// `[instance_assignment | witness_assignment]`. In particular, slot `0` is
+/// the constant `z_0 = 1`. The returned witness commits to the values at
+/// `committed_indices` (which are R1CS column indices in that full
+/// assignment space).
 pub fn r1cs_to_circuit_and_witness<F: Ring + Random>(
     blinding_rng: Option<&mut impl CryptoRngCore>,
     r1cs: R1cs<F>,
