@@ -1,6 +1,10 @@
 //! Timed I/O loops and helpers.
 
-use crate::{config::SyncMode, error::Result, report::Stats};
+use crate::{
+    config::{SyncMethod, SyncMode},
+    error::Result,
+    report::Stats,
+};
 use commonware_runtime::{Blob, IoBufMut, IoBufs};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::time::Instant;
@@ -119,6 +123,35 @@ pub async fn run_write_loop(
         blob.sync().await?;
     }
 
+    Ok(stats)
+}
+
+/// Timed durable write loop with caller-defined offset selection.
+#[inline]
+pub async fn run_sync_write_loop(
+    blob: impl Blob,
+    deadline: Instant,
+    io_size: usize,
+    payload: IoBufs,
+    sync_method: SyncMethod,
+    mut next_block: impl FnMut() -> u64,
+) -> Result<Stats> {
+    let mut stats = Stats::default();
+    let io_size = io_size as u64;
+    while should_continue(deadline, stats.ops) {
+        let offset = next_block() * io_size;
+        let started = should_sample_latency(stats.ops).then(Instant::now);
+        match sync_method {
+            SyncMethod::WriteThenSync => {
+                blob.write_at(offset, payload.clone()).await?;
+                blob.sync().await?;
+            }
+            SyncMethod::WriteAtSync => {
+                blob.write_at_sync(offset, payload.clone()).await?;
+            }
+        }
+        stats.record(io_size, started.map(|s| s.elapsed()));
+    }
     Ok(stats)
 }
 

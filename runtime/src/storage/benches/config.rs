@@ -21,6 +21,9 @@ pub enum Workload {
     /// Monotonic append writes to a growing file.
     #[value(name = "write_append")]
     WriteAppend,
+    /// Durable positioned writes over a fixed-size file.
+    #[value(name = "write_sync")]
+    WriteSync,
     /// One append writer plus many random readers of the visible prefix.
     #[value(name = "read_write_append")]
     ReadWriteAppend,
@@ -31,7 +34,11 @@ impl Workload {
     pub const fn has_writes(self) -> bool {
         matches!(
             self,
-            Self::WriteSeq | Self::WriteRand | Self::WriteAppend | Self::ReadWriteAppend
+            Self::WriteSeq
+                | Self::WriteRand
+                | Self::WriteAppend
+                | Self::WriteSync
+                | Self::ReadWriteAppend
         )
     }
 
@@ -64,6 +71,17 @@ pub enum WriteShape {
     /// Four-buffer vectored write per operation.
     #[value(name = "vectored")]
     Vectored,
+}
+
+/// Durable write implementation for the `write_sync` workload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SyncMethod {
+    /// Call `write_at`, then call `sync`.
+    #[value(name = "write_then_sync")]
+    WriteThenSync,
+    /// Call `write_at_sync`.
+    #[value(name = "write_at_sync")]
+    WriteAtSync,
 }
 
 /// Write durability policy.
@@ -100,7 +118,7 @@ macro_rules! display_value_enum {
     )+};
 }
 
-display_value_enum!(Workload, CacheMode, WriteShape, OutputFormat);
+display_value_enum!(Workload, CacheMode, WriteShape, SyncMethod, OutputFormat);
 
 impl fmt::Display for SyncMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -164,6 +182,10 @@ pub struct Config {
     /// Write payload layout for write-heavy workloads.
     #[arg(long, value_enum, default_value = "contiguous")]
     pub write_shape: WriteShape,
+
+    /// Durable write method for the write_sync workload.
+    #[arg(long, value_enum, default_value = "write_then_sync")]
+    pub sync_method: SyncMethod,
 
     /// Durability cadence: `end` or a positive integer per writer stream.
     #[arg(long = "sync-every", default_value = "end", value_parser = parse_sync_mode)]
@@ -241,11 +263,14 @@ impl Config {
                 if !file_size.is_multiple_of(io_size) {
                     return Err("--file-size must be a multiple of --io-size".into());
                 }
-                if matches!(self.workload, Workload::WriteSeq | Workload::WriteRand) {
+                if matches!(
+                    self.workload,
+                    Workload::WriteSeq | Workload::WriteRand | Workload::WriteSync
+                ) {
                     let total_blocks = file_size / io_size;
                     if total_blocks < self.inflight as u64 {
                         return Err(
-                            "write_seq and write_rand require at least one non-overlapping block per worker"
+                            "write_seq, write_rand, and write_sync require at least one non-overlapping block per worker"
                                 .into(),
                         );
                     }
@@ -268,9 +293,18 @@ impl Config {
             if self.write_shape != WriteShape::Contiguous {
                 return Err("--write-shape is only valid for write-heavy workloads".into());
             }
+            if self.sync_method != SyncMethod::WriteThenSync {
+                return Err("--sync-method is only valid for write_sync".into());
+            }
             if self.sync_mode != SyncMode::End {
                 return Err("--sync-every is only valid for write-heavy workloads".into());
             }
+        } else if self.workload != Workload::WriteSync {
+            if self.sync_method != SyncMethod::WriteThenSync {
+                return Err("--sync-method is only valid for write_sync".into());
+            }
+        } else if self.sync_mode != SyncMode::End {
+            return Err("--sync-every is not used by write_sync".into());
         }
 
         Ok(())
