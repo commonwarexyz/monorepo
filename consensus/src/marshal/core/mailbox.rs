@@ -15,7 +15,7 @@ use commonware_actor::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use std::collections::VecDeque;
+use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -227,7 +227,13 @@ impl<S: Scheme, V: Variant> Message<S, V> {
 pub(crate) struct Pending<S: Scheme, V: Variant> {
     floor: Option<Height>,
     prune: Option<Height>,
-    messages: VecDeque<Message<S, V>>,
+    hints: BTreeMap<Height, NonEmptyVec<S::PublicKey>>,
+    messages: VecDeque<PendingMessage<S, V>>,
+}
+
+enum PendingMessage<S: Scheme, V: Variant> {
+    Message(Message<S, V>),
+    HintFinalized(Height),
 }
 
 impl<S: Scheme, V: Variant> Default for Pending<S, V> {
@@ -235,6 +241,7 @@ impl<S: Scheme, V: Variant> Default for Pending<S, V> {
         Self {
             floor: None,
             prune: None,
+            hints: BTreeMap::new(),
             messages: VecDeque::new(),
         }
     }
@@ -264,41 +271,47 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.prune = self.prune.max(prune);
     }
 
+    fn extend_hint_targets(
+        pending: &mut NonEmptyVec<S::PublicKey>,
+        targets: NonEmptyVec<S::PublicKey>,
+    ) {
+        for target in targets {
+            if !pending.contains(&target) {
+                pending.push(target);
+            }
+        }
+    }
+
     fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         // Hint is already covered by floor/prune
         let current = self.height();
         if current.is_some_and(|current| height <= current) {
             return;
         }
-        let mut targets = Some(targets);
-        self.messages.retain_mut(|message| {
-            let Message::HintFinalized {
-                height: existing,
-                targets: pending,
-            } = message
-            else {
-                return true;
-            };
-            if *existing != height {
-                return true;
-            }
 
-            // Found an existing hint at this height: union the target sets
-            if let Some(targets) = targets.take() {
-                for target in targets {
-                    if !pending.contains(&target) {
-                        pending.push(target);
-                    }
-                }
+        match self.hints.entry(height) {
+            Entry::Vacant(entry) => {
+                entry.insert(targets);
+                self.messages
+                    .push_back(PendingMessage::HintFinalized(height));
             }
-            true
-        });
-
-        // No matching hint was found; append a fresh one
-        if let Some(targets) = targets {
-            self.messages
-                .push_back(Message::HintFinalized { height, targets });
+            Entry::Occupied(mut entry) => {
+                Self::extend_hint_targets(entry.get_mut(), targets);
+            }
         }
+    }
+
+    fn restore_hint(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+        match self.hints.entry(height) {
+            Entry::Vacant(entry) => {
+                entry.insert(targets);
+            }
+            Entry::Occupied(mut entry) => {
+                Self::extend_hint_targets(entry.get_mut(), targets);
+            }
+        }
+        self.messages
+            .push_front(PendingMessage::HintFinalized(height));
     }
 
     fn drain_one<F>(&mut self, message: Message<S, V>, push: &mut F) -> bool
@@ -314,8 +327,9 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         match message {
             Message::SetFloor { height } => self.set_floor(height),
             Message::Prune { height } => self.prune(height),
+            Message::HintFinalized { height, targets } => self.restore_hint(height, targets),
             message if message.response_closed() => return true,
-            message => self.messages.push_front(message),
+            message => self.messages.push_front(PendingMessage::Message(message)),
         }
         false
     }
@@ -323,7 +337,10 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
 
 impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     fn is_empty(&self) -> bool {
-        self.floor.is_none() && self.prune.is_none() && self.messages.is_empty()
+        self.floor.is_none()
+            && self.prune.is_none()
+            && self.hints.is_empty()
+            && self.messages.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
@@ -345,12 +362,32 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
 
         // Drain the remaining queued messages in FIFO order
         let height = self.height();
-        while let Some(message) = self.messages.pop_front() {
-            if message.response_closed() || message.stale(height) {
-                continue;
-            }
-            if !self.drain_one(message, &mut push) {
-                break;
+        while let Some(pending) = self.messages.pop_front() {
+            match pending {
+                PendingMessage::Message(message) => {
+                    if message.response_closed() || message.stale(height) {
+                        continue;
+                    }
+                    if !self.drain_one(message, &mut push) {
+                        break;
+                    }
+                }
+                PendingMessage::HintFinalized(hint_height) => {
+                    if Some(hint_height) <= height {
+                        self.hints.remove(&hint_height);
+                        continue;
+                    }
+                    let Some(targets) = self.hints.remove(&hint_height) else {
+                        continue;
+                    };
+                    let message = Message::HintFinalized {
+                        height: hint_height,
+                        targets,
+                    };
+                    if !self.drain_one(message, &mut push) {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -381,7 +418,9 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
                 if message.stale(overflow.height()) {
                     return;
                 }
-                overflow.messages.push_back(message);
+                overflow
+                    .messages
+                    .push_back(PendingMessage::Message(message));
             }
         }
     }
@@ -796,11 +835,11 @@ mod tests {
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
-                TestMessage::GetInfo {
+                PendingMessage::Message(TestMessage::GetInfo {
                     identifier: Identifier::Height(found),
                     response,
                     ..
-                } if *found == Height::new(height) && !response.is_closed()
+                }) if *found == Height::new(height) && !response.is_closed()
             )
         })
     }
@@ -809,11 +848,11 @@ mod tests {
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
-                TestMessage::GetBlock {
+                PendingMessage::Message(TestMessage::GetBlock {
                     identifier: Identifier::Height(found),
                     response,
                     ..
-                } if *found == Height::new(height) && !response.is_closed()
+                }) if *found == Height::new(height) && !response.is_closed()
             )
         })
     }
@@ -822,34 +861,27 @@ mod tests {
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
-                TestMessage::GetFinalization {
+                PendingMessage::Message(TestMessage::GetFinalization {
                     height: found,
                     response,
-                } if *found == Height::new(height) && !response.is_closed()
+                }) if *found == Height::new(height) && !response.is_closed()
             )
         })
     }
 
     fn hint_targets(overflow: &TestPending, height: u64) -> Option<&NonEmptyVec<harness::K>> {
-        overflow.messages.iter().find_map(|message| {
-            let TestMessage::HintFinalized {
-                height: found,
-                targets,
-            } = message
-            else {
-                return None;
-            };
-            (*found == Height::new(height)).then_some(targets)
-        })
+        overflow.hints.get(&Height::new(height))
     }
 
     fn has_block_message(overflow: &TestPending, height: u64) -> bool {
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
-                TestMessage::Proposed { block, .. }
-                    | TestMessage::Verified { block, .. }
-                    | TestMessage::Certified { block, .. }
+                PendingMessage::Message(
+                    TestMessage::Proposed { block, .. }
+                        | TestMessage::Verified { block, .. }
+                        | TestMessage::Certified { block, .. }
+                )
                     if block.height() == Height::new(height)
             )
         })
@@ -864,15 +896,15 @@ mod tests {
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
-                TestMessage::SubscribeByDigest { digest, response, .. }
+                PendingMessage::Message(TestMessage::SubscribeByDigest { digest, response, .. })
                     if *digest == expected && !response.is_closed()
             ) || matches!(
                 message,
-                TestMessage::SubscribeByCommitment {
+                PendingMessage::Message(TestMessage::SubscribeByCommitment {
                     commitment,
                     response,
                     ..
-                } if *commitment == expected && !response.is_closed()
+                }) if *commitment == expected && !response.is_closed()
             )
         })
     }
@@ -900,10 +932,14 @@ mod tests {
 
         let (pending_closed, pending_closed_rx) = subscribe_by_digest(1);
         drop(pending_closed_rx);
-        overflow.messages.push_back(pending_closed);
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(pending_closed));
 
         let (pending_open, mut pending_open_rx) = subscribe_by_commitment(2);
-        overflow.messages.push_back(pending_open);
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(pending_open));
 
         let (current_closed, current_closed_rx) = subscribe_by_digest(3);
         drop(current_closed_rx);
@@ -924,10 +960,14 @@ mod tests {
 
         let (pending_closed, pending_closed_rx) = get_block(1);
         drop(pending_closed_rx);
-        overflow.messages.push_back(pending_closed);
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(pending_closed));
 
         let (pending_open, mut pending_open_rx) = get_info(2);
-        overflow.messages.push_back(pending_open);
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(pending_open));
 
         let (current_closed, current_closed_rx) = get_finalization(3);
         drop(current_closed_rx);
@@ -1015,12 +1055,16 @@ mod tests {
         let (get_info_4, _get_info_4_rx) = get_info(4);
         let (get_block_7, _get_block_7_rx) = get_block(7);
         let (get_block_8, _get_block_8_rx) = get_block(8);
-        overflow.messages.push_back(get_info_4);
-        overflow.messages.push_back(get_block_7);
         overflow
             .messages
-            .push_back(hint_finalized(8, public_key(1)));
-        overflow.messages.push_back(get_block_8);
+            .push_back(PendingMessage::Message(get_info_4));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(get_block_7));
+        overflow.hint_finalized(Height::new(8), NonEmptyVec::new(public_key(1)));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(get_block_8));
         <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
         assert_eq!(overflow.floor, Some(Height::new(8)));
         assert!(has_get_block(&overflow, 8));
@@ -1043,12 +1087,16 @@ mod tests {
         let (get_finalization_4, _get_finalization_4_rx) = get_finalization(4);
         let (get_block_6, _get_block_6_rx) = get_block(6);
         let (get_block_7, _get_block_7_rx) = get_block(7);
-        overflow.messages.push_back(get_finalization_4);
-        overflow.messages.push_back(get_block_6);
         overflow
             .messages
-            .push_back(hint_finalized(6, public_key(2)));
-        overflow.messages.push_back(get_block_7);
+            .push_back(PendingMessage::Message(get_finalization_4));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(get_block_6));
+        overflow.hint_finalized(Height::new(6), NonEmptyVec::new(public_key(2)));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(get_block_7));
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
         assert_eq!(overflow.prune, Some(Height::new(7)));
         assert!(has_get_block(&overflow, 7));
@@ -1134,9 +1182,15 @@ mod tests {
         let (proposed_message, mut proposed_ack) = proposed(4);
         let (verified_message, mut verified_ack) = verified(6);
         let (certified_message, mut certified_ack) = certified(8);
-        overflow.messages.push_back(proposed_message);
-        overflow.messages.push_back(verified_message);
-        overflow.messages.push_back(certified_message);
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(proposed_message));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(verified_message));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(certified_message));
 
         <TestMessage as Policy>::handle(&mut overflow, set_floor(7));
         assert!(has_block_message(&overflow, 4));
