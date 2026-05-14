@@ -203,39 +203,37 @@ where
         commitment: Commitment,
     ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeAssignedShardVerified {
-            commitment,
-            response: responder,
-        };
-        let _ = self.sender.enqueue(msg);
+        let _ = self
+            .sender
+            .enqueue(Message::SubscribeAssignedShardVerified {
+                commitment,
+                response: responder,
+            });
         receiver
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
     pub fn subscribe(&self, commitment: Commitment) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeByCommitment {
+        let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,
             response: responder,
-        };
-        let _ = self.sender.enqueue(msg);
+        });
         receiver
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
     pub fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeByDigest {
+        let _ = self.sender.enqueue(Message::SubscribeByDigest {
             digest,
             response: responder,
-        };
-        let _ = self.sender.enqueue(msg);
+        });
         receiver
     }
 
     /// Request to prune all caches at and below the given commitment.
     pub fn prune(&self, through: Commitment) {
-        let msg = Message::Prune { through };
-        let _ = self.sender.enqueue(msg);
+        let _ = self.sender.enqueue(Message::Prune { through });
     }
 }
