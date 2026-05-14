@@ -745,8 +745,10 @@ mod tests {
                 .unwrap();
 
             // Put initial data
-            metadata.put(U64::new(1), b"hello".to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(U64::new(1), b"hello".to_vec())
+                .await
+                .unwrap();
 
             // Sync again with no changes - will rewrite because key_order_changed is recent
             // (on startup, key_order_changed is set to next_version)
@@ -785,8 +787,10 @@ mod tests {
                     .unwrap();
 
             // Put initial data
-            metadata.put(U64::new(1), b"hello".to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(U64::new(1), b"hello".to_vec())
+                .await
+                .unwrap();
 
             // Sync again to ensure both blobs are populated
             metadata.sync().await.unwrap();
@@ -833,8 +837,10 @@ mod tests {
             // Test: put -> remove -> put same key
             metadata.put(key.clone(), b"first".to_vec());
             metadata.remove(&key);
-            metadata.put(key.clone(), b"second".to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(key.clone(), b"second".to_vec())
+                .await
+                .unwrap();
             let value = metadata.get(&key).unwrap();
             assert_eq!(value, b"second");
 
@@ -843,8 +849,10 @@ mod tests {
             let value = metadata.get_mut(&key).unwrap();
             value[0] = b'T';
             metadata.remove(&key);
-            metadata.put(key.clone(), b"fourth".to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(key.clone(), b"fourth".to_vec())
+                .await
+                .unwrap();
             let value = metadata.get(&key).unwrap();
             assert_eq!(value, b"fourth");
 
@@ -1006,8 +1014,10 @@ mod tests {
 
             // Initial data
             metadata.put(U64::new(1), b"first".to_vec());
-            metadata.put(U64::new(2), b"second".to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(U64::new(2), b"second".to_vec())
+                .await
+                .unwrap();
 
             // Clear everything
             metadata.clear();
@@ -1029,8 +1039,10 @@ mod tests {
 
             // Repopulate with different data
             metadata.put(U64::new(3), b"third".to_vec());
-            metadata.put(U64::new(4), b"fourth".to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(U64::new(4), b"fourth".to_vec())
+                .await
+                .unwrap();
 
             // Verify new data
             assert_eq!(metadata.get(&U64::new(3)).unwrap(), b"third");

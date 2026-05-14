@@ -708,8 +708,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Persist metadata if pruning_boundary is mid-section.
         if !size.is_multiple_of(items_per_blob) {
-            metadata.put(PRUNING_BOUNDARY_KEY, size.to_be_bytes().to_vec());
-            metadata.sync().await?;
+            metadata
+                .put_sync(PRUNING_BOUNDARY_KEY, size.to_be_bytes().to_vec())
+                .await?;
         } else if metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
             metadata.remove(&PRUNING_BOUNDARY_KEY);
             metadata.sync().await?;
@@ -1001,8 +1002,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // Persist metadata only when pruning_boundary is mid-section.
         if !inner.pruning_boundary.is_multiple_of(self.items_per_blob) {
             let value = inner.pruning_boundary.to_be_bytes().to_vec();
-            inner.metadata.put(PRUNING_BOUNDARY_KEY, value);
-            inner.metadata.sync().await?;
+            inner.metadata.put_sync(PRUNING_BOUNDARY_KEY, value).await?;
         } else if inner.metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
             inner.metadata.sync().await?;
@@ -2944,8 +2944,10 @@ mod tests {
                 Metadata::<_, u64, Vec<u8>>::init(context.child("restore_meta"), meta_cfg.clone())
                     .await
                     .unwrap();
-            metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec())
+                .await
+                .unwrap();
 
             // Crash Scenario 2: After ensure_section_exists(), before metadata update
             // Target: init_at_size(12) -> should be section 2 (starts at 10)
