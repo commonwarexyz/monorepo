@@ -48,6 +48,8 @@ impl Message {
 }
 
 impl mailbox::Policy for Message {
+    type Overflow = VecDeque<Self>;
+
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match message.policy {
             Policy::Drop => false,

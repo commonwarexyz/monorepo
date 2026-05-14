@@ -50,8 +50,43 @@ use std::{
     task::{Context, Poll},
 };
 
+/// Retained overflow messages for a mailbox policy.
+pub trait Overflow<T>: Default {
+    /// Return whether the retained message set is empty.
+    fn is_empty(&self) -> bool;
+
+    /// Drain retained messages into `push` in delivery order.
+    ///
+    /// If `push` returns `Some`, the undelivered message and any later messages
+    /// must remain retained for a future drain.
+    fn drain<F>(&mut self, push: F)
+    where
+        F: FnMut(T) -> Option<T>;
+}
+
+impl<T> Overflow<T> for VecDeque<T> {
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(T) -> Option<T>,
+    {
+        while let Some(message) = self.pop_front() {
+            if let Some(message) = push(message) {
+                self.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 /// Overflow behavior for actor messages when an inbox is full.
 pub trait Policy: Sized {
+    /// Overflow storage used by this policy.
+    type Overflow: Overflow<Self>;
+
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
     /// Messages already in the ready queue are not provided here. Policy changes only apply to
@@ -71,12 +106,12 @@ pub trait Policy: Sized {
     /// This method should not unwind after mutating `overflow`. A panic, including one from a
     /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
     /// the mailbox.
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool;
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
 }
 
 // `activity` packs the published overflow state and in-flight overflow
 // mutations into one atomic word. The overflow lock serializes actual
-// `VecDeque` changes (this word lets the ready fast path avoid that lock when
+// overflow changes (this word lets the ready fast path avoid that lock when
 // overflow is inactive).
 //
 // The low bit records whether the most recently published overflow state was
@@ -96,7 +131,7 @@ pub trait Policy: Sized {
 //   snapshot.
 //
 // Activity accesses are relaxed because this word does not publish queue
-// contents. The overflow mutex serializes `VecDeque` access, and the ready queue
+// contents. The overflow mutex serializes overflow access, and the ready queue
 // owns its own synchronization. Stale activity observations only decide whether
 // a caller tries a fast path, locks overflow, or waits for a later wake.
 const OVERFLOW_HAS_MESSAGES: usize = 1;
@@ -217,16 +252,16 @@ cfg_if::cfg_if! {
     }
 }
 
-struct Overflow<T> {
-    queue: Mutex<VecDeque<T>>,
+struct OverflowState<T: Policy> {
+    queue: Mutex<T::Overflow>,
     activity: AtomicUsize,
 }
 
-impl<T> Overflow<T> {
+impl<T: Policy> OverflowState<T> {
     #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(T::Overflow::default()),
             activity: AtomicUsize::new(0),
         }
     }
@@ -239,15 +274,12 @@ impl<T> Overflow<T> {
         ready.push(message)
     }
 
-    fn enqueue(&self, ready: &Ready<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback
-    where
-        T: Policy,
-    {
+    fn enqueue(&self, ready: &Ready<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback {
         // Mark overflow active so racing senders stay off the ready fast path.
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
         if is_closed() {
-            mutation.publish(&queue);
+            mutation.publish(queue.is_empty());
             return Feedback::Closed;
         }
 
@@ -257,7 +289,7 @@ impl<T> Overflow<T> {
         let message = if queue.is_empty() {
             match ready.push(message) {
                 Ok(()) => {
-                    mutation.publish(&queue);
+                    mutation.publish(queue.is_empty());
                     return Feedback::Ok;
                 }
                 Err(message) => message,
@@ -272,7 +304,7 @@ impl<T> Overflow<T> {
         } else {
             Feedback::Dropped
         };
-        mutation.publish(&queue);
+        mutation.publish(queue.is_empty());
         feedback
     }
 
@@ -284,16 +316,8 @@ impl<T> Overflow<T> {
 
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
-        while let Some(message) = queue.pop_front() {
-            match ready.push(message) {
-                Ok(()) => {}
-                Err(message) => {
-                    queue.push_front(message);
-                    break;
-                }
-            }
-        }
-        mutation.publish(&queue);
+        queue.drain(|message| ready.push(message).err());
+        mutation.publish(queue.is_empty());
     }
 }
 
@@ -307,8 +331,8 @@ impl<'a> Mutation<'a> {
         Self { activity }
     }
 
-    fn publish<T>(&self, queue: &VecDeque<T>) {
-        if queue.is_empty() {
+    fn publish(&self, is_empty: bool) {
+        if is_empty {
             self.activity
                 .fetch_and(!OVERFLOW_HAS_MESSAGES, Ordering::Relaxed);
         } else {
@@ -327,9 +351,9 @@ impl Drop for Mutation<'_> {
     }
 }
 
-struct State<T> {
+struct State<T: Policy> {
     ready: Ready<T>,
-    overflow: Overflow<T>,
+    overflow: OverflowState<T>,
     closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
@@ -413,11 +437,11 @@ impl<T: Policy> Sender<T> {
 ///
 /// Dropping the last sender disconnects the mailbox, but the receiver continues
 /// returning buffered messages until ready and overflow are empty.
-pub struct Receiver<T> {
+pub struct Receiver<T: Policy> {
     state: Arc<State<T>>,
 }
 
-impl<T> Receiver<T> {
+impl<T: Policy> Receiver<T> {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         // Fast path avoids waker churn when a message is already ready.
         if let Some(message) = self.pop() {
@@ -483,7 +507,7 @@ impl<T> Receiver<T> {
     }
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T: Policy> Drop for Receiver<T> {
     fn drop(&mut self) {
         // Publish closure so future sends stop accepting messages.
         self.state.closed.store(true, Ordering::Release);
@@ -494,7 +518,7 @@ impl<T> Drop for Receiver<T> {
 pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let state = Arc::new(State {
         ready: Ready::new(capacity.get()),
-        overflow: Overflow::new(),
+        overflow: OverflowState::new(),
         closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),
@@ -533,6 +557,8 @@ mod tests {
     }
 
     impl Policy for Message {
+        type Overflow = VecDeque<Self>;
+
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             match message {
                 Self::Update(value) => {
@@ -841,6 +867,8 @@ mod tests {
     }
 
     impl Policy for ClearingMessage {
+        type Overflow = VecDeque<Self>;
+
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             overflow.push_back(message);
             overflow.clear();
@@ -871,6 +899,8 @@ mod tests {
     }
 
     impl Policy for SpillAndDropMessage {
+        type Overflow = VecDeque<Self>;
+
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             overflow.push_back(message);
             false
@@ -938,6 +968,8 @@ mod loom_tests {
     }
 
     impl Policy for Message {
+        type Overflow = VecDeque<Self>;
+
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             match message {
                 Self::Drop(_) => false,
@@ -950,6 +982,8 @@ mod loom_tests {
     }
 
     impl Policy for OrderedMessage {
+        type Overflow = VecDeque<Self>;
+
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             let gate = match &message {
                 Self::Item(_) => None,
@@ -967,6 +1001,8 @@ mod loom_tests {
     }
 
     impl Policy for ReplacingMessage {
+        type Overflow = VecDeque<Self>;
+
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             match message {
                 Self::FillReady => false,
