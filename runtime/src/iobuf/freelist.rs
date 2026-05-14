@@ -10,7 +10,7 @@
 //! A [`PooledBuffer`] does not carry its allocation layout. Any buffer created
 //! by this freelist, or taken from it, must eventually be returned to the same
 //! freelist before the freelist is finally dropped. [`Freelist::drain`] and
-//! [`Drop`] only release buffers currently parked here, **an outstanding buffer
+//! [`Drop`] only release buffers currently parked here. **An outstanding buffer
 //! that is never returned will leak**.
 //!
 //! This is intentionally narrower than a general multi-producer, multi-consumer
