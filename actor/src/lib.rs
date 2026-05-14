@@ -15,7 +15,7 @@ commonware_macros::stability_scope!(BETA {
     pub enum Feedback {
         /// The work was accepted within the configured capacity.
         Ok,
-        /// The submission was handled outside the configured capacity and requests sender backoff.
+        /// The submission exceeded the configured capacity and requests sender backoff.
         Backoff,
         /// The endpoint is closed.
         Closed,
