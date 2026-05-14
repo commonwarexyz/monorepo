@@ -52,8 +52,18 @@ jobs:
     - name: Install Dylint
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
       run: |
-        cargo install cargo-dylint --version 6.0.0 --locked
-        cargo install dylint-link --version 6.0.0 --locked
+        #!/usr/bin/bash
+        set -euo pipefail
+
+        VERSION="6.0.0"
+        if ! cargo install --list | grep -q "^cargo-dylint v$VERSION:"; then
+          echo "cargo-dylint $VERSION not found, installing"
+          cargo install cargo-dylint --version "$VERSION" --locked --force
+        fi
+        if ! cargo install --list | grep -q "^dylint-link v$VERSION:"; then
+          echo "dylint-link $VERSION not found, installing"
+          cargo install dylint-link --version "$VERSION" --locked --force
+        fi
     - name: Fmt
       run: just check-fmt
     - name: Lint
