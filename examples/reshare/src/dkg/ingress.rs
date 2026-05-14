@@ -83,10 +83,13 @@ where
     /// [Actor]: super::Actor
     pub async fn act(&mut self) -> Option<SignedDealerLog<V, C>> {
         let (response_tx, response_rx) = oneshot::channel();
-        let message = Message::Act {
-            response: response_tx,
-        };
-        if !self.sender.enqueue(message).accepted() {
+        if !self
+            .sender
+            .enqueue(Message::Act {
+                response: response_tx,
+            })
+            .accepted()
+        {
             error!("failed to send act message");
             return None;
         }
