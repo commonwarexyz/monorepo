@@ -165,9 +165,179 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
 }
 
+#[derive(Clone, Copy, Default)]
+struct Cutoff {
+    height: Option<Height>,
+}
+
+impl Cutoff {
+    const fn new(height: Height) -> Self {
+        Self {
+            height: Some(height),
+        }
+    }
+
+    fn update_max_height(max: &mut Option<Height>, height: Height) {
+        if max.is_none_or(|current| height > current) {
+            *max = Some(height);
+        }
+    }
+
+    fn observe<S: Scheme, V: Variant>(&mut self, message: &Message<S, V>) {
+        match message {
+            Message::SetFloor { height } | Message::Prune { height } => {
+                Self::update_max_height(&mut self.height, *height);
+            }
+            _ => {}
+        }
+    }
+
+    fn drops_below(self, height: Height) -> bool {
+        self.height.is_some_and(|cutoff| height < cutoff)
+    }
+
+    fn drops_at_or_below(self, height: Height) -> bool {
+        self.height.is_some_and(|cutoff| height <= cutoff)
+    }
+}
+
+impl<S: Scheme, V: Variant> Message<S, V> {
+    fn stale(&self, cutoff: Cutoff) -> bool {
+        match self {
+            Self::GetInfo {
+                identifier: Identifier::Height(height),
+                ..
+            }
+            | Self::GetBlock {
+                identifier: Identifier::Height(height),
+                ..
+            }
+            | Self::GetFinalization { height, .. } => cutoff.drops_below(*height),
+            Self::HintFinalized { height, .. } => cutoff.drops_at_or_below(*height),
+            Self::GetBlock {
+                identifier: Identifier::Digest(_) | Identifier::Latest,
+                ..
+            }
+            | Self::GetInfo {
+                identifier: Identifier::Digest(_) | Identifier::Latest,
+                ..
+            } => false,
+            _ => false,
+        }
+    }
+}
+
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
-        overflow.push_back(message);
+        match message {
+            Self::HintFinalized { height, targets } => {
+                let mut cutoff = Cutoff::default();
+                let mut pending_targets = Some(targets);
+
+                // Coalesce same-height hints into one request with all known targets.
+                for message in overflow.iter_mut() {
+                    cutoff.observe(message);
+                    if let Self::HintFinalized {
+                        height: existing_height,
+                        targets: existing_targets,
+                    } = message
+                    {
+                        if *existing_height != height {
+                            continue;
+                        }
+
+                        for target in pending_targets.take().expect("targets must be present") {
+                            if !existing_targets.contains(&target) {
+                                existing_targets.push(target);
+                            }
+                        }
+                        return true;
+                    }
+                }
+
+                let targets = pending_targets.expect("targets must be present");
+                let message = Self::HintFinalized { height, targets };
+                if message.stale(cutoff) {
+                    return false;
+                }
+                overflow.push_back(message);
+            }
+            Self::SetFloor { height } => {
+                let mut cutoff = Cutoff::new(height);
+                let mut append = true;
+
+                // Use the incoming floor to drop obsolete work before appending it.
+                overflow.retain_mut(|message| {
+                    let keep = match message {
+                        Self::SetFloor {
+                            height: existing_height,
+                        } => {
+                            if height > *existing_height {
+                                false
+                            } else {
+                                append = false;
+                                true
+                            }
+                        }
+                        _ => true,
+                    };
+                    if !keep {
+                        return false;
+                    }
+
+                    cutoff.observe(message);
+                    !message.stale(cutoff)
+                });
+
+                if append {
+                    overflow.push_back(Self::SetFloor { height });
+                }
+            }
+            Self::Prune { height } => {
+                let mut cutoff = Cutoff::new(height);
+                let mut append = true;
+
+                // Use the incoming prune to drop obsolete work before appending it.
+                overflow.retain_mut(|message| {
+                    let keep = match message {
+                        Self::Prune {
+                            height: existing_height,
+                        } => {
+                            if height > *existing_height {
+                                false
+                            } else {
+                                append = false;
+                                true
+                            }
+                        }
+                        _ => true,
+                    };
+                    if !keep {
+                        return false;
+                    }
+
+                    cutoff.observe(message);
+                    !message.stale(cutoff)
+                });
+
+                if append {
+                    overflow.push_back(Self::Prune { height });
+                }
+            }
+            message => {
+                let mut cutoff = Cutoff::default();
+                for existing in overflow.iter() {
+                    cutoff.observe(existing);
+                    if message.stale(cutoff) {
+                        return false;
+                    }
+                }
+
+                // Preserve ordinary FIFO overflow behavior for other messages.
+                overflow.push_back(message);
+            }
+        }
+
         true
     }
 }
@@ -444,5 +614,259 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
             }
         };
         self.sender.enqueue(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marshal::{mocks::harness, standard::Standard};
+    use commonware_cryptography::{ed25519::PrivateKey, Signer as _};
+
+    type TestMessage = Message<harness::S, Standard<harness::B>>;
+
+    fn public_key(seed: u64) -> harness::K {
+        PrivateKey::from_seed(seed).public_key()
+    }
+
+    fn get_info(height: u64) -> TestMessage {
+        let (response, _) = oneshot::channel();
+        TestMessage::GetInfo {
+            identifier: Identifier::Height(Height::new(height)),
+            response,
+        }
+    }
+
+    fn get_block(height: u64) -> TestMessage {
+        let (response, _) = oneshot::channel();
+        TestMessage::GetBlock {
+            identifier: Identifier::Height(Height::new(height)),
+            response,
+        }
+    }
+
+    fn get_finalization(height: u64) -> TestMessage {
+        let (response, _) = oneshot::channel();
+        TestMessage::GetFinalization {
+            height: Height::new(height),
+            response,
+        }
+    }
+
+    fn hint_finalized(height: u64, target: harness::K) -> TestMessage {
+        TestMessage::HintFinalized {
+            height: Height::new(height),
+            targets: NonEmptyVec::new(target),
+        }
+    }
+
+    fn set_floor(height: u64) -> TestMessage {
+        TestMessage::SetFloor {
+            height: Height::new(height),
+        }
+    }
+
+    fn prune(height: u64) -> TestMessage {
+        TestMessage::Prune {
+            height: Height::new(height),
+        }
+    }
+
+    fn has_get_info(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
+        overflow.iter().any(|message| {
+            matches!(
+                message,
+                TestMessage::GetInfo {
+                    identifier: Identifier::Height(found),
+                    ..
+                } if *found == Height::new(height)
+            )
+        })
+    }
+
+    fn has_get_block(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
+        overflow.iter().any(|message| {
+            matches!(
+                message,
+                TestMessage::GetBlock {
+                    identifier: Identifier::Height(found),
+                    ..
+                } if *found == Height::new(height)
+            )
+        })
+    }
+
+    fn has_get_finalization(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
+        overflow.iter().any(|message| {
+            matches!(
+                message,
+                TestMessage::GetFinalization { height: found, .. }
+                    if *found == Height::new(height)
+            )
+        })
+    }
+
+    fn has_hint(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
+        overflow.iter().any(|message| {
+            matches!(
+                message,
+                TestMessage::HintFinalized { height: found, .. }
+                    if *found == Height::new(height)
+            )
+        })
+    }
+
+    fn has_prune(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
+        overflow.iter().any(|message| {
+            matches!(
+                message,
+                TestMessage::Prune { height: found } if *found == Height::new(height)
+            )
+        })
+    }
+
+    #[test]
+    fn policy_coalesces_hint_targets() {
+        let mut overflow = VecDeque::new();
+        let first = public_key(1);
+        let second = public_key(2);
+
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            hint_finalized(10, first.clone())
+        ));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            hint_finalized(10, first.clone())
+        ));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            hint_finalized(10, second.clone())
+        ));
+
+        assert_eq!(overflow.len(), 1);
+        let TestMessage::HintFinalized { height, targets } = &overflow[0] else {
+            panic!("expected hint");
+        };
+        assert_eq!(*height, Height::new(10));
+        assert_eq!(targets.len().get(), 2);
+        assert!(targets.contains(&first));
+        assert!(targets.contains(&second));
+    }
+
+    #[test]
+    fn policy_keeps_highest_floor_and_prune() {
+        let mut overflow = VecDeque::new();
+
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            set_floor(5)
+        ));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            set_floor(3)
+        ));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            set_floor(8)
+        ));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(4)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(2)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
+
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            &overflow[0],
+            TestMessage::SetFloor { height } if *height == Height::new(8)
+        ));
+        assert!(matches!(
+            &overflow[1],
+            TestMessage::Prune { height } if *height == Height::new(7)
+        ));
+    }
+
+    #[test]
+    fn policy_replaces_floor_and_prune_at_back() {
+        let mut overflow = VecDeque::new();
+
+        overflow.push_back(set_floor(5));
+        overflow.push_back(get_info(4));
+        overflow.push_back(get_block(7));
+        overflow.push_back(hint_finalized(8, public_key(1)));
+        overflow.push_back(get_block(8));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            set_floor(8)
+        ));
+        assert_eq!(overflow.len(), 2);
+        assert!(!has_get_info(&overflow, 4));
+        assert!(!has_get_block(&overflow, 7));
+        assert!(!has_hint(&overflow, 8));
+        assert!(has_get_block(&overflow, 8));
+        assert!(matches!(
+            &overflow[1],
+            TestMessage::SetFloor { height } if *height == Height::new(8)
+        ));
+
+        overflow.clear();
+        overflow.push_back(prune(5));
+        overflow.push_back(get_finalization(4));
+        overflow.push_back(get_block(6));
+        overflow.push_back(hint_finalized(6, public_key(2)));
+        overflow.push_back(get_block(7));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
+        assert_eq!(overflow.len(), 2);
+        assert!(!has_get_finalization(&overflow, 4));
+        assert!(!has_get_block(&overflow, 6));
+        assert!(!has_hint(&overflow, 6));
+        assert!(has_get_block(&overflow, 7));
+        assert!(matches!(
+            &overflow[1],
+            TestMessage::Prune { height } if *height == Height::new(7)
+        ));
+    }
+
+    #[test]
+    fn policy_drops_stale_requests_after_prior_floor_and_prune() {
+        let mut overflow = VecDeque::new();
+
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            set_floor(5)
+        ));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info(4)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(5)));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block(4)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(5)));
+        assert!(!<TestMessage as Policy>::handle(
+            &mut overflow,
+            get_finalization(4)
+        ));
+        assert!(!<TestMessage as Policy>::handle(
+            &mut overflow,
+            hint_finalized(5, public_key(1))
+        ));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            hint_finalized(6, public_key(2))
+        ));
+
+        assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
+        assert!(!has_get_info(&overflow, 5));
+        assert!(!has_get_block(&overflow, 5));
+        assert!(!has_hint(&overflow, 5));
+        assert!(!has_hint(&overflow, 6));
+        assert!(has_prune(&overflow, 7));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info(6)));
+        assert!(!<TestMessage as Policy>::handle(
+            &mut overflow,
+            get_finalization(6)
+        ));
+        assert!(!has_get_finalization(&overflow, 6));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block(6)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(7)));
+        assert!(has_get_info(&overflow, 7));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(7)));
+        assert!(has_get_block(&overflow, 7));
     }
 }
