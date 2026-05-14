@@ -668,13 +668,13 @@ pub fn observe(
         .cloned()
         .try_collect()
         .expect("selected dealers are unique");
-    Ok(Output::new(
+    Output::new(
         *info.summary(),
         sharing,
         info.player_quorum,
         dealers,
         info.players.clone(),
-    )?)
+    )
 }
 
 /// Compute the public output and recover this player's private share.
