@@ -201,19 +201,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         }
     }
 
-    pub(crate) fn response_closed(&self) -> bool {
-        match self {
-            Self::GetInfo { response, .. } => response.is_closed(),
-            Self::GetBlock { response, .. } => response.is_closed(),
-            Self::GetFinalization { response, .. } => response.is_closed(),
-            Self::SubscribeByDigest { response, .. }
-            | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
-            Self::GetVerified { response, .. } => response.is_closed(),
-            _ => false,
-        }
-    }
-
-    fn ack_stale_durable(&mut self) {
+    fn handle_stale(&mut self) {
         match self {
             Self::Proposed { ack, .. }
             | Self::Verified { ack, .. }
@@ -224,6 +212,18 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 }
             }
             _ => {}
+        }
+    }
+
+    pub(crate) fn response_closed(&self) -> bool {
+        match self {
+            Self::GetInfo { response, .. } => response.is_closed(),
+            Self::GetBlock { response, .. } => response.is_closed(),
+            Self::GetFinalization { response, .. } => response.is_closed(),
+            Self::SubscribeByDigest { response, .. }
+            | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
+            Self::GetVerified { response, .. } => response.is_closed(),
+            _ => false,
         }
     }
 }
@@ -257,7 +257,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         if message.response_closed() {
             false
         } else if message.stale(height) {
-            message.ack_stale_durable();
+            message.handle_stale();
             false
         } else {
             true
@@ -332,7 +332,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.retain_useful();
 
         if message.stale(self.height()) {
-            message.ack_stale_durable();
+            message.handle_stale();
             return false;
         }
 
