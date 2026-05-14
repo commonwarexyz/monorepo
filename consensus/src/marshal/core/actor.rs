@@ -651,25 +651,23 @@ where
                     Message::GetBlock {
                         identifier,
                         response,
-                    } => {
-                        match identifier {
-                            BlockID::Digest(digest) => {
-                                let result = self.find_block_by_digest(&mut buffer, digest).await;
-                                response.send_lossy(result);
-                            }
-                            BlockID::Height(height) => {
-                                let result = self.get_finalized_block(height).await;
-                                response.send_lossy(result);
-                            }
-                            BlockID::Latest => {
-                                let block = match self.get_latest().await {
-                                    Some((_, digest, _)) => {
-                                        self.find_block_by_digest(&mut buffer, digest).await
-                                    }
-                                    None => None,
-                                };
-                                response.send_lossy(block);
-                            }
+                    } => match identifier {
+                        BlockID::Digest(digest) => {
+                            let result = self.find_block_by_digest(&mut buffer, digest).await;
+                            response.send_lossy(result);
+                        }
+                        BlockID::Height(height) => {
+                            let result = self.get_finalized_block(height).await;
+                            response.send_lossy(result);
+                        }
+                        BlockID::Latest => {
+                            let block = match self.get_latest().await {
+                                Some((_, digest, _)) => {
+                                    self.find_block_by_digest(&mut buffer, digest).await
+                                }
+                                None => None,
+                            };
+                            response.send_lossy(block);
                         }
                     }
                     Message::GetFinalization { height, response } => {
