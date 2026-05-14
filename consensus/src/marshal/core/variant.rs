@@ -142,10 +142,5 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn finalized(&self, commitment: V::Commitment);
 
     /// Send a block to peers.
-    fn send(
-        &self,
-        round: Round,
-        block: V::Block,
-        recipients: Recipients<Self::PublicKey>,
-    );
+    fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
 }

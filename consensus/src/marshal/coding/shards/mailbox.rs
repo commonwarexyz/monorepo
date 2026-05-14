@@ -133,18 +133,16 @@ where
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
-        let msg = Message::Proposed { block, round };
-        let _ = self.sender.enqueue(msg);
+        let _ = self.sender.enqueue(Message::Proposed { block, round });
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
     pub fn discovered(&self, commitment: Commitment, leader: P, round: Round) {
-        let msg = Message::Discovered {
+        let _ = self.sender.enqueue(Message::Discovered {
             commitment,
             leader,
             round,
-        };
-        let _ = self.sender.enqueue(msg);
+        });
     }
 
     /// Request a reconstructed block by its [`Commitment`].
