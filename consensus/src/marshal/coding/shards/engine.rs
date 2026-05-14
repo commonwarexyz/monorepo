@@ -480,10 +480,16 @@ where
                     commitment,
                     response,
                 } => {
+                    if response.is_closed() {
+                        continue;
+                    }
                     let block = self.reconstructed_blocks.get(&commitment).cloned();
                     response.send_lossy(block);
                 }
                 Message::GetByDigest { digest, response } => {
+                    if response.is_closed() {
+                        continue;
+                    }
                     let block = self
                         .reconstructed_blocks
                         .iter()
@@ -901,6 +907,10 @@ where
         commitment: Commitment,
         response: oneshot::Sender<()>,
     ) {
+        if response.is_closed() {
+            return;
+        }
+
         // Answer immediately if our own shard has been verified.
         let has_shard = self
             .state
@@ -933,6 +943,10 @@ where
         key: BlockSubscriptionKey<B::Digest>,
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
+        if response.is_closed() {
+            return;
+        }
+
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => {
                 self.reconstructed_blocks.get(&commitment)

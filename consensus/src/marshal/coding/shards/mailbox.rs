@@ -90,6 +90,26 @@ where
     },
 }
 
+impl<B, C, H, P> Message<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn response_closed(&self) -> bool {
+        match self {
+            Self::GetByCommitment { response, .. } | Self::GetByDigest { response, .. } => {
+                response.is_closed()
+            }
+            Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
+            Self::SubscribeByCommitment { response, .. }
+            | Self::SubscribeByDigest { response, .. } => response.is_closed(),
+            _ => false,
+        }
+    }
+}
+
 impl<B, C, H, P> Policy for Message<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -100,6 +120,13 @@ where
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        let useful = !message.response_closed();
+
+        overflow.retain(|message| !message.response_closed());
+        if !useful {
+            return false;
+        }
+
         overflow.push_back(message);
         true
     }

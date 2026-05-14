@@ -72,6 +72,16 @@ enum PendingVerification<S: CertificateScheme, V: Variant> {
     },
 }
 
+impl<S: CertificateScheme, V: Variant> PendingVerification<S, V> {
+    fn response_closed(&self) -> bool {
+        match self {
+            Self::Notarized { response, .. } | Self::Finalized { response, .. } => {
+                response.is_closed()
+            }
+        }
+    }
+}
+
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<V: Variant, A: Acknowledgement> {
@@ -493,6 +503,9 @@ where
                         identifier,
                         response,
                     } => {
+                        if response.is_closed() {
+                            continue;
+                        }
                         let info = match identifier {
                             // TODO: Instead of pulling out the entire block, determine the
                             // height directly from the archive by mapping the digest to
@@ -516,6 +529,9 @@ where
                         response.send_lossy(info);
                     }
                     Message::GetVerified { round, response } => {
+                        if response.is_closed() {
+                            continue;
+                        }
                         let block = self.cache.get_verified(round).await.map(Into::into);
                         response.send_lossy(block);
                     }
@@ -637,26 +653,34 @@ where
                     Message::GetBlock {
                         identifier,
                         response,
-                    } => match identifier {
-                        BlockID::Digest(digest) => {
-                            let result = self.find_block_by_digest(&mut buffer, digest).await;
-                            response.send_lossy(result);
+                    } => {
+                        if response.is_closed() {
+                            continue;
                         }
-                        BlockID::Height(height) => {
-                            let result = self.get_finalized_block(height).await;
-                            response.send_lossy(result);
+                        match identifier {
+                            BlockID::Digest(digest) => {
+                                let result = self.find_block_by_digest(&mut buffer, digest).await;
+                                response.send_lossy(result);
+                            }
+                            BlockID::Height(height) => {
+                                let result = self.get_finalized_block(height).await;
+                                response.send_lossy(result);
+                            }
+                            BlockID::Latest => {
+                                let block = match self.get_latest().await {
+                                    Some((_, digest, _)) => {
+                                        self.find_block_by_digest(&mut buffer, digest).await
+                                    }
+                                    None => None,
+                                };
+                                response.send_lossy(block);
+                            }
                         }
-                        BlockID::Latest => {
-                            let block = match self.get_latest().await {
-                                Some((_, digest, _)) => {
-                                    self.find_block_by_digest(&mut buffer, digest).await
-                                }
-                                None => None,
-                            };
-                            response.send_lossy(block);
-                        }
-                    },
+                    }
                     Message::GetFinalization { height, response } => {
+                        if response.is_closed() {
+                            continue;
+                        }
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
                     }
@@ -764,6 +788,7 @@ where
                 // Drain up to max_repair messages: blocks handled immediately,
                 // certificates batched for verification, produces deferred.
                 let mut needs_sync = false;
+                let mut handled = false;
                 let mut produces = Vec::new();
                 let mut delivers = Vec::new();
                 for msg in std::iter::once(message)
@@ -772,6 +797,10 @@ where
                 {
                     match msg {
                         handler::Message::Produce { key, response } => {
+                            if response.is_closed() {
+                                continue;
+                            }
+                            handled = true;
                             produces.push((key, response));
                         }
                         handler::Message::Deliver {
@@ -779,6 +808,10 @@ where
                             value,
                             response,
                         } => {
+                            if response.is_closed() {
+                                continue;
+                            }
+                            handled = true;
                             needs_sync |= self
                                 .handle_deliver(
                                     key,
@@ -790,6 +823,9 @@ where
                                 .await;
                         }
                     }
+                }
+                if !handled {
+                    continue;
                 }
 
                 // Batch verify and process all delivers.
@@ -826,6 +862,10 @@ where
         response: oneshot::Sender<Bytes>,
         buffer: &Buf,
     ) {
+        if response.is_closed() {
+            return;
+        }
+
         match key {
             Request::Block(commitment) => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
@@ -870,6 +910,10 @@ where
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
+        if response.is_closed() {
+            return;
+        }
+
         let digest = match key {
             BlockSubscriptionKey::Digest(digest) => digest,
             BlockSubscriptionKey::Commitment(commitment) => V::commitment_to_inner(commitment),
@@ -951,6 +995,10 @@ where
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
+        if response.is_closed() {
+            return false;
+        }
+
         match key {
             Request::Block(commitment) => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
@@ -1072,6 +1120,7 @@ where
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
+        delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
             return false;
         }

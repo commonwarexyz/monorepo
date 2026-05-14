@@ -201,6 +201,18 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         }
     }
 
+    fn response_closed(&self) -> bool {
+        match self {
+            Self::GetInfo { response, .. } => response.is_closed(),
+            Self::GetBlock { response, .. } => response.is_closed(),
+            Self::GetFinalization { response, .. } => response.is_closed(),
+            Self::SubscribeByDigest { response, .. }
+            | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
+            Self::GetVerified { response, .. } => response.is_closed(),
+            _ => false,
+        }
+    }
+
     fn ack_stale_durable(&mut self) {
         match self {
             Self::Proposed { ack, .. }
@@ -241,66 +253,84 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.height().is_some_and(|current| height <= current)
     }
 
+    fn retain_message(message: &mut Message<S, V>, height: Option<Height>) -> bool {
+        if message.response_closed() {
+            false
+        } else if message.stale(height) {
+            message.ack_stale_durable();
+            false
+        } else {
+            true
+        }
+    }
+
     fn retain_useful(&mut self) {
         let height = self.height();
-
-        self.messages.retain_mut(|message| {
-            if message.stale(height) {
-                message.ack_stale_durable();
-                false
-            } else {
-                true
-            }
-        });
+        self.messages
+            .retain_mut(|message| Self::retain_message(message, height));
     }
 
     fn set_floor(&mut self, height: Height) -> bool {
         if self.floor.is_none_or(|current| height > current) {
             self.floor = Some(height);
-            self.retain_useful();
         }
+        self.retain_useful();
         true
     }
 
     fn prune(&mut self, height: Height) -> bool {
         if self.prune.is_none_or(|current| height > current) {
             self.prune = Some(height);
-            self.retain_useful();
         }
+        self.retain_useful();
         true
     }
 
     fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) -> bool {
         if self.drops_at_or_below(height) {
+            self.retain_useful();
             return false;
         }
 
-        for message in &mut self.messages {
+        let current = self.height();
+        let mut targets = Some(targets);
+
+        self.messages.retain_mut(|message| {
+            if !Self::retain_message(message, current) {
+                return false;
+            }
+
             let Message::HintFinalized {
                 height: existing,
                 targets: pending,
             } = message
             else {
-                continue;
+                return true;
             };
             if *existing != height {
-                continue;
+                return true;
             }
 
-            for target in targets {
-                if !pending.contains(&target) {
-                    pending.push(target);
+            if let Some(targets) = targets.take() {
+                for target in targets {
+                    if !pending.contains(&target) {
+                        pending.push(target);
+                    }
                 }
             }
-            return true;
-        }
+            true
+        });
 
-        self.messages
-            .push_back(Message::HintFinalized { height, targets });
+        if let Some(targets) = targets {
+            self.messages
+                .push_back(Message::HintFinalized { height, targets });
+        }
         true
     }
 
     fn push_message(&mut self, mut message: Message<S, V>) -> bool {
+        self.retain_useful();
+
         if message.stale(self.height()) {
             message.ack_stale_durable();
             return false;
@@ -368,6 +398,11 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+        if message.response_closed() {
+            overflow.retain_useful();
+            return false;
+        }
+
         match message {
             Self::HintFinalized { height, targets } => overflow.hint_finalized(height, targets),
             Self::SetFloor { height } => overflow.set_floor(height),
@@ -653,12 +688,15 @@ mod tests {
         harness::make_raw_block(harness::D::EMPTY, Height::new(height), height)
     }
 
-    fn get_info(height: u64) -> TestMessage {
-        let (response, _) = oneshot::channel();
-        TestMessage::GetInfo {
-            identifier: Identifier::Height(Height::new(height)),
-            response,
-        }
+    fn get_info(height: u64) -> (TestMessage, oneshot::Receiver<Option<(Height, harness::D)>>) {
+        let (response, receiver) = oneshot::channel();
+        (
+            TestMessage::GetInfo {
+                identifier: Identifier::Height(Height::new(height)),
+                response,
+            },
+            receiver,
+        )
     }
 
     fn proposed(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
@@ -697,20 +735,55 @@ mod tests {
         )
     }
 
-    fn get_block(height: u64) -> TestMessage {
-        let (response, _) = oneshot::channel();
-        TestMessage::GetBlock {
-            identifier: Identifier::Height(Height::new(height)),
-            response,
-        }
+    fn get_block(height: u64) -> (TestMessage, oneshot::Receiver<Option<harness::B>>) {
+        let (response, receiver) = oneshot::channel();
+        (
+            TestMessage::GetBlock {
+                identifier: Identifier::Height(Height::new(height)),
+                response,
+            },
+            receiver,
+        )
     }
 
-    fn get_finalization(height: u64) -> TestMessage {
-        let (response, _) = oneshot::channel();
-        TestMessage::GetFinalization {
-            height: Height::new(height),
-            response,
-        }
+    fn get_finalization(
+        height: u64,
+    ) -> (
+        TestMessage,
+        oneshot::Receiver<Option<Finalization<harness::S, harness::D>>>,
+    ) {
+        let (response, receiver) = oneshot::channel();
+        (
+            TestMessage::GetFinalization {
+                height: Height::new(height),
+                response,
+            },
+            receiver,
+        )
+    }
+
+    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<harness::B>) {
+        let (response, receiver) = oneshot::channel();
+        (
+            TestMessage::SubscribeByDigest {
+                round: Some(round(height)),
+                digest: block(height).digest(),
+                response,
+            },
+            receiver,
+        )
+    }
+
+    fn subscribe_by_commitment(height: u64) -> (TestMessage, oneshot::Receiver<harness::B>) {
+        let (response, receiver) = oneshot::channel();
+        (
+            TestMessage::SubscribeByCommitment {
+                round: Some(round(height)),
+                commitment: block(height).digest(),
+                response,
+            },
+            receiver,
+        )
     }
 
     fn hint_finalized(height: u64, target: harness::K) -> TestMessage {
@@ -751,8 +824,9 @@ mod tests {
                 message,
                 TestMessage::GetInfo {
                     identifier: Identifier::Height(found),
+                    response,
                     ..
-                } if *found == Height::new(height)
+                } if *found == Height::new(height) && !response.is_closed()
             )
         })
     }
@@ -763,8 +837,9 @@ mod tests {
                 message,
                 TestMessage::GetBlock {
                     identifier: Identifier::Height(found),
+                    response,
                     ..
-                } if *found == Height::new(height)
+                } if *found == Height::new(height) && !response.is_closed()
             )
         })
     }
@@ -773,8 +848,10 @@ mod tests {
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
-                TestMessage::GetFinalization { height: found, .. }
-                    if *found == Height::new(height)
+                TestMessage::GetFinalization {
+                    height: found,
+                    response,
+                } if *found == Height::new(height) && !response.is_closed()
             )
         })
     }
@@ -812,6 +889,24 @@ mod tests {
         overflow.prune == Some(Height::new(height))
     }
 
+    fn has_subscription(overflow: &TestPending, height: u64) -> bool {
+        let expected = block(height).digest();
+        overflow.messages.iter().any(|message| {
+            matches!(
+                message,
+                TestMessage::SubscribeByDigest { digest, response, .. }
+                    if *digest == expected && !response.is_closed()
+            ) || matches!(
+                message,
+                TestMessage::SubscribeByCommitment {
+                    commitment,
+                    response,
+                    ..
+                } if *commitment == expected && !response.is_closed()
+            )
+        })
+    }
+
     #[test]
     fn policy_coalesces_hint_targets() {
         let mut overflow = pending();
@@ -839,17 +934,73 @@ mod tests {
     }
 
     #[test]
+    fn policy_drops_closed_subscriptions() {
+        let mut overflow = pending();
+
+        let (pending_closed, pending_closed_rx) = subscribe_by_digest(1);
+        drop(pending_closed_rx);
+        overflow.messages.push_back(pending_closed);
+
+        let (pending_open, mut pending_open_rx) = subscribe_by_commitment(2);
+        overflow.messages.push_back(pending_open);
+
+        let (current_closed, current_closed_rx) = subscribe_by_digest(3);
+        drop(current_closed_rx);
+        assert!(!<TestMessage as Policy>::handle(
+            &mut overflow,
+            current_closed
+        ));
+
+        assert!(!has_subscription(&overflow, 1));
+        assert!(has_subscription(&overflow, 2));
+        assert!(!has_subscription(&overflow, 3));
+        assert!(matches!(
+            pending_open_rx.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn policy_drops_closed_responses() {
+        let mut overflow = pending();
+
+        let (pending_closed, pending_closed_rx) = get_block(1);
+        drop(pending_closed_rx);
+        overflow.messages.push_back(pending_closed);
+
+        let (pending_open, mut pending_open_rx) = get_info(2);
+        overflow.messages.push_back(pending_open);
+
+        let (current_closed, current_closed_rx) = get_finalization(3);
+        drop(current_closed_rx);
+        assert!(!<TestMessage as Policy>::handle(
+            &mut overflow,
+            current_closed
+        ));
+
+        assert!(!has_get_block(&overflow, 1));
+        assert!(has_get_info(&overflow, 2));
+        assert!(!has_get_finalization(&overflow, 3));
+        assert!(matches!(
+            pending_open_rx.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
     fn policy_keeps_coalesced_hints_in_fifo_position() {
         let mut overflow = pending();
         let first = public_key(1);
         let second = public_key(2);
+        let (get_block_9, _get_block_9_rx) = get_block(9);
+        let (get_info_11, _get_info_11_rx) = get_info(11);
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(9)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block_9));
         assert!(<TestMessage as Policy>::handle(
             &mut overflow,
             hint_finalized(10, first.clone())
         ));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(11)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info_11));
         assert!(<TestMessage as Policy>::handle(
             &mut overflow,
             hint_finalized(10, second.clone())
@@ -912,12 +1063,15 @@ mod tests {
         let mut overflow = pending();
 
         overflow.floor = Some(Height::new(5));
-        overflow.messages.push_back(get_info(4));
-        overflow.messages.push_back(get_block(7));
+        let (get_info_4, _get_info_4_rx) = get_info(4);
+        let (get_block_7, _get_block_7_rx) = get_block(7);
+        let (get_block_8, _get_block_8_rx) = get_block(8);
+        overflow.messages.push_back(get_info_4);
+        overflow.messages.push_back(get_block_7);
         overflow
             .messages
             .push_back(hint_finalized(8, public_key(1)));
-        overflow.messages.push_back(get_block(8));
+        overflow.messages.push_back(get_block_8);
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(8)));
         assert_eq!(overflow.floor, Some(Height::new(8)));
         assert!(!has_get_info(&overflow, 4));
@@ -933,12 +1087,15 @@ mod tests {
 
         let mut overflow = pending();
         overflow.prune = Some(Height::new(5));
-        overflow.messages.push_back(get_finalization(4));
-        overflow.messages.push_back(get_block(6));
+        let (get_finalization_4, _get_finalization_4_rx) = get_finalization(4);
+        let (get_block_6, _get_block_6_rx) = get_block(6);
+        let (get_block_7, _get_block_7_rx) = get_block(7);
+        overflow.messages.push_back(get_finalization_4);
+        overflow.messages.push_back(get_block_6);
         overflow
             .messages
             .push_back(hint_finalized(6, public_key(2)));
-        overflow.messages.push_back(get_block(7));
+        overflow.messages.push_back(get_block_7);
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
         assert_eq!(overflow.prune, Some(Height::new(7)));
         assert!(!has_get_finalization(&overflow, 4));
@@ -956,18 +1113,25 @@ mod tests {
     #[test]
     fn policy_drops_stale_requests_after_prior_floor_and_prune() {
         let mut overflow = pending();
+        let (get_info_4, _get_info_4_rx) = get_info(4);
+        let (get_info_5, _get_info_5_rx) = get_info(5);
+        let (get_info_6, _get_info_6_rx) = get_info(6);
+        let (get_info_7, _get_info_7_rx) = get_info(7);
+        let (get_block_4, _get_block_4_rx) = get_block(4);
+        let (get_block_5, _get_block_5_rx) = get_block(5);
+        let (get_block_6, _get_block_6_rx) = get_block(6);
+        let (get_block_7, _get_block_7_rx) = get_block(7);
+        let (get_finalization_4, _get_finalization_4_rx) = get_finalization(4);
+        let (get_finalization_6, _get_finalization_6_rx) = get_finalization(6);
 
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(5)));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info(4)));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(5)));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info_4));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info_5));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block_4));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block_5));
         assert!(!<TestMessage as Policy>::handle(
             &mut overflow,
-            get_block(4)
-        ));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(5)));
-        assert!(!<TestMessage as Policy>::handle(
-            &mut overflow,
-            get_finalization(4)
+            get_finalization_4
         ));
         assert!(!<TestMessage as Policy>::handle(
             &mut overflow,
@@ -984,19 +1148,16 @@ mod tests {
         assert!(!has_hint(&overflow, 5));
         assert!(!has_hint(&overflow, 6));
         assert!(has_prune(&overflow, 7));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info(6)));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info_6));
         assert!(!<TestMessage as Policy>::handle(
             &mut overflow,
-            get_finalization(6)
+            get_finalization_6
         ));
         assert!(!has_get_finalization(&overflow, 6));
-        assert!(!<TestMessage as Policy>::handle(
-            &mut overflow,
-            get_block(6)
-        ));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(7)));
+        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block_6));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info_7));
         assert!(has_get_info(&overflow, 7));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(7)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block_7));
         assert!(has_get_block(&overflow, 7));
     }
 

@@ -38,7 +38,7 @@ pub mod mocks;
 mod tests {
     use super::{mocks::TestMessage, *};
     use crate::Broadcaster;
-    use commonware_actor::Feedback;
+    use commonware_actor::{mailbox::Policy, Feedback};
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -54,7 +54,11 @@ mod tests {
         Quota, Runner, Supervisor as _,
     };
     use commonware_utils::NZUsize;
-    use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        num::NonZeroU32,
+        time::Duration,
+    };
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
@@ -138,6 +142,44 @@ mod tests {
         oracle.manager().track(0, all_peers).await;
 
         (peers, registrations, oracle)
+    }
+
+    #[test]
+    fn policy_drops_closed_subscriptions() {
+        let mut overflow = VecDeque::new();
+        let pending = TestMessage::shared(b"pending");
+        let open = TestMessage::shared(b"open");
+        let current = TestMessage::shared(b"current");
+
+        let (closed_responder, closed_receiver) = commonware_utils::channel::oneshot::channel();
+        drop(closed_receiver);
+        overflow.push_back(Message::Subscribe {
+            digest: pending.digest(),
+            responder: closed_responder,
+        });
+
+        let (open_responder, _open_receiver) = commonware_utils::channel::oneshot::channel();
+        overflow.push_back(Message::Subscribe {
+            digest: open.digest(),
+            responder: open_responder,
+        });
+
+        let (current_responder, current_receiver) = commonware_utils::channel::oneshot::channel();
+        drop(current_receiver);
+        assert!(!<Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Subscribe {
+                digest: current.digest(),
+                responder: current_responder,
+            }
+        ));
+
+        assert_eq!(overflow.len(), 1);
+        assert!(matches!(
+            &overflow[0],
+            Message::Subscribe { digest, responder }
+                if *digest == open.digest() && !responder.is_closed()
+        ));
     }
 
     async fn spawn_peer_engines(

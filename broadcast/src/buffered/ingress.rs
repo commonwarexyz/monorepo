@@ -34,10 +34,23 @@ pub enum Message<P: PublicKey, M: Digestible> {
     },
 }
 
+impl<P: PublicKey, M: Digestible> Message<P, M> {
+    fn closed_subscription(&self) -> bool {
+        matches!(self, Self::Subscribe { responder, .. } if responder.is_closed())
+    }
+}
+
 impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+        let useful = !message.closed_subscription();
+
+        overflow.retain(|message| !message.closed_subscription());
+        if !useful {
+            return false;
+        }
+
         overflow.push_back(message);
         true
     }
