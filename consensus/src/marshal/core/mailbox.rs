@@ -367,9 +367,6 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     where
         F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
     {
-        // Capture before draining floor/prune because those fields are consumed below
-        let height = self.height();
-
         // Drain floor and prune first so the actor advances its floor before
         // it sees the height-bounded reads that follow
         if let Some(height) = self.floor.take() {
@@ -387,7 +384,7 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
         while let Some(pending) = self.messages.pop_front() {
             match pending {
                 PendingMessage::Message(message) => {
-                    if message.response_closed() || message.stale(height) {
+                    if message.response_closed() {
                         continue;
                     }
                     if !self.drain_one(message, &mut push) {
@@ -395,10 +392,6 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
                     }
                 }
                 PendingMessage::HintFinalized(hint_height) => {
-                    if Some(hint_height) <= height {
-                        self.hints.remove(&hint_height);
-                        continue;
-                    }
                     let Some(targets) = self.hints.remove(&hint_height) else {
                         continue;
                     };
@@ -1034,50 +1027,6 @@ mod tests {
     }
 
     #[test]
-    fn policy_drain_filters_with_consumed_floor_and_prune() {
-        let mut overflow = pending();
-        let (stale_info, _stale_info_rx) = get_info(3);
-        let (stale_block, _stale_block_rx) = get_block(4);
-        let (live_block, _live_block_rx) = get_block(6);
-
-        overflow.floor = Some(Height::new(4));
-        overflow.prune = Some(Height::new(5));
-        overflow
-            .messages
-            .push_back(PendingMessage::Message(stale_info));
-        overflow.hint_finalized(Height::new(5), NonEmptyVec::new(public_key(1)));
-        overflow
-            .messages
-            .push_back(PendingMessage::Message(stale_block));
-        overflow.hint_finalized(Height::new(6), NonEmptyVec::new(public_key(2)));
-        overflow
-            .messages
-            .push_back(PendingMessage::Message(live_block));
-
-        let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 4);
-        assert!(matches!(
-            &drained[0],
-            TestMessage::SetFloor { height } if *height == Height::new(4)
-        ));
-        assert!(matches!(
-            &drained[1],
-            TestMessage::Prune { height } if *height == Height::new(5)
-        ));
-        assert!(matches!(
-            &drained[2],
-            TestMessage::HintFinalized { height, .. } if *height == Height::new(6)
-        ));
-        assert!(matches!(
-            &drained[3],
-            TestMessage::GetBlock {
-                identifier: Identifier::Height(height),
-                ..
-            } if *height == Height::new(6)
-        ));
-    }
-
-    #[test]
     fn policy_keeps_coalesced_hints_in_fifo_position() {
         let mut overflow = pending();
         let first = public_key(1);
@@ -1277,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_drops_stale_requests_during_drain_after_prior_floor_and_prune() {
+    fn policy_drops_stale_requests_against_pending_floor_and_prune() {
         let mut overflow = pending();
         let (get_info_4, _get_info_4_rx) = get_info(4);
         let (get_info_5, _get_info_5_rx) = get_info(5);
