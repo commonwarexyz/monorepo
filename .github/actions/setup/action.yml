@@ -70,3 +70,4 @@ runs:
         cache-on-failure: false
         cache-workspace-crates: true
         cache-directories: ${{ env.CARGO_TARGET_DIR }}
+        cache-bin: false
