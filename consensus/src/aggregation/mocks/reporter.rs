@@ -223,9 +223,7 @@ where
     pub async fn get(&mut self, height: Height) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
         assert!(
-            self.sender
-                .enqueue(Message::Get(height, sender))
-                .accepted(),
+            self.sender.enqueue(Message::Get(height, sender)).accepted(),
             "Failed to send get"
         );
         receiver.await.unwrap()
