@@ -51,12 +51,13 @@
 
 use super::{freelist::Freelist, IoBufMut};
 use crate::{
-    iobuf::aligned::{AlignedBuffer, PooledBufMut},
+    iobuf::buffer::{PooledBufMut, PooledBuffer},
     telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::{NZUsize, NZU32};
 use crossbeam_utils::CachePadded;
 use std::{
+    alloc::Layout,
     cell::{Cell, UnsafeCell},
     mem::align_of,
     num::{NonZeroU32, NonZeroUsize},
@@ -421,7 +422,7 @@ struct SizeClassLabel {
 
 /// Metrics for the buffer pool.
 struct PoolMetrics {
-    /// Number of tracked buffers currently created for the size class.
+    /// Number of tracked buffers created for the size class.
     created: GaugeFamily<SizeClassLabel>,
     /// Total number of failed allocations (pool exhausted).
     exhausted_total: CounterFamily<SizeClassLabel>,
@@ -434,7 +435,7 @@ impl PoolMetrics {
         Self {
             created: registry.register(
                 "buffer_pool_created",
-                "Number of tracked buffers currently created for the pool",
+                "Number of tracked buffers created for the pool",
                 raw::Family::default(),
             ),
             exhausted_total: registry.register(
@@ -456,7 +457,10 @@ impl PoolMetrics {
 /// Each class is a small two-level allocator:
 /// - a shared global freelist for tracked buffers visible to all threads
 /// - a per-thread local cache for same-thread reuse
-/// - a `created` counter that caps the total number of tracked buffers
+///
+/// The global freelist owns the allocation layout and slot reservation counter
+/// for the class. Checked-out buffers and TLS entries carry an [`Arc`] back to
+/// this size class so the freelist remains alive until those buffers return.
 ///
 /// Allocation prefers the local cache, then refills from the global freelist,
 /// and only creates a new tracked buffer when no free buffer is available and
@@ -466,14 +470,8 @@ pub(super) struct SizeClass {
     class_id: usize,
     /// The buffer size for this class.
     size: usize,
-    /// Buffer alignment.
-    alignment: usize,
-    /// Maximum number of tracked buffers for this class.
-    max: usize,
     /// Global free list of tracked buffers available for reuse.
     global: Freelist,
-    /// Number of tracked buffers currently in existence for this class.
-    created: AtomicUsize,
     /// Maximum number of buffers retained in the current thread's local bin.
     thread_cache_capacity: usize,
 }
@@ -488,8 +486,8 @@ unsafe impl Sync for SizeClass {}
 impl SizeClass {
     /// Creates a new size class with the given parameters.
     ///
-    /// If `prefill` is true, allocates `max` buffers upfront and puts them
-    /// into the global freelist.
+    /// If `prefill` is true, the global freelist creates `max` buffers upfront
+    /// and makes them immediately available for reuse.
     fn new(
         class_id: usize,
         size: usize,
@@ -499,38 +497,20 @@ impl SizeClass {
         thread_cache_capacity: usize,
         prefill: bool,
     ) -> Self {
-        let freelist = Freelist::new(max, parallelism);
-        let max = max.get() as usize;
-        let mut created = 0;
-        if prefill {
-            for slot in 0..max {
-                freelist.put(slot as u32, AlignedBuffer::new(size, alignment));
-            }
-            created = max;
-        }
+        let layout = Layout::from_size_align(size, alignment).expect("alignment is a power of two");
+        let freelist = Freelist::new(max, parallelism, layout, prefill);
         Self {
             class_id,
             size,
-            alignment,
-            max,
             global: freelist,
-            created: AtomicUsize::new(created),
             thread_cache_capacity,
         }
     }
 
-    /// Atomically reserves capacity to create one new tracked buffer.
-    ///
-    /// Returns the reserved slot id if the reservation succeeded, or `None` if
-    /// the class is already at capacity.
+    /// Returns the buffer size for this class.
     #[inline]
-    fn try_reserve(&self) -> Option<u32> {
-        self.created
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
-                (created < self.max).then_some(created + 1)
-            })
-            .ok()
-            .map(|slot| slot as u32)
+    pub(super) const fn size(&self) -> usize {
+        self.size
     }
 }
 
@@ -546,7 +526,7 @@ impl SizeClass {
 /// buffer to the correct class-global freelist even if the originating
 /// [`BufferPool`] handle has already been dropped.
 struct TlsSizeClassCacheEntry {
-    buffer: AlignedBuffer,
+    buffer: PooledBuffer,
     class: Arc<SizeClass>,
     slot: u32,
 }
@@ -555,7 +535,7 @@ struct TlsSizeClassCacheEntry {
 ///
 /// Each instance is stored in [`TlsSizeClassCaches`] under one global
 /// [`SizeClass::class_id`], so all entries in the cache belong to the same size
-/// class. The cache owns full [`AlignedBuffer`] values while they are local,
+/// class. The cache owns full [`PooledBuffer`] values while they are local,
 /// returning them to the global freelist happens only on miss refill, overflow,
 /// explicit flush, or thread exit.
 ///
@@ -812,7 +792,7 @@ impl BufferPoolThreadCache {
     /// Returns a buffer to the current thread's local cache for the given
     /// size class, spilling to the global freelist if the cache is full.
     #[inline(always)]
-    pub(super) fn push(class: Arc<SizeClass>, slot: u32, buffer: AlignedBuffer) {
+    pub(super) fn push(class: Arc<SizeClass>, slot: u32, buffer: PooledBuffer) {
         if class.thread_cache_capacity == 0 {
             class.global.put(slot, buffer);
             return;
@@ -921,7 +901,7 @@ impl BufferPoolThreadCache {
 
 /// Internal allocation result for pooled allocations.
 struct Allocation {
-    buffer: AlignedBuffer,
+    buffer: PooledBuffer,
     is_new: bool,
     class: Arc<SizeClass>,
     slot: u32,
@@ -937,8 +917,7 @@ pub(crate) struct BufferPoolInner {
 impl Drop for BufferPoolInner {
     fn drop(&mut self) {
         for class in &self.classes {
-            let drained = class.global.drain();
-            class.created.fetch_sub(drained, Ordering::Relaxed);
+            class.global.drain();
         }
     }
 }
@@ -950,7 +929,8 @@ impl BufferPoolInner {
     /// 1. **Thread-local cache** (fast path): no atomics, no contention.
     /// 2. **Global freelist**: atomic pop, then batch-refill the local cache
     ///    when the local bin is large enough to amortize shared-queue traffic.
-    /// 3. **New allocation**: reserve capacity via CAS, allocate from heap.
+    /// 3. **New allocation**: reserve a slot in the global freelist, then
+    ///    allocate from the heap.
     ///
     /// If `zero_on_new` is true, newly-created buffers are allocated with
     /// `alloc_zeroed`. Reused buffers are never re-zeroed here.
@@ -969,31 +949,26 @@ impl BufferPoolInner {
             });
         }
 
-        // Slow path: create a new tracked buffer (metrics only here).
+        // Slow path: create a new tracked buffer and update metrics.
         self.try_alloc_new(class, zero_on_new)
     }
 
     /// Creates a new tracked buffer after the reuse path fails.
     ///
     /// This is separate from [`Self::try_alloc`] so the steady-state allocation
-    /// path can inline the TLS hit without also carrying reservation, metrics,
-    /// and heap-allocation code.
+    /// path can inline the TLS hit without also carrying slot reservation,
+    /// metrics, and heap-allocation code.
     #[inline(never)]
-    fn try_alloc_new(&self, class: &Arc<SizeClass>, zero_on_new: bool) -> Option<Allocation> {
+    fn try_alloc_new(&self, class: &Arc<SizeClass>, zeroed: bool) -> Option<Allocation> {
         let label = SizeClassLabel {
             size_class: class.size as u64,
         };
-        let Some(slot) = class.try_reserve() else {
+        let Some((slot, buffer)) = class.global.try_create(zeroed) else {
             self.metrics.exhausted_total.get_or_create(&label).inc();
             return None;
         };
 
         self.metrics.created.get_or_create(&label).inc();
-        let buffer = if zero_on_new {
-            AlignedBuffer::new_zeroed(class.size, class.alignment)
-        } else {
-            AlignedBuffer::new(class.size, class.alignment)
-        };
         Some(Allocation {
             buffer,
             is_new: true,
@@ -1074,14 +1049,16 @@ impl BufferPool {
             classes.push(class);
         }
 
-        // Update created metrics after prefill
+        // Initialize created metrics after constructor prefill.
         if config.prefill {
             for class in &classes {
                 let label = SizeClassLabel {
                     size_class: class.size as u64,
                 };
-                let created = class.created.load(Ordering::Relaxed) as i64;
-                metrics.created.get_or_create(&label).set(created);
+                metrics
+                    .created
+                    .get_or_create(&label)
+                    .set(config.max_per_class.get() as i64);
             }
         }
 
@@ -1350,7 +1327,7 @@ mod tests {
     fn get_allocated(pool: &BufferPool, size: usize) -> usize {
         let class_index = pool.class_index(size).unwrap();
         let class = &pool.inner.classes[class_index];
-        class.created.load(Ordering::Relaxed) - get_global_len(class) - get_local_len(class)
+        get_global_created(class) - get_global_len(class) - get_local_len(class)
     }
 
     /// Helper to get the number of free buffers visible to the current thread.
@@ -1363,6 +1340,11 @@ mod tests {
     /// Helper to get the number of free buffers parked in the global freelist.
     fn get_global_len(class: &SizeClass) -> usize {
         freelist::tests::len(&class.global)
+    }
+
+    /// Helper to get the number of buffers created by the global freelist.
+    fn get_global_created(class: &SizeClass) -> usize {
+        freelist::tests::created(&class.global)
     }
 
     /// Helper to get the number of free buffers parked in the current thread's
@@ -1991,32 +1973,30 @@ mod tests {
     #[test]
     fn test_global_batch_alloc_stops_when_global_runs_empty() {
         let class = test_size_class(64, 64);
-        let slot = class.try_reserve().expect("slot reservation");
+        let (slot, buffer) = class.global.try_create(false).expect("slot reservation");
 
         // A short global freelist should return the allocation and stop
         // without filling the local cache to its batch target.
-        class
-            .global
-            .put(slot, AlignedBuffer::new(class.size, class.alignment));
+        class.global.put(slot, buffer);
         let entry = BufferPoolThreadCache::pop(&class).expect("global allocation");
-        drop(entry.buffer);
 
         assert_eq!(get_local_len(&class), 0);
         assert_eq!(get_global_len(&class), 0);
+
+        // Return the manually popped entry so the freelist owns and deallocates
+        // the buffer at test teardown.
+        class.global.put(entry.slot, entry.buffer);
     }
 
     #[test]
     fn test_tls_size_class_cache_push_tolerates_empty_spill() {
         let class = test_size_class(64, 64);
-        let slot = class.try_reserve().expect("slot reservation");
-        let mut cache = TlsSizeClassCache {
-            entries: Vec::new(),
-            capacity: 0,
-        };
+        let (slot, buffer) = class.global.try_create(false).expect("slot reservation");
+        let mut cache = TlsSizeClassCache::new(0);
 
         // Small local capacities should bypass batching and push straight to global.
         cache.push(TlsSizeClassCacheEntry {
-            buffer: AlignedBuffer::new(class.size, class.alignment),
+            buffer,
             class,
             slot,
         });
@@ -2039,13 +2019,11 @@ mod tests {
             false,
         ));
 
-        // Reserve both slot ids and keep each allocation's pointer so we can
+        // Create both slot ids and keep each allocation's pointer so we can
         // verify that the freelist returns the same buffer parked for that slot.
-        let slot0 = class.try_reserve().expect("first slot");
-        let slot1 = class.try_reserve().expect("second slot");
-        let buffer0 = AlignedBuffer::new(64, 64);
+        let (slot0, buffer0) = class.global.try_create(false).expect("first slot");
         let ptr0 = buffer0.as_ptr();
-        let buffer1 = AlignedBuffer::new(64, 64);
+        let (slot1, buffer1) = class.global.try_create(false).expect("second slot");
         let ptr1 = buffer1.as_ptr();
 
         class.global.put(slot0, buffer0);
@@ -2067,6 +2045,12 @@ mod tests {
 
         // Both slots were claimed above, so the global freelist is empty.
         assert!(class.global.take().is_none());
+
+        // Return the buffers so the freelist owns and deallocates them when the
+        // test size class is dropped.
+        for (slot, buffer) in popped {
+            class.global.put(slot, buffer);
+        }
     }
 
     #[test]
@@ -2075,26 +2059,24 @@ mod tests {
         // into_bytes should detach without retaining the pool allocation.
         let page = page_size();
         let class = test_size_class(page, page);
-        let slot0 = class.try_reserve().expect("first slot");
-        let slot1 = class.try_reserve().expect("second slot");
-        let slot2 = class.try_reserve().expect("third slot");
+        let (slot0, buffer0) = class.global.try_create(false).expect("first slot");
+        let (slot1, buffer1) = class.global.try_create(false).expect("second slot");
+        let (slot2, buffer2) = class.global.try_create(false).expect("third slot");
 
         // Mutable pooled debug should include cursor position.
         let pooled_mut_debug = {
-            let pooled_mut =
-                PooledBufMut::new(AlignedBuffer::new(page, page), Arc::clone(&class), slot0);
+            let pooled_mut = PooledBufMut::new(buffer0, class.clone(), slot0);
             format!("{pooled_mut:?}")
         };
         assert!(pooled_mut_debug.contains("PooledBufMut"));
         assert!(pooled_mut_debug.contains("cursor"));
 
         // Empty mutable buffer converts to empty Bytes without retaining pool memory.
-        let empty_from_mut =
-            PooledBufMut::new(AlignedBuffer::new(page, page), Arc::clone(&class), slot1);
+        let empty_from_mut = PooledBufMut::new(buffer1, class.clone(), slot1);
         assert!(empty_from_mut.into_bytes().is_empty());
 
         // Immutable pooled debug should include capacity.
-        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), class, slot2).into_pooled();
+        let pooled = PooledBufMut::new(buffer2, class, slot2).into_pooled();
         let pooled_debug = format!("{pooled:?}");
         assert!(pooled_debug.contains("PooledBuf"));
         assert!(pooled_debug.contains("capacity"));
@@ -2461,7 +2443,7 @@ mod tests {
         let class_index = pool
             .class_index(page)
             .expect("class exists for page-sized buffer");
-        let class = Arc::clone(&pool.inner.classes[class_index]);
+        let class = pool.inner.classes[class_index].clone();
 
         // Return one buffer to the current thread's local cache and overflow
         // the other into the shared global freelist.
@@ -2479,7 +2461,7 @@ mod tests {
 
         assert_eq!(get_global_len(&class), 0);
         assert_eq!(get_local_len(&class), 1);
-        assert_eq!(class.created.load(Ordering::Relaxed), 1);
+        assert_eq!(get_global_created(&class), 2);
     }
 
     #[test]
