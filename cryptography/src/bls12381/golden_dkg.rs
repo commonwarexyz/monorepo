@@ -542,10 +542,16 @@ pub fn observe<M: Faults>(
     let public = selection.public_poly(strategy);
     let n = info.players.len() as u32;
     let sharing = Sharing::new(info.mode, NZU32!(n), public);
+    let dealers: Set<PublicKey> = selection
+        .dealings
+        .keys()
+        .cloned()
+        .try_collect()
+        .expect("selected dealers are unique");
     Ok(Output::new(
         *info.summary(),
         sharing,
-        info.dealers.clone(),
+        dealers,
         info.players.clone(),
     ))
 }
@@ -607,12 +613,13 @@ pub fn play<M: Faults>(
 
     let n = info.players.len() as u32;
     let sharing = Sharing::new(info.mode, NZU32!(n), public);
-    let output = Output::new(
-        *info.summary(),
-        sharing,
-        info.dealers.clone(),
-        info.players.clone(),
-    );
+    let dealers: Set<PublicKey> = selection
+        .dealings
+        .keys()
+        .cloned()
+        .try_collect()
+        .expect("selected dealers are unique");
+    let output = Output::new(*info.summary(), sharing, dealers, info.players.clone());
     let share = Share::new(my_index, Private::new(private));
     Ok((output, share))
 }
@@ -1472,6 +1479,56 @@ mod tests {
             .bad_signature(0)
             .run(&TEST_SETUP, 42, &Sequential)
             .expect("plan should succeed with 1 bad sig");
+    }
+
+    #[test]
+    fn output_dealers_excludes_filtered_dealers() {
+        let mut rng = commonware_utils::test_rng();
+        let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let player_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let dealer_set: Set<PublicKey> = dealer_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let player_set: Set<PublicKey> = player_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let info = Info::new(0, None, dealer_set.clone(), player_set);
+
+        // Deal honestly, but corrupt one dealer's signature so identify() drops it.
+        let mut logs = std::collections::BTreeMap::new();
+        for (i, dk) in dealer_keys.iter().enumerate() {
+            let mut signed = deal::<N3f1>(&mut rng, &TEST_SETUP, &info, dk, None, &Sequential)
+                .expect("honest deal should succeed");
+            if i == 0 {
+                let mut sig_bytes = signed.signature.encode_mut();
+                sig_bytes[0] ^= 0xFF;
+                signed.signature = commonware_codec::ReadExt::read(&mut sig_bytes)
+                    .expect("signature should decode");
+            }
+            if let Some((pk, log)) = signed.identify() {
+                logs.insert(pk, log);
+            }
+        }
+
+        assert_eq!(logs.len(), 3, "one dealer should be filtered by identify");
+        let selected_dealers: Set<PublicKey> = logs.keys().cloned().try_collect().unwrap();
+
+        let output = observe::<N3f1>(&mut rng, &TEST_SETUP, &info, logs, &Sequential)
+            .expect("round should still succeed with three valid dealers");
+        assert_eq!(
+            output.dealers(),
+            &selected_dealers,
+            "output dealers should match the validated subset that finalized the round"
+        );
+        assert_ne!(
+            output.dealers(),
+            &dealer_set,
+            "output dealers should not include the filtered dealer"
+        );
     }
 
     #[test]
