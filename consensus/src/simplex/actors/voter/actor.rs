@@ -881,14 +881,12 @@ impl<
                 view = self.state.current_view();
 
                 // Notify application of proposal.
-                self.relay
-                    .broadcast(
-                        proposed,
-                        Plan::Propose {
-                            round: context.round,
-                        },
-                    )
-                    .await;
+                let _ = self.relay.broadcast(
+                    proposed,
+                    Plan::Propose {
+                        round: context.round,
+                    },
+                );
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter

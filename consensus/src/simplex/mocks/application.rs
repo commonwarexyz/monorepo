@@ -12,6 +12,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_actor::Feedback;
 use commonware_utils::channel::{
     fallible::{AsyncFallibleExt, OneshotExt},
     mpsc, oneshot,
@@ -116,8 +117,12 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type PublicKey = P;
     type Plan = Plan<P>;
 
-    async fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) {
-        self.sender.send_lossy(Message::Broadcast { payload }).await;
+    fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) -> Feedback {
+        match self.sender.try_send(Message::Broadcast { payload }) {
+            Ok(()) => Feedback::Ok,
+            Err(mpsc::error::TrySendError::Full(_)) => Feedback::Backoff,
+            Err(mpsc::error::TrySendError::Closed(_)) => Feedback::Closed,
+        }
     }
 }
 

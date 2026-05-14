@@ -197,11 +197,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         type Plan: Send;
 
         /// Broadcast a payload according to the given plan.
-        fn broadcast(
-            &mut self,
-            payload: Self::Digest,
-            plan: Self::Plan,
-        ) -> impl Future<Output = ()> + Send;
+        fn broadcast(&mut self, payload: Self::Digest, plan: Self::Plan) -> Feedback;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.

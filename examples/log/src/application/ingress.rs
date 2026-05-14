@@ -1,4 +1,7 @@
-use commonware_actor::mailbox::{Policy, Sender};
+use commonware_actor::{
+    mailbox::{Policy, Sender},
+    Feedback,
+};
 use commonware_consensus::{
     simplex::{types::Context, Plan},
     types::Epoch,
@@ -99,10 +102,11 @@ impl<D: Digest> Re for Mailbox<D> {
     type PublicKey = PublicKey;
     type Plan = Plan<PublicKey>;
 
-    async fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) {
+    fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) -> Feedback {
         // We don't broadcast our raw messages to other peers.
         //
         // If we were building an EVM blockchain, for example, we'd
         // send the block to other peers here.
+        Feedback::Ok
     }
 }

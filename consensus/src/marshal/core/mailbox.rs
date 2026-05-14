@@ -657,12 +657,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         round: Round,
         commitment: V::Commitment,
         recipients: Recipients<S::PublicKey>,
-    ) {
-        let _ = self.sender.enqueue(Message::Forward {
+    ) -> Feedback {
+        self.sender.enqueue(Message::Forward {
             round,
             commitment,
             recipients,
-        });
+        })
     }
 }
 
