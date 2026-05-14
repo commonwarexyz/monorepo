@@ -52,7 +52,7 @@ use std::{
 
 /// Retained overflow messages for a mailbox policy.
 pub trait Overflow<T>: Default {
-    /// Return whether no messages are retained.
+    /// Return whether the retained message set is empty.
     fn is_empty(&self) -> bool;
 
     /// Drain retained messages into `push` in delivery order.
