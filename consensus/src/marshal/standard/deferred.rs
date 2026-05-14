@@ -289,7 +289,7 @@ where
             .epocher
             .last(prev)
             .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await.ok().flatten() else {
+        let Some(block) = self.marshal.get_block(last_height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
             unreachable!("missing starting epoch block at height {}", last_height);
@@ -342,8 +342,6 @@ where
             if let Some(block) = marshal
                 .get_verified(consensus_context.round)
                 .await
-                .ok()
-                .flatten()
             {
                 let block_context = block.context();
                 if block_context != consensus_context {
@@ -404,10 +402,9 @@ where
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
                 let digest = parent.digest();
-                if marshal
+                if !marshal
                     .verified(consensus_context.round, parent)
                     .await
-                    .is_err()
                 {
                     debug!(
                         round = ?consensus_context.round,
@@ -456,10 +453,9 @@ where
             build_timer.observe(&runtime_context);
 
             let digest = built_block.digest();
-            if marshal
+            if !marshal
                 .proposed(consensus_context.round, built_block)
                 .await
-                .is_err()
             {
                 debug!(
                     round = ?consensus_context.round,
@@ -495,7 +491,8 @@ where
             .child("optimistic_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
-                let block_request = marshal.subscribe_by_digest(Some(context.round), digest);
+                let block_request = marshal
+                    .subscribe_by_digest(Some(context.round), digest);
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -660,7 +657,7 @@ where
                 // Certifier holds a notarization for this block, so route
                 // the write to the notarized cache. `certified` is
                 // idempotent, so crash-recovery double-invocation is safe.
-                if marshaled.marshal.certified(round, block).await.is_err() {
+                if !marshaled.marshal.certified(round, block).await {
                     debug!(?round, "marshal unable to accept block");
                     return;
                 }
@@ -789,8 +786,7 @@ mod tests {
             let parent_digest = parent.digest();
             assert!(marshal
                 .verified(Round::new(Epoch::new(0), View::new(1)), parent.clone())
-                .await
-                .is_ok());
+                .await);
 
             // Block A at view 5 (height 2)
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -801,7 +797,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
             let commitment_a = block_a.digest();
-            assert!(marshal.verified(round_a, block_a.clone()).await.is_ok());
+            assert!(marshal.verified(round_a, block_a.clone()).await);
 
             // Block B at view 10 (height 2, different block same height)
             let round_b = Round::new(Epoch::new(0), View::new(10));
@@ -812,7 +808,7 @@ mod tests {
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
             let commitment_b = block_b.digest();
-            assert!(marshal.verified(round_b, block_b.clone()).await.is_ok());
+            assert!(marshal.verified(round_b, block_b.clone()).await);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -929,8 +925,7 @@ mod tests {
             assert!(marshal
                 .clone()
                 .verified(Round::new(Epoch::zero(), View::new(19)), parent.clone())
-                .await
-                .is_ok());
+                .await);
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let unsupported_round = Round::new(Epoch::new(1), View::new(20));
@@ -949,8 +944,7 @@ mod tests {
             assert!(marshal
                 .clone()
                 .verified(unsupported_round, block.clone())
-                .await
-                .is_ok());
+                .await);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1023,8 +1017,7 @@ mod tests {
             assert!(marshal
                 .clone()
                 .verified(Round::new(Epoch::zero(), View::new(1)), parent.clone())
-                .await
-                .is_ok());
+                .await);
 
             // Build a block with context A (embedded in the block).
             let round_a = Round::new(Epoch::zero(), View::new(2));
@@ -1035,7 +1028,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
             let commitment_a = block_a.digest();
-            assert!(marshal.verified(round_a, block_a).await.is_ok());
+            assert!(marshal.verified(round_a, block_a).await);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1117,7 +1110,7 @@ mod tests {
             // block subscription is still pending.
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(marshal.verified(round, block).await.is_ok());
+            assert!(marshal.verified(round, block).await);
 
             let certify_rx = marshaled.certify(round, digest).await;
             select! {
@@ -1274,7 +1267,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
             let digest_a = block_a.digest();
-            assert!(marshal.verified(round, block_a.clone()).await.is_ok());
+            assert!(marshal.verified(round, block_a.clone()).await);
 
             let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let digest_b = block_b.digest();
@@ -1342,7 +1335,7 @@ mod tests {
                 parent: (View::zero(), genesis.digest()),
             };
             let stale_block = B::new::<Sha256>(stale_ctx, genesis.digest(), Height::new(1), 100);
-            assert!(marshal.verified(round, stale_block).await.is_ok());
+            assert!(marshal.verified(round, stale_block).await);
 
             // Simulate a replay where parent selection now points to a
             // different parent view than the cached block was built for.

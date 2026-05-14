@@ -100,7 +100,7 @@ where
             return Some(Decision::Complete(false));
         }
 
-        if marshal.verified(context.round, block).await.is_err() {
+        if !marshal.verified(context.round, block).await {
             return None;
         }
         return Some(Decision::Complete(true));
@@ -231,7 +231,10 @@ where
     if parent_digest == genesis.digest() {
         Either::Left(ready(Ok(genesis)))
     } else {
-        Either::Right(marshal.subscribe_by_digest(parent_round, parent_digest))
+        Either::Right(
+            marshal
+                .subscribe_by_digest(parent_round, parent_digest),
+        )
     }
 }
 

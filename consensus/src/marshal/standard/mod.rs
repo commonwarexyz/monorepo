@@ -489,12 +489,10 @@ mod tests {
             .mailbox;
             assert!(peer_mailbox
                 .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
-                .await
-                .is_ok());
+                .await);
             assert!(peer_mailbox
                 .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
-                .await
-                .is_ok());
+                .await);
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
             context.sleep(Duration::from_millis(200)).await;
 
@@ -587,16 +585,13 @@ mod tests {
             .mailbox;
             assert!(peer_mailbox
                 .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
-                .await
-                .is_ok());
+                .await);
             assert!(peer_mailbox
                 .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
-                .await
-                .is_ok());
+                .await);
             assert!(peer_mailbox
                 .verified(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
-                .await
-                .is_ok());
+                .await);
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_three.clone())
                 .await;
@@ -700,9 +695,7 @@ mod tests {
                 recovering
                     .mailbox
                     .get_info(Identifier::Latest)
-                    .await
-                    .ok()
-                    .flatten(),
+                    .await,
                 Some((Height::new(1), block_one.digest())),
                 "latest tip should be derived from the highest stored finalization"
             );
@@ -710,9 +703,7 @@ mod tests {
                 recovering
                     .mailbox
                     .get_block(Height::new(2))
-                    .await
-                    .ok()
-                    .flatten(),
+                    .await,
                 Some(block_two.clone()),
                 "block without a finalization row should still be queryable by height"
             );
@@ -795,8 +786,7 @@ mod tests {
                         Round::new(Epoch::zero(), View::new(block.height().get())),
                         (*block).clone(),
                     )
-                    .await
-                    .is_ok());
+                    .await);
                 StandardHarness::report_finalization(&mut peer_mailbox, finalizations[i].clone())
                     .await;
             }
@@ -1237,8 +1227,7 @@ mod tests {
                 assert!(marshal
                     .clone()
                     .verified(boundary_round, boundary_block.clone())
-                    .await
-                    .is_ok());
+                    .await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1309,8 +1298,7 @@ mod tests {
                 assert!(marshal
                     .clone()
                     .verified(boundary_round, boundary_block)
-                    .await
-                    .is_ok());
+                    .await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1347,8 +1335,7 @@ mod tests {
                 assert!(marshal
                     .clone()
                     .verified(non_boundary_round, non_boundary_block)
-                    .await
-                    .is_ok());
+                    .await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1452,8 +1439,7 @@ mod tests {
                 assert!(marshal
                     .clone()
                     .verified(malformed_round, malformed_block)
-                    .await
-                    .is_ok());
+                    .await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1491,7 +1477,7 @@ mod tests {
                 let parent =
                     B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 300);
                 let parent_digest = parent.digest();
-                assert!(marshal.verified(parent_round, parent).await.is_ok());
+                assert!(marshal.verified(parent_round, parent).await);
 
                 let mismatch_round = Round::new(Epoch::zero(), View::new(3));
                 let mismatched_context = Ctx {
@@ -1509,8 +1495,7 @@ mod tests {
                 assert!(marshal
                     .clone()
                     .verified(mismatch_round, mismatched_block)
-                    .await
-                    .is_ok());
+                    .await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1582,7 +1567,7 @@ mod tests {
                 };
                 let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
                 let parent_digest = parent.digest();
-                assert!(marshal.verified(parent_round, parent).await.is_ok());
+                assert!(marshal.verified(parent_round, parent).await);
 
                 // 2) Publish a valid child; only application-level verification should fail.
                 let round = Round::new(Epoch::zero(), View::new(2));
@@ -1593,7 +1578,7 @@ mod tests {
                 };
                 let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
                 let digest = block.digest();
-                assert!(marshal.verified(round, block).await.is_ok());
+                assert!(marshal.verified(round, block).await);
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2044,7 +2029,7 @@ mod tests {
             .await;
 
             assert!(
-                mailbox.verified(round, block.clone()).await.is_ok(),
+                mailbox.verified(round, block.clone()).await,
                 "verified block should persist to the cache"
             );
             StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
@@ -2082,8 +2067,6 @@ mod tests {
             let recovered = mailbox
                 .get_block(Height::new(1))
                 .await
-                .ok()
-                .flatten()
                 .expect("finalized block must be durable before delivery");
             assert_eq!(
                 recovered.digest(),
@@ -2094,8 +2077,6 @@ mod tests {
                 mailbox
                     .get_finalization(Height::new(1))
                     .await
-                    .ok()
-                    .flatten()
                     .expect("finalization must be durable before delivery")
                     .round(),
                 round,
@@ -2318,7 +2299,7 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.proposed(round, block.clone()).await.is_ok());
+            assert!(mailbox.proposed(round, block.clone()).await);
 
             let targets = vec![participants[1].clone()];
             mailbox.forward(round, digest, Recipients::Some(targets.clone()));
@@ -2372,7 +2353,7 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await.is_ok());
+            assert!(mailbox.verified(round, block.clone()).await);
 
             let targets = vec![participants[1].clone(), participants[2].clone()];
             mailbox.forward(round, digest, Recipients::Some(targets.clone()));
@@ -2459,15 +2440,13 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await.is_ok());
+            assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             // Wait until marshal has durably stored the finalization.
             while mailbox
                 .get_finalization(Height::new(1))
                 .await
-                .ok()
-                .flatten()
                 .is_none()
             {
                 context.sleep(Duration::from_millis(10)).await;
@@ -2554,14 +2533,12 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await.is_ok());
+            assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             while mailbox
                 .get_finalization(Height::new(1))
                 .await
-                .ok()
-                .flatten()
                 .is_none()
             {
                 context.sleep(Duration::from_millis(10)).await;
@@ -2575,14 +2552,10 @@ mod tests {
             assert!(mailbox
                 .get_block(Height::new(1))
                 .await
-                .ok()
-                .flatten()
                 .is_some());
             assert!(mailbox
                 .get_finalization(Height::new(1))
                 .await
-                .ok()
-                .flatten()
                 .is_some());
         });
     }
