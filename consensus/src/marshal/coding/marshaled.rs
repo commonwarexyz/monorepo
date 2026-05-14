@@ -376,8 +376,7 @@ where
                 (parent, block)
             } else {
                 // No prefetched block, fetch both parent and block
-                let block_request =
-                    marshal.subscribe_by_commitment(Some(round), commitment);
+                let block_request = marshal.subscribe_by_commitment(Some(round), commitment);
                 let block_requests = try_join(parent_request, block_request);
 
                 select! {
@@ -570,7 +569,12 @@ where
             // parent and cannot be broadcast under the current header, so
             // drop the receiver and let the voter nullify the view via
             // timeout.
-            if let Some(block) = marshal.get_verified(consensus_context.round).await.ok().flatten() {
+            if let Some(block) = marshal
+                .get_verified(consensus_context.round)
+                .await
+                .ok()
+                .flatten()
+            {
                 let block_context = block.context();
                 if block_context != consensus_context {
                     debug!(

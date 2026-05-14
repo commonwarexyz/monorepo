@@ -487,16 +487,14 @@ mod tests {
             )
             .await
             .mailbox;
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
-                    .await.is_ok()
-            );
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
-                    .await.is_ok()
-            );
+            assert!(peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                .await
+                .is_ok());
+            assert!(peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                .await
+                .is_ok());
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
             context.sleep(Duration::from_millis(200)).await;
 
@@ -587,21 +585,18 @@ mod tests {
             )
             .await
             .mailbox;
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
-                    .await.is_ok()
-            );
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
-                    .await.is_ok()
-            );
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
-                    .await.is_ok()
-            );
+            assert!(peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                .await
+                .is_ok());
+            assert!(peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                .await
+                .is_ok());
+            assert!(peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
+                .await
+                .is_ok());
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_three.clone())
                 .await;
@@ -702,12 +697,22 @@ mod tests {
 
             // The tip tracks the highest finalization, not the highest block.
             assert_eq!(
-                recovering.mailbox.get_info(Identifier::Latest).await.ok().flatten(),
+                recovering
+                    .mailbox
+                    .get_info(Identifier::Latest)
+                    .await
+                    .ok()
+                    .flatten(),
                 Some((Height::new(1), block_one.digest())),
                 "latest tip should be derived from the highest stored finalization"
             );
             assert_eq!(
-                recovering.mailbox.get_block(Height::new(2)).await.ok().flatten(),
+                recovering
+                    .mailbox
+                    .get_block(Height::new(2))
+                    .await
+                    .ok()
+                    .flatten(),
                 Some(block_two.clone()),
                 "block without a finalization row should still be queryable by height"
             );
@@ -785,14 +790,13 @@ mod tests {
             .await
             .mailbox;
             for (i, block) in blocks.iter().enumerate() {
-                assert!(
-                    peer_mailbox
-                        .verified(
-                            Round::new(Epoch::zero(), View::new(block.height().get())),
-                            (*block).clone(),
-                        )
-                        .await.is_ok()
-                );
+                assert!(peer_mailbox
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(block.height().get())),
+                        (*block).clone(),
+                    )
+                    .await
+                    .is_ok());
                 StandardHarness::report_finalization(&mut peer_mailbox, finalizations[i].clone())
                     .await;
             }
@@ -1230,12 +1234,11 @@ mod tests {
                     1900,
                 );
                 let boundary_digest = boundary_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(boundary_round, boundary_block.clone())
-                        .await.is_ok()
-                );
+                assert!(marshal
+                    .clone()
+                    .verified(boundary_round, boundary_block.clone())
+                    .await
+                    .is_ok());
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1303,12 +1306,11 @@ mod tests {
                     1900,
                 );
                 let boundary_digest = boundary_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(boundary_round, boundary_block)
-                        .await.is_ok()
-                );
+                assert!(marshal
+                    .clone()
+                    .verified(boundary_round, boundary_block)
+                    .await
+                    .is_ok());
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1342,12 +1344,11 @@ mod tests {
                     1000,
                 );
                 let non_boundary_digest = non_boundary_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(non_boundary_round, non_boundary_block)
-                        .await.is_ok()
-                );
+                assert!(marshal
+                    .clone()
+                    .verified(non_boundary_round, non_boundary_block)
+                    .await
+                    .is_ok());
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1448,12 +1449,11 @@ mod tests {
                     200,
                 );
                 let malformed_digest = malformed_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(malformed_round, malformed_block)
-                        .await.is_ok()
-                );
+                assert!(marshal
+                    .clone()
+                    .verified(malformed_round, malformed_block)
+                    .await
+                    .is_ok());
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -1506,12 +1506,11 @@ mod tests {
                     400,
                 );
                 let mismatched_digest = mismatched_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(mismatch_round, mismatched_block)
-                        .await.is_ok()
-                );
+                assert!(marshal
+                    .clone()
+                    .verified(mismatch_round, mismatched_block)
+                    .await
+                    .is_ok());
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2082,7 +2081,9 @@ mod tests {
 
             let recovered = mailbox
                 .get_block(Height::new(1))
-                .await.ok().flatten()
+                .await
+                .ok()
+                .flatten()
                 .expect("finalized block must be durable before delivery");
             assert_eq!(
                 recovered.digest(),
@@ -2092,7 +2093,9 @@ mod tests {
             assert_eq!(
                 mailbox
                     .get_finalization(Height::new(1))
-                    .await.ok().flatten()
+                    .await
+                    .ok()
+                    .flatten()
                     .expect("finalization must be durable before delivery")
                     .round(),
                 round,
@@ -2272,12 +2275,11 @@ mod tests {
             )
             .await;
 
-            mailbox
-                .forward(
-                    round,
-                    unknown,
-                    Recipients::Some(vec![participants[1].clone()]),
-                );
+            mailbox.forward(
+                round,
+                unknown,
+                Recipients::Some(vec![participants[1].clone()]),
+            );
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
@@ -2319,8 +2321,7 @@ mod tests {
             assert!(mailbox.proposed(round, block.clone()).await.is_ok());
 
             let targets = vec![participants[1].clone()];
-            mailbox
-                .forward(round, digest, Recipients::Some(targets.clone()));
+            mailbox.forward(round, digest, Recipients::Some(targets.clone()));
             wait_until(&context, Duration::from_secs(5), "first forward", || {
                 !buffer.sends.lock().is_empty()
             })
@@ -2334,8 +2335,7 @@ mod tests {
             // The in-memory slot was consumed; a second forward for the same
             // commitment must still succeed by falling back to storage (the
             // block was persisted by `Proposed`, mirroring `Verified`).
-            mailbox
-                .forward(round, digest, Recipients::Some(targets));
+            mailbox.forward(round, digest, Recipients::Some(targets));
             wait_until(&context, Duration::from_secs(5), "second forward", || {
                 buffer.sends.lock().len() >= 2
             })
@@ -2375,8 +2375,7 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await.is_ok());
 
             let targets = vec![participants[1].clone(), participants[2].clone()];
-            mailbox
-                .forward(round, digest, Recipients::Some(targets.clone()));
+            mailbox.forward(round, digest, Recipients::Some(targets.clone()));
             wait_until(&context, Duration::from_secs(5), "buffer.send", || {
                 !buffer.sends.lock().is_empty()
             })
@@ -2420,8 +2419,7 @@ mod tests {
             mailbox.set_floor(Height::new(10));
             context.sleep(Duration::from_millis(50)).await;
 
-            mailbox
-                .hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
+            mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
@@ -2465,12 +2463,17 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             // Wait until marshal has durably stored the finalization.
-            while mailbox.get_finalization(Height::new(1)).await.ok().flatten().is_none() {
+            while mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            mailbox
-                .hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
+            mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
@@ -2503,8 +2506,7 @@ mod tests {
             .await;
 
             let target = participants[1].clone();
-            mailbox
-                .hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()));
+            mailbox.hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()));
             wait_until(&context, Duration::from_secs(5), "fetch_targeted", || {
                 !resolver.targeted.lock().is_empty()
             })
@@ -2555,7 +2557,13 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await.is_ok());
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            while mailbox.get_finalization(Height::new(1)).await.ok().flatten().is_none() {
+            while mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -2564,8 +2572,18 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // The finalized block and its finalization must still be retrievable.
-            assert!(mailbox.get_block(Height::new(1)).await.ok().flatten().is_some());
-            assert!(mailbox.get_finalization(Height::new(1)).await.ok().flatten().is_some());
+            assert!(mailbox
+                .get_block(Height::new(1))
+                .await
+                .ok()
+                .flatten()
+                .is_some());
+            assert!(mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .ok()
+                .flatten()
+                .is_some());
         });
     }
 }

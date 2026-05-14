@@ -356,11 +356,23 @@ mod tests {
             // Wait until the descendant is archived: that proves finalization processing
             // has completed, at which point the parent must already have been repaired
             // from the shard buffer.
-            while handle.mailbox.get_block(Height::new(2)).await.ok().flatten().is_none() {
+            while handle
+                .mailbox
+                .get_block(Height::new(2))
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let parent = handle.mailbox.get_block(Height::new(1)).await.ok().flatten();
+            let parent = handle
+                .mailbox
+                .get_block(Height::new(1))
+                .await
+                .ok()
+                .flatten();
             assert!(
                 parent.is_some(),
                 "parent must be archived from shard buffer before height-prune evicts it"
@@ -1027,8 +1039,7 @@ mod tests {
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
-            let block_rx = marshal
-                .subscribe_by_commitment(Some(round), missing_commitment);
+            let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
 
@@ -1684,7 +1695,11 @@ mod tests {
             );
 
             // Without the block, finalization should not be persisted by height yet.
-            let stored_finalization = v0_mailbox.get_finalization(Height::new(1)).await.ok().flatten();
+            let stored_finalization = v0_mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .ok()
+                .flatten();
             assert!(
                 stored_finalization.is_none(),
                 "finalization should not be archived until matching block is available"

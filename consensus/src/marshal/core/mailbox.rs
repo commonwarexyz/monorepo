@@ -365,12 +365,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> oneshot::Receiver<Option<(Height, <V::Block as Digestible>::Digest)>> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::GetInfo {
-                identifier,
-                response,
-            });
+        let _ = self.sender.enqueue(Message::GetInfo {
+            identifier,
+            response,
+        });
         receiver
     }
 
@@ -382,12 +380,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> oneshot::Receiver<Option<V::Block>> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::GetBlock {
-                identifier,
-                response,
-            });
+        let _ = self.sender.enqueue(Message::GetBlock {
+            identifier,
+            response,
+        });
         receiver
     }
 
@@ -507,9 +503,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub fn proposed(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::Proposed { round, block, ack });
+        let _ = self.sender.enqueue(Message::Proposed { round, block, ack });
         receiver
     }
 
@@ -519,9 +513,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub fn verified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::Verified { round, block, ack });
+        let _ = self.sender.enqueue(Message::Verified { round, block, ack });
         receiver
     }
 
@@ -745,18 +737,9 @@ mod tests {
     fn policy_keeps_highest_floor_and_prune() {
         let mut overflow = VecDeque::new();
 
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            set_floor(5)
-        ));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            set_floor(3)
-        ));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            set_floor(8)
-        ));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(5)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(3)));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(8)));
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(4)));
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(2)));
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
@@ -781,10 +764,7 @@ mod tests {
         overflow.push_back(get_block(7));
         overflow.push_back(hint_finalized(8, public_key(1)));
         overflow.push_back(get_block(8));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            set_floor(8)
-        ));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(8)));
         assert_eq!(overflow.len(), 2);
         assert!(!has_get_info(&overflow, 4));
         assert!(!has_get_block(&overflow, 7));
@@ -817,13 +797,13 @@ mod tests {
     fn policy_drops_stale_requests_after_prior_floor_and_prune() {
         let mut overflow = VecDeque::new();
 
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            set_floor(5)
-        ));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(5)));
         assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info(4)));
         assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(5)));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block(4)));
+        assert!(!<TestMessage as Policy>::handle(
+            &mut overflow,
+            get_block(4)
+        ));
         assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(5)));
         assert!(!<TestMessage as Policy>::handle(
             &mut overflow,
@@ -850,7 +830,10 @@ mod tests {
             get_finalization(6)
         ));
         assert!(!has_get_finalization(&overflow, 6));
-        assert!(!<TestMessage as Policy>::handle(&mut overflow, get_block(6)));
+        assert!(!<TestMessage as Policy>::handle(
+            &mut overflow,
+            get_block(6)
+        ));
         assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(7)));
         assert!(has_get_info(&overflow, 7));
         assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(7)));
