@@ -118,7 +118,10 @@ struct Inner<E: Context, V: Codec> {
     /// Never decreases (pruning only moves forward).
     pruning_boundary: u64,
 
-    /// Earliest data section modified since the most recent successful commit or sync.
+    /// Earliest data section modified since the last `commit()` or `sync()`.
+    ///
+    /// Tracks which sections need fsyncing. Reset by both `commit()` and `sync()` so
+    /// that repeated commit-without-sync cycles only fsync newly dirtied sections.
     dirty_from_section: Option<u64>,
 }
 
