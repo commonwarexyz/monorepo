@@ -130,11 +130,9 @@
 //! cached, additional shards for that commitment are ignored.
 //!
 //! _If the leader is not yet known, shards are buffered in fixed-size per-peer
-//! queues until consensus signals the leader via [`Discovered`]. Once leader
+//! queues until consensus signals the leader via [`Mailbox::discovered`]. Once leader
 //! is known, buffered shards for that commitment are ingested into the active
 //! state machine._
-//!
-//! [`Discovered`]: super::Message::Discovered
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -244,7 +242,7 @@ where
     /// Shards for commitments without a reconstruction state are buffered per
     /// peer in a fixed-size ring to bound memory under Byzantine spam. These
     /// shards are only ingested when consensus provides a leader via
-    /// [`Discovered`](super::Message::Discovered).
+    /// [`Mailbox::discovered`].
     ///
     /// The worst-case total memory usage for the set of shard buffers is
     /// `num_participants * peer_buffer_size * max_shard_size`.
@@ -1399,7 +1397,7 @@ where
     ///   `Ready` state to ensure we verify and re-broadcast it.
     /// - When the leader is not yet known, shards are buffered at the
     ///   engine level in bounded per-peer queues until
-    ///   [`Discovered`](super::Message::Discovered) creates a
+    ///   [`Mailbox::discovered`] creates a
     ///   reconstruction state for this commitment.
     async fn on_network_shard<Sch, S, X>(
         &mut self,
