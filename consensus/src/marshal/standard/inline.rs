@@ -921,14 +921,16 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            assert_eq!(
-                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone()),
-                commonware_actor::Feedback::Ok,
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
                 "buffer broadcast for parent should be accepted"
             );
-            assert_eq!(
-                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone()),
-                commonware_actor::Feedback::Ok,
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
                 "buffer broadcast for child should be accepted"
             );
 
@@ -1036,14 +1038,16 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            assert_eq!(
-                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone()),
-                commonware_actor::Feedback::Ok,
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
                 "buffer broadcast for parent should be accepted"
             );
-            assert_eq!(
-                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone()),
-                commonware_actor::Feedback::Ok,
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
                 "buffer broadcast for child should be accepted"
             );
 
@@ -1131,14 +1135,16 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            assert_eq!(
-                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), parent),
-                commonware_actor::Feedback::Ok,
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                    .accepted(),
                 "buffer broadcast for parent should be accepted"
             );
-            assert_eq!(
-                buffer.broadcast(commonware_p2p::Recipients::Some(vec![]), child),
-                commonware_actor::Feedback::Ok,
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                    .accepted(),
                 "buffer broadcast for child should be accepted"
             );
 

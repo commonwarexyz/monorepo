@@ -946,9 +946,7 @@ mod tests {
             // Peer A broadcasts a message.
             let msg = TestMessage::shared(b"eviction-test");
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
-            assert!(mailbox_a
-                .broadcast(Recipients::All, msg.clone())
-                .accepted());
+            assert!(mailbox_a.broadcast(Recipients::All, msg.clone()).accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Peer B should have cached the message (received from A).
@@ -1060,9 +1058,7 @@ mod tests {
             // Peer A broadcasts a message. B caches it.
             let msg = TestMessage::shared(b"eviction-latest-test");
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
-            assert!(mailbox_a
-                .broadcast(Recipients::All, msg.clone())
-                .accepted());
+            assert!(mailbox_a.broadcast(Recipients::All, msg.clone()).accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
@@ -1180,9 +1176,10 @@ mod tests {
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
             let msg = TestMessage::shared(b"startup-latest-primary-only");
-            assert_eq!(
-                mailbox_a.broadcast(Recipients::All, msg.clone()),
-                Feedback::Ok,
+            assert!(
+                mailbox_a
+                    .broadcast(Recipients::All, msg.clone())
+                    .accepted(),
                 "Recipients::All is accepted locally; cache policy is separate"
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -1224,10 +1221,9 @@ mod tests {
 
             // Enqueue a broadcast while the engine task is not running yet (only the mailbox channel)
             let msg = TestMessage::shared(b"queued-before-start");
-            assert_eq!(
-                mailbox.broadcast(Recipients::All, msg.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox
+                .broadcast(Recipients::All, msg.clone())
+                .accepted());
 
             // Start the engine (now that a message is enqueued)
             engine.start(network);
@@ -1308,9 +1304,10 @@ mod tests {
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
 
             let before = TestMessage::shared(b"before-tracking");
-            assert_eq!(
-                mailbox_a.broadcast(Recipients::All, before.clone()),
-                Feedback::Ok,
+            assert!(
+                mailbox_a
+                    .broadcast(Recipients::All, before.clone())
+                    .accepted(),
                 "broadcast request should be accepted before a peer set is tracked"
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -1335,10 +1332,9 @@ mod tests {
             context.sleep(A_JIFFY).await;
 
             let after = TestMessage::shared(b"after-tracking");
-            assert_eq!(
-                mailbox_a.broadcast(Recipients::All, after.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox_a
+                .broadcast(Recipients::All, after.clone())
+                .accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert_eq!(mailbox_b.get(after.digest()).await, Some(after));
@@ -1393,15 +1389,9 @@ mod tests {
             let msg = TestMessage::shared(b"shared-msg");
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
             let mailbox_c = mailboxes.get(&peer_c).unwrap().clone();
-            assert_eq!(
-                mailbox_a.broadcast(Recipients::All, msg.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox_a.broadcast(Recipients::All, msg.clone()).accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-            assert_eq!(
-                mailbox_c.broadcast(Recipients::All, msg.clone()),
-                Feedback::Ok
-            );
+            assert!(mailbox_c.broadcast(Recipients::All, msg.clone()).accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // B has the message in both A's and C's deques (ref count = 2).
