@@ -223,7 +223,7 @@ where
             .epocher
             .last(prev)
             .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await else {
+        let Some(block) = self.marshal.get_block(last_height).await.ok().flatten() else {
             unreachable!("missing starting epoch block at height {}", last_height);
         };
         block.digest()
@@ -264,7 +264,7 @@ where
             // Skip this view and let the voter nullify it via timeout.
             if marshal
                 .get_verified(consensus_context.round)
-                .await
+                .await.ok().flatten()
                 .is_some()
             {
                 debug!(
@@ -310,7 +310,7 @@ where
                 .expect("current epoch should exist");
             if parent.height() == last_in_epoch {
                 let digest = parent.digest();
-                if !marshal.verified(consensus_context.round, parent).await {
+                if marshal.verified(consensus_context.round, parent).await.is_err() {
                     debug!(
                         round = ?consensus_context.round,
                         ?digest,
@@ -358,7 +358,7 @@ where
             build_timer.observe(&runtime_context);
 
             let digest = built_block.digest();
-            if !marshal.proposed(consensus_context.round, built_block).await {
+            if marshal.proposed(consensus_context.round, built_block).await.is_err() {
                 debug!(
                     round = ?consensus_context.round,
                     ?digest,
@@ -406,8 +406,7 @@ where
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
             let block_request = marshal
-                .subscribe_by_digest(Some(context.round), digest)
-                .await;
+                .subscribe_by_digest(Some(context.round), digest);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -495,7 +494,7 @@ where
         }
 
         // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -516,7 +515,7 @@ where
             // block through marshal before signaling success. The caller
             // holds a notarization for this block, so route it into the
             // notarized cache directly rather than the verified cache.
-            if marshal.certified(round, block).await {
+            if marshal.certified(round, block).await.is_ok() {
                 tx.send_lossy(true);
             }
         });
@@ -545,7 +544,7 @@ where
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients).await;
+        self.marshal.forward(round, digest, recipients);
     }
 }
 
@@ -661,7 +660,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, parent).await);
+            assert!(marshal.verified(parent_round, parent).await.is_ok());
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -672,7 +671,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.verified(round, block).await);
+            assert!(marshal.verified(round, block).await.is_ok());
 
             // Complete verify first so the block is already available locally.
             let verify_rx = inline.verify(verify_context, digest).await;
@@ -742,7 +741,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, parent).await);
+            assert!(marshal.verified(parent_round, parent).await.is_ok());
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -753,7 +752,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.verified(round, block).await);
+            assert!(marshal.verified(round, block).await.is_ok());
 
             // Certify should still resolve by waiting on marshal block availability directly.
             let certify_rx = inline.certify(round, digest).await;
@@ -817,7 +816,7 @@ mod tests {
                 1900,
             );
             let boundary_digest = boundary_block.digest();
-            assert!(marshal.verified(boundary_round, boundary_block).await);
+            assert!(marshal.verified(boundary_round, boundary_block).await.is_ok());
 
             let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = Ctx {
@@ -967,7 +966,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            let post_restart = marshal2.get_block(&child_digest).await;
+            let post_restart = marshal2.get_block(&child_digest).await.ok().flatten();
             assert!(
                 post_restart.is_some(),
                 "verify resolved true so block must be durably persisted (seed={seed})"
@@ -1074,7 +1073,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            let post_restart = marshal2.get_block(&child_digest).await;
+            let post_restart = marshal2.get_block(&child_digest).await.ok().flatten();
             assert!(
                 post_restart.is_some(),
                 "certify resolved true so block must be durably persisted (seed={seed})"
@@ -1149,6 +1148,7 @@ mod tests {
                 .await
                 .expect("verify should reach application before marshal abort");
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());
 
             select! {
@@ -1191,7 +1191,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            let post_restart = marshal2.get_block(&child_digest).await;
+            let post_restart = marshal2.get_block(&child_digest).await.ok().flatten();
             assert!(
                 post_restart.is_none(),
                 "failed marshal.verified ack must not leave a durably recoverable block"
@@ -1249,7 +1249,7 @@ mod tests {
             let pre_application = pre_setup.application;
 
             let stale_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
-            assert!(pre_marshal.verified(round, stale_block).await);
+            assert!(pre_marshal.verified(round, stale_block).await.is_ok());
 
             // Simulate a crash: abort the actor and drop every handle so the
             // storage partition is fully released before reopening.

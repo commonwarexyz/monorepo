@@ -1,10 +1,6 @@
-use super::Scheme;
 use commonware_actor::mailbox::{Policy, Sender};
 use commonware_consensus::{
-    simplex::{
-        types::{Activity, Context},
-        Plan,
-    },
+    simplex::{types::Context, Plan},
     types::Epoch,
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
@@ -22,9 +18,6 @@ pub enum Message<D: Digest> {
     },
     Verify {
         response: oneshot::Sender<bool>,
-    },
-    Report {
-        activity: Activity<Scheme, D>,
     },
 }
 

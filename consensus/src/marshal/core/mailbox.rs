@@ -15,7 +15,7 @@ use commonware_actor::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use std::collections::VecDeque;
+use std::{collections::VecDeque, future::Future};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -359,58 +359,49 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// A request to retrieve the information about the highest finalized block.
-    pub async fn get_info(
+    pub fn get_info(
         &self,
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
-    ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
+    ) -> oneshot::Receiver<Option<(Height, <V::Block as Digestible>::Digest)>> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
-        if !self
+        let _ = self
             .sender
             .enqueue(Message::GetInfo {
                 identifier,
                 response,
-            })
-            .accepted()
-        {
-            return None;
-        }
-        receiver.await.ok().flatten()
+            });
+        receiver
     }
 
     /// A best-effort attempt to retrieve a given block from local
     /// storage. It is not an indication to go fetch the block from the network.
-    pub async fn get_block(
+    pub fn get_block(
         &self,
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
-    ) -> Option<V::Block> {
+    ) -> oneshot::Receiver<Option<V::Block>> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
-        if !self
+        let _ = self
             .sender
             .enqueue(Message::GetBlock {
                 identifier,
                 response,
-            })
-            .accepted()
-        {
-            return None;
-        }
-        receiver.await.ok().flatten()
+            });
+        receiver
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
-    pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
+    pub fn get_finalization(
+        &self,
+        height: Height,
+    ) -> oneshot::Receiver<Option<Finalization<S, V::Commitment>>> {
         let (response, receiver) = oneshot::channel();
-        if !self
+        let _ = self
             .sender
-            .enqueue(Message::GetFinalization { height, response })
-            .accepted()
-        {
-            return None;
-        }
-        receiver.await.ok().flatten()
+            .enqueue(Message::GetFinalization { height, response });
+        receiver
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -432,7 +423,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The height must be covered by both the epocher and the provider. If the
     /// epocher cannot map the height to an epoch, or the provider cannot supply
     /// a scheme for that epoch, the hint is silently dropped.
-    pub async fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+    pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         let _ = self
             .sender
             .enqueue(Message::HintFinalized { height, targets });
@@ -447,7 +438,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// it may never become available.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
-    pub async fn subscribe_by_digest(
+    pub fn subscribe_by_digest(
         &self,
         round: Option<Round>,
         digest: <V::Block as Digestible>::Digest,
@@ -470,7 +461,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// it may never become available.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
-    pub async fn subscribe_by_commitment(
+    pub fn subscribe_by_commitment(
         &self,
         round: Option<Round>,
         commitment: V::Commitment,
@@ -487,74 +478,63 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
     ///
     /// If the starting block is not found, `None` is returned.
-    pub async fn ancestry(
+    pub fn ancestry(
         &self,
         (start_round, start_digest): (Option<Round>, <V::Block as Digestible>::Digest),
-    ) -> Option<AncestorStream<Self, V::ApplicationBlock>> {
-        self.subscribe_by_digest(start_round, start_digest)
-            .await
-            .await
-            .ok()
-            .map(|block| AncestorStream::new(self.clone(), [V::into_inner(block)]))
+    ) -> impl Future<Output = Option<AncestorStream<Self, V::ApplicationBlock>>> + '_ {
+        let subscription = self.subscribe_by_digest(start_round, start_digest);
+        let mailbox = self.clone();
+        async move {
+            subscription
+                .await
+                .ok()
+                .map(|block| AncestorStream::new(mailbox, [V::into_inner(block)]))
+        }
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
-    pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
+    pub fn get_verified(&self, round: Round) -> oneshot::Receiver<Option<V::Block>> {
         let (response, receiver) = oneshot::channel();
-        if !self
+        let _ = self
             .sender
-            .enqueue(Message::GetVerified { round, response })
-            .accepted()
-        {
-            return None;
-        }
-        receiver.await.ok().flatten()
+            .enqueue(Message::GetVerified { round, response });
+        receiver
     }
 
-    /// Notifies the actor that a block has been locally proposed, awaiting
-    /// the actor's confirmation that the block has been durably persisted
-    /// before returning.
+    /// Notifies the actor that a block has been locally proposed.
+    ///
+    /// The returned receiver resolves after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
+    pub fn proposed(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
-        if !self
+        let _ = self
             .sender
-            .enqueue(Message::Proposed { round, block, ack })
-            .accepted()
-        {
-            return false;
-        }
-        receiver.await.is_ok()
+            .enqueue(Message::Proposed { round, block, ack });
+        receiver
     }
 
-    /// Notifies the actor that a block has been verified, awaiting the actor's
-    /// confirmation that the block has been durably persisted before returning.
+    /// Notifies the actor that a block has been verified.
+    ///
+    /// The returned receiver resolves after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
+    pub fn verified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
-        if !self
+        let _ = self
             .sender
-            .enqueue(Message::Verified { round, block, ack })
-            .accepted()
-        {
-            return false;
-        }
-        receiver.await.is_ok()
+            .enqueue(Message::Verified { round, block, ack });
+        receiver
     }
 
-    /// Notifies the actor that a block has been certified, awaiting the actor's
-    /// confirmation that the block has been durably persisted before returning.
+    /// Notifies the actor that a block has been certified.
+    ///
+    /// The returned receiver resolves after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn certified(&self, round: Round, block: V::Block) -> bool {
+    pub fn certified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
-        if !self
+        let _ = self
             .sender
-            .enqueue(Message::Certified { round, block, ack })
-            .accepted()
-        {
-            return false;
-        }
-        receiver.await.is_ok()
+            .enqueue(Message::Certified { round, block, ack });
+        receiver
     }
 
     /// Sets the sync starting point (advances if higher than current).
@@ -566,7 +546,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// from tip), use [Self::prune] instead.
     ///
     /// The default floor is 0.
-    pub async fn set_floor(&self, height: Height) {
+    pub fn set_floor(&self, height: Height) {
         let _ = self.sender.enqueue(Message::SetFloor { height });
     }
 
@@ -577,12 +557,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// otherwise the prune request is ignored.
     ///
     /// A `prune` request for a height above marshal's current floor is dropped.
-    pub async fn prune(&self, height: Height) {
+    pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune { height });
     }
 
     /// Forward a block to a set of recipients.
-    pub async fn forward(
+    pub fn forward(
         &self,
         round: Round,
         commitment: V::Commitment,
@@ -599,9 +579,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
 
-    async fn fetch_block(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
-        let subscription = self.subscribe_by_digest(None, digest).await;
-        subscription.await.ok().map(V::into_inner)
+    fn fetch_block(
+        self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> impl Future<Output = Option<Self::Block>> + Send {
+        let subscription = self.subscribe_by_digest(None, digest);
+        async move { subscription.await.ok().map(V::into_inner) }
     }
 }
 

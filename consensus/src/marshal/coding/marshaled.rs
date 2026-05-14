@@ -376,9 +376,8 @@ where
                 (parent, block)
             } else {
                 // No prefetched block, fetch both parent and block
-                let block_request = marshal
-                    .subscribe_by_commitment(Some(round), commitment)
-                    .await;
+                let block_request =
+                    marshal.subscribe_by_commitment(Some(round), commitment);
                 let block_requests = try_join(parent_request, block_request);
 
                 select! {
@@ -502,7 +501,7 @@ where
             .epocher
             .last(previous_epoch)
             .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await else {
+        let Some(block) = self.marshal.get_block(last_height).await.ok().flatten() else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
             unreachable!("missing starting epoch block at height {last_height}");
@@ -571,7 +570,7 @@ where
             // parent and cannot be broadcast under the current header, so
             // drop the receiver and let the voter nullify the view via
             // timeout.
-            if let Some(block) = marshal.get_verified(consensus_context.round).await {
+            if let Some(block) = marshal.get_verified(consensus_context.round).await.ok().flatten() {
                 let block_context = block.context();
                 if block_context != consensus_context {
                     debug!(
@@ -636,7 +635,7 @@ where
             if parent.height() == last_in_epoch {
                 let commitment = parent.commitment();
                 let round = consensus_context.round;
-                if !marshal.verified(round, parent).await {
+                if marshal.verified(round, parent).await.is_err() {
                     debug!(
                         ?round,
                         ?commitment,
@@ -689,7 +688,7 @@ where
 
             let commitment = coded_block.commitment();
             let round = consensus_context.round;
-            if !marshal.proposed(round, coded_block).await {
+            if marshal.proposed(round, coded_block).await.is_err() {
                 debug!(?round, ?commitment, "marshal rejected proposed block");
                 return;
             }
@@ -774,8 +773,7 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(Some(consensus_context.round), payload)
-                .await;
+                .subscribe_by_commitment(Some(consensus_context.round), payload);
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
@@ -830,7 +828,7 @@ where
 
                     // Valid re-proposal: notify the marshal and complete the
                     // verification task for `certify`.
-                    if !marshal.verified(round, block).await {
+                    if marshal.verified(round, block).await.is_err() {
                         debug!(?round, "marshal unable to accept block");
                         return;
                     }
@@ -927,10 +925,7 @@ where
             ?payload,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_commitment(Some(round), payload)
-            .await;
+        let block_rx = self.marshal.subscribe_by_commitment(Some(round), payload);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -981,7 +976,7 @@ where
                 // Certifier holds a notarization for this block, so route
                 // the write to the notarized cache. `certified` is
                 // idempotent, so crash-recovery double-invocation is safe.
-                if !marshaled.marshal.certified(round, block).await {
+                if marshaled.marshal.certified(round, block).await.is_err() {
                     debug!(?round, "marshal unable to accept block");
                     return;
                 }
@@ -1038,9 +1033,7 @@ where
         let Plan::Propose { round } = plan else {
             return;
         };
-        self.marshal
-            .forward(round, commitment, Recipients::All)
-            .await;
+        self.marshal.forward(round, commitment, Recipients::All);
     }
 }
 
@@ -1111,11 +1104,7 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        Either::Right(
-            marshal
-                .subscribe_by_commitment(parent_round, parent_commitment)
-                .await,
-        )
+        Either::Right(marshal.subscribe_by_commitment(parent_round, parent_commitment))
     }
 }
 

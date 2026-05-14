@@ -418,8 +418,7 @@ impl<
                         &parent_chunk,
                         parent.epoch,
                         parent.certificate.clone(),
-                    )
-                    .await;
+                    );
                 }
 
                 // Process the node
@@ -453,7 +452,7 @@ impl<
                     debug!(?err, ?sender, "ack validate failed");
                     continue;
                 };
-                if let Err(err) = self.handle_ack(&ack).await {
+                if let Err(err) = self.handle_ack(&ack) {
                     debug!(?err, ?sender, "ack handle failed");
                     guard.set(Status::Failure);
                     continue;
@@ -566,7 +565,7 @@ impl<
         };
 
         // Handle the ack internally
-        self.handle_ack(&ack).await?;
+        self.handle_ack(&ack)?;
 
         // Send the ack to the network
         ack_sender
@@ -582,7 +581,7 @@ impl<
     /// The certificate must already be verified.
     /// If the certificate is new, it is stored and the proof is emitted to the committer.
     /// If the certificate is already known, it is ignored.
-    async fn handle_certificate(
+    fn handle_certificate(
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
@@ -616,7 +615,7 @@ impl<
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
+    fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
         let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
@@ -629,8 +628,7 @@ impl<
         {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
-            self.handle_certificate(&ack.chunk, ack.epoch, certificate)
-                .await;
+            self.handle_certificate(&ack.chunk, ack.epoch, certificate);
         }
 
         Ok(())

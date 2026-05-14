@@ -218,7 +218,7 @@ impl<
     }
 
     /// Adds a vote that we constructed ourselves to the verifier.
-    pub async fn add_constructed(&mut self, message: Vote<S, D>) {
+    pub fn add_constructed(&mut self, message: Vote<S, D>) {
         match &message {
             Vote::Notarize(notarize) => {
                 // Report activity

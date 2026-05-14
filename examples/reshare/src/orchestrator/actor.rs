@@ -232,8 +232,7 @@ where
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
                 self.marshal
-                    .hint_finalized(boundary_height, NonEmptyVec::new(from))
-                    .await;
+                    .hint_finalized(boundary_height, NonEmptyVec::new(from));
             },
             Some(transition) = self.mailbox.recv() else {
                 warn!("mailbox closed, shutting down orchestrator");

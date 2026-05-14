@@ -38,12 +38,12 @@ use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
-    num::{NonZero, NonZeroU16},
+    num::{NonZero, NonZeroU16, NonZeroUsize},
     time::Instant,
 };
 use tracing::{error, info, warn};
 
-const MAILBOX_SIZE: usize = 1024;
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
 const DEQUE_SIZE: usize = 10;
 const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
@@ -148,7 +148,7 @@ where
             dkg::Config {
                 manager: config.manager.clone(),
                 signer: config.signer.clone(),
-                mailbox_size: NZUsize!(MAILBOX_SIZE),
+                mailbox_size: MAILBOX_SIZE,
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
                 max_supported_mode: MAX_SUPPORTED_MODE,
@@ -159,7 +159,7 @@ where
             context.child("buffer"),
             buffered::Config {
                 public_key: config.signer.public_key(),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: MAILBOX_SIZE.get(),
                 deque_size: DEQUE_SIZE,
                 priority: true,
                 codec_config: num_participants,
@@ -268,7 +268,7 @@ where
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
-                mailbox_size: NZUsize!(MAILBOX_SIZE),
+                mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
                     ACTIVITY_TIMEOUT
                         .get()
@@ -302,8 +302,8 @@ where
                 provider,
                 marshal: marshal_mailbox,
                 strategy: config.strategy.clone(),
-                muxer_size: MAILBOX_SIZE,
-                mailbox_size: MAILBOX_SIZE,
+                muxer_size: MAILBOX_SIZE.get(),
+                mailbox_size: MAILBOX_SIZE.get(),
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 _phantom: PhantomData,
             },

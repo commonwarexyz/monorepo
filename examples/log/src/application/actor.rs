@@ -1,6 +1,6 @@
 use super::{
     ingress::{Mailbox, Message},
-    reporter::{self, Reporter},
+    reporter::Reporter,
     Config, Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver};
@@ -30,7 +30,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
         let (sender, receiver) = mailbox::new(config.mailbox_size);
         let mailbox = Mailbox::new(sender);
-        let reporter = Reporter::new(&mailbox);
+        let reporter = Reporter::new();
         (
             Self {
                 context: ContextCell::new(context),
@@ -84,9 +84,6 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
                     // If we linked payloads to their parent, we would verify
                     // the parent included in the payload matches the provided context.
                     let _ = response.send(true);
-                }
-                Message::Report { activity } => {
-                    reporter::log(activity);
                 }
             }
         }
