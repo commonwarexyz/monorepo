@@ -1034,6 +1034,7 @@ mod tests {
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
             let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
+
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
 
