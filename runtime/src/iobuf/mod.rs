@@ -27,7 +27,7 @@ use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBound
 
 #[cfg(feature = "bench")]
 pub mod bench {
-    pub use super::{aligned::PooledBuffer, freelist::Freelist};
+    pub use super::{buffer::PooledBuffer, freelist::Freelist};
 }
 
 /// Immutable byte buffer.
