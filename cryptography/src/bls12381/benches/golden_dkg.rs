@@ -10,6 +10,8 @@ use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, hint::black_box, num::NonZeroU32, sync::LazyLock};
 
+const BENCH_NAMESPACE: &[u8] = b"bench";
+
 // One dealer is enough: Golden DKG cost scales with the number of receivers,
 // not the number of dealers.
 cfg_if::cfg_if! {
@@ -41,12 +43,12 @@ impl Bench {
             .map(|_| PrivateKey::random(&mut *rng).public())
             .try_collect()
             .unwrap();
-        let info = Info::new(0, None, dealers, players);
+        let info = Info::new::<N3f1>(BENCH_NAMESPACE, 0, None, dealers, players).unwrap();
         Self { info, me }
     }
 
     fn deal(&self, rng: &mut impl CryptoRngCore) -> SignedDealerLog {
-        golden_dkg::deal::<N3f1>(rng, &SETUP, &self.info, &self.me, None, &Sequential)
+        golden_dkg::deal(rng, &SETUP, &self.info, &self.me, None, &Sequential)
             .expect("honest deal should succeed")
     }
 }
@@ -67,7 +69,7 @@ fn bench_golden_dkg_deal(c: &mut Criterion) {
                 },
                 |(info, me, mut rng)| {
                     black_box(
-                        golden_dkg::deal::<N3f1>(&mut rng, &SETUP, &info, &me, None, &Sequential)
+                        golden_dkg::deal(&mut rng, &SETUP, &info, &me, None, &Sequential)
                             .unwrap(),
                     );
                 },
@@ -91,11 +93,11 @@ fn bench_golden_dkg_verify(c: &mut Criterion) {
             b.iter_batched(
                 || (bench.info.clone(), signed.clone(), StdRng::seed_from_u64(0)),
                 |(info, signed, mut rng)| {
-                    let (pk, log) = signed.identify().expect("honest log should identify");
+                    let (pk, log) = signed.identify(&info).expect("honest log should identify");
                     let mut logs = BTreeMap::<PublicKey, DealerLog>::new();
                     logs.insert(pk, log);
                     black_box(
-                        golden_dkg::observe::<N3f1>(&mut rng, &SETUP, &info, logs, &Sequential)
+                        golden_dkg::observe(&mut rng, &SETUP, &info, logs, &Sequential)
                             .unwrap(),
                     );
                 },
