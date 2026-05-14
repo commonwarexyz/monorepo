@@ -554,7 +554,7 @@ where
                         // overwritten.
                         let commitment = V::commitment(&block);
                         self.last_proposed_block = Some((round, commitment, block));
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Verified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -562,7 +562,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_verified(round, block.digest(), block).await;
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Certified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -570,7 +570,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_block(round, block.digest(), block).await;
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Notarization { notarization } => {
                         let round = notarization.round();

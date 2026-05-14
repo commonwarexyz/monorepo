@@ -114,7 +114,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The proposed block.
         block: V::Block,
         /// A channel signaled once the block is durably stored.
-        ack: oneshot::Sender<()>,
+        ack: Option<oneshot::Sender<()>>,
     },
     /// A notification that a block has been verified by the application.
     Verified {
@@ -123,7 +123,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The verified block.
         block: V::Block,
         /// A channel signaled once the block is durably stored.
-        ack: oneshot::Sender<()>,
+        ack: Option<oneshot::Sender<()>>,
     },
     /// A notification that a block has been certified by the application.
     Certified {
@@ -132,7 +132,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The certified block.
         block: V::Block,
         /// A channel signaled once the block is durably stored.
-        ack: oneshot::Sender<()>,
+        ack: Option<oneshot::Sender<()>>,
     },
     /// Sets the sync starting point (advances if higher than current).
     ///
@@ -169,7 +169,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 }
 
 impl<S: Scheme, V: Variant> Message<S, V> {
-    fn stale(&self, pending: &Pending<S, V>) -> bool {
+    fn stale_below(current: Option<Height>, height: Height) -> bool {
+        current.is_some_and(|current| height < current)
+    }
+
+    fn stale_at_or_below(current: Option<Height>, height: Height) -> bool {
+        current.is_some_and(|current| height <= current)
+    }
+
+    fn stale(&self, current: Option<Height>) -> bool {
         match self {
             Self::GetInfo {
                 identifier: Identifier::Height(height),
@@ -179,11 +187,11 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Height(height),
                 ..
             }
-            | Self::GetFinalization { height, .. } => pending.drops_below(*height),
+            | Self::GetFinalization { height, .. } => Self::stale_below(current, *height),
             Self::Proposed { block, .. }
             | Self::Verified { block, .. }
-            | Self::Certified { block, .. } => pending.drops_below(block.height()),
-            Self::HintFinalized { height, .. } => pending.drops_at_or_below(*height),
+            | Self::Certified { block, .. } => Self::stale_below(current, block.height()),
+            Self::HintFinalized { height, .. } => Self::stale_at_or_below(current, *height),
             Self::GetBlock {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
@@ -196,13 +204,15 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         }
     }
 
-    fn ack_stale_durable(self) {
+    fn ack_stale_durable(&mut self) {
         match self {
             Self::Proposed { ack, .. }
             | Self::Verified { ack, .. }
             | Self::Certified { ack, .. } => {
                 // Stale durable work no longer needs storage, so wake waiters as complete.
-                let _ = ack.send(());
+                if let Some(ack) = ack.take() {
+                    let _ = ack.send(());
+                }
             }
             _ => {}
         }
@@ -232,10 +242,6 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.floor.into_iter().chain(self.prune).max()
     }
 
-    fn drops_below(&self, height: Height) -> bool {
-        self.height().is_some_and(|current| height < current)
-    }
-
     fn drops_at_or_below(&self, height: Height) -> bool {
         self.height().is_some_and(|current| height <= current)
     }
@@ -245,15 +251,14 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.hints
             .retain(|candidate, _| !height.is_some_and(|current| *candidate <= current));
 
-        let len = self.messages.len();
-        for _ in 0..len {
-            let message = self.messages.pop_front().expect("message count fixed");
-            if message.stale(self) {
+        self.messages.retain_mut(|message| {
+            if message.stale(height) {
                 message.ack_stale_durable();
+                false
             } else {
-                self.messages.push_back(message);
+                true
             }
-        }
+        });
     }
 
     fn set_floor(&mut self, height: Height) -> bool {
@@ -292,8 +297,8 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         true
     }
 
-    fn push_message(&mut self, message: Message<S, V>) -> bool {
-        if message.stale(self) {
+    fn push_message(&mut self, mut message: Message<S, V>) -> bool {
+        if message.stale(self.height()) {
             message.ack_stale_durable();
             return false;
         }
@@ -535,7 +540,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Proposed { round, block, ack });
+        let _ = self.sender.enqueue(Message::Proposed {
+            round,
+            block,
+            ack: Some(ack),
+        });
         receiver.await.is_ok()
     }
 
@@ -545,7 +554,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Verified { round, block, ack });
+        let _ = self.sender.enqueue(Message::Verified {
+            round,
+            block,
+            ack: Some(ack),
+        });
         receiver.await.is_ok()
     }
 
@@ -557,7 +570,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let (ack, receiver) = oneshot::channel();
         let _ = self
             .sender
-            .enqueue(Message::Certified { round, block, ack });
+            .enqueue(Message::Certified {
+                round,
+                block,
+                ack: Some(ack),
+            });
         receiver.await.is_ok()
     }
 
@@ -672,7 +689,7 @@ mod tests {
             TestMessage::Proposed {
                 round: round(height),
                 block: block(height),
-                ack,
+                ack: Some(ack),
             },
             receiver,
         )
@@ -684,7 +701,7 @@ mod tests {
             TestMessage::Verified {
                 round: round(height),
                 block: block(height),
-                ack,
+                ack: Some(ack),
             },
             receiver,
         )
@@ -696,7 +713,7 @@ mod tests {
             TestMessage::Certified {
                 round: round(height),
                 block: block(height),
-                ack,
+                ack: Some(ack),
             },
             receiver,
         )
