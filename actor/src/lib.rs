@@ -23,5 +23,12 @@ commonware_macros::stability_scope!(BETA {
         Closed,
     }
 
+    impl Feedback {
+        /// Returns `true` when work was accepted by the endpoint.
+        pub const fn accepted(self) -> bool {
+            matches!(self, Self::Ok | Self::Backoff)
+        }
+    }
+
     pub mod mailbox;
 });

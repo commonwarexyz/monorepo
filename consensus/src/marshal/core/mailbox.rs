@@ -191,10 +191,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::GetInfo {
-            identifier,
-            response,
-        });
+        if !self
+            .sender
+            .enqueue(Message::GetInfo {
+                identifier,
+                response,
+            })
+            .accepted()
+        {
+            return None;
+        }
         receiver.await.ok().flatten()
     }
 
@@ -206,10 +212,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> Option<V::Block> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::GetBlock {
-            identifier,
-            response,
-        });
+        if !self
+            .sender
+            .enqueue(Message::GetBlock {
+                identifier,
+                response,
+            })
+            .accepted()
+        {
+            return None;
+        }
         receiver.await.ok().flatten()
     }
 
@@ -217,9 +229,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
     pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
+        if !self
             .sender
-            .enqueue(Message::GetFinalization { height, response });
+            .enqueue(Message::GetFinalization { height, response })
+            .accepted()
+        {
+            return None;
+        }
         receiver.await.ok().flatten()
     }
 
@@ -311,9 +327,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns the verified block previously persisted for `round`, if any.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
+        if !self
             .sender
-            .enqueue(Message::GetVerified { round, response });
+            .enqueue(Message::GetVerified { round, response })
+            .accepted()
+        {
+            return None;
+        }
         receiver.await.ok().flatten()
     }
 
@@ -323,7 +343,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Proposed { round, block, ack });
+        if !self
+            .sender
+            .enqueue(Message::Proposed { round, block, ack })
+            .accepted()
+        {
+            return false;
+        }
         receiver.await.is_ok()
     }
 
@@ -332,7 +358,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Verified { round, block, ack });
+        if !self
+            .sender
+            .enqueue(Message::Verified { round, block, ack })
+            .accepted()
+        {
+            return false;
+        }
         receiver.await.is_ok()
     }
 
@@ -341,9 +373,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self
+        if !self
             .sender
-            .enqueue(Message::Certified { round, block, ack });
+            .enqueue(Message::Certified { round, block, ack })
+            .accepted()
+        {
+            return false;
+        }
         receiver.await.is_ok()
     }
 

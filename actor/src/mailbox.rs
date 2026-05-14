@@ -1174,10 +1174,10 @@ mod loom_tests {
             let feedback = sender.enqueue(Message::Spill(0));
             close.join().unwrap();
 
-            match feedback {
-                Feedback::Ok | Feedback::Backoff => assert!(wakes.load(Ordering::Acquire) > 0),
-                Feedback::Closed => {}
-                feedback => panic!("unexpected feedback: {feedback:?}"),
+            if feedback.accepted() {
+                assert!(wakes.load(Ordering::Acquire) > 0);
+            } else {
+                assert_eq!(feedback, Feedback::Closed);
             }
             assert_eq!(sender.enqueue(Message::Spill(1)), Feedback::Closed);
         });
@@ -1234,7 +1234,7 @@ mod loom_tests {
             let seen = Arc::new(AtomicUsize::new(0));
             let enqueue = thread::spawn(move || {
                 let feedback = sender.enqueue(Message::Spill(1));
-                assert!(matches!(feedback, Feedback::Ok | Feedback::Backoff));
+                assert!(feedback.accepted());
             });
 
             let seen_by_receiver = seen.clone();
@@ -1270,14 +1270,8 @@ mod loom_tests {
 
             let seen = Arc::new(AtomicUsize::new(0));
 
-            assert!(matches!(
-                enqueue_1.join().unwrap(),
-                Feedback::Ok | Feedback::Backoff
-            ));
-            assert!(matches!(
-                enqueue_2.join().unwrap(),
-                Feedback::Ok | Feedback::Backoff
-            ));
+            assert!(enqueue_1.join().unwrap().accepted());
+            assert!(enqueue_2.join().unwrap().accepted());
 
             while let Ok(message) = receiver.try_recv() {
                 record(&seen, message);
@@ -1357,7 +1351,7 @@ mod loom_tests {
             let mut observed = vec![value(receiver.try_recv().unwrap())];
             gate.store(2, Ordering::Release);
             let feedback = sender.enqueue(OrderedMessage::Item(3));
-            assert!(matches!(feedback, Feedback::Ok | Feedback::Backoff));
+            assert!(feedback.accepted());
 
             overflow.join().unwrap();
             while let Ok(message) = receiver.try_recv() {

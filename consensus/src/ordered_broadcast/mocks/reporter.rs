@@ -219,9 +219,10 @@ impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
 impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
     pub async fn get_tip(&mut self, sequencer: C) -> Option<(Height, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::GetTip(sequencer, sender)),
-            Feedback::Closed,
+        assert!(
+            self.sender
+                .enqueue(Message::GetTip(sequencer, sender))
+                .accepted(),
             "Failed to send get tip"
         );
         receiver.await.unwrap()
@@ -229,10 +230,10 @@ impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
 
     pub async fn get_contiguous_tip(&mut self, sequencer: C) -> Option<Height> {
         let (sender, receiver) = oneshot::channel();
-        assert_ne!(
+        assert!(
             self.sender
-                .enqueue(Message::GetContiguousTip(sequencer, sender)),
-            Feedback::Closed,
+                .enqueue(Message::GetContiguousTip(sequencer, sender))
+                .accepted(),
             "Failed to send get contiguous tip"
         );
         receiver.await.unwrap()
@@ -240,9 +241,10 @@ impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
 
     pub async fn get(&mut self, sequencer: C, height: Height) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::Get(sequencer, height, sender)),
-            Feedback::Closed,
+        assert!(
+            self.sender
+                .enqueue(Message::Get(sequencer, height, sender))
+                .accepted(),
             "Failed to send get"
         );
         receiver.await.unwrap()

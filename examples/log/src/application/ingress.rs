@@ -1,8 +1,5 @@
 use super::Scheme;
-use commonware_actor::{
-    mailbox::{Policy, Sender},
-    Feedback,
-};
+use commonware_actor::mailbox::{Policy, Sender};
 use commonware_consensus::{
     simplex::{
         types::{Activity, Context},
@@ -56,9 +53,10 @@ impl<D: Digest> Au for Mailbox<D> {
 
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::Genesis { epoch, response }),
-            Feedback::Closed,
+        assert!(
+            self.sender
+                .enqueue(Message::Genesis { epoch, response })
+                .accepted(),
             "Failed to send genesis"
         );
         receiver.await.expect("Failed to receive genesis")
@@ -71,9 +69,10 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::Propose { response }),
-            Feedback::Closed,
+        assert!(
+            self.sender
+                .enqueue(Message::Propose { response })
+                .accepted(),
             "Failed to send propose"
         );
         receiver
@@ -89,9 +88,8 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.
         let (response, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::Verify { response }),
-            Feedback::Closed,
+        assert!(
+            self.sender.enqueue(Message::Verify { response }).accepted(),
             "Failed to send verify"
         );
         receiver

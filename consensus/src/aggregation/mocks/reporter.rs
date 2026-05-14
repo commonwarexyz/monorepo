@@ -202,9 +202,8 @@ where
 {
     pub async fn get_tip(&mut self) -> Option<(Height, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::GetTip(sender)),
-            Feedback::Closed,
+        assert!(
+            self.sender.enqueue(Message::GetTip(sender)).accepted(),
             "Failed to send get tip"
         );
         receiver.await.unwrap()
@@ -212,9 +211,10 @@ where
 
     pub async fn get_contiguous_tip(&mut self) -> Option<Height> {
         let (sender, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::GetContiguousTip(sender)),
-            Feedback::Closed,
+        assert!(
+            self.sender
+                .enqueue(Message::GetContiguousTip(sender))
+                .accepted(),
             "Failed to send get contiguous tip"
         );
         receiver.await.unwrap()
@@ -222,9 +222,10 @@ where
 
     pub async fn get(&mut self, height: Height) -> Option<(D, Epoch)> {
         let (sender, receiver) = oneshot::channel();
-        assert_ne!(
-            self.sender.enqueue(Message::Get(height, sender)),
-            Feedback::Closed,
+        assert!(
+            self.sender
+                .enqueue(Message::Get(height, sender))
+                .accepted(),
             "Failed to send get"
         );
         receiver.await.unwrap()

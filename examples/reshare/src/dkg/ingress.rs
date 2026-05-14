@@ -85,7 +85,7 @@ where
         let message = Message::Act {
             response: response_tx,
         };
-        if self.sender.enqueue(message) == Feedback::Closed {
+        if !self.sender.enqueue(message).accepted() {
             error!("failed to send act message");
             return None;
         }
