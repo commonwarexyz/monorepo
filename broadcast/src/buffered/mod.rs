@@ -38,7 +38,10 @@ pub mod mocks;
 mod tests {
     use super::{mocks::TestMessage, *};
     use crate::Broadcaster;
-    use commonware_actor::{mailbox::Policy, Feedback};
+    use commonware_actor::{
+        mailbox::{Overflow, Policy},
+        Feedback,
+    };
     use commonware_codec::RangeCfg;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -146,7 +149,7 @@ mod tests {
 
     #[test]
     fn policy_drops_closed_responders() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
         let pending_subscribe = TestMessage::shared(b"pending_subscribe");
         let pending_get = TestMessage::shared(b"pending_get");
         let open_subscribe = TestMessage::shared(b"open_subscribe");
@@ -154,30 +157,42 @@ mod tests {
         let current_get = TestMessage::shared(b"current_get");
 
         let (closed_responder, closed_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Subscribe {
+                digest: pending_subscribe.digest(),
+                responder: closed_responder,
+            },
+        );
         drop(closed_receiver);
-        overflow.push_back(Message::Subscribe {
-            digest: pending_subscribe.digest(),
-            responder: closed_responder,
-        });
 
         let (open_responder, _open_receiver) = commonware_utils::channel::oneshot::channel();
-        overflow.push_back(Message::Subscribe {
-            digest: open_subscribe.digest(),
-            responder: open_responder,
-        });
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Subscribe {
+                digest: open_subscribe.digest(),
+                responder: open_responder,
+            },
+        );
 
         let (closed_responder, closed_receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: pending_get.digest(),
+                responder: closed_responder,
+            },
+        );
         drop(closed_receiver);
-        overflow.push_back(Message::Get {
-            digest: pending_get.digest(),
-            responder: closed_responder,
-        });
 
         let (open_responder, _open_receiver) = commonware_utils::channel::oneshot::channel();
-        overflow.push_back(Message::Get {
-            digest: open_get.digest(),
-            responder: open_responder,
-        });
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: open_get.digest(),
+                responder: open_responder,
+            },
+        );
 
         let (current_responder, current_receiver) = commonware_utils::channel::oneshot::channel();
         drop(current_receiver);
@@ -189,13 +204,19 @@ mod tests {
             },
         );
 
-        assert_eq!(overflow.len(), 2);
-        assert!(overflow.iter().any(|message| matches!(
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+
+        assert_eq!(drained.len(), 2);
+        assert!(drained.iter().any(|message| matches!(
             message,
             Message::Subscribe { digest, responder }
                 if *digest == open_subscribe.digest() && !responder.is_closed()
         )));
-        assert!(overflow.iter().any(|message| matches!(
+        assert!(drained.iter().any(|message| matches!(
             message,
             Message::Get { digest, responder }
                 if *digest == open_get.digest() && !responder.is_closed()

@@ -5,7 +5,7 @@ use crate::{
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
-use commonware_actor::mailbox::{Policy, Sender};
+use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 /// A message that can be sent to the coding [`Engine`].
 ///
 /// [`Engine`]: super::Engine
-pub enum Message<B, C, H, P>
+pub(crate) enum Message<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
@@ -110,6 +110,56 @@ where
     }
 }
 
+pub(crate) struct Pending<B, C, H, P>(VecDeque<Message<B, C, H, P>>)
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey;
+
+impl<B, C, H, P> Default for Pending<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn default() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+impl<B, C, H, P> Overflow<Message<B, C, H, P>> for Pending<B, C, H, P>
+where
+    B: CertifiableBlock,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<B, C, H, P>) -> Option<Message<B, C, H, P>>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.response_closed() {
+                continue;
+            }
+
+            let Some(message) = push(message) else {
+                continue;
+            };
+            if !message.response_closed() {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 impl<B, C, H, P> Policy for Message<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -117,15 +167,14 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    type Overflow = VecDeque<Self>;
+    type Overflow = Pending<B, C, H, P>;
 
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
-        overflow.retain(|message| !message.response_closed());
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
             return;
         }
 
-        overflow.push_back(message);
+        overflow.0.push_back(message);
     }
 }
 
@@ -151,7 +200,7 @@ where
     P: PublicKey,
 {
     /// Create a new [`Mailbox`] with the given sender.
-    pub const fn new(sender: Sender<Message<B, C, H, P>>) -> Self {
+    pub(crate) const fn new(sender: Sender<Message<B, C, H, P>>) -> Self {
         Self { sender }
     }
 

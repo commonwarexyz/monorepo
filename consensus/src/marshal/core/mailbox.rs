@@ -166,16 +166,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 }
 
 impl<S: Scheme, V: Variant> Message<S, V> {
-    fn stale_below(current: Option<Height>, height: Height, inclusive: bool) -> bool {
-        current.is_some_and(|current| {
-            if inclusive {
-                height <= current
-            } else {
-                height < current
-            }
-        })
-    }
-
     fn stale(&self, current: Option<Height>) -> bool {
         match self {
             // Height-targeted reads below the floor can never be served
@@ -187,12 +177,12 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Height(height),
                 ..
             }
-            | Self::GetFinalization { height, .. } => Self::stale_below(current, *height, false),
+            | Self::GetFinalization { height, .. } => Some(*height) < current,
             // Hints only inform the actor about heights strictly above the floor
-            Self::HintFinalized { height, .. } => Self::stale_below(current, *height, true),
+            Self::HintFinalized { height, .. } => Some(*height) <= current,
             // Durability acks cannot be dropped: callers depend on them
             Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. } => false,
-            // Digest and Latest lookups are not bound to a specific height
+            // Digest and latest lookups are not bound to a specific height
             Self::GetBlock {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
@@ -201,19 +191,35 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             } => false,
-            _ => false,
+            Self::SubscribeByDigest { .. }
+            | Self::SubscribeByCommitment { .. }
+            | Self::GetVerified { .. }
+            | Self::Forward { .. }
+            | Self::SetFloor { .. }
+            | Self::Prune { .. }
+            | Self::Notarization { .. }
+            | Self::Finalization { .. } => false,
         }
     }
 
     pub(crate) fn response_closed(&self) -> bool {
         match self {
             Self::GetInfo { response, .. } => response.is_closed(),
-            Self::GetBlock { response, .. } => response.is_closed(),
+            Self::GetBlock { response, .. } | Self::GetVerified { response, .. } => {
+                response.is_closed()
+            }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
-            Self::GetVerified { response, .. } => response.is_closed(),
-            _ => false,
+            Self::HintFinalized { .. }
+            | Self::Forward { .. }
+            | Self::Proposed { .. }
+            | Self::Verified { .. }
+            | Self::Certified { .. }
+            | Self::SetFloor { .. }
+            | Self::Prune { .. }
+            | Self::Notarization { .. }
+            | Self::Finalization { .. } => false,
         }
     }
 }
@@ -240,51 +246,32 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.floor.into_iter().chain(self.prune).max()
     }
 
-    fn retain_message(message: &Message<S, V>, height: Option<Height>) -> bool {
-        if message.response_closed() {
-            false
-        } else {
-            !message.stale(height)
+    fn set_floor(&mut self, height: Height) {
+        let floor = Some(height);
+        if self.floor >= floor {
+            return;
         }
+
+        self.floor = self.floor.max(floor);
     }
 
-    fn retain_useful(&mut self) {
-        let height = self.height();
-        self.messages
-            .retain(|message| Self::retain_message(message, height));
-    }
-
-    fn set_floor(&mut self, height: Height) -> bool {
-        // Floor only moves up: ignore a regression
-        if self.floor.is_none_or(|current| height > current) {
-            self.floor = Some(height);
+    fn prune(&mut self, height: Height) {
+        let prune = Some(height);
+        if self.prune >= prune {
+            return;
         }
-        self.retain_useful();
-        true
+
+        self.prune = self.prune.max(prune);
     }
 
-    fn prune(&mut self, height: Height) -> bool {
-        // Prune only moves up: ignore a regression
-        if self.prune.is_none_or(|current| height > current) {
-            self.prune = Some(height);
-        }
-        self.retain_useful();
-        true
-    }
-
-    fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) -> bool {
-        // Hint is already covered by floor/prune; drop it and sweep stale neighbors
+    fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+        // Hint is already covered by floor/prune
         let current = self.height();
         if current.is_some_and(|current| height <= current) {
-            self.retain_useful();
-            return false;
+            return;
         }
         let mut targets = Some(targets);
         self.messages.retain_mut(|message| {
-            // Sweep stale or closed messages while we walk the queue
-            if !Self::retain_message(message, current) {
-                return false;
-            }
             let Message::HintFinalized {
                 height: existing,
                 targets: pending,
@@ -312,7 +299,6 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
             self.messages
                 .push_back(Message::HintFinalized { height, targets });
         }
-        true
     }
 
     fn drain_one<F>(&mut self, message: Message<S, V>, push: &mut F) -> bool
@@ -326,8 +312,9 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
 
         // Receiver rejected; restore so the next drain retries from the same point
         match message {
-            Message::SetFloor { height } => self.floor = Some(height),
-            Message::Prune { height } => self.prune = Some(height),
+            Message::SetFloor { height } => self.set_floor(height),
+            Message::Prune { height } => self.prune(height),
+            message if message.response_closed() => return true,
             message => self.messages.push_front(message),
         }
         false
@@ -357,7 +344,11 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
         }
 
         // Drain the remaining queued messages in FIFO order
+        let height = self.height();
         while let Some(message) = self.messages.pop_front() {
+            if message.response_closed() || message.stale(height) {
+                continue;
+            }
             if !self.drain_one(message, &mut push) {
                 break;
             }
@@ -369,9 +360,8 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        // A closed responder cannot be served; sweep any other closed entries too
+        // A closed responder cannot be served
         if message.response_closed() {
-            overflow.retain_useful();
             return;
         }
         match message {
@@ -386,9 +376,8 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::Prune { height } => {
                 overflow.prune(height);
             }
-            // Sweep stale entries first, then queue if the new message is still useful
+            // Queue if the new message is still useful
             message => {
-                overflow.retain_useful();
                 if message.stale(overflow.height()) {
                     return;
                 }
@@ -854,10 +843,6 @@ mod tests {
         })
     }
 
-    fn has_hint(overflow: &TestPending, height: u64) -> bool {
-        hint_targets(overflow, height).is_some()
-    }
-
     fn has_block_message(overflow: &TestPending, height: u64) -> bool {
         overflow.messages.iter().any(|message| {
             matches!(
@@ -1023,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_replaces_floor_and_prune_and_drops_stale_pending() {
+    fn policy_replaces_floor_and_prune_and_drops_stale_pending_on_drain() {
         let mut overflow = pending();
 
         overflow.floor = Some(Height::new(5));
@@ -1038,15 +1023,19 @@ mod tests {
         overflow.messages.push_back(get_block_8);
         <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
         assert_eq!(overflow.floor, Some(Height::new(8)));
-        assert!(!has_get_info(&overflow, 4));
-        assert!(!has_get_block(&overflow, 7));
-        assert!(!has_hint(&overflow, 8));
         assert!(has_get_block(&overflow, 8));
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 2);
         assert!(matches!(
             &drained[0],
             TestMessage::SetFloor { height } if *height == Height::new(8)
+        ));
+        assert!(matches!(
+            &drained[1],
+            TestMessage::GetBlock {
+                identifier: Identifier::Height(height),
+                ..
+            } if *height == Height::new(8)
         ));
 
         let mut overflow = pending();
@@ -1062,9 +1051,6 @@ mod tests {
         overflow.messages.push_back(get_block_7);
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
         assert_eq!(overflow.prune, Some(Height::new(7)));
-        assert!(!has_get_finalization(&overflow, 4));
-        assert!(!has_get_block(&overflow, 6));
-        assert!(!has_hint(&overflow, 6));
         assert!(has_get_block(&overflow, 7));
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 2);
@@ -1072,10 +1058,17 @@ mod tests {
             &drained[0],
             TestMessage::Prune { height } if *height == Height::new(7)
         ));
+        assert!(matches!(
+            &drained[1],
+            TestMessage::GetBlock {
+                identifier: Identifier::Height(height),
+                ..
+            } if *height == Height::new(7)
+        ));
     }
 
     #[test]
-    fn policy_drops_stale_requests_after_prior_floor_and_prune() {
+    fn policy_drops_stale_requests_during_drain_after_prior_floor_and_prune() {
         let mut overflow = pending();
         let (get_info_4, _get_info_4_rx) = get_info(4);
         let (get_info_5, _get_info_5_rx) = get_info(5);
@@ -1098,10 +1091,6 @@ mod tests {
         <TestMessage as Policy>::handle(&mut overflow, hint_finalized(6, public_key(2)));
 
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
-        assert!(!has_get_info(&overflow, 5));
-        assert!(!has_get_block(&overflow, 5));
-        assert!(!has_hint(&overflow, 5));
-        assert!(!has_hint(&overflow, 6));
         assert!(has_prune(&overflow, 7));
         <TestMessage as Policy>::handle(&mut overflow, get_info_6);
         <TestMessage as Policy>::handle(&mut overflow, get_finalization_6);
@@ -1111,6 +1100,31 @@ mod tests {
         assert!(has_get_info(&overflow, 7));
         <TestMessage as Policy>::handle(&mut overflow, get_block_7);
         assert!(has_get_block(&overflow, 7));
+
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 4);
+        assert!(matches!(
+            &drained[0],
+            TestMessage::SetFloor { height } if *height == Height::new(5)
+        ));
+        assert!(matches!(
+            &drained[1],
+            TestMessage::Prune { height } if *height == Height::new(7)
+        ));
+        assert!(matches!(
+            &drained[2],
+            TestMessage::GetInfo {
+                identifier: Identifier::Height(height),
+                ..
+            } if *height == Height::new(7)
+        ));
+        assert!(matches!(
+            &drained[3],
+            TestMessage::GetBlock {
+                identifier: Identifier::Height(height),
+                ..
+            } if *height == Height::new(7)
+        ));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::Broadcaster;
 use commonware_actor::{
-    mailbox::{Policy, Sender},
+    mailbox::{Overflow, Policy, Sender},
     Feedback,
 };
 use commonware_codec::Codec;
@@ -10,7 +10,7 @@ use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
 /// Message types that can be sent to the `Mailbox`
-pub enum Message<P: PublicKey, M: Digestible> {
+pub(crate) enum Message<P: PublicKey, M: Digestible> {
     /// Broadcast a [crate::Broadcaster::Message] to the network.
     Broadcast {
         recipients: Recipients<P>,
@@ -44,16 +44,48 @@ impl<P: PublicKey, M: Digestible> Message<P, M> {
     }
 }
 
+pub(crate) struct Pending<P: PublicKey, M: Digestible>(VecDeque<Message<P, M>>);
+
+impl<P: PublicKey, M: Digestible> Default for Pending<P, M> {
+    fn default() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<P, M>) -> Option<Message<P, M>>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.response_closed() {
+                continue;
+            }
+
+            let Some(message) = push(message) else {
+                continue;
+            };
+            if !message.response_closed() {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
-    type Overflow = VecDeque<Self>;
+    type Overflow = Pending<P, M>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.retain(|message| !message.response_closed());
         if message.response_closed() {
             return;
         }
 
-        overflow.push_back(message);
+        overflow.0.push_back(message);
     }
 }
 
