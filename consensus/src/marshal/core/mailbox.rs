@@ -147,8 +147,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Prunes finalized blocks and certificates below the given height.
     ///
     /// Unlike [Message::SetFloor], this does not affect the sync starting point.
-    /// The height must be at or below the current floor (last processed height),
-    /// otherwise the prune request is ignored.
+    /// Callers must only prune at or below marshal's current floor
+    /// (`last_processed_height`).
     Prune {
         /// The minimum height to keep (blocks below this are pruned).
         height: Height,
@@ -616,10 +616,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Prunes finalized blocks and certificates below the given height.
     ///
     /// Unlike [Self::set_floor], this does not affect the sync starting point.
-    /// The height must be at or below the current floor (last processed height),
-    /// otherwise the prune request is ignored.
-    ///
-    /// A `prune` request for a height above marshal's current floor is dropped.
+    /// Callers must only prune at or below marshal's current floor
+    /// (`last_processed_height`).
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune { height });
     }
