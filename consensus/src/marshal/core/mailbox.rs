@@ -201,7 +201,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         }
     }
 
-    fn response_closed(&self) -> bool {
+    pub(crate) fn response_closed(&self) -> bool {
         match self {
             Self::GetInfo { response, .. } => response.is_closed(),
             Self::GetBlock { response, .. } => response.is_closed(),

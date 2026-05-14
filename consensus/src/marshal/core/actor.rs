@@ -498,14 +498,15 @@ where
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
+                if message.response_closed() {
+                    continue;
+                }
+
                 match message {
                     Message::GetInfo {
                         identifier,
                         response,
                     } => {
-                        if response.is_closed() {
-                            continue;
-                        }
                         let info = match identifier {
                             // TODO: Instead of pulling out the entire block, determine the
                             // height directly from the archive by mapping the digest to
@@ -529,9 +530,6 @@ where
                         response.send_lossy(info);
                     }
                     Message::GetVerified { round, response } => {
-                        if response.is_closed() {
-                            continue;
-                        }
                         let block = self.cache.get_verified(round).await.map(Into::into);
                         response.send_lossy(block);
                     }
@@ -654,9 +652,6 @@ where
                         identifier,
                         response,
                     } => {
-                        if response.is_closed() {
-                            continue;
-                        }
                         match identifier {
                             BlockID::Digest(digest) => {
                                 let result = self.find_block_by_digest(&mut buffer, digest).await;
@@ -678,9 +673,6 @@ where
                         }
                     }
                     Message::GetFinalization { height, response } => {
-                        if response.is_closed() {
-                            continue;
-                        }
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
                     }
@@ -795,12 +787,13 @@ where
                     .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
                     .take(self.max_repair.get())
                 {
+                    if msg.response_closed() {
+                        continue;
+                    }
+                    handled = true;
+
                     match msg {
                         handler::Message::Produce { key, response } => {
-                            if response.is_closed() {
-                                continue;
-                            }
-                            handled = true;
                             produces.push((key, response));
                         }
                         handler::Message::Deliver {
@@ -808,10 +801,6 @@ where
                             value,
                             response,
                         } => {
-                            if response.is_closed() {
-                                continue;
-                            }
-                            handled = true;
                             needs_sync |= self
                                 .handle_deliver(
                                     key,
@@ -862,10 +851,6 @@ where
         response: oneshot::Sender<Bytes>,
         buffer: &Buf,
     ) {
-        if response.is_closed() {
-            return;
-        }
-
         match key {
             Request::Block(commitment) => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
@@ -910,10 +895,6 @@ where
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
-        if response.is_closed() {
-            return;
-        }
-
         let digest = match key {
             BlockSubscriptionKey::Digest(digest) => digest,
             BlockSubscriptionKey::Commitment(commitment) => V::commitment_to_inner(commitment),
@@ -995,10 +976,6 @@ where
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
-        if response.is_closed() {
-            return false;
-        }
-
         match key {
             Request::Block(commitment) => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
