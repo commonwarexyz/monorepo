@@ -6,7 +6,10 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    num::NonZeroUsize,
+};
 
 /// Tracks all known certificates from the last
 /// certified notarization or finalized view to the current view.
@@ -35,13 +38,13 @@ pub struct State<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: usize) -> Self {
+    pub fn new(fetch_concurrent: NonZeroUsize) -> Self {
         Self {
             current_view: View::zero(),
             floor: None,
             notarizations: BTreeMap::new(),
             nullifications: BTreeMap::new(),
-            fetch_concurrent,
+            fetch_concurrent: fetch_concurrent.get(),
             fetch_floor: View::zero(),
             satisfied_by: HashMap::new(),
             failed_views: HashSet::new(),
@@ -228,7 +231,7 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec};
+    use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec, NZUsize};
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-state";
@@ -348,7 +351,7 @@ mod tests {
     #[test_async]
     async fn handle_nullification_requests_missing_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(2);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2));
         let mut resolver = MockResolver::default();
 
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
@@ -397,7 +400,7 @@ mod tests {
     #[test_async]
     async fn floor_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
         let mut resolver = MockResolver::default();
 
         for view in 4..=6 {
@@ -444,7 +447,7 @@ mod tests {
     #[test_async]
     async fn produce_returns_floor_or_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(2);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2));
         let mut resolver = MockResolver::default();
 
         // Finalization sets floor
@@ -506,7 +509,7 @@ mod tests {
     #[test_async]
     async fn certification_failure_re_requests_satisfied_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
         let mut resolver = MockResolver::default();
 
         // Notarization at view 5 satisfies request for view 2
@@ -542,7 +545,7 @@ mod tests {
     #[test_async]
     async fn certification_success_clears_tracking() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
         let mut resolver = MockResolver::default();
 
         // Notarization at view 5 satisfies request for view 2
@@ -575,7 +578,7 @@ mod tests {
     #[test_async]
     async fn finalization_upgrades_certified_notarization_at_same_view() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10));
         let mut resolver = MockResolver::default();
 
         // Create and certify a notarization at view 5

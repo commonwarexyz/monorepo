@@ -12,6 +12,7 @@ use crate::{
     Epochable, Viewable,
 };
 use bytes::Bytes;
+use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
@@ -47,7 +48,7 @@ pub struct Actor<
 
     state: State<S, D>,
 
-    mailbox_receiver: mpsc::Receiver<MailboxMessage<S, D>>,
+    mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
 
 impl<
@@ -59,7 +60,7 @@ impl<
     > Actor<E, S, B, D, T>
 {
     pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -68,7 +69,7 @@ impl<
                 strategy: cfg.strategy,
 
                 epoch: cfg.epoch,
-                mailbox_size: cfg.mailbox_size,
+                mailbox_size: cfg.mailbox_size.get(),
                 fetch_timeout: cfg.fetch_timeout,
 
                 state: State::new(cfg.fetch_concurrent),
@@ -256,7 +257,7 @@ impl<
                 response.send_lossy(true);
 
                 // Notify voter as soon as possible
-                voter.resolved(parsed.clone()).await;
+                voter.resolved(parsed.clone());
 
                 // Process message with the request view for tracking
                 self.state.handle(parsed, Some(view), resolver).await;
