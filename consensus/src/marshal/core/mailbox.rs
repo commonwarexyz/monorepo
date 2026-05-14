@@ -253,22 +253,43 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         self.floor.into_iter().chain(self.prune).max()
     }
 
+    fn retain(&mut self) {
+        let current = self.height();
+        self.hints.retain(|height, _| Some(*height) > current);
+
+        let hints = &self.hints;
+        self.messages.retain(|message| match message {
+            PendingMessage::Message(message) => {
+                !message.response_closed() && !message.stale(current)
+            }
+            PendingMessage::HintFinalized(height) => hints.contains_key(height),
+        });
+    }
+
     fn set_floor(&mut self, height: Height) {
+        let current = self.height();
         let floor = Some(height);
         if self.floor >= floor {
             return;
         }
 
         self.floor = self.floor.max(floor);
+        if self.height() > current {
+            self.retain();
+        }
     }
 
     fn prune(&mut self, height: Height) {
+        let current = self.height();
         let prune = Some(height);
         if self.prune >= prune {
             return;
         }
 
         self.prune = self.prune.max(prune);
+        if self.height() > current {
+            self.retain();
+        }
     }
 
     fn extend_hint_targets(
@@ -1067,7 +1088,11 @@ mod tests {
             .push_back(PendingMessage::Message(get_block_8));
         <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
         assert_eq!(overflow.floor, Some(Height::new(8)));
+        assert_eq!(overflow.messages.len(), 1);
+        assert!(!has_get_info(&overflow, 4));
+        assert!(!has_get_block(&overflow, 7));
         assert!(has_get_block(&overflow, 8));
+        assert!(hint_targets(&overflow, 8).is_none());
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 2);
         assert!(matches!(
@@ -1099,7 +1124,11 @@ mod tests {
             .push_back(PendingMessage::Message(get_block_7));
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
         assert_eq!(overflow.prune, Some(Height::new(7)));
+        assert_eq!(overflow.messages.len(), 1);
+        assert!(!has_get_finalization(&overflow, 4));
+        assert!(!has_get_block(&overflow, 6));
         assert!(has_get_block(&overflow, 7));
+        assert!(hint_targets(&overflow, 6).is_none());
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 2);
         assert!(matches!(
@@ -1113,6 +1142,64 @@ mod tests {
                 ..
             } if *height == Height::new(7)
         ));
+    }
+
+    #[test]
+    fn policy_floor_and_prune_drop_closed_pending() {
+        let mut overflow = pending();
+        let (closed_message, closed_rx) = get_block(8);
+        drop(closed_rx);
+        let (open_message, mut open_rx) = get_block(8);
+
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(closed_message));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(open_message));
+
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(7));
+        assert_eq!(overflow.messages.len(), 1);
+        assert!(has_get_block(&overflow, 8));
+        assert!(matches!(open_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let mut overflow = pending();
+        let (closed_message, closed_rx) = get_finalization(8);
+        drop(closed_rx);
+        let (open_message, mut open_rx) = get_finalization(8);
+
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(closed_message));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(open_message));
+
+        <TestMessage as Policy>::handle(&mut overflow, prune(7));
+        assert_eq!(overflow.messages.len(), 1);
+        assert!(has_get_finalization(&overflow, 8));
+        assert!(matches!(open_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn policy_skips_retain_when_effective_height_does_not_increase() {
+        let mut overflow = pending();
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(10));
+
+        let (closed_message, closed_rx) = get_block(11);
+        drop(closed_rx);
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(closed_message));
+
+        <TestMessage as Policy>::handle(&mut overflow, set_floor(9));
+        assert_eq!(overflow.messages.len(), 1);
+
+        <TestMessage as Policy>::handle(&mut overflow, prune(9));
+        assert_eq!(overflow.messages.len(), 1);
+
+        <TestMessage as Policy>::handle(&mut overflow, prune(12));
+        assert!(overflow.messages.is_empty());
     }
 
     #[test]
