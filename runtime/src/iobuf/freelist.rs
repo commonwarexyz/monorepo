@@ -108,7 +108,7 @@
 //! ownership discipline: a slot is either checked out, parked in a thread-local
 //! cache, or available in this freelist. Only the thread that owns a slot
 //! outside the freelist may access that slot's parking cell.
-use super::aligned::PooledBuffer;
+use super::buffer::PooledBuffer;
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,

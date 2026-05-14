@@ -14,12 +14,12 @@
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
-mod aligned;
+mod buffer;
 mod freelist;
 mod pool;
 
-pub(crate) use aligned::AlignedBuffer;
-use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
+pub(crate) use buffer::AlignedBuffer;
+use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};

@@ -51,7 +51,7 @@
 
 use super::{freelist::Freelist, IoBufMut};
 use crate::{
-    iobuf::aligned::{PooledBufMut, PooledBuffer},
+    iobuf::buffer::{PooledBufMut, PooledBuffer},
     telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::{NZUsize, NZU32};
