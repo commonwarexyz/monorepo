@@ -81,7 +81,7 @@ pub enum SyncMethod {
     WriteThenSync,
     /// Call `write_at_sync`.
     #[value(name = "write_at_sync")]
-    WriteAtSync,
+    WriteAndSync,
 }
 
 /// Write durability policy.
