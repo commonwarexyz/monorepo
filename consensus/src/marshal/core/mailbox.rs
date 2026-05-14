@@ -15,10 +15,7 @@ use commonware_actor::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    future::Future,
-};
+use std::{collections::VecDeque, future::Future};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -222,7 +219,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
 pub(crate) struct Pending<S: Scheme, V: Variant> {
     floor: Option<Height>,
     prune: Option<Height>,
-    hints: BTreeMap<Height, NonEmptyVec<S::PublicKey>>,
     messages: VecDeque<Message<S, V>>,
 }
 
@@ -231,7 +227,6 @@ impl<S: Scheme, V: Variant> Default for Pending<S, V> {
         Self {
             floor: None,
             prune: None,
-            hints: BTreeMap::new(),
             messages: VecDeque::new(),
         }
     }
@@ -248,8 +243,6 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
 
     fn retain_useful(&mut self) {
         let height = self.height();
-        self.hints
-            .retain(|candidate, _| !height.is_some_and(|current| *candidate <= current));
 
         self.messages.retain_mut(|message| {
             if message.stale(height) {
@@ -282,18 +275,28 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
             return false;
         }
 
-        match self.hints.entry(height) {
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                for target in targets {
-                    if !entry.get().contains(&target) {
-                        entry.get_mut().push(target);
-                    }
+        for message in &mut self.messages {
+            let Message::HintFinalized {
+                height: existing,
+                targets: pending,
+            } = message
+            else {
+                continue;
+            };
+            if *existing != height {
+                continue;
+            }
+
+            for target in targets {
+                if !pending.contains(&target) {
+                    pending.push(target);
                 }
             }
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(targets);
-            }
+            return true;
         }
+
+        self.messages
+            .push_back(Message::HintFinalized { height, targets });
         true
     }
 
@@ -314,9 +317,6 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
             }
             Message::Prune { height } => {
                 self.prune = Some(height);
-            }
-            Message::HintFinalized { height, targets } => {
-                self.hints.insert(height, targets);
             }
             message => {
                 self.messages.push_front(message);
@@ -339,10 +339,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
 
 impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     fn is_empty(&self) -> bool {
-        self.floor.is_none()
-            && self.prune.is_none()
-            && self.hints.is_empty()
-            && self.messages.is_empty()
+        self.floor.is_none() && self.prune.is_none() && self.messages.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
@@ -357,12 +354,6 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
 
         if let Some(height) = self.prune.take() {
             if !self.drain_one(Message::Prune { height }, &mut push) {
-                return;
-            }
-        }
-
-        while let Some((height, targets)) = self.hints.pop_first() {
-            if !self.drain_one(Message::HintFinalized { height, targets }, &mut push) {
                 return;
             }
         }
@@ -801,8 +792,21 @@ mod tests {
         })
     }
 
+    fn hint_targets(overflow: &TestPending, height: u64) -> Option<&NonEmptyVec<harness::K>> {
+        overflow.messages.iter().find_map(|message| {
+            let TestMessage::HintFinalized {
+                height: found,
+                targets,
+            } = message
+            else {
+                return None;
+            };
+            (*found == Height::new(height)).then_some(targets)
+        })
+    }
+
     fn has_hint(overflow: &TestPending, height: u64) -> bool {
-        overflow.hints.contains_key(&Height::new(height))
+        hint_targets(overflow, height).is_some()
     }
 
     fn has_durable(overflow: &TestPending, height: u64) -> bool {
@@ -840,8 +844,50 @@ mod tests {
             hint_finalized(10, second.clone())
         ));
 
-        assert_eq!(overflow.hints.len(), 1);
-        let targets = overflow.hints.get(&Height::new(10)).expect("expected hint");
+        assert_eq!(overflow.messages.len(), 1);
+        let targets = hint_targets(&overflow, 10).expect("expected hint");
+        assert_eq!(targets.len().get(), 2);
+        assert!(targets.contains(&first));
+        assert!(targets.contains(&second));
+    }
+
+    #[test]
+    fn policy_keeps_coalesced_hints_in_fifo_position() {
+        let mut overflow = pending();
+        let first = public_key(1);
+        let second = public_key(2);
+
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_block(9)));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            hint_finalized(10, first.clone())
+        ));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, get_info(11)));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            hint_finalized(10, second.clone())
+        ));
+
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 3);
+        assert!(matches!(
+            &drained[0],
+            TestMessage::GetBlock {
+                identifier: Identifier::Height(height),
+                ..
+            } if *height == Height::new(9)
+        ));
+        assert!(matches!(
+            &drained[2],
+            TestMessage::GetInfo {
+                identifier: Identifier::Height(height),
+                ..
+            } if *height == Height::new(11)
+        ));
+        let TestMessage::HintFinalized { height, targets } = &drained[1] else {
+            panic!("expected hint");
+        };
+        assert_eq!(*height, Height::new(10));
         assert_eq!(targets.len().get(), 2);
         assert!(targets.contains(&first));
         assert!(targets.contains(&second));
@@ -860,7 +906,6 @@ mod tests {
 
         assert_eq!(overflow.floor, Some(Height::new(8)));
         assert_eq!(overflow.prune, Some(Height::new(7)));
-        assert!(overflow.hints.is_empty());
         assert!(overflow.messages.is_empty());
 
         let drained = drain(&mut overflow);
@@ -883,8 +928,8 @@ mod tests {
         overflow.messages.push_back(get_info(4));
         overflow.messages.push_back(get_block(7));
         overflow
-            .hints
-            .insert(Height::new(8), NonEmptyVec::new(public_key(1)));
+            .messages
+            .push_back(hint_finalized(8, public_key(1)));
         overflow.messages.push_back(get_block(8));
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(8)));
         assert_eq!(overflow.floor, Some(Height::new(8)));
@@ -904,8 +949,8 @@ mod tests {
         overflow.messages.push_back(get_finalization(4));
         overflow.messages.push_back(get_block(6));
         overflow
-            .hints
-            .insert(Height::new(6), NonEmptyVec::new(public_key(2)));
+            .messages
+            .push_back(hint_finalized(6, public_key(2)));
         overflow.messages.push_back(get_block(7));
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
         assert_eq!(overflow.prune, Some(Height::new(7)));
