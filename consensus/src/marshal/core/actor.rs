@@ -17,7 +17,7 @@ use crate::{
     Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
-use commonware_actor::mailbox;
+use commonware_actor::{mailbox, Feedback};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -1318,7 +1318,9 @@ where
 
             let (height, commitment) = (block.height(), V::commitment(&block));
             let (ack, ack_waiter) = A::handle();
-            application.report(Update::Block(V::into_inner(block), ack));
+            if application.report(Update::Block(V::into_inner(block), ack)) != Feedback::Ok {
+                return;
+            }
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,

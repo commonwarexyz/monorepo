@@ -367,6 +367,9 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     where
         F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
     {
+        // Capture before draining floor/prune because those fields are consumed below
+        let height = self.height();
+
         // Drain floor and prune first so the actor advances its floor before
         // it sees the height-bounded reads that follow
         if let Some(height) = self.floor.take() {
@@ -381,7 +384,6 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
         }
 
         // Drain the remaining queued messages in FIFO order
-        let height = self.height();
         while let Some(pending) = self.messages.pop_front() {
             match pending {
                 PendingMessage::Message(message) => {
@@ -1029,6 +1031,50 @@ mod tests {
             } if *height == Height::new(2) && !response.is_closed()
         ));
         assert!(matches!(second_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn policy_drain_filters_with_consumed_floor_and_prune() {
+        let mut overflow = pending();
+        let (stale_info, _stale_info_rx) = get_info(3);
+        let (stale_block, _stale_block_rx) = get_block(4);
+        let (live_block, _live_block_rx) = get_block(6);
+
+        overflow.floor = Some(Height::new(4));
+        overflow.prune = Some(Height::new(5));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(stale_info));
+        overflow.hint_finalized(Height::new(5), NonEmptyVec::new(public_key(1)));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(stale_block));
+        overflow.hint_finalized(Height::new(6), NonEmptyVec::new(public_key(2)));
+        overflow
+            .messages
+            .push_back(PendingMessage::Message(live_block));
+
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 4);
+        assert!(matches!(
+            &drained[0],
+            TestMessage::SetFloor { height } if *height == Height::new(4)
+        ));
+        assert!(matches!(
+            &drained[1],
+            TestMessage::Prune { height } if *height == Height::new(5)
+        ));
+        assert!(matches!(
+            &drained[2],
+            TestMessage::HintFinalized { height, .. } if *height == Height::new(6)
+        ));
+        assert!(matches!(
+            &drained[3],
+            TestMessage::GetBlock {
+                identifier: Identifier::Height(height),
+                ..
+            } if *height == Height::new(6)
+        ));
     }
 
     #[test]
