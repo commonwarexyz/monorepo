@@ -9,13 +9,16 @@ use crate::{
     Heightable, Reporter,
 };
 use commonware_actor::{
-    mailbox::{Policy, Sender},
+    mailbox::{Overflow, Policy, Sender},
     Feedback,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use std::{collections::VecDeque, future::Future};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -165,44 +168,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
 }
 
-#[derive(Clone, Copy, Default)]
-struct Cutoff {
-    height: Option<Height>,
-}
-
-impl Cutoff {
-    const fn new(height: Height) -> Self {
-        Self {
-            height: Some(height),
-        }
-    }
-
-    fn update_max_height(max: &mut Option<Height>, height: Height) {
-        if max.is_none_or(|current| height > current) {
-            *max = Some(height);
-        }
-    }
-
-    fn observe<S: Scheme, V: Variant>(&mut self, message: &Message<S, V>) {
-        match message {
-            Message::SetFloor { height } | Message::Prune { height } => {
-                Self::update_max_height(&mut self.height, *height);
-            }
-            _ => {}
-        }
-    }
-
-    fn drops_below(self, height: Height) -> bool {
-        self.height.is_some_and(|cutoff| height < cutoff)
-    }
-
-    fn drops_at_or_below(self, height: Height) -> bool {
-        self.height.is_some_and(|cutoff| height <= cutoff)
-    }
-}
-
 impl<S: Scheme, V: Variant> Message<S, V> {
-    fn stale(&self, cutoff: Cutoff) -> bool {
+    fn stale(&self, pending: &Pending<S, V>) -> bool {
         match self {
             Self::GetInfo {
                 identifier: Identifier::Height(height),
@@ -212,11 +179,11 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Height(height),
                 ..
             }
-            | Self::GetFinalization { height, .. } => cutoff.drops_below(*height),
+            | Self::GetFinalization { height, .. } => pending.drops_below(*height),
             Self::Proposed { block, .. }
             | Self::Verified { block, .. }
-            | Self::Certified { block, .. } => cutoff.drops_below(block.height()),
-            Self::HintFinalized { height, .. } => cutoff.drops_at_or_below(*height),
+            | Self::Certified { block, .. } => pending.drops_below(block.height()),
+            Self::HintFinalized { height, .. } => pending.drops_at_or_below(*height),
             Self::GetBlock {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
@@ -242,137 +209,177 @@ impl<S: Scheme, V: Variant> Message<S, V> {
     }
 }
 
-impl<S: Scheme, V: Variant> Policy for Message<S, V> {
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+pub(crate) struct Pending<S: Scheme, V: Variant> {
+    floor: Option<Height>,
+    prune: Option<Height>,
+    hints: BTreeMap<Height, NonEmptyVec<S::PublicKey>>,
+    messages: VecDeque<Message<S, V>>,
+}
+
+impl<S: Scheme, V: Variant> Default for Pending<S, V> {
+    fn default() -> Self {
+        Self {
+            floor: None,
+            prune: None,
+            hints: BTreeMap::new(),
+            messages: VecDeque::new(),
+        }
+    }
+}
+
+impl<S: Scheme, V: Variant> Pending<S, V> {
+    fn height(&self) -> Option<Height> {
+        self.floor.into_iter().chain(self.prune).max()
+    }
+
+    fn drops_below(&self, height: Height) -> bool {
+        self.height().is_some_and(|current| height < current)
+    }
+
+    fn drops_at_or_below(&self, height: Height) -> bool {
+        self.height().is_some_and(|current| height <= current)
+    }
+
+    fn retain_useful(&mut self) {
+        let height = self.height();
+        self.hints
+            .retain(|candidate, _| !height.is_some_and(|current| *candidate <= current));
+
+        let len = self.messages.len();
+        for _ in 0..len {
+            let message = self.messages.pop_front().expect("message count fixed");
+            if message.stale(self) {
+                message.ack_stale_durable();
+            } else {
+                self.messages.push_back(message);
+            }
+        }
+    }
+
+    fn set_floor(&mut self, height: Height) -> bool {
+        if self.floor.is_none_or(|current| height > current) {
+            self.floor = Some(height);
+            self.retain_useful();
+        }
+        true
+    }
+
+    fn prune(&mut self, height: Height) -> bool {
+        if self.prune.is_none_or(|current| height > current) {
+            self.prune = Some(height);
+            self.retain_useful();
+        }
+        true
+    }
+
+    fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) -> bool {
+        if self.drops_at_or_below(height) {
+            return false;
+        }
+
+        match self.hints.entry(height) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                for target in targets {
+                    if !entry.get().contains(&target) {
+                        entry.get_mut().push(target);
+                    }
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(targets);
+            }
+        }
+        true
+    }
+
+    fn push_message(&mut self, message: Message<S, V>) -> bool {
+        if message.stale(self) {
+            message.ack_stale_durable();
+            return false;
+        }
+
+        self.messages.push_back(message);
+        true
+    }
+
+    fn restore_front(&mut self, message: Message<S, V>) {
         match message {
-            Self::HintFinalized { height, targets } => {
-                let mut cutoff = Cutoff::default();
-                let mut pending_targets = Some(targets);
-
-                // Coalesce same-height hints into one request with all known targets.
-                for message in overflow.iter_mut() {
-                    cutoff.observe(message);
-                    if cutoff.drops_at_or_below(height) {
-                        return false;
-                    }
-
-                    if let Self::HintFinalized {
-                        height: existing_height,
-                        targets: existing_targets,
-                    } = message
-                    {
-                        if *existing_height != height {
-                            continue;
-                        }
-
-                        for target in pending_targets.take().expect("targets must be present") {
-                            if !existing_targets.contains(&target) {
-                                existing_targets.push(target);
-                            }
-                        }
-                        return true;
-                    }
-                }
-
-                let targets = pending_targets.expect("targets must be present");
-                let message = Self::HintFinalized { height, targets };
-                if message.stale(cutoff) {
-                    return false;
-                }
-                overflow.push_back(message);
+            Message::SetFloor { height } => {
+                self.floor = Some(height);
             }
-            Self::SetFloor { height } => {
-                let mut cutoff = Cutoff::new(height);
-                let mut append = true;
-                let len = overflow.len();
-
-                // Use the incoming floor to drop obsolete work before appending it.
-                for _ in 0..len {
-                    let message = overflow.pop_front().expect("overflow length fixed");
-                    let keep = match &message {
-                        Self::SetFloor {
-                            height: existing_height,
-                        } => {
-                            if height > *existing_height {
-                                false
-                            } else {
-                                append = false;
-                                true
-                            }
-                        }
-                        _ => true,
-                    };
-                    if !keep {
-                        continue;
-                    }
-
-                    cutoff.observe(&message);
-                    let stale = message.stale(cutoff);
-                    if stale {
-                        message.ack_stale_durable();
-                    } else {
-                        overflow.push_back(message);
-                    }
-                }
-
-                if append {
-                    overflow.push_back(Self::SetFloor { height });
-                }
+            Message::Prune { height } => {
+                self.prune = Some(height);
             }
-            Self::Prune { height } => {
-                let mut cutoff = Cutoff::new(height);
-                let mut append = true;
-                let len = overflow.len();
-
-                // Use the incoming prune to drop obsolete work before appending it.
-                for _ in 0..len {
-                    let message = overflow.pop_front().expect("overflow length fixed");
-                    let keep = match &message {
-                        Self::Prune {
-                            height: existing_height,
-                        } => {
-                            if height > *existing_height {
-                                false
-                            } else {
-                                append = false;
-                                true
-                            }
-                        }
-                        _ => true,
-                    };
-                    if !keep {
-                        continue;
-                    }
-
-                    cutoff.observe(&message);
-                    let stale = message.stale(cutoff);
-                    if stale {
-                        message.ack_stale_durable();
-                    } else {
-                        overflow.push_back(message);
-                    }
-                }
-
-                if append {
-                    overflow.push_back(Self::Prune { height });
-                }
+            Message::HintFinalized { height, targets } => {
+                self.hints.insert(height, targets);
             }
             message => {
-                let mut cutoff = Cutoff::default();
-                if overflow.iter().any(|existing| {
-                    cutoff.observe(existing);
-                    message.stale(cutoff)
-                }) {
-                    message.ack_stale_durable();
-                    return false;
-                }
+                self.messages.push_front(message);
+            }
+        }
+    }
 
-                // Preserve ordinary FIFO overflow behavior for other messages.
-                overflow.push_back(message);
+    fn drain_one<F>(&mut self, message: Message<S, V>, push: &mut F) -> bool
+    where
+        F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
+    {
+        if let Some(message) = push(message) {
+            self.restore_front(message);
+            false
+        } else {
+            true
+        }
+    }
+}
+
+impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
+    fn is_empty(&self) -> bool {
+        self.floor.is_none()
+            && self.prune.is_none()
+            && self.hints.is_empty()
+            && self.messages.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
+    {
+        if let Some(height) = self.floor.take() {
+            if !self.drain_one(Message::SetFloor { height }, &mut push) {
+                return;
             }
         }
 
-        true
+        if let Some(height) = self.prune.take() {
+            if !self.drain_one(Message::Prune { height }, &mut push) {
+                return;
+            }
+        }
+
+        while let Some((height, targets)) = self.hints.pop_first() {
+            if !self.drain_one(Message::HintFinalized { height, targets }, &mut push) {
+                return;
+            }
+        }
+
+        while let Some(message) = self.messages.pop_front() {
+            if !self.drain_one(message, &mut push) {
+                break;
+            }
+        }
+    }
+}
+
+impl<S: Scheme, V: Variant> Policy for Message<S, V> {
+    type Overflow = Pending<S, V>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+        match message {
+            Self::HintFinalized { height, targets } => overflow.hint_finalized(height, targets),
+            Self::SetFloor { height } => overflow.set_floor(height),
+            Self::Prune { height } => overflow.prune(height),
+            message => overflow.push_message(message),
+        }
     }
 }
 
@@ -637,6 +644,7 @@ mod tests {
     use commonware_utils::channel::oneshot::error::TryRecvError;
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
+    type TestPending = Pending<harness::S, Standard<harness::B>>;
 
     fn public_key(seed: u64) -> harness::K {
         PrivateKey::from_seed(seed).public_key()
@@ -729,8 +737,21 @@ mod tests {
         }
     }
 
-    fn has_get_info(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
-        overflow.iter().any(|message| {
+    fn pending() -> TestPending {
+        TestPending::default()
+    }
+
+    fn drain(overflow: &mut TestPending) -> VecDeque<TestMessage> {
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        drained
+    }
+
+    fn has_get_info(overflow: &TestPending, height: u64) -> bool {
+        overflow.messages.iter().any(|message| {
             matches!(
                 message,
                 TestMessage::GetInfo {
@@ -741,8 +762,8 @@ mod tests {
         })
     }
 
-    fn has_get_block(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
-        overflow.iter().any(|message| {
+    fn has_get_block(overflow: &TestPending, height: u64) -> bool {
+        overflow.messages.iter().any(|message| {
             matches!(
                 message,
                 TestMessage::GetBlock {
@@ -753,8 +774,8 @@ mod tests {
         })
     }
 
-    fn has_get_finalization(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
-        overflow.iter().any(|message| {
+    fn has_get_finalization(overflow: &TestPending, height: u64) -> bool {
+        overflow.messages.iter().any(|message| {
             matches!(
                 message,
                 TestMessage::GetFinalization { height: found, .. }
@@ -763,18 +784,12 @@ mod tests {
         })
     }
 
-    fn has_hint(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
-        overflow.iter().any(|message| {
-            matches!(
-                message,
-                TestMessage::HintFinalized { height: found, .. }
-                    if *found == Height::new(height)
-            )
-        })
+    fn has_hint(overflow: &TestPending, height: u64) -> bool {
+        overflow.hints.contains_key(&Height::new(height))
     }
 
-    fn has_durable(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
-        overflow.iter().any(|message| {
+    fn has_durable(overflow: &TestPending, height: u64) -> bool {
+        overflow.messages.iter().any(|message| {
             matches!(
                 message,
                 TestMessage::Proposed { block, .. }
@@ -785,18 +800,13 @@ mod tests {
         })
     }
 
-    fn has_prune(overflow: &VecDeque<TestMessage>, height: u64) -> bool {
-        overflow.iter().any(|message| {
-            matches!(
-                message,
-                TestMessage::Prune { height: found } if *found == Height::new(height)
-            )
-        })
+    fn has_prune(overflow: &TestPending, height: u64) -> bool {
+        overflow.prune == Some(Height::new(height))
     }
 
     #[test]
     fn policy_coalesces_hint_targets() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = pending();
         let first = public_key(1);
         let second = public_key(2);
 
@@ -813,11 +823,8 @@ mod tests {
             hint_finalized(10, second.clone())
         ));
 
-        assert_eq!(overflow.len(), 1);
-        let TestMessage::HintFinalized { height, targets } = &overflow[0] else {
-            panic!("expected hint");
-        };
-        assert_eq!(*height, Height::new(10));
+        assert_eq!(overflow.hints.len(), 1);
+        let targets = overflow.hints.get(&Height::new(10)).expect("expected hint");
         assert_eq!(targets.len().get(), 2);
         assert!(targets.contains(&first));
         assert!(targets.contains(&second));
@@ -825,7 +832,7 @@ mod tests {
 
     #[test]
     fn policy_keeps_highest_floor_and_prune() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = pending();
 
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(5)));
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(3)));
@@ -834,58 +841,72 @@ mod tests {
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(2)));
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
 
-        assert_eq!(overflow.len(), 2);
+        assert_eq!(overflow.floor, Some(Height::new(8)));
+        assert_eq!(overflow.prune, Some(Height::new(7)));
+        assert!(overflow.hints.is_empty());
+        assert!(overflow.messages.is_empty());
+
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 2);
         assert!(matches!(
-            &overflow[0],
+            &drained[0],
             TestMessage::SetFloor { height } if *height == Height::new(8)
         ));
         assert!(matches!(
-            &overflow[1],
+            &drained[1],
             TestMessage::Prune { height } if *height == Height::new(7)
         ));
     }
 
     #[test]
-    fn policy_replaces_floor_and_prune_at_back() {
-        let mut overflow = VecDeque::new();
+    fn policy_replaces_floor_and_prune_and_drops_stale_pending() {
+        let mut overflow = pending();
 
-        overflow.push_back(set_floor(5));
-        overflow.push_back(get_info(4));
-        overflow.push_back(get_block(7));
-        overflow.push_back(hint_finalized(8, public_key(1)));
-        overflow.push_back(get_block(8));
+        overflow.floor = Some(Height::new(5));
+        overflow.messages.push_back(get_info(4));
+        overflow.messages.push_back(get_block(7));
+        overflow
+            .hints
+            .insert(Height::new(8), NonEmptyVec::new(public_key(1)));
+        overflow.messages.push_back(get_block(8));
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(8)));
-        assert_eq!(overflow.len(), 2);
+        assert_eq!(overflow.floor, Some(Height::new(8)));
         assert!(!has_get_info(&overflow, 4));
         assert!(!has_get_block(&overflow, 7));
         assert!(!has_hint(&overflow, 8));
         assert!(has_get_block(&overflow, 8));
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 2);
         assert!(matches!(
-            &overflow[1],
+            &drained[0],
             TestMessage::SetFloor { height } if *height == Height::new(8)
         ));
 
-        overflow.clear();
-        overflow.push_back(prune(5));
-        overflow.push_back(get_finalization(4));
-        overflow.push_back(get_block(6));
-        overflow.push_back(hint_finalized(6, public_key(2)));
-        overflow.push_back(get_block(7));
+        let mut overflow = pending();
+        overflow.prune = Some(Height::new(5));
+        overflow.messages.push_back(get_finalization(4));
+        overflow.messages.push_back(get_block(6));
+        overflow
+            .hints
+            .insert(Height::new(6), NonEmptyVec::new(public_key(2)));
+        overflow.messages.push_back(get_block(7));
         assert!(<TestMessage as Policy>::handle(&mut overflow, prune(7)));
-        assert_eq!(overflow.len(), 2);
+        assert_eq!(overflow.prune, Some(Height::new(7)));
         assert!(!has_get_finalization(&overflow, 4));
         assert!(!has_get_block(&overflow, 6));
         assert!(!has_hint(&overflow, 6));
         assert!(has_get_block(&overflow, 7));
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 2);
         assert!(matches!(
-            &overflow[1],
+            &drained[0],
             TestMessage::Prune { height } if *height == Height::new(7)
         ));
     }
 
     #[test]
     fn policy_drops_stale_requests_after_prior_floor_and_prune() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = pending();
 
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(5)));
         assert!(!<TestMessage as Policy>::handle(&mut overflow, get_info(4)));
@@ -932,14 +953,14 @@ mod tests {
 
     #[test]
     fn policy_drops_stale_durable_messages_and_acks_waiters() {
-        let mut overflow = VecDeque::new();
+        let mut overflow = pending();
 
         let (proposed_message, mut proposed_ack) = proposed(4);
         let (verified_message, mut verified_ack) = verified(6);
         let (certified_message, mut certified_ack) = certified(8);
-        overflow.push_back(proposed_message);
-        overflow.push_back(verified_message);
-        overflow.push_back(certified_message);
+        overflow.messages.push_back(proposed_message);
+        overflow.messages.push_back(verified_message);
+        overflow.messages.push_back(certified_message);
 
         assert!(<TestMessage as Policy>::handle(&mut overflow, set_floor(7)));
         assert!(!has_durable(&overflow, 4));

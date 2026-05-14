@@ -27,6 +27,8 @@ enum Message<C: PublicKey, S: Scheme, D: Digest> {
 }
 
 impl<C: PublicKey, S: Scheme, D: Digest> Policy for Message<C, S, D> {
+    type Overflow = VecDeque<Self>;
+
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         overflow.push_back(message);
         true

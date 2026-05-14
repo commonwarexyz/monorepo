@@ -97,6 +97,8 @@ where
     H: Hasher,
     P: PublicKey,
 {
+    type Overflow = VecDeque<Self>;
+
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         overflow.push_back(message);
         true
