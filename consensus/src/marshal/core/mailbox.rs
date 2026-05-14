@@ -328,12 +328,10 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     where
         F: FnMut(Message<S, V>) -> Option<Message<S, V>>,
     {
-        if let Some(message) = push(message) {
+        push(message).is_none_or(|message| {
             self.restore_front(message);
             false
-        } else {
-            true
-        }
+        })
     }
 }
 
@@ -559,13 +557,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::Certified {
-                round,
-                block,
-                ack: Some(ack),
-            });
+        let _ = self.sender.enqueue(Message::Certified {
+            round,
+            block,
+            ack: Some(ack),
+        });
         receiver.await.is_ok()
     }
 

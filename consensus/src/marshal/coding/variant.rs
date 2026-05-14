@@ -15,7 +15,6 @@ use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::future::{ready, Future};
 
 /// The coding variant of Marshal, which uses erasure coding for block dissemination.
 ///
@@ -94,15 +93,15 @@ where
     fn subscribe_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> impl Future<Output = oneshot::Receiver<CodedBlock<B, C, H>>> + Send {
-        ready(self.subscribe_by_digest(digest))
+    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+        self.subscribe_by_digest(digest)
     }
 
     fn subscribe_by_commitment(
         &self,
         commitment: Commitment,
-    ) -> impl Future<Output = oneshot::Receiver<CodedBlock<B, C, H>>> + Send {
-        ready(self.subscribe(commitment))
+    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+        self.subscribe(commitment)
     }
 
     async fn finalized(&self, commitment: Commitment) {

@@ -71,14 +71,14 @@ where
         self.find_by_digest(commitment).await
     }
 
-    async fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<B> {
+    fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
-        self.subscribe_prepared(digest, tx).await;
+        self.subscribe_prepared(digest, tx);
         rx
     }
 
-    async fn subscribe_by_commitment(&self, commitment: B::Digest) -> oneshot::Receiver<B> {
-        self.subscribe_by_digest(commitment).await
+    fn subscribe_by_commitment(&self, commitment: B::Digest) -> oneshot::Receiver<B> {
+        self.subscribe_by_digest(commitment)
     }
 
     async fn finalized(&self, _commitment: B::Digest) {

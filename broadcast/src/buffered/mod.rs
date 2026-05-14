@@ -149,7 +149,7 @@ mod tests {
             let context = context.child("peer").with_attribute("public_key", &peer);
             let config = Config {
                 public_key: peer.clone(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -190,7 +190,7 @@ mod tests {
             for peer in peers.iter() {
                 let mailbox = mailboxes.get(peer).unwrap().clone();
                 let digest = message.digest();
-                let receiver = mailbox.subscribe(digest).await;
+                let receiver = mailbox.subscribe(digest);
                 let received_message = receiver.await.ok();
                 assert_eq!(received_message.unwrap(), message.clone());
             }
@@ -243,7 +243,7 @@ mod tests {
             assert!(receiver_before.is_none());
 
             // Attempt retrieval before broadcasting
-            let receiver_before = mailbox_a.subscribe(digest_m1).await;
+            let receiver_before = mailbox_a.subscribe(digest_m1);
 
             // Broadcast the message
             let result = mailbox_a.broadcast(Recipients::All, m1.clone()).await;
@@ -260,7 +260,7 @@ mod tests {
             assert_eq!(receiver_after, Some(m1.clone()));
 
             // Perform a second retrieval after the broadcast
-            let receiver_after = mailbox_a.subscribe(digest_m1).await;
+            let receiver_after = mailbox_a.subscribe(digest_m1);
 
             // Measure the time taken for the second retrieval
             let start = context.current();
@@ -303,7 +303,7 @@ mod tests {
                 let mut all_received = true;
                 for peer in peers.iter() {
                     let mailbox = mailboxes.get(peer).unwrap().clone();
-                    let receiver = mailbox.subscribe(digest).await;
+                    let receiver = mailbox.subscribe(digest);
                     let has = match context.timeout(A_JIFFY, receiver).await {
                         Ok(r) => r.is_ok(),
                         Err(Error::Timeout) => false,
@@ -346,7 +346,7 @@ mod tests {
             // Get from cache (should be instant)
             let digest = message.digest();
             let mailbox = mailboxes.get(peers.last().unwrap()).unwrap().clone();
-            let receiver = mailbox.subscribe(digest).await;
+            let receiver = mailbox.subscribe(digest);
             let start = context.current();
             let received = receiver.await.expect("failed to get cached message");
             let duration = context.current().duration_since(start).unwrap();
@@ -369,11 +369,11 @@ mod tests {
             let digest = message.digest();
             let mailbox1 = mailboxes.get(&peers[0]).unwrap().clone();
             let mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
-            let receiver = mailbox1.subscribe(digest).await;
+            let receiver = mailbox1.subscribe(digest);
 
             // Create two other requests which are dropped
-            let dummy1 = mailbox1.subscribe(digest).await;
-            let dummy2 = mailbox2.subscribe(digest).await;
+            let dummy1 = mailbox1.subscribe(digest);
+            let dummy2 = mailbox2.subscribe(digest);
             drop(dummy1);
             drop(dummy2);
 
@@ -416,12 +416,12 @@ mod tests {
             // Check all other messages exist
             let peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             for msg in messages.iter().skip(1) {
-                let result = peer_mailbox.subscribe(msg.digest()).await.await.unwrap();
+                let result = peer_mailbox.subscribe(msg.digest()).await.unwrap();
                 assert_eq!(result, msg.clone());
             }
 
             // Check first message times out
-            let receiver = peer_mailbox.subscribe(messages[0].digest()).await;
+            let receiver = peer_mailbox.subscribe(messages[0].digest());
             match context.timeout(A_JIFFY, receiver).await {
                 Ok(_) => panic!("receiver should have failed"),
                 Err(Error::Timeout) => {} // Expected timeout
@@ -471,7 +471,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Verify B can still get M1 (in C's deque)
-            let receiver = mailbox_b.subscribe(digest_m1).await;
+            let receiver = mailbox_b.subscribe(digest_m1);
             let received = receiver.await.expect("M1 should be retrievable");
             assert_eq!(received, m1);
 
@@ -487,7 +487,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Verify B cannot get M1 (evicted from all deques)
-            let receiver = mailbox_b.subscribe(digest_m1).await;
+            let receiver = mailbox_b.subscribe(digest_m1);
             match context.timeout(A_JIFFY, receiver).await {
                 Ok(_) => panic!("M1 should not be retrievable"),
                 Err(Error::Timeout) => {} // Expected timeout
@@ -684,7 +684,6 @@ mod tests {
             let received = victim_mailbox
                 .subscribe(message.digest())
                 .await
-                .await
                 .expect("victim should receive valid message after malformed payload");
             assert_eq!(received, message);
         });
@@ -702,7 +701,7 @@ mod tests {
             let engine_context = context.child("waiter_cleanup");
             let config = Config {
                 public_key: peer,
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -714,8 +713,8 @@ mod tests {
 
             let missing = TestMessage::shared(b"never-arrives");
             let missing_digest = missing.digest();
-            let rx1 = mailbox.subscribe(missing_digest).await;
-            let rx2 = mailbox.subscribe(missing_digest).await;
+            let rx1 = mailbox.subscribe(missing_digest);
+            let rx2 = mailbox.subscribe(missing_digest);
 
             // Ensure subscriptions are processed and waiters are reflected in metrics.
             let _ = mailbox
@@ -790,7 +789,7 @@ mod tests {
             let ctx = context.child("peer").with_attribute("public_key", &peer);
             let config = Config {
                 public_key: peer.clone(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -847,7 +846,7 @@ mod tests {
 
             // Subscribe should not panic (returns Canceled since engine is down)
             let digest = message.digest();
-            let receiver = mailbox.subscribe(digest).await;
+            let receiver = mailbox.subscribe(digest);
             let result = receiver.await;
             assert!(
                 result.is_err(),
@@ -940,7 +939,7 @@ mod tests {
             let network_b = registrations.remove(&peer_b).unwrap();
             let config_b = Config {
                 public_key: peer_b.clone(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -957,7 +956,7 @@ mod tests {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
                 let config = Config {
                     public_key: peer.clone(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
                     codec_config: RangeCfg::from(..),
@@ -1054,7 +1053,7 @@ mod tests {
             let network_b = registrations.remove(&peer_b).unwrap();
             let config_b = Config {
                 public_key: peer_b.clone(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -1070,7 +1069,7 @@ mod tests {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
                 let config = Config {
                     public_key: peer.clone(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
                     codec_config: RangeCfg::from(..),
@@ -1188,7 +1187,7 @@ mod tests {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
                 let config = Config {
                     public_key: peer.clone(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
                     codec_config: RangeCfg::from(..),
@@ -1237,7 +1236,7 @@ mod tests {
             let network = registrations.remove(&peer).unwrap();
             let config = Config {
                 public_key: peer.clone(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -1318,7 +1317,7 @@ mod tests {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
                 let config = Config {
                     public_key: peer.clone(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
                     codec_config: RangeCfg::from(..),
@@ -1384,7 +1383,7 @@ mod tests {
             let network_b = registrations.remove(&peer_b).unwrap();
             let config_b = Config {
                 public_key: peer_b.clone(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -1401,7 +1400,7 @@ mod tests {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
                 let config = Config {
                     public_key: peer.clone(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
                     codec_config: RangeCfg::from(..),

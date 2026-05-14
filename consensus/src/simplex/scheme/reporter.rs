@@ -231,10 +231,7 @@ mod tests {
         };
 
         // Report it.
-        assert_eq!(
-            reporter.report(Activity::Notarize(notarize)),
-            Feedback::Ok
-        );
+        assert_eq!(reporter.report(Activity::Notarize(notarize)), Feedback::Ok);
 
         // Should be ignored.
         assert_eq!(mock.count(), 0);
@@ -367,10 +364,7 @@ mod tests {
         };
 
         // Report peer per-validator activity
-        assert_eq!(
-            reporter.report(Activity::Notarize(notarize)),
-            Feedback::Ok
-        );
+        assert_eq!(reporter.report(Activity::Notarize(notarize)), Feedback::Ok);
 
         // Must be filtered
         assert_eq!(mock.count(), 0);

@@ -924,11 +924,9 @@ where
             }
             Entry::Vacant(entry) => {
                 let rx = match key {
-                    BlockSubscriptionKey::Digest(digest) => {
-                        buffer.subscribe_by_digest(digest).await
-                    }
+                    BlockSubscriptionKey::Digest(digest) => buffer.subscribe_by_digest(digest),
                     BlockSubscriptionKey::Commitment(commitment) => {
-                        buffer.subscribe_by_commitment(commitment).await
+                        buffer.subscribe_by_commitment(commitment)
                     }
                 };
                 let waiter_key = key;

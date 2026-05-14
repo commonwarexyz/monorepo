@@ -1,4 +1,5 @@
 use super::{metrics, Config, Mailbox, Message};
+use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
@@ -12,7 +13,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
 };
 use std::collections::{BTreeMap, VecDeque};
@@ -69,7 +70,7 @@ where
     // Messaging
     ////////////////////////////////////////
     /// The mailbox for receiving messages.
-    mailbox_receiver: mpsc::Receiver<Message<P, M>>,
+    mailbox_receiver: actor_mailbox::Receiver<Message<P, M>>,
 
     /// Pending requests from the application.
     waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
@@ -116,7 +117,7 @@ where
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
     pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
-        let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (mailbox_sender, mailbox_receiver) = actor_mailbox::new(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
         let metrics = metrics::Metrics::init(&context);

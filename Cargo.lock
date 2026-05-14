@@ -1047,6 +1047,7 @@ dependencies = [
 name = "commonware-broadcast"
 version = "2026.4.0"
 dependencies = [
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",

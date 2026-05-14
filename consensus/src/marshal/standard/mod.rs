@@ -1653,12 +1653,12 @@ mod tests {
             None
         }
 
-        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
             let (_sender, receiver) = oneshot::channel();
             receiver
         }
 
-        async fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
             let (_sender, receiver) = oneshot::channel();
             receiver
         }
@@ -1959,7 +1959,7 @@ mod tests {
 
             let broadcast_config = buffered::Config {
                 public_key: me.clone(),
-                mailbox_size: 100,
+                mailbox_size: NZUsize!(100),
                 deque_size: 10,
                 priority: false,
                 codec_config: (),

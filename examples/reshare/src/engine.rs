@@ -159,7 +159,7 @@ where
             context.child("buffer"),
             buffered::Config {
                 public_key: config.signer.public_key(),
-                mailbox_size: MAILBOX_SIZE.get(),
+                mailbox_size: MAILBOX_SIZE,
                 deque_size: DEQUE_SIZE,
                 priority: true,
                 codec_config: num_participants,

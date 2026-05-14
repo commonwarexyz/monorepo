@@ -207,7 +207,7 @@ fn fuzz(input: FuzzInput) {
             // Create mailbox
             let config = Config {
                 public_key: public_key.clone(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
