@@ -141,9 +141,18 @@ mod tests {
 
     #[test]
     fn combine_returns_worst_feedback() {
-        assert_eq!(combine(Feedback::Closed, Feedback::Dropped), Feedback::Closed);
-        assert_eq!(combine(Feedback::Dropped, Feedback::Backoff), Feedback::Dropped);
-        assert_eq!(combine(Feedback::Backoff, Feedback::Dropped), Feedback::Dropped);
+        assert_eq!(
+            combine(Feedback::Closed, Feedback::Dropped),
+            Feedback::Closed
+        );
+        assert_eq!(
+            combine(Feedback::Dropped, Feedback::Backoff),
+            Feedback::Dropped
+        );
+        assert_eq!(
+            combine(Feedback::Backoff, Feedback::Dropped),
+            Feedback::Dropped
+        );
         assert_eq!(combine(Feedback::Backoff, Feedback::Ok), Feedback::Backoff);
         assert_eq!(combine(Feedback::Ok, Feedback::Ok), Feedback::Ok);
     }
