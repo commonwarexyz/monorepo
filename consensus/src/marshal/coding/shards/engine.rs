@@ -148,7 +148,7 @@ use crate::{
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
 };
-use commonware_actor::mailbox as actor_mailbox;
+use commonware_actor::mailbox;
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
@@ -286,7 +286,7 @@ where
     context: ContextCell<E>,
 
     /// Receiver for incoming messages to the actor.
-    mailbox: actor_mailbox::Receiver<Message<B, C, H, P>>,
+    mailbox: mailbox::Receiver<Message<B, C, H, P>>,
 
     /// The scheme provider.
     scheme_provider: S,
@@ -371,7 +371,7 @@ where
     /// Create a new [`Engine`] with the given configuration.
     pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
-        let (sender, mailbox) = actor_mailbox::new(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
