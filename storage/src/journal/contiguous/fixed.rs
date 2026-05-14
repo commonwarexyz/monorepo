@@ -44,10 +44,11 @@
 //! - PRUNING_BOUNDARY_KEY: Stores the pruning boundary as a u64 when it's mid-section (not a
 //!   multiple of items_per_blob). Absent from legacy journals or when the boundary is
 //!   section-aligned, since it can be derived from the oldest blob.
-//! - DURABLE_SIZE_KEY: Stores the logical size that was last durably persisted as a u64. Used
-//!   during recovery to distinguish the trusted durable prefix (corruption = hard error) from the
-//!   uncommitted suffix (truncation = OK). Absent on journals created before this key was added,
-//!   which fall back to scanning all sections during recovery.
+//! - RECOVERY_WATERMARK_KEY: Stores the logical size recovery can trust without scanning. Used to
+//!   distinguish the trusted prefix (corruption = hard error) from the suffix that must be scanned
+//!   and may be truncated. Absent on journals created before this key was added; those journals
+//!   recover from the newest retained blob using the old rollover-sync invariant, then write the
+//!   key before accepting new appends.
 //!
 //! # Consistency
 //!
@@ -85,8 +86,8 @@ use tracing::warn;
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
 
-/// Metadata key for storing the durable logical size watermark.
-const DURABLE_SIZE_KEY: u64 = 2;
+/// Metadata key for storing the recovery watermark.
+const RECOVERY_WATERMARK_KEY: u64 = 2;
 
 /// Return the first retained logical position in `section`.
 #[inline]
@@ -138,7 +139,7 @@ struct Inner<E: Context, A: CodecFixedShared> {
     /// Total number of items appended (not affected by pruning).
     size: u64,
 
-    /// Stores the durable-size watermark and, when the pruning boundary is mid-section, the exact
+    /// Stores the recovery watermark and, when the pruning boundary is mid-section, the exact
     /// pruning boundary. Otherwise, the pruning-boundary entry is omitted.
     ///
     /// Metadata is persisted only after the blob state it describes is durable.
@@ -151,15 +152,14 @@ struct Inner<E: Context, A: CodecFixedShared> {
     /// The position before which all items have been pruned.
     pruning_boundary: u64,
 
-    /// The logical size up to which all data has been durably synced, mirroring the persisted
-    /// `DURABLE_SIZE_KEY` in metadata.
+    /// The recovery watermark to use for future metadata writes.
     ///
-    /// Advanced only by `sync`.
-    durable_size: u64,
+    /// `sync()` advances this to `size` after dirty sections are persisted. `commit()` may make
+    /// later items durable without advancing the watermark. `rewind()` and recovery may lower it;
+    /// the lowered value is persisted only after the corresponding blob state is durable.
+    recovery_watermark: u64,
 
-    /// The earliest section modified since the last `commit()` or `sync()`.
-    ///
-    /// Advanced by both `sync` and `commit`.
+    /// The earliest section modified since the last successful `commit()` or `sync()`.
     dirty_from_section: Option<u64>,
 }
 
@@ -472,13 +472,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
     }
 
-    /// Update pruning boundary and durable size in the in-memory metadata store
+    /// Update pruning boundary and recovery watermark in the in-memory metadata store
     /// without fsyncing. Call `inner.metadata.sync()` separately to persist.
     fn sync_metadata_in_place(
         inner: &mut Inner<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        durable_size: u64,
+        recovery_watermark: u64,
     ) -> Result<(), Error> {
         let current_pruning =
             Self::parse_metadata_u64(&inner.metadata, PRUNING_BOUNDARY_KEY, "pruning_boundary")?;
@@ -493,25 +493,29 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
 
-        let current_durable =
-            Self::parse_metadata_u64(&inner.metadata, DURABLE_SIZE_KEY, "durable_size")?;
-        if current_durable != Some(durable_size) {
-            inner
-                .metadata
-                .put(DURABLE_SIZE_KEY, durable_size.to_be_bytes().to_vec());
+        let current_watermark = Self::parse_metadata_u64(
+            &inner.metadata,
+            RECOVERY_WATERMARK_KEY,
+            "recovery_watermark",
+        )?;
+        if current_watermark != Some(recovery_watermark) {
+            inner.metadata.put(
+                RECOVERY_WATERMARK_KEY,
+                recovery_watermark.to_be_bytes().to_vec(),
+            );
         }
 
         Ok(())
     }
 
-    /// Update and persist pruning boundary and durable size metadata.
+    /// Update and persist pruning boundary and recovery watermark metadata.
     async fn sync_metadata(
         inner: &mut Inner<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        durable_size: u64,
+        recovery_watermark: u64,
     ) -> Result<(), Error> {
-        Self::sync_metadata_in_place(inner, items_per_blob, pruning_boundary, durable_size)?;
+        Self::sync_metadata_in_place(inner, items_per_blob, pruning_boundary, recovery_watermark)?;
         inner.metadata.sync().await?;
         Ok(())
     }
@@ -575,14 +579,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let meta_pruning_boundary =
             Self::parse_metadata_u64(&metadata, PRUNING_BOUNDARY_KEY, "pruning_boundary")?;
-        let meta_durable_size =
-            Self::parse_metadata_u64(&metadata, DURABLE_SIZE_KEY, "durable_size")?;
+        let meta_recovery_watermark =
+            Self::parse_metadata_u64(&metadata, RECOVERY_WATERMARK_KEY, "recovery_watermark")?;
 
-        let (pruning_boundary, size, durable_size) = Self::recover_bounds(
+        let (pruning_boundary, size, recovery_watermark) = Self::recover_bounds(
             &mut journal,
             items_per_blob,
             meta_pruning_boundary,
-            meta_durable_size,
+            meta_recovery_watermark,
         )
         .await?;
 
@@ -594,10 +598,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             size,
             metadata,
             pruning_boundary,
-            durable_size,
+            recovery_watermark,
             dirty_from_section: None,
         };
-        Self::sync_metadata(&mut inner, items_per_blob, pruning_boundary, durable_size).await?;
+        Self::sync_metadata(
+            &mut inner,
+            items_per_blob,
+            pruning_boundary,
+            recovery_watermark,
+        )
+        .await?;
 
         let metrics = Metrics::new(context);
         metrics.update(size, pruning_boundary, items_per_blob);
@@ -610,12 +620,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         })
     }
 
-    /// Recover `(pruning_boundary, size, durable_size)` from metadata and blob state.
+    /// Recover `(pruning_boundary, size, recovery_watermark)` from metadata and blob state.
     async fn recover_bounds(
         inner: &mut SegmentedJournal<E, A>,
         items_per_blob: u64,
         meta_pruning_boundary: Option<u64>,
-        meta_durable_size: Option<u64>,
+        meta_recovery_watermark: Option<u64>,
     ) -> Result<(u64, u64, u64), Error> {
         let blob_boundary = inner.oldest_section().map_or(0, |o| o * items_per_blob);
 
@@ -624,8 +634,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // First check if a PRUNING_BOUNDARY_KEY appears in the metadata. It is stored only when the
         // oldest blob's first logical item is not at the start of its section. If present and it
         // points at the current oldest section, use it as the exact pruning boundary. Otherwise it
-        // is stale from a crash, and both it and DURABLE_SIZE_KEY are ignored. Absence of the key
-        // is normal (aligned boundary) and is not evidence of staleness.
+        // is stale from a crash, and both it and RECOVERY_WATERMARK_KEY are ignored. Absence of the
+        // key is normal (aligned boundary) and is not evidence of staleness.
         let pruning_boundary = match meta_pruning_boundary {
             Some(meta_pruning_boundary)
                 if !meta_pruning_boundary.is_multiple_of(items_per_blob) =>
@@ -663,38 +673,49 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             _ => blob_boundary,
         };
 
-        let effective_durable_size = if metadata_stale {
+        let effective_recovery_watermark = if metadata_stale {
             None
         } else {
-            meta_durable_size
+            meta_recovery_watermark
         };
 
+        // Check oldest section for potential corruption.
         Self::validate_oldest_section(
             inner,
             items_per_blob,
             pruning_boundary,
-            effective_durable_size,
+            effective_recovery_watermark,
         )
         .await?;
 
-        let (size, durable_size) = Self::recover_size(
-            inner,
-            items_per_blob,
-            pruning_boundary,
-            effective_durable_size,
-        )
-        .await?;
-        Ok((pruning_boundary, size, durable_size))
+        let (size, recovery_watermark) = match (metadata_stale, meta_recovery_watermark) {
+            (false, None) => {
+                Self::recover_legacy_size(inner, items_per_blob, pruning_boundary).await?
+            }
+            (false, Some(recovery_watermark)) => {
+                Self::recover_size_from_watermark(
+                    inner,
+                    items_per_blob,
+                    pruning_boundary,
+                    recovery_watermark,
+                )
+                .await?
+            }
+            (true, _) => {
+                Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await?
+            }
+        };
+        Ok((pruning_boundary, size, recovery_watermark))
     }
 
     /// Check that the oldest section's length is consistent with the pruning boundary and
-    /// durable-size watermark. A non-tail oldest section must be full (up to its capacity), unless
-    /// `durable_size` indicates only part of it was synced.
+    /// recovery watermark. A non-tail oldest section must be full (up to its capacity), unless
+    /// `recovery_watermark` indicates only part of it was synced.
     async fn validate_oldest_section(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        durable_size: Option<u64>,
+        recovery_watermark: Option<u64>,
     ) -> Result<(), Error> {
         let (Some(oldest), Some(newest)) = (inner.oldest_section(), inner.newest_section()) else {
             return Ok(());
@@ -715,8 +736,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(());
         }
 
-        // Otherwise make sure the oldest section is full.
-        let required = durable_size
+        // A non-tail oldest section normally must be full; otherwise the next section would leave
+        // a logical gap. The exception is when the recovery watermark is still inside this section:
+        // bytes after the watermark are uncommitted, so recovery may truncate here and discard
+        // later sections.
+        let required = recovery_watermark
             .map(|ds| ds.saturating_sub(first_in_oldest).min(expected))
             .unwrap_or(expected);
 
@@ -736,32 +760,80 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(())
     }
 
-    /// Returns (size, durable_size) by using the durable watermark when available,
-    /// falling back to a full blob scan otherwise.
+    async fn section_len_within_capacity(
+        inner: &SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+        section: u64,
+    ) -> Result<(u64, u64), Error> {
+        let len = inner.section_len(section).await?;
+        let capacity = section_capacity(pruning_boundary, section, items_per_blob);
+        if len > capacity {
+            return Err(Error::Corruption(format!(
+                "section {section} has too many items: expected at most {capacity}, got {len}"
+            )));
+        }
+        Ok((len, capacity))
+    }
+
+    /// Recover a legacy journal that has no RECOVERY_WATERMARK_KEY.
     ///
-    /// When `meta_durable_size` is `None` (legacy journals without DURABLE_SIZE_KEY),
-    /// uses `pruning_boundary` as the starting point, which causes
-    /// `recover_from_durable_size` to scan all sections from the oldest forward.
-    async fn recover_size(
+    /// Before the watermark key existed, writers synced each section before rolling over to the
+    /// next one. That makes all retained sections before the newest trusted without scanning them;
+    /// only the newest section can contain an uncertain tail.
+    async fn recover_legacy_size(
+        inner: &SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+    ) -> Result<(u64, u64), Error> {
+        let Some(newest) = inner.newest_section() else {
+            return Ok((pruning_boundary, pruning_boundary));
+        };
+
+        let (tail_len, _) =
+            Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, newest)
+                .await?;
+        let size = first_in_section(pruning_boundary, newest, items_per_blob) + tail_len;
+        Ok((size, size))
+    }
+
+    /// Recover using a persisted RECOVERY_WATERMARK_KEY.
+    ///
+    /// If the watermark conflicts with blob state, falls back to walking retained section lengths
+    /// until the first short section.
+    async fn recover_size_from_watermark(
         inner: &mut SegmentedJournal<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        meta_durable_size: Option<u64>,
+        recovery_watermark: u64,
     ) -> Result<(u64, u64), Error> {
-        let durable_size = meta_durable_size.unwrap_or(pruning_boundary);
-
-        if let Some(size) =
-            Self::recover_from_durable_size(inner, items_per_blob, pruning_boundary, durable_size)
-                .await?
+        if let Some(size) = Self::try_recover_from_watermark(
+            inner,
+            items_per_blob,
+            pruning_boundary,
+            recovery_watermark,
+        )
+        .await?
         {
             // If recovery had to truncate below the persisted watermark, the
             // watermark was stale and must be lowered before metadata is
             // persisted again during init.
-            return Ok((size, durable_size.min(size)));
+            return Ok((size, recovery_watermark.min(size)));
         }
 
-        // Fallback: the watermark was inconsistent with blob state. Scan forward
-        // until the first short section, then truncate there to preserve contiguity.
+        Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await
+    }
+
+    /// Recover by walking section lengths until the first short section.
+    ///
+    /// This is used for crash repair when metadata is known stale or a persisted watermark is
+    /// inconsistent with blob state. It is not used for legacy journals that simply lack the
+    /// watermark key.
+    async fn recover_by_walking_lengths(
+        inner: &mut SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+    ) -> Result<(u64, u64), Error> {
         let oldest = inner.oldest_section();
         let newest = inner.newest_section();
 
@@ -769,14 +841,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok((pruning_boundary, pruning_boundary));
         };
 
+        // The oldest section's capacity was already checked before recovery mode dispatch.
         let oldest_len = inner.section_len(oldest).await?;
         let expected_oldest = section_capacity(pruning_boundary, oldest, items_per_blob);
-        if oldest_len > expected_oldest {
-            return Err(Error::Corruption(format!(
-                "oldest section {oldest} has too many items: expected at most {expected_oldest}, got {oldest_len}"
-            )));
-        }
-
         let mut size = pruning_boundary + oldest_len;
 
         if oldest == newest {
@@ -791,15 +858,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
 
         for section in oldest + 1..=newest {
-            let len = inner.section_len(section).await?;
-            if len > items_per_blob {
-                return Err(Error::Corruption(format!(
-                    "section {section} has too many items: expected at most {items_per_blob}, got {len}"
-                )));
-            }
+            let (len, capacity) =
+                Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
+                    .await?;
 
             size += len;
-            if len < items_per_blob {
+            if len < capacity {
                 inner.rewind(section, len * Self::CHUNK_SIZE_U64).await?;
                 return Ok((size, size));
             }
@@ -808,36 +872,39 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((size, size))
     }
 
-    /// Try to recover size using the durable watermark. Returns `None` if the watermark
-    /// is inconsistent with the blob state and the caller should fall back.
-    async fn recover_from_durable_size(
+    /// Try to recover size using the recovery watermark.
+    ///
+    /// Returns `None` if the watermark is inconsistent with the blob state and the
+    /// caller should use the blob-length crash-repair path instead.
+    async fn try_recover_from_watermark(
         inner: &mut SegmentedJournal<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        durable_size: u64,
+        recovery_watermark: u64,
     ) -> Result<Option<u64>, Error> {
-        if durable_size < pruning_boundary {
+        if recovery_watermark < pruning_boundary {
             warn!(
-                durable_size,
+                recovery_watermark,
                 pruning_boundary,
-                "crash repair: durable size behind pruning boundary, falling back"
+                "crash repair: recovery watermark behind pruning boundary, falling back"
             );
             return Ok(None);
         }
 
         let oldest = inner.oldest_section();
         let newest = inner.newest_section();
-        let target_section = durable_size / items_per_blob;
+        let target_section = recovery_watermark / items_per_blob;
         let first_in_target = first_in_section(pruning_boundary, target_section, items_per_blob);
-        let target_pos = durable_size - first_in_target;
+        let target_pos = recovery_watermark - first_in_target;
+
         let Some(oldest) = oldest else {
-            return if durable_size == pruning_boundary {
-                Ok(Some(durable_size))
+            return if recovery_watermark == pruning_boundary {
+                Ok(Some(recovery_watermark))
             } else {
                 warn!(
-                    durable_size,
+                    recovery_watermark,
                     pruning_boundary,
-                    "crash repair: durable size ahead of empty blob set, falling back"
+                    "crash repair: recovery watermark ahead of empty blob set, falling back"
                 );
                 Ok(None)
             };
@@ -845,8 +912,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         if target_section < oldest {
             warn!(
-                durable_size,
-                oldest, "crash repair: durable size precedes oldest retained section, falling back"
+                recovery_watermark,
+                oldest,
+                "crash repair: recovery watermark precedes oldest retained section, falling back"
             );
             return Ok(None);
         }
@@ -854,108 +922,168 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let Some(newest) = newest else {
             // oldest is Some but newest is None — impossible for a consistent blob set.
             return Err(Error::Corruption(format!(
-                "durable size {durable_size} references section {target_section} \
+                "recovery watermark {recovery_watermark} references section {target_section} \
                  which does not exist"
             )));
         };
 
-        // Handle target_section beyond newest: all durable data must be in
-        // sections oldest..=newest. Verify every retained section is complete;
-        // if not, the watermark is stale (e.g. crash during clear_to_size).
         if target_section > newest {
-            for section in oldest..=newest {
-                let len = inner.section_len(section).await?;
-                let expected = section_capacity(pruning_boundary, section, items_per_blob);
-                if len > expected {
-                    return Err(Error::Corruption(format!(
-                        "section {section} has too many items: expected at most {expected}, got {len}"
-                    )));
-                }
-                if len < expected {
-                    warn!(
-                        durable_size,
-                        section,
-                        len,
-                        expected,
-                        "crash repair: section not full, durable watermark is stale"
-                    );
-                    return Ok(None);
-                }
-            }
-            // All retained sections are complete. The watermark must land exactly at the
-            // start of the next section after newest.
-            if target_section != newest + 1 || target_pos != 0 {
-                return Err(Error::Corruption(format!(
-                    "durable size {durable_size} references section {target_section} \
-                     which does not exist"
-                )));
-            }
-            return Ok(Some(durable_size));
+            return Self::recover_watermark_beyond_newest(
+                inner,
+                items_per_blob,
+                pruning_boundary,
+                recovery_watermark,
+                target_section,
+                target_pos,
+                oldest,
+                newest,
+            )
+            .await;
         }
 
-        // Validate sections strictly between oldest and target_section.
-        // These are in the durable prefix and must be full.
-        for section in oldest + 1..target_section {
-            let len = inner.section_len(section).await?;
-            if len != items_per_blob {
-                return Err(Error::Corruption(format!(
-                    "section {section} in durable prefix has {len} items, expected {items_per_blob}"
-                )));
+        Self::validate_complete_sections_before_target(
+            inner,
+            items_per_blob,
+            pruning_boundary,
+            oldest,
+            target_section,
+        )
+        .await?;
+
+        Self::recover_from_target_section(
+            inner,
+            items_per_blob,
+            pruning_boundary,
+            recovery_watermark,
+            target_section,
+            target_pos,
+            newest,
+        )
+        .await
+        .map(Some)
+    }
+
+    /// The watermark points after the last retained section.
+    ///
+    /// All retained sections must be complete, and the watermark must land exactly at the start of
+    /// the next section. Otherwise the watermark is stale or corrupt.
+    async fn recover_watermark_beyond_newest(
+        inner: &SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+        recovery_watermark: u64,
+        target_section: u64,
+        target_pos: u64,
+        oldest: u64,
+        newest: u64,
+    ) -> Result<Option<u64>, Error> {
+        for section in oldest..=newest {
+            let (len, capacity) =
+                Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
+                    .await?;
+            if len < capacity {
+                warn!(
+                    recovery_watermark,
+                    section,
+                    len,
+                    capacity,
+                    "crash repair: section not full, recovery watermark is stale"
+                );
+                return Ok(None);
             }
         }
 
-        // target_section <= newest: scan from target_section through newest.
-        let len = inner.section_len(target_section).await?;
-        let expected_items = section_capacity(pruning_boundary, target_section, items_per_blob);
-        if len > expected_items {
+        if target_section != newest + 1 || target_pos != 0 {
             return Err(Error::Corruption(format!(
-                "section {target_section} has too many items: expected at most {expected_items}, got {len}"
+                "recovery watermark {recovery_watermark} references section {target_section} \
+                 which does not exist"
             )));
         }
+        Ok(Some(recovery_watermark))
+    }
+
+    /// Sections strictly before the target section are inside the trusted prefix.
+    async fn validate_complete_sections_before_target(
+        inner: &SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+        oldest: u64,
+        target_section: u64,
+    ) -> Result<(), Error> {
+        for section in oldest + 1..target_section {
+            let (len, capacity) =
+                Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
+                    .await?;
+            if len != capacity {
+                return Err(Error::Corruption(format!(
+                    "section {section} in trusted prefix has {len} items, expected {capacity}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Recover from the section containing the recovery watermark, then scan the suffix until the
+    /// first short section.
+    async fn recover_from_target_section(
+        inner: &mut SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+        recovery_watermark: u64,
+        target_section: u64,
+        target_pos: u64,
+        newest: u64,
+    ) -> Result<u64, Error> {
+        let first_in_target = first_in_section(pruning_boundary, target_section, items_per_blob);
+        let (len, capacity) = Self::section_len_within_capacity(
+            inner,
+            items_per_blob,
+            pruning_boundary,
+            target_section,
+        )
+        .await?;
+
         if target_pos > len {
             if target_section < newest {
                 return Err(Error::Corruption(format!(
-                    "durable size {durable_size} extends past section {target_section} \
+                    "recovery watermark {recovery_watermark} extends past section {target_section} \
                      which has only {len} items"
                 )));
             }
             // The watermark may be stale, for example after a crash during
             // clear_to_size after blobs were replaced but before metadata was
-            // updated. Accept the shorter tail and let recover_size lower the
-            // durable watermark to the recovered size.
+            // updated. Accept the shorter tail and let the caller lower the
+            // recovery watermark to the recovered size.
             warn!(
-                durable_size,
+                recovery_watermark,
                 target_section,
                 len,
-                "crash repair: tail section shorter than durable size, truncating"
+                "crash repair: tail section shorter than recovery watermark, truncating"
             );
-            return Ok(Some(first_in_target + len));
+            return Ok(first_in_target + len);
         }
 
         let mut size = first_in_target + len;
-        if len < expected_items {
+        if len < capacity {
             inner
                 .rewind(target_section, len * Self::CHUNK_SIZE_U64)
                 .await?;
-            return Ok(Some(size));
+            return Ok(size);
         }
 
         for section in target_section + 1..=newest {
-            let len = inner.section_len(section).await?;
-            if len > items_per_blob {
-                return Err(Error::Corruption(format!(
-                    "section {section} has too many items: expected at most {items_per_blob}, got {len}"
-                )));
-            }
+            let (len, capacity) =
+                Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
+                    .await?;
 
             size += len;
-            if len < items_per_blob {
+            if len < capacity {
                 inner.rewind(section, len * Self::CHUNK_SIZE_U64).await?;
-                return Ok(Some(size));
+                return Ok(size);
             }
         }
 
-        Ok(Some(size))
+        Ok(size)
     }
 
     /// Initialize a new `Journal` instance in a pruned state at a given size.
@@ -1009,7 +1137,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             size,
             metadata,
             pruning_boundary: size,
-            durable_size: size,
+            recovery_watermark: size,
             dirty_from_section: None,
         };
         Self::sync_metadata(&mut inner, items_per_blob, size, size).await?;
@@ -1054,10 +1182,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Persist dirty sections so the current state survives a crash.
     ///
-    /// Does not advance the durable-size metadata, so recovery may need to scan sections beyond
-    /// the persisted watermark. Use `sync()` to persist all metadata.
+    /// Does not advance the recovery watermark, so recovery may need to scan sections beyond the
+    /// persisted watermark. Use `sync()` to persist all metadata.
     ///
-    /// If a prior rewind lowered the in-memory durable-size watermark, this persists
+    /// If a prior rewind lowered the in-memory recovery watermark, this persists
     /// the reduced watermark after syncing data so recovery cannot trust stale tail data.
     pub async fn commit(&self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
@@ -1067,20 +1195,23 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
-        let current_durable =
-            Self::parse_metadata_u64(&inner.metadata, DURABLE_SIZE_KEY, "durable_size")?;
-        let should_sync_metadata = match current_durable {
-            Some(current) => current > inner.durable_size,
+        let current_watermark = Self::parse_metadata_u64(
+            &inner.metadata,
+            RECOVERY_WATERMARK_KEY,
+            "recovery_watermark",
+        )?;
+        let should_sync_metadata = match current_watermark {
+            Some(current) => current > inner.recovery_watermark,
             None => false,
         };
         if should_sync_metadata {
             let pruning_boundary = inner.pruning_boundary;
-            let durable_size = inner.durable_size;
+            let recovery_watermark = inner.recovery_watermark;
             Self::sync_metadata_in_place(
                 &mut inner,
                 self.items_per_blob,
                 pruning_boundary,
-                durable_size,
+                recovery_watermark,
             )?;
         }
         drop(inner);
@@ -1093,7 +1224,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(())
     }
 
-    /// Persist dirty sections and update all metadata (durable-size and pruning boundary).
+    /// Persist dirty sections and update all metadata (recovery watermark and pruning boundary).
     pub async fn sync(&self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
@@ -1101,15 +1232,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.fsync_dirty_sections().await?;
 
         let mut inner = self.inner.write().await;
-        inner.durable_size = inner.size;
+        inner.recovery_watermark = inner.size;
         inner.dirty_from_section = None;
         let pruning_boundary = inner.pruning_boundary;
-        let durable_size = inner.durable_size;
+        let recovery_watermark = inner.recovery_watermark;
         Self::sync_metadata_in_place(
             &mut inner,
             self.items_per_blob,
             pruning_boundary,
-            durable_size,
+            recovery_watermark,
         )?;
         drop(inner);
 
@@ -1128,9 +1259,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
     }
 
-    /// Return the durable size watermark.
-    pub(crate) async fn durable_size(&self) -> u64 {
-        self.inner.read().await.durable_size
+    /// Return the recovery watermark.
+    pub(crate) async fn recovery_watermark(&self) -> u64 {
+        self.inner.read().await.recovery_watermark
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
@@ -1245,7 +1376,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         inner.journal.rewind(section, byte_offset).await?;
         inner.size = size;
-        inner.durable_size = inner.durable_size.min(size);
+        inner.recovery_watermark = inner.recovery_watermark.min(size);
         Self::mark_dirty_from(&mut inner, section);
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_blob);
@@ -1330,15 +1461,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         inner.size = new_size;
         inner.pruning_boundary = new_size;
-        inner.durable_size = new_size;
+        inner.recovery_watermark = new_size;
         inner.dirty_from_section = None;
         let pruning_boundary = inner.pruning_boundary;
-        let durable_size = inner.durable_size;
+        let recovery_watermark = inner.recovery_watermark;
         Self::sync_metadata(
             &mut inner,
             self.items_per_blob,
             pruning_boundary,
-            durable_size,
+            recovery_watermark,
         )
         .await?;
 
@@ -1915,7 +2046,7 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Section 40 is within the synced durable prefix. Corruption there is a hard error.
+            // Section 40 is within the trusted prefix. Corruption there is a hard error.
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -1943,7 +2074,7 @@ mod tests {
                 .await
                 .expect("failed to remove blob");
 
-            // Section 1 is within the synced durable prefix. Missing section is a hard error.
+            // Section 1 is within the trusted prefix. Missing section is a hard error.
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -2100,10 +2231,10 @@ mod tests {
             // The truncation invalidates the last page, which is removed. This loses one item.
             assert_eq!(journal.pruning_boundary().await, 0);
             assert_eq!(journal.size().await, 4);
-            assert_eq!(journal.durable_size().await, 4);
+            assert_eq!(journal.recovery_watermark().await, 4);
             drop(journal);
 
-            // Delete the second blob (within the durable prefix) and re-init.
+            // Delete the second blob (within the trusted prefix) and re-init.
             // This is corruption of synced data.
             context
                 .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
@@ -2173,12 +2304,12 @@ mod tests {
                 let mut inner = journal.inner.write().await;
                 inner
                     .metadata
-                    .put(DURABLE_SIZE_KEY, 6u64.to_be_bytes().to_vec());
+                    .put(RECOVERY_WATERMARK_KEY, 6u64.to_be_bytes().to_vec());
                 inner
                     .metadata
                     .sync()
                     .await
-                    .expect("failed to sync stale durable size");
+                    .expect("failed to sync stale recovery watermark");
             }
             drop(journal);
 
@@ -2201,6 +2332,66 @@ mod tests {
             ));
             assert_eq!(journal.test_oldest_section().await, Some(1));
             assert_eq!(journal.inner.read().await.journal.newest_section(), Some(1));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_legacy_recovery_installs_watermark() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..12u64 {
+                journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            journal.sync().await.expect("failed to sync journal");
+
+            {
+                let mut inner = journal.inner.write().await;
+                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
+                inner
+                    .metadata
+                    .sync()
+                    .await
+                    .expect("failed to remove recovery watermark");
+            }
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to recover legacy journal");
+            assert_eq!(journal.bounds().await, 0..12);
+            assert_eq!(journal.recovery_watermark().await, 12);
+            drop(journal);
+
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+                .await
+                .expect("failed to reopen metadata");
+            let raw_watermark = metadata
+                .get(&RECOVERY_WATERMARK_KEY)
+                .expect("missing recovery watermark after legacy recovery");
+            let persisted_watermark =
+                u64::from_be_bytes(raw_watermark.as_slice().try_into().unwrap());
+            assert_eq!(persisted_watermark, 12);
+            drop(metadata);
+
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+                .await
+                .expect("failed to reopen upgraded journal");
+            assert_eq!(journal.bounds().await, 0..12);
+            assert_eq!(journal.recovery_watermark().await, 12);
 
             journal.destroy().await.unwrap();
         });
@@ -2281,7 +2472,7 @@ mod tests {
             let bounds = journal.bounds().await;
             assert_eq!(bounds.end, 0);
             assert!(bounds.is_empty());
-            assert_eq!(journal.durable_size().await, 0);
+            assert_eq!(journal.recovery_watermark().await, 0);
             // Make sure journal still works for appending.
             journal
                 .append(&test_digest(0))
@@ -2514,7 +2705,7 @@ mod tests {
                 .await
                 .expect("failed to re-initialize journal");
             assert_eq!(journal.bounds().await, 0..10);
-            assert_eq!(journal.durable_size().await, 7);
+            assert_eq!(journal.recovery_watermark().await, 7);
             for i in 0..7u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
@@ -2599,7 +2790,7 @@ mod tests {
                 "Journal should recover to {} items after truncation",
                 expected_items
             );
-            assert_eq!(journal.durable_size().await, expected_items);
+            assert_eq!(journal.recovery_watermark().await, expected_items);
 
             // Verify we can still read the remaining items
             for i in 0..expected_items {
@@ -3534,7 +3725,7 @@ mod tests {
         // Regression: when the old pruning boundary was section-aligned,
         // PRUNING_BOUNDARY_KEY is absent. A crash during clear_to_size after
         // blobs are recreated but before metadata sync leaves a stale
-        // DURABLE_SIZE_KEY with no positive conflict signal from the pruning key.
+        // RECOVERY_WATERMARK_KEY with no positive conflict signal from the pruning key.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -3550,7 +3741,7 @@ mod tests {
             drop(journal);
 
             // Simulate clear_to_size(7) crash: blobs cleared, section 1 created,
-            // but metadata still has durable_size=10.
+            // but metadata still has recovery_watermark=10.
             let blob_part = blob_partition(&cfg);
             context.remove(&blob_part, None).await.unwrap();
             let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
@@ -3563,14 +3754,14 @@ mod tests {
             let bounds = journal.bounds().await;
             assert_eq!(bounds.start, 5);
             assert_eq!(bounds.end, 5);
-            assert_eq!(journal.durable_size().await, 5);
+            assert_eq!(journal.recovery_watermark().await, 5);
             journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
     fn test_fixed_journal_clear_to_size_crash_aligned_metadata_far_watermark() {
-        // Regression: the stale durable watermark may point more than one section
+        // Regression: the stale recovery watermark may point more than one section
         // past the recreated empty tail.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3586,7 +3777,7 @@ mod tests {
             drop(journal);
 
             // Simulate clear_to_size(2) crash: blobs cleared, section 0 created,
-            // but metadata still has durable_size=10.
+            // but metadata still has recovery_watermark=10.
             let blob_part = blob_partition(&cfg);
             context.remove(&blob_part, None).await.unwrap();
             let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
@@ -3599,7 +3790,7 @@ mod tests {
             let bounds = journal.bounds().await;
             assert_eq!(bounds.start, 0);
             assert_eq!(bounds.end, 0);
-            assert_eq!(journal.durable_size().await, 0);
+            assert_eq!(journal.recovery_watermark().await, 0);
             journal.destroy().await.unwrap();
         });
     }
