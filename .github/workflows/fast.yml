@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_COOLDOWN_VERSION: 0.3.0
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly
   PANDOC_VERSION: 3.8.2.1
@@ -228,6 +229,21 @@ jobs:
         tool: just@1.43.0,cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
       run: just udeps
+
+  Cooldown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Install just & cargo-cooldown
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0,cargo-cooldown@${{ env.CARGO_COOLDOWN_VERSION }}
+    - name: Check dependency cooldown
+      run: just cooldown
 
   Lock:
     runs-on: ubuntu-latest
