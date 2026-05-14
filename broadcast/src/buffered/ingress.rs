@@ -99,11 +99,7 @@ impl<P: PublicKey, M: Digestible + Codec> Broadcaster for Mailbox<P, M> {
     /// Broadcast a message to recipients.
     ///
     /// If the engine has shut down, returns [`Feedback::Closed`].
-    fn broadcast(
-        &self,
-        recipients: Self::Recipients,
-        message: Self::Message,
-    ) -> Feedback {
+    fn broadcast(&self, recipients: Self::Recipients, message: Self::Message) -> Feedback {
         self.sender.enqueue(Message::Broadcast {
             recipients,
             message,
