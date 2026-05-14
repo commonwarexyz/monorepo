@@ -7,7 +7,7 @@
 //! Prior to this, we have agreed on distinct group elements `G_i`, `H_i`, and `Q`.
 //!
 //! A prover has two vectors of field elements `a_i` and `b_i`. They have created
-//! a commitment `P` to these vectors, defined as `P = <a_i, G_i> + <b_i, H_i>`.
+//! a commitment `P` to these vectors, defined as `P = <a_i, G_i> + <b_i, y^i H_i>`.
 //! They want to convince the verifier that the product of the vectors that `P`
 //! commits to is equal to `c = <a_i, b_i>`.
 //!
@@ -57,12 +57,14 @@
 //! Given a [`Setup`], [`Witness`], and [`Claim`], you can create a [`Proof`]
 //! with [`prove`].
 //!
-//! Both [`prove`] and [`verify`] also take a [`Transcript`]. The proof is only
-//! valid for the transcript state used to produce it, so the verifier must
-//! replay the same transcript history before calling [`verify`].
+//! Both [`prove`] and [`verify`] take a [`Transcript`]. The proof is only valid
+//! for the transcript state used to produce it, so the verifier must replay the
+//! same transcript history before calling [`verify`].
 //!
 //! On the verifier side, we don't have a [`Witness`], and can instead check
 //! that the prover had a valid witness, using their [`Proof`], through [`verify`].
+//! The result is a [`Synthetic`] verification equation that can be evaluated
+//! against the setup's generators, or combined with other equations for batching.
 //!
 //! ## Example
 //!
@@ -92,6 +94,7 @@
 //! // Witness vectors must have the same power-of-two length.
 //! let (witness, claim) = Witness::new_with_claim(
 //!     &setup,
+//!     F::one(),
 //!     [
 //!         (F::from(3u64), F::from(4u64)),
 //!         (F::from(5u64), F::from(6u64)),
@@ -114,13 +117,11 @@
 //! // Verification must replay the same transcript state.
 //! let mut verifier_transcript = Transcript::new(b"ipa-example");
 //! verifier_transcript.commit(b"context".as_slice());
-//! assert!(verify(
-//!     &mut verifier_transcript,
-//!     &setup,
-//!     &claim,
-//!     proof,
-//!     &strategy,
-//! ));
+//! let valid = setup
+//!     .eval(|vs| verify(&mut verifier_transcript, vs, &claim, proof), &strategy)
+//!     .map(|g| g == G::zero())
+//!     .unwrap_or(false);
+//! assert!(valid);
 //! ```
 //!
 //! # References
@@ -131,8 +132,11 @@
 use crate::transcript::{Summary, Transcript};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
-use commonware_math::algebra::{CryptoGroup, Field, Random, Space};
-use commonware_parallel::Strategy;
+use commonware_math::{
+    algebra::{powers, CryptoGroup, Field, Random, Space},
+    synthetic::Synthetic,
+};
+use commonware_parallel::{Sequential, Strategy};
 
 /// A setup decides on what group elements we use to commit to vectors and their product.
 ///
@@ -232,16 +236,53 @@ impl<G> Setup<G> {
     pub const fn product_generator(&self) -> &G {
         &self.product_generator
     }
+
+    /// Check if this setup supports claims of a given length.
+    pub const fn supports(&self, lg_len: u8) -> bool {
+        self.g.len() >> lg_len > 0
+    }
+
+    /// Build a virtual setup, call `f` to obtain a verification equation,
+    /// and evaluate it against the concrete generators in `self`.
+    ///
+    /// Returns `None` when `f` returns `None` (malformed proof).
+    /// Otherwise returns the evaluated group element, which should be
+    /// zero for a valid proof.
+    pub fn eval<F: Field>(
+        &self,
+        f: impl FnOnce(&Setup<Synthetic<F, G>>) -> Option<Synthetic<F, G>>,
+        strategy: &impl Strategy,
+    ) -> Option<G>
+    where
+        G: Space<F>,
+    {
+        let n = self.g.len();
+        let mut gens = Synthetic::<F, G>::generators();
+        let vg: Vec<_> = (0..n)
+            .map(|_| gens.next().expect("generators is infinite"))
+            .collect();
+        let vh: Vec<_> = (0..n)
+            .map(|_| gens.next().expect("generators is infinite"))
+            .collect();
+        let vq = gens.next().expect("generators is infinite");
+        let vs = Setup::new(vq, vg.into_iter().zip(vh));
+        let mut flat = Vec::with_capacity(2 * n + 1);
+        flat.extend_from_slice(&self.g);
+        flat.extend_from_slice(&self.h);
+        flat.push(self.product_generator.clone());
+        f(&vs).map(|v| v.eval(&flat, strategy))
+    }
 }
 
 /// The public claim we're making about the inner product.
 ///
-/// We claim that our commitment `P` is equal to `<a_i, G_i> + <b_i, H_i>`,
+/// We claim that our commitment `P` is equal to `<a_i, G_i> + <b_i, y^i H_i>`,
 /// and that our product `c` is equal to `<a_i, b_i>`.
 #[derive(Debug, PartialEq)]
 pub struct Claim<F, G> {
     pub commitment: G,
     pub product: F,
+    pub y: F,
     /// The claimed vector length, stored as `log2(len)`.
     ///
     /// Inner product arguments require power-of-two vector lengths, so storing
@@ -253,13 +294,17 @@ impl<F: Write, G: Write> Write for Claim<F, G> {
     fn write(&self, buf: &mut impl BufMut) {
         self.commitment.write(buf);
         self.product.write(buf);
+        self.y.write(buf);
         self.log_len.write(buf);
     }
 }
 
 impl<F: EncodeSize, G: EncodeSize> EncodeSize for Claim<F, G> {
     fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.product.encode_size() + self.log_len.encode_size()
+        self.commitment.encode_size()
+            + self.product.encode_size()
+            + self.y.encode_size()
+            + self.log_len.encode_size()
     }
 }
 
@@ -270,6 +315,7 @@ impl<F: Read, G: Read> Read for Claim<F, G> {
         Ok(Self {
             commitment: G::read_cfg(buf, g_cfg)?,
             product: F::read_cfg(buf, f_cfg)?,
+            y: F::read_cfg(buf, f_cfg)?,
             log_len: u8::read(buf)?,
         })
     }
@@ -285,6 +331,7 @@ where
         Ok(Self {
             commitment: u.arbitrary()?,
             product: u.arbitrary()?,
+            y: u.arbitrary()?,
             log_len: u.arbitrary()?,
         })
     }
@@ -325,6 +372,7 @@ impl<F: Field> Witness<F> {
     /// witnesses.
     pub fn new_with_claim<G: Space<F>>(
         setup: &Setup<G>,
+        y: F,
         elements: impl IntoIterator<Item = (F, F)>,
     ) -> Option<(Self, Claim<F, G>)> {
         let witness = Self::new(elements)?;
@@ -336,15 +384,21 @@ impl<F: Field> Witness<F> {
         let claim = {
             let mut commitment = G::zero();
             let mut product = F::zero();
-            for (((a_i, b_i), g_i), h_i) in
-                witness.a.iter().zip(&witness.b).zip(&setup.g).zip(&setup.h)
+            for ((((a_i, b_i), g_i), h_i), y_i) in witness
+                .a
+                .iter()
+                .zip(&witness.b)
+                .zip(&setup.g)
+                .zip(&setup.h)
+                .zip(powers(F::one(), &y))
             {
-                commitment += &(g_i.clone() * a_i + &(h_i.clone() * b_i));
+                commitment += &(g_i.clone() * a_i + &(h_i.clone() * &(b_i.clone() * &y_i)));
                 product += &(a_i.clone() * b_i);
             }
             Claim {
                 commitment,
                 product,
+                y,
                 log_len: witness.a.len().ilog2() as u8,
             }
         };
@@ -353,7 +407,7 @@ impl<F: Field> Witness<F> {
 }
 
 /// A proof for the inner product argument.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Proof<F, G> {
     l_r_coms: Vec<(G, G)>,
     /// Summary of the transcript after the public statement and all proof messages.
@@ -452,15 +506,15 @@ where
     //
     // We have vectors a_i and b_i, in our claim, we have:
     //
-    //   P = <a_i, G_i> + <b_i, H_i>
+    //   P = <a_i, G_i> + <b_i, y^i H_i>
     //   c = <a_i, b_i>
     //
     // for recursion, it's convenient to have a statement about one commitment
-    // instead.
+    // instead. We can also run the protocol over H'_i := y^i H_i instead.
     //
     // We can have the verifier give us a challenge w, compressing this into:
     //
-    //  P = <a_i, G_i> + <b_i, H_i> + c * w * Q
+    //  P = <a_i, G_i> + <b_i, H'_i> + c * w * Q
     //
     // where Q is the additional generator from our setup.
     //
@@ -544,6 +598,9 @@ where
     let mut b = witness.b;
     let mut g = setup.g[..witness_len].to_vec();
     let mut h = setup.h[..witness_len].to_vec();
+    for (h_i, y_i) in h.iter_mut().zip(powers(F::one(), &claim.y)) {
+        *h_i *= &y_i;
+    }
     while a.len() > 1 {
         let mid = a.len() / 2;
         let (a_lo, a_hi) = a.split_at_mut(mid);
@@ -596,23 +653,22 @@ where
     })
 }
 
-/// Check a [`Proof`], relative to a [`Claim`] and [`Setup`].
-///  
+/// Construct the verification equation for a [`Proof`], relative to a
+/// [`Claim`] and a virtual [`Setup`].
+///
 /// If the check succeeds, we are convinced that the prover knows a valid
 /// [`Witness`] to this particular [`Claim`].
 ///
-/// It's important that the verifier uses a [`Setup`] that they know to be
-/// correct, rather than one that the prover is telling them to use. For example,
-/// by using one generated from a deterministic seed that's agreed upon, or
-/// something similar.
-#[must_use]
+/// The returned [`Synthetic`] should evaluate to zero for a correct proof.
+/// Use [`Setup::eval`] to create the virtual setup and evaluate the result.
+///
+/// The return will be `None` if the proof is incorrect in an obvious way.
 pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
-    setup: &Setup<G>,
+    setup: &Setup<Synthetic<F, G>>,
     claim: &Claim<F, G>,
     proof: Proof<F, G>,
-    strategy: &impl Strategy,
-) -> bool
+) -> Option<Synthetic<F, G>>
 where
     Claim<F, G>: Encode,
 {
@@ -687,10 +743,11 @@ where
     // If we reverse this vector, the result we get is the same as if we had reversed
     // the previous step's vector, copied it, and then multiplied with u_k on the left,
     // and u_k^-1 on the right, which is exactly what we need to do.
+    //
+    // Recall also that the prover starts by turning H_i -> H'_i = y^i H_i. We can
+    // accomplish this by multiplying our weights for those values by y^i as well.
     let rounds = usize::from(claim.log_len);
-    let Some(claimed_len) = 1usize.checked_shl(u32::from(claim.log_len)) else {
-        return false;
-    };
+    let claimed_len = 1usize.checked_shl(u32::from(claim.log_len))?;
     let Proof {
         l_r_coms,
         transcript_summary,
@@ -698,25 +755,17 @@ where
         b_final,
     } = proof;
     if l_r_coms.len() != rounds {
-        return false;
-    }
-    if setup.g.len() < claimed_len || setup.h.len() < claimed_len {
-        return false;
+        return None;
     }
     transcript.commit(claim.encode());
 
     let w = F::random(&mut transcript.noise(b"w challenge"));
-    let w_q = setup.product_generator.clone() * &w;
 
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
     // - a_final * g_final - b_final * h_final - a_final * b_final * U = 0.
-    let capacity = 2 * claimed_len + 2 * rounds + 1;
-    let mut points = Vec::<G>::with_capacity(capacity);
-    let mut weights = Vec::<F>::with_capacity(capacity);
     let mut us = Vec::<(F, F)>::with_capacity(rounds);
-
-    for (l, r) in l_r_coms {
+    let mut out = Synthetic::concrete(l_r_coms.into_iter().flat_map(|(l, r)| {
         transcript.commit(l.encode());
         transcript.commit(r.encode());
         let u = F::random(transcript.noise(b"u challenge"));
@@ -732,48 +781,40 @@ where
             out.square();
             out
         };
-        points.push(l);
-        weights.push(u2);
-        points.push(r);
-        weights.push(u_inv2);
-    }
+        [(u2, l), (u_inv2, r)]
+    }));
     if transcript.summarize() != transcript_summary {
-        return false;
+        return None;
     }
-
-    points.extend_from_slice(&setup.g[..claimed_len]);
-    points.extend_from_slice(&setup.h[..claimed_len]);
-    points.push(w_q);
-
-    let g_h_weights_start = weights.len();
-    weights.push(F::one());
-    for (u, u_inv) in us.into_iter().rev() {
-        let end = weights.len();
-        weights.extend_from_within(g_h_weights_start..end);
-        for left_i in &mut weights[g_h_weights_start..end] {
-            *left_i *= &u_inv;
+    out += &Synthetic::concrete([(F::one(), claim.commitment.clone())]);
+    out += &(setup.product_generator().clone() * &(claim.product.clone() * &w));
+    let g_weights = {
+        let mut weights = Vec::<F>::with_capacity(claimed_len);
+        weights.push(F::one());
+        for (u, u_inv) in us.into_iter().rev() {
+            let end = weights.len();
+            weights.extend_from_within(..);
+            for left_i in &mut weights[..end] {
+                *left_i *= &u_inv;
+            }
+            for right_i in &mut weights[end..] {
+                *right_i *= &u;
+            }
         }
-        for right_i in &mut weights[end..] {
-            *right_i *= &u;
-        }
-    }
-    let g_end = weights.len();
-    weights.extend_from_within(g_h_weights_start..g_end);
-    weights[g_end..].reverse();
-
-    let g_weight_tweak = -a_final.clone();
-    for g_w_i in &mut weights[g_h_weights_start..g_end] {
-        *g_w_i *= &g_weight_tweak;
-    }
-
-    let h_weight_tweak = -b_final.clone();
-    for h_w_i in &mut weights[g_end..] {
-        *h_w_i *= &h_weight_tweak;
-    }
-
-    weights.push(claim.product.clone() - &(a_final * &b_final));
-
-    G::msm(&points, &weights, strategy) == -claim.commitment.clone()
+        weights
+    };
+    let h_weights: Vec<F> = g_weights
+        .iter()
+        .rev()
+        .zip(powers(F::one(), &claim.y))
+        .map(|(w_i, y_i)| y_i * w_i)
+        .collect();
+    let g = &setup.g()[..claimed_len];
+    let h = &setup.h()[..claimed_len];
+    out -= &(Synthetic::msm(h, &h_weights, &Sequential) * &b_final);
+    out -= &(Synthetic::msm(g, &g_weights, &Sequential) * &a_final);
+    out -= &(setup.product_generator().clone() * &(a_final * &b_final * &w));
+    Some(out)
 }
 
 #[cfg(all(test, feature = "arbitrary"))]
@@ -835,9 +876,9 @@ pub mod fuzz {
     }
 
     impl<'a> Prover<'a> {
-        fn new(setup: &'a Setup<G>, a: &[F], b: &[F]) -> Self {
+        fn new(setup: &'a Setup<G>, y: F, a: &[F], b: &[F]) -> Self {
             let (witness, claim) =
-                Witness::new_with_claim(setup, a.iter().zip(b).map(|(&a, &b)| (a, b)))
+                Witness::new_with_claim(setup, y, a.iter().zip(b).map(|(&a, &b)| (a, b)))
                     .expect("prover expects arguments to match setup");
             let proof = prove(
                 &mut Transcript::new(NAMESPACE),
@@ -909,9 +950,8 @@ pub mod fuzz {
             // Padding with zeros preserves the commitment and product, but the
             // regenerated proof is now bound to a different claimed length.
             let longer_claim = Claim {
-                commitment: self.claim.commitment,
-                product: self.claim.product,
                 log_len: longer_log_len,
+                ..self.claim
             };
             self.proof = prove(
                 &mut Transcript::new(NAMESPACE),
@@ -955,18 +995,22 @@ pub mod fuzz {
             } else {
                 NAMESPACE
             };
-            verify(
-                &mut Transcript::new(ns),
-                self.setup,
-                &self.claim,
-                self.proof,
-                &Sequential,
-            )
+            let setup = self.setup;
+            let claim = self.claim;
+            let proof = self.proof;
+            setup
+                .eval(
+                    |vs| super::verify(&mut Transcript::new(ns), vs, &claim, proof),
+                    &Sequential,
+                )
+                .map(|g| g == G::zero())
+                .unwrap_or(false)
         }
     }
 
     #[derive(Debug)]
     pub struct Plan {
+        y: F,
         a: Vec<F>,
         b: Vec<F>,
     }
@@ -975,20 +1019,21 @@ pub mod fuzz {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
             let lg_len = u.int_in_range(0..=MAX_VECTOR_LG)?;
             let len = 1usize << lg_len;
+            let y = u.arbitrary()?;
             let a = (0..len)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<Vec<_>>>()?;
             let b = (0..len)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<Vec<_>>>()?;
-            Ok(Self { a, b })
+            Ok(Self { y, a, b })
         }
     }
 
     impl Plan {
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             let setup = test_setup();
-            let mut prover = Prover::new(setup, &self.a, &self.b);
+            let mut prover = Prover::new(setup, self.y, &self.a, &self.b);
             // is the prover going to be malicious at all?
             if u.arbitrary::<bool>()? {
                 match u.arbitrary::<u8>()? {
