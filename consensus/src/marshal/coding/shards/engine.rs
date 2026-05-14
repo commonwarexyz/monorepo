@@ -464,59 +464,62 @@ where
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");
                 return;
-            } => match message {
-                Message::Proposed { block, round } => {
-                    self.broadcast_shards(&mut sender, round, block).await;
+            } => {
+                if message.response_closed() {
+                    continue;
                 }
-                Message::Discovered {
-                    commitment,
-                    leader,
-                    round,
-                } => {
-                    self.handle_external_proposal(&mut sender, commitment, leader, round)
-                        .await;
-                }
-                Message::GetByCommitment {
-                    commitment,
-                    response,
-                } => {
-                    if response.is_closed() {
-                        continue;
+
+                match message {
+                    Message::Proposed { block, round } => {
+                        self.broadcast_shards(&mut sender, round, block).await;
                     }
-                    let block = self.reconstructed_blocks.get(&commitment).cloned();
-                    response.send_lossy(block);
-                }
-                Message::GetByDigest { digest, response } => {
-                    if response.is_closed() {
-                        continue;
+                    Message::Discovered {
+                        commitment,
+                        leader,
+                        round,
+                    } => {
+                        self.handle_external_proposal(&mut sender, commitment, leader, round)
+                            .await;
                     }
-                    let block = self
-                        .reconstructed_blocks
-                        .iter()
-                        .find_map(|(_, b)| (b.digest() == digest).then_some(b))
-                        .cloned();
-                    response.send_lossy(block);
-                }
-                Message::SubscribeAssignedShardVerified {
-                    commitment,
-                    response,
-                } => {
-                    self.handle_assigned_shard_verified_subscription(commitment, response);
-                }
-                Message::SubscribeByCommitment {
-                    commitment,
-                    response,
-                } => {
-                    self.handle_block_subscription(
-                        BlockSubscriptionKey::Commitment(commitment),
+                    Message::GetByCommitment {
+                        commitment,
                         response,
-                    );
-                }
-                Message::SubscribeByDigest { digest, response } => {
-                    self.handle_block_subscription(BlockSubscriptionKey::Digest(digest), response);
-                }
-                Message::Prune { through } => {
-                    self.prune(through);
+                    } => {
+                        let block = self.reconstructed_blocks.get(&commitment).cloned();
+                        response.send_lossy(block);
+                    }
+                    Message::GetByDigest { digest, response } => {
+                        let block = self
+                            .reconstructed_blocks
+                            .iter()
+                            .find_map(|(_, b)| (b.digest() == digest).then_some(b))
+                            .cloned();
+                        response.send_lossy(block);
+                    }
+                    Message::SubscribeAssignedShardVerified {
+                        commitment,
+                        response,
+                    } => {
+                        self.handle_assigned_shard_verified_subscription(commitment, response);
+                    }
+                    Message::SubscribeByCommitment {
+                        commitment,
+                        response,
+                    } => {
+                        self.handle_block_subscription(
+                            BlockSubscriptionKey::Commitment(commitment),
+                            response,
+                        );
+                    }
+                    Message::SubscribeByDigest { digest, response } => {
+                        self.handle_block_subscription(
+                            BlockSubscriptionKey::Digest(digest),
+                            response,
+                        );
+                    }
+                    Message::Prune { through } => {
+                        self.prune(through);
+                    }
                 }
             },
             Some((peer, shard)) = receiver.recv() else {
@@ -907,10 +910,6 @@ where
         commitment: Commitment,
         response: oneshot::Sender<()>,
     ) {
-        if response.is_closed() {
-            return;
-        }
-
         // Answer immediately if our own shard has been verified.
         let has_shard = self
             .state
@@ -943,10 +942,6 @@ where
         key: BlockSubscriptionKey<B::Digest>,
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
-        if response.is_closed() {
-            return;
-        }
-
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => {
                 self.reconstructed_blocks.get(&commitment)

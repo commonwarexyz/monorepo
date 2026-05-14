@@ -97,7 +97,7 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    fn response_closed(&self) -> bool {
+    pub(crate) fn response_closed(&self) -> bool {
         match self {
             Self::GetByCommitment { response, .. } | Self::GetByDigest { response, .. } => {
                 response.is_closed()
