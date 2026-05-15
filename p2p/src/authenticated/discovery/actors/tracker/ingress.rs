@@ -6,7 +6,6 @@ use crate::{
             actors::{peer, tracker::Metadata},
             types,
         },
-        Mailbox as PeerMailbox,
     },
     PeerSetSubscription, TrackedPeers,
 };
@@ -70,7 +69,7 @@ pub enum Message<C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: PeerMailbox<peer::Message<C>>,
+        peer: peer::Mailbox<C>,
     },
 
     /// Notify the tracker that a [types::Payload::BitVec] message has been received from a peer.
@@ -81,7 +80,7 @@ pub enum Message<C: PublicKey> {
         bit_vec: types::BitVec,
 
         /// The mailbox of the peer actor.
-        peer: PeerMailbox<peer::Message<C>>,
+        peer: peer::Mailbox<C>,
     },
 
     /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
@@ -195,10 +194,10 @@ pub(crate) trait SenderExt<C: PublicKey> {
     ) -> impl Future<Output = Option<types::Info<C>>> + Send;
 
     /// Send a `Construct` message to the tracker.
-    fn construct(&self, public_key: C, peer: PeerMailbox<peer::Message<C>>) -> Feedback;
+    fn construct(&self, public_key: C, peer: peer::Mailbox<C>) -> Feedback;
 
     /// Send a `BitVec` message to the tracker.
-    fn bit_vec(&self, bit_vec: types::BitVec, peer: PeerMailbox<peer::Message<C>>) -> Feedback;
+    fn bit_vec(&self, bit_vec: types::BitVec, peer: peer::Mailbox<C>) -> Feedback;
 
     /// Send a `Peers` message to the tracker.
     fn peers(&self, peers: Vec<types::Info<C>>) -> Feedback;
@@ -237,11 +236,11 @@ impl<C: PublicKey> SenderExt<C> for mailbox::Sender<Message<C>> {
         })
     }
 
-    fn construct(&self, public_key: C, peer: PeerMailbox<peer::Message<C>>) -> Feedback {
+    fn construct(&self, public_key: C, peer: peer::Mailbox<C>) -> Feedback {
         enqueue(self, Message::Construct { public_key, peer })
     }
 
-    fn bit_vec(&self, bit_vec: types::BitVec, peer: PeerMailbox<peer::Message<C>>) -> Feedback {
+    fn bit_vec(&self, bit_vec: types::BitVec, peer: peer::Mailbox<C>) -> Feedback {
         enqueue(self, Message::BitVec { bit_vec, peer })
     }
 

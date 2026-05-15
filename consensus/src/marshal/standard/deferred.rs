@@ -1207,17 +1207,10 @@ mod tests {
             // Its gated `app.verify` blocks until we release it, giving us a
             // deterministic window to abort the marshal actor.
             let optimistic_rx = marshaled.verify(child_ctx, child_digest).await;
-            select! {
-                result = optimistic_rx => {
-                    assert!(
-                        result.expect("optimistic verify should resolve"),
-                        "optimistic verify should accept the available block"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("optimistic verify should resolve before certify");
-                },
-            }
+            let result = optimistic_rx
+                .await
+                .expect("optimistic verify should resolve");
+            assert!(result, "optimistic verify should accept the available block");
 
             let certify_rx = marshaled.certify(child_round, child_digest).await;
             verify_started

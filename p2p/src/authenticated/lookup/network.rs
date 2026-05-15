@@ -6,7 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::Mailbox, Channel};
+use crate::Channel;
 use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select;
@@ -15,9 +15,8 @@ use commonware_runtime::{
     Resolver, Spawner,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
-use commonware_utils::{channel::mpsc, union};
+use commonware_utils::union;
 use rand_core::CryptoRngCore;
-use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
@@ -36,7 +35,7 @@ pub struct Network<
     tracker_mailbox: mailbox::Sender<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
-    listener: mpsc::Receiver<HashSet<IpAddr>>,
+    listener: mailbox::Receiver<listener::Message>,
 }
 
 impl<
@@ -55,7 +54,7 @@ impl<
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
+        let (listener_mailbox, listener) = listener::Mailbox::new(cfg.mailbox_size);
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {

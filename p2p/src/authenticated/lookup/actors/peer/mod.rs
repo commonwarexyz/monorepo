@@ -11,7 +11,7 @@ mod actor;
 pub use actor::Actor;
 
 mod ingress;
-pub use ingress::Message;
+pub use ingress::{Mailbox, Message};
 
 pub struct Config<C: PublicKey> {
     pub mailbox_size: NonZeroUsize,

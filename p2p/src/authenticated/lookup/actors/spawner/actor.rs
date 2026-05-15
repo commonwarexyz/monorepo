@@ -14,7 +14,6 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use commonware_utils::channel::mpsc;
 use rand_core::CryptoRngCore;
 use std::num::NonZeroUsize;
 use tracing::debug;
@@ -32,7 +31,7 @@ pub struct Actor<
     send_batch_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
 
-    receiver: mpsc::Receiver<Message<Si, St, C>>,
+    receiver: mailbox::Receiver<Message<Si, St, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,

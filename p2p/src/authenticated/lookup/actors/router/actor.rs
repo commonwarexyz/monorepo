@@ -10,7 +10,7 @@ use crate::{
     },
     Recipients,
 };
-use commonware_actor::mailbox;
+use commonware_actor::{mailbox, Feedback};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -63,7 +63,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool) {
         let channel = encoded.channel;
         if let Some(relay) = self.connections.get_mut(&recipient) {
-            if relay.send(encoded, priority).is_err() {
+            if relay.send(encoded, priority) != Feedback::Ok {
                 self.messages_dropped
                     .get_or_create(&metrics::Message::new_data(&recipient, channel))
                     .inc();
@@ -90,7 +90,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             Recipients::All => {
                 // Send to all connected peers
                 for (recipient, relay) in self.connections.iter_mut() {
-                    if relay.send(encoded.clone(), priority).is_err() {
+                    if relay.send(encoded.clone(), priority) != Feedback::Ok {
                         self.messages_dropped
                             .get_or_create(&metrics::Message::new_data(recipient, channel))
                             .inc();
@@ -144,9 +144,8 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                     }
                     Message::SubscribePeers { mut sender } => {
                         let peers = self.connections.keys().cloned().collect();
-                        if Pin::new(&mut sender).start_send(peers).is_ok() {
-                            self.open_subscriptions.push(sender);
-                        }
+                        let _ = Pin::new(&mut sender).start_send(peers);
+                        self.open_subscriptions.push(sender);
                     }
                 }
             },
@@ -155,10 +154,6 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 
     /// Notifies all open peer subscriptions with the current list of connected peers.
     fn notify_subscribers(&mut self) {
-        if self.open_subscriptions.is_empty() {
-            return;
-        }
-
         let peers: Vec<P> = self.connections.keys().cloned().collect();
         let mut keep = Vec::with_capacity(self.open_subscriptions.len());
 

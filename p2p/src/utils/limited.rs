@@ -8,10 +8,7 @@ use commonware_utils::{channel::ring, sync::Mutex};
 use futures::{FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
-/// Provides peer subscriptions for resolving [`Recipients::All`].
-///
-/// Implementations must return immediately. Updates are consumed opportunistically by
-/// [`LimitedSender::check`].
+/// Provides peer snapshots for resolving [`Recipients::All`].
 pub trait Connected: Clone + Send + Sync + 'static {
     type PublicKey: PublicKey;
 
@@ -250,6 +247,14 @@ mod tests {
         }
     }
 
+    fn assert_sent_to(sender: &MockSender, index: usize, expected: &[PublicKey]) {
+        let messages = sender.sent_messages();
+        let Recipients::Some(sent) = &messages[index].0 else {
+            panic!("expected Recipients::Some");
+        };
+        assert_eq!(sent, expected);
+    }
+
     impl UnlimitedSender for MockSender {
         type Error = MockError;
         type PublicKey = PublicKey;
@@ -371,10 +376,7 @@ mod tests {
                 checked.send(IoBuf::from(b"hello"), false).unwrap(),
                 Feedback::Ok
             );
-            match &sender.sent_messages()[0].0 {
-                Recipients::Some(sent) => assert_eq!(sent.len(), 3),
-                _ => panic!("expected Recipients::Some"),
-            }
+            assert_sent_to(&sender, 0, &[key(1), key(2), key(3)]);
         });
     }
 
@@ -395,25 +397,12 @@ mod tests {
             checked.send(IoBuf::from(b"limit"), false).unwrap();
 
             // Now check with all three peers - peer1 should be filtered out
+            let expected = vec![peer2.clone(), peer3.clone()];
             let checked = limited
-                .check(Recipients::Some(vec![
-                    peer1.clone(),
-                    peer2.clone(),
-                    peer3.clone(),
-                ]))
+                .check(Recipients::Some(vec![peer1, peer2, peer3]))
                 .unwrap();
             checked.send(IoBuf::from(b"filtered"), false).unwrap();
-            let messages = sender.sent_messages();
-            let sent_to = match &messages[1].0 {
-                Recipients::Some(sent) => sent,
-                _ => panic!("expected Recipients::Some"),
-            };
-
-            // peer1 should be filtered out since it's rate limited
-            assert_eq!(sent_to.len(), 2);
-            assert!(!sent_to.contains(&peer1));
-            assert!(sent_to.contains(&peer2));
-            assert!(sent_to.contains(&peer3));
+            assert_sent_to(&sender, 1, &expected);
         });
     }
 
@@ -470,13 +459,7 @@ mod tests {
             assert!(crate::CheckedSender::recipients(&checked).is_empty());
             checked.send(IoBuf::from(b"empty"), false).unwrap();
 
-            // Verify that the sender received the message with empty Recipients::Some
-            let messages = sender.sent_messages();
-            assert_eq!(messages.len(), 1);
-            match &messages[0].0 {
-                Recipients::Some(pks) => assert!(pks.is_empty()),
-                _ => panic!("expected Recipients::Some"),
-            }
+            assert_sent_to(&sender, 0, &[]);
         });
     }
 
@@ -492,7 +475,7 @@ mod tests {
 
             // Rate limit peer1
             limited
-                .check(Recipients::One(peer1.clone()))
+                .check(Recipients::One(peer1))
                 .unwrap()
                 .send(IoBuf::from(b"limit"), false)
                 .unwrap();
@@ -500,15 +483,7 @@ mod tests {
             // Check All should filter out peer1
             let checked = limited.check(Recipients::All).unwrap();
             checked.send(IoBuf::from(b"filtered"), false).unwrap();
-            let messages = sender.sent_messages();
-            let sent_to = match &messages[1].0 {
-                Recipients::Some(sent) => sent,
-                _ => panic!("expected Recipients::Some"),
-            };
-
-            assert_eq!(sent_to.len(), 1);
-            assert!(!sent_to.contains(&peer1));
-            assert!(sent_to.contains(&peer2));
+            assert_sent_to(&sender, 1, &[peer2]);
         });
     }
 

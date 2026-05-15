@@ -1,10 +1,10 @@
-use super::{ingress::Message, Config, Error};
+use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
     data::EncodedData,
-    lookup::{channels::Channels, metrics, types},
-    relay::{recv_prioritized, Prioritized, Relay},
-    Mailbox,
+    lookup::{channels::{self, Channels}, metrics, types},
+    relay::{recv_prioritized, Message as RelayMessage, Prioritized, Relay},
 };
+use commonware_actor::{mailbox, Feedback};
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -13,10 +13,7 @@ use commonware_runtime::{
     Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::{
-    channel::mpsc::{self, error::TrySendError},
-    time::SYSTEM_TIME_PRECISION,
-};
+use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
@@ -27,9 +24,9 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     ping_frequency: Duration,
     send_batch_size: usize,
 
-    control: mpsc::Receiver<Message>,
-    high: mpsc::Receiver<EncodedData>,
-    low: mpsc::Receiver<EncodedData>,
+    control: mailbox::Receiver<Message>,
+    high: mailbox::Receiver<RelayMessage<EncodedData>>,
+    low: mailbox::Receiver<RelayMessage<EncodedData>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -39,18 +36,17 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
+        let (relay, receivers) = Relay::new(cfg.mailbox_size);
         (
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 control: control_receiver,
-                high: high_receiver,
-                low: low_receiver,
+                high: receivers.high,
+                low: receivers.low,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 dropped_messages: cfg.dropped_messages,
@@ -58,7 +54,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 _phantom: std::marker::PhantomData,
             },
             control_sender,
-            Relay::new(low_sender, high_sender),
+            relay,
         )
     }
 
@@ -96,9 +92,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mpsc::Receiver<Message>,
-        high: &mut mpsc::Receiver<EncodedData>,
-        low: &mut mpsc::Receiver<EncodedData>,
+        control: &mut mailbox::Receiver<Message>,
+        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
@@ -109,11 +105,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 }
             }
             if let Ok(msg) = high.try_recv() {
+                let msg = msg.0;
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
             if let Ok(msg) = low.try_recv() {
+                let msg = msg.0;
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
@@ -281,20 +279,16 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
                     match msg {
                         types::Message::Data(data) => {
-                            // Send message to application using non-blocking try_send.
-                            //
-                            // We intentionally drop messages when the application buffer is
-                            // full rather than blocking. Blocking here would also block
-                            // processing of Ping messages, causing the peer connection to
-                            // stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
-                            if let Err(e) = sender.try_send((peer.clone(), data.message)) {
-                                if matches!(e, TrySendError::Full(_)) {
-                                    self.dropped_messages
-                                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                        .inc();
-                                }
-                                debug!(err=?e, channel=data.channel, "failed to send message to client");
+                            let feedback =
+                                sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                            if feedback == Feedback::Backoff {
+                                self.dropped_messages
+                                    .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                                    .inc();
+                            }
+                            if feedback != Feedback::Ok {
+                                debug!(?feedback, channel=data.channel, "failed to send message to client");
                             }
                         }
                         types::Message::Ping => {
@@ -567,7 +561,7 @@ mod tests {
                 send_batch_size: NZUsize!(2),
                 ..default_peer_config(&context)
             };
-            let (peer_actor, mut peer_mailbox, relay) =
+            let (peer_actor, peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
             let mut channels = create_channels(&context);
@@ -575,18 +569,32 @@ mod tests {
             let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
 
             let pool = context.network_buffer_pool().clone();
-            relay
-                .send(
-                    types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
-                    false,
-                )
-                .expect("first send failed");
-            relay
-                .send(
-                    types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
-                    false,
-                )
-                .expect("second send failed");
+            assert!(
+                relay
+                    .send(
+                        types::Message::encode_data(
+                            &pool,
+                            0,
+                            IoBufs::from(IoBuf::from(b"first"))
+                        ),
+                        false,
+                    )
+                    .accepted(),
+                "first send failed"
+            );
+            assert!(
+                relay
+                    .send(
+                        types::Message::encode_data(
+                            &pool,
+                            0,
+                            IoBufs::from(IoBuf::from(b"second"))
+                        ),
+                        false,
+                    )
+                    .accepted(),
+                "second send failed"
+            );
 
             let peer_handle = context.child("task").spawn(move |_context| async move {
                 peer_actor

@@ -270,6 +270,7 @@ mod tests {
         CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
         Sender,
     };
+    use commonware_actor::Feedback;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
@@ -2430,14 +2431,13 @@ mod tests {
             let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
             let _handle = router.start(channels);
 
-            // Register peer 1 with small buffer (will fill up after 10 messages)
-            // Must keep receivers alive to prevent channel from closing
+            // Register peer 1 with a small relay buffer and keep the receivers
+            // alive without draining them.
             let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();
-            let (slow_low, _slow_low_rx) = mpsc::channel(10);
-            let (slow_high, _slow_high_rx) = mpsc::channel(10);
+            let (slow_relay, _slow_receivers) = Relay::new(NZUsize!(10));
             assert!(
                 mailbox
-                    .ready(slow_peer.clone(), Relay::new(slow_low, slow_high))
+                    .ready(slow_peer.clone(), slow_relay)
                     .await
                     .is_some(),
                 "Failed to register slow peer"
@@ -2445,11 +2445,10 @@ mod tests {
 
             // Register peer 2 with large buffer
             let fast_peer = ed25519::PrivateKey::from_seed(1).public_key();
-            let (fast_low, mut fast_receiver) = mpsc::channel(100);
-            let (fast_high, _fast_high_rx) = mpsc::channel(100);
+            let (fast_relay, mut fast_receivers) = Relay::new(NZUsize!(100));
             assert!(
                 mailbox
-                    .ready(fast_peer.clone(), Relay::new(fast_low, fast_high))
+                    .ready(fast_peer.clone(), fast_relay)
                     .await
                     .is_some(),
                 "Failed to register fast peer"
@@ -2464,11 +2463,11 @@ mod tests {
                 let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
                 assert_ne!(
                     sent,
-                    commonware_actor::Feedback::Closed,
+                    Feedback::Closed,
                     "Broadcast {i} should be accepted"
                 );
 
-                assert!(fast_receiver.recv().await.is_some());
+                assert!(fast_receivers.low.recv().await.is_some());
             }
         });
     }

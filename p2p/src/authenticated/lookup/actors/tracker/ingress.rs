@@ -3,7 +3,6 @@ use crate::{
     authenticated::{
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
-        Mailbox as PeerMailbox,
     },
     types::Address,
     AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
@@ -58,7 +57,7 @@ pub enum Message<C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: PeerMailbox<peer::Message>,
+        peer: peer::Mailbox,
     },
 
     // ---------- Used by dialer ----------
@@ -159,7 +158,7 @@ where
 /// Convenience methods for the tracker mailbox sender.
 pub(crate) trait SenderExt<C: PublicKey> {
     /// Send a `Connect` message to the tracker.
-    fn connect(&self, public_key: C, peer: PeerMailbox<peer::Message>) -> Feedback;
+    fn connect(&self, public_key: C, peer: peer::Mailbox) -> Feedback;
 
     /// Request dialable peers from the tracker.
     ///
@@ -184,7 +183,7 @@ pub(crate) trait SenderExt<C: PublicKey> {
 }
 
 impl<C: PublicKey> SenderExt<C> for mailbox::Sender<Message<C>> {
-    fn connect(&self, public_key: C, peer: PeerMailbox<peer::Message>) -> Feedback {
+    fn connect(&self, public_key: C, peer: peer::Mailbox) -> Feedback {
         enqueue(self, Message::Connect { public_key, peer })
     }
 

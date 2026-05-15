@@ -1,8 +1,8 @@
 //! Tracker
 
-use crate::authenticated::Mailbox;
+use crate::authenticated::lookup::actors::listener;
 use commonware_cryptography::Signer;
-use std::{collections::HashSet, net::IpAddr, num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, time::Duration};
 
 pub mod actor;
 mod directory;
@@ -26,6 +26,6 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
     pub allow_dns: bool,
     pub bypass_ip_check: bool,
-    pub listener: Mailbox<HashSet<IpAddr>>,
+    pub listener: listener::Mailbox,
     pub block_duration: Duration,
 }

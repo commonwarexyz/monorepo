@@ -122,7 +122,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
-        supervisor.spawn((send, recv), reservation).await;
+        let _ = supervisor.spawn((send, recv), reservation);
     }
 
     #[allow(clippy::type_complexity)]

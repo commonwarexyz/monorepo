@@ -1,13 +1,28 @@
 use super::{actors::Messenger, Error};
 use crate::{
     utils::limited::{CheckedSender, LimitedSender},
-    Channel, Message, Recipients,
+    Channel, Message as NetworkMessage, Recipients,
 };
-use commonware_actor::Feedback;
+use commonware_actor::{
+    mailbox::{self, Policy},
+    Feedback,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Quota};
-use commonware_utils::channel::mpsc;
-use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt::Debug,
+    num::NonZeroUsize,
+    time::SystemTime,
+};
+
+pub(crate) struct Inbound<P: PublicKey>(pub(crate) NetworkMessage<P>);
+
+impl<P: PublicKey> Policy for Inbound<P> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
+}
 
 /// An interior sender that enforces message size limits and
 /// supports sending arbitrary bytes to a set of recipients over
@@ -91,13 +106,18 @@ where
 }
 
 /// Channel to asynchronously receive messages from a channel.
-#[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
-    receiver: mpsc::Receiver<Message<P>>,
+    receiver: mailbox::Receiver<Inbound<P>>,
+}
+
+impl<P: PublicKey> Debug for Receiver<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Receiver").finish_non_exhaustive()
+    }
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) const fn new(receiver: mpsc::Receiver<Message<P>>) -> Self {
+    pub(super) const fn new(receiver: mailbox::Receiver<Inbound<P>>) -> Self {
         Self { receiver }
     }
 }
@@ -110,8 +130,8 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     ///
     /// This method will block until a message is received or the underlying
     /// network shuts down.
-    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        let (sender, message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
+    async fn recv(&mut self) -> Result<NetworkMessage<Self::PublicKey>, Error> {
+        let Inbound((sender, message)) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
 
         // We don't check that the message is too large here because we already enforce
         // that on the network layer.
@@ -123,7 +143,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,
-    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
+    receivers: BTreeMap<Channel, (Quota, mailbox::Sender<Inbound<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
@@ -142,7 +162,8 @@ impl<P: PublicKey> Channels<P> {
         backlog: usize,
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {
-        let (sender, receiver) = mpsc::channel(backlog);
+        let backlog = NonZeroUsize::new(backlog).expect("message backlog must be non-zero");
+        let (sender, receiver) = mailbox::new(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }
@@ -152,7 +173,7 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u64, (Quota, mpsc::Sender<Message<P>>)> {
+    pub fn collect(self) -> BTreeMap<u64, (Quota, mailbox::Sender<Inbound<P>>)> {
         self.receivers
     }
 }

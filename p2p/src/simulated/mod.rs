@@ -262,11 +262,11 @@ mod tests {
             }
             track_peers(&oracle, agents.keys().cloned()).await;
 
-            // Randomly link agents
+            // Link all outbound-capable agents.
             let only_inbound = PrivateKey::from_seed(0).public_key();
             for agent in agents.keys() {
                 if agent == &only_inbound {
-                    // Test that we can gracefully handle missing links
+                    // Leave this peer inbound-only to exercise missing-link handling.
                     continue;
                 }
                 for other in agents.keys() {
@@ -292,10 +292,9 @@ mod tests {
             context
                 .child("agent_sender")
                 .spawn(|mut context| async move {
-                    // Sort agents for deterministic output
+                    // BTreeMap iteration gives deterministic sender selection.
                     let keys = agents.keys().cloned().collect::<Vec<_>>();
 
-                    // Send messages
                     loop {
                         let index = context.gen_range(0..keys.len());
                         let sender = &keys[index];

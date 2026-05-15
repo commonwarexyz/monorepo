@@ -216,20 +216,25 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{
+        authenticated::{
+            lookup::actors::router::{Actor as RouterActor, Config as RouterConfig},
+            relay::Relay,
+        },
         Address, AddressableManager, CheckedSender as _, Ingress, LimitedSender as _, Provider,
         Receiver, Recipients, Sender,
     };
+    use commonware_actor::Feedback;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock,
-        Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
+        IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
         channel::mpsc,
         hostname,
         ordered::{Map, Set},
-        Hostname, TryCollect, NZU32,
+        Hostname, TryCollect, NZU32, NZUsize,
     };
     use rand_core::{CryptoRngCore, RngCore};
     use std::{
@@ -2136,6 +2141,47 @@ mod tests {
             assert!(received0);
             let (sender, _) = receiver2.recv().await.unwrap();
             assert_eq!(sender, peer1.public_key());
+        });
+    }
+
+    #[test]
+    fn test_broadcast_slow_peer_no_blocking() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|context| async move {
+            let cfg = RouterConfig {
+                mailbox_size: NZUsize!(1),
+            };
+            let (router, mailbox, messenger) =
+                RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
+
+            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
+            let _handle = router.start(channels);
+
+            let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();
+            let (slow_relay, _slow_receivers) = Relay::new(NZUsize!(10));
+            assert!(
+                mailbox.ready(slow_peer, slow_relay).await.is_some(),
+                "Failed to register slow peer"
+            );
+
+            let fast_peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let (fast_relay, mut fast_receivers) = Relay::new(NZUsize!(100));
+            assert!(
+                mailbox.ready(fast_peer, fast_relay).await.is_some(),
+                "Failed to register fast peer"
+            );
+
+            let message = IoBuf::from(vec![0u8; 100]);
+            for i in 0..11 {
+                let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
+                assert_ne!(
+                    sent,
+                    Feedback::Closed,
+                    "Broadcast {i} should be accepted"
+                );
+
+                assert!(fast_receivers.low.recv().await.is_some());
+            }
         });
     }
 }

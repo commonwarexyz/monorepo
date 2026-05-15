@@ -137,7 +137,7 @@ impl<
                 debug!(?peer, ?ingress, "upgraded connection");
 
                 // Start peer to handle messages
-                supervisor.spawn(instance, reservation).await;
+                let _ = supervisor.spawn(instance, reservation);
             }
         });
     }

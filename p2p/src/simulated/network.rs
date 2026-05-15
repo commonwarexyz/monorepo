@@ -11,7 +11,8 @@ use crate::{
         limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
         PeerSetsAtIndex as PeerSetsAtIndexBase,
     },
-    Channel, Message, PeerSetUpdate, Recipients, TrackedPeers, UnlimitedSender as _,
+    Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
+    UnlimitedSender as _,
 };
 use commonware_actor::{
     mailbox::{self, Policy},
@@ -52,19 +53,32 @@ type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, IoBuf);
 
-enum ConnectedMessage<P: PublicKey> {
+struct TaskMessage<P: PublicKey>(Task<P>);
+
+impl<P: PublicKey> Policy for TaskMessage<P> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
+}
+
+enum Message<P: PublicKey> {
     Subscribe {
         exclude: P,
         sender: ring::Sender<Vec<P>>,
     },
 }
 
-impl<P: PublicKey> Policy for ConnectedMessage<P> {
+impl<P: PublicKey> Policy for Message<P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         overflow.push_back(message);
     }
+}
+
+struct ConnectedPeers<P: PublicKey> {
+    sender: mailbox::Sender<Message<P>>,
+    receiver: mailbox::Receiver<Message<P>>,
 }
 
 /// Target for a message in a split receiver.
@@ -100,14 +114,14 @@ impl<P: PublicKey, F> SplitForwarder<P> for F where
 {
 }
 
-/// A function that routes incoming [Message]s to a [SplitTarget].
+/// A function that routes incoming [NetworkMessage]s to a [SplitTarget].
 pub trait SplitRouter<P: PublicKey>:
-    Fn(&Message<P>) -> SplitTarget + Send + Sync + 'static
+    Fn(&NetworkMessage<P>) -> SplitTarget + Send + Sync + 'static
 {
 }
 
 impl<P: PublicKey, F> SplitRouter<P> for F where
-    F: Fn(&Message<P>) -> SplitTarget + Send + Sync + 'static
+    F: Fn(&NetworkMessage<P>) -> SplitTarget + Send + Sync + 'static
 {
 }
 
@@ -155,8 +169,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     ingress: mailbox::Receiver<ingress::Message<P, E>>,
 
     // Mailbox for peer list subscriptions used by rate-limited senders.
-    connected_mailbox: mailbox::Sender<ConnectedMessage<P>>,
-    connected_ingress: mailbox::Receiver<ConnectedMessage<P>>,
+    connected: ConnectedPeers<P>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
@@ -205,8 +218,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         let (sender, receiver) = mpsc::unbounded_channel();
         let (oracle_mailbox, oracle_receiver) =
             mailbox::new::<ingress::Message<P, E>>(NZUsize!(1024));
-        let (connected_mailbox, connected_ingress) =
-            mailbox::new::<ConnectedMessage<P>>(NZUsize!(1));
+        let (connected_sender, connected_receiver) = mailbox::new::<Message<P>>(NZUsize!(1));
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
 
@@ -221,8 +233,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
                 ingress: oracle_receiver,
-                connected_mailbox,
-                connected_ingress,
+                connected: ConnectedPeers {
+                    sender: connected_sender,
+                    receiver: connected_receiver,
+                },
                 sender,
                 receiver,
                 links: HashMap::new(),
@@ -459,8 +473,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     channel,
                     self.max_size,
                     self.sender.clone(),
-                    self.connected_mailbox.clone(),
-                    self.connected_peers_except(&public_key),
+                    self.connected.sender.clone(),
+                    self.connected_peers_for(&public_key),
                     clock,
                     quota,
                 );
@@ -588,13 +602,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    fn handle_connected(&mut self, message: ConnectedMessage<P>) {
+    fn handle_connected(&mut self, message: Message<P>) {
         match message {
-            ConnectedMessage::Subscribe {
+            Message::Subscribe {
                 exclude,
                 mut sender,
             } => {
-                let peers = self.connected_peers_except(&exclude);
+                let peers = self.connected_peers_for(&exclude);
                 if !peers.is_empty() && Pin::new(&mut sender).start_send(peers).is_err() {
                     return;
                 }
@@ -604,7 +618,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     fn drain_connected(&mut self) {
-        while let Ok(message) = self.connected_ingress.try_recv() {
+        while let Ok(message) = self.connected.receiver.try_recv() {
             self.handle_connected(message);
         }
     }
@@ -621,10 +635,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             return;
         }
 
-        let peers = self.all_connected_peers();
+        let peers: Vec<P> = self.peer_ref_counts.keys().cloned().collect();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for (exclude, mut subscriber) in self.peer_subscribers.drain(..) {
-            let peer_list: Vec<P> = if self.peer_ref_counts.contains_key(&exclude) {
+            let peer_list = if peers.contains(&exclude) {
                 peers
                     .iter()
                     .filter(|peer| *peer != &exclude)
@@ -671,25 +685,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         })
     }
 
-    /// Peers used when expanding [`Recipients::All`].
-    ///
-    /// Every peer in a tracked peer set is treated as reachable for broadcast.
-    /// Primary peers still drive primary-only behavior such as dialing; peers listed only as
-    /// secondary still receive [`Recipients::All`] traffic, which matches how tests use this
-    /// network.
-    fn all_connected_peers(&self) -> Vec<P> {
-        self.peer_ref_counts.keys().cloned().collect()
-    }
-
-    /// Peers used when expanding [`Recipients::All`] for a specific sender.
-    fn connected_peers_except(&self, exclude: &P) -> Vec<P> {
-        // Senders for peers outside the tracked set should not broadcast to the tracked set.
-        if !self.peer_ref_counts.contains_key(exclude) {
+    /// Peers used when expanding [`Recipients::All`] for a sender.
+    fn connected_peers_for(&self, sender: &P) -> Vec<P> {
+        if !self.peer_ref_counts.contains_key(sender) {
             return Vec::new();
         }
         self.peer_ref_counts
             .keys()
-            .filter(|peer| *peer != exclude)
+            .filter(|peer| *peer != sender)
             .cloned()
             .collect()
     }
@@ -750,7 +753,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         // Collect recipients
         let recipients = match recipients {
-            Recipients::All => self.all_connected_peers(),
+            Recipients::All => self.connected_peers_for(&origin),
             Recipients::Some(keys) => keys,
             Recipients::One(key) => vec![key],
         };
@@ -845,7 +848,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             Some(message) = self.ingress.recv() else break => {
                 self.handle_ingress(message).await;
             },
-            Some(message) = self.connected_ingress.recv() else break => {
+            Some(message) = self.connected.receiver.recv() else break => {
                 self.handle_connected(message);
             },
             Some(task) = self.receiver.recv() else break => {
@@ -860,7 +863,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 /// This is derived from tracked peer sets and is not a liveness signal.
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     me: P,
-    mailbox: mailbox::Sender<ConnectedMessage<P>>,
+    mailbox: mailbox::Sender<Message<P>>,
     peers: Vec<P>,
     _clock: std::marker::PhantomData<E>,
 }
@@ -877,7 +880,7 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
-    const fn new(me: P, mailbox: mailbox::Sender<ConnectedMessage<P>>, peers: Vec<P>) -> Self {
+    const fn new(me: P, mailbox: mailbox::Sender<Message<P>>, peers: Vec<P>) -> Self {
         Self {
             me,
             mailbox,
@@ -896,7 +899,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
-        let _ = self.mailbox.enqueue(ConnectedMessage::Subscribe {
+        let _ = self.mailbox.enqueue(Message::Subscribe {
             exclude: self.me.clone(),
             sender,
         });
@@ -912,8 +915,8 @@ pub struct UnlimitedSender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: u32,
-    high: mpsc::UnboundedSender<Task<P>>,
-    low: mpsc::UnboundedSender<Task<P>>,
+    high: mailbox::Sender<TaskMessage<P>>,
+    low: mailbox::Sender<TaskMessage<P>>,
 }
 
 impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
@@ -935,13 +938,12 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 
         // Send message
         let channel = if priority { &self.high } else { &self.low };
-        if channel
-            .send((self.channel, self.me.clone(), recipients, message))
-            .is_err()
-        {
-            return Ok(Feedback::Closed);
-        }
-        Ok(Feedback::Ok)
+        Ok(channel.enqueue(TaskMessage((
+            self.channel,
+            self.me.clone(),
+            recipients,
+            message,
+        ))))
     }
 }
 
@@ -975,14 +977,14 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         channel: Channel,
         max_size: u32,
         sender: mpsc::UnboundedSender<Task<P>>,
-        connected_mailbox: mailbox::Sender<ConnectedMessage<P>>,
+        connected: mailbox::Sender<Message<P>>,
         connected_peers: Vec<P>,
         clock: E,
         quota: Quota,
     ) -> (Self, Handle<()>) {
         // Listen for messages
-        let (high, mut high_receiver) = mpsc::unbounded_channel();
-        let (low, mut low_receiver) = mpsc::unbounded_channel();
+        let (high, mut high_receiver) = mailbox::new::<TaskMessage<P>>(NZUsize!(1024));
+        let (low, mut low_receiver) = mailbox::new::<TaskMessage<P>>(NZUsize!(1024));
         let processor = context.child("processor").spawn(move |_| async move {
             loop {
                 // Wait for task
@@ -990,13 +992,13 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
                 select! {
                     high_task = high_receiver.recv() => {
                         task = match high_task {
-                            Some(task) => task,
+                            Some(task) => task.0,
                             None => break,
                         };
                     },
                     low_task = low_receiver.recv() => {
                         task = match low_task {
-                            Some(task) => task,
+                            Some(task) => task.0,
                             None => break,
                         };
                     },
@@ -1016,7 +1018,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             high,
             low,
         };
-        let peer_source = ConnectedPeerProvider::new(me, connected_mailbox, connected_peers);
+        let peer_source = ConnectedPeerProvider::new(me, connected, connected_peers);
         let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
         (Self { limited_sender }, processor)
@@ -1152,7 +1154,7 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
     }
 }
 
-type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
+type MessageReceiver<P> = mpsc::UnboundedReceiver<NetworkMessage<P>>;
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
@@ -1164,7 +1166,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type Error = Error;
     type PublicKey = P;
 
-    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
+    async fn recv(&mut self) -> Result<NetworkMessage<Self::PublicKey>, Error> {
         self.receiver.recv().await.ok_or(Error::NetworkClosed)
     }
 }
@@ -1462,6 +1464,24 @@ mod tests {
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    async fn send_when_ready(
+        context: &deterministic::Context,
+        sender: &mut Sender<ed25519::PublicKey, deterministic::Context>,
+        recipients: Recipients<ed25519::PublicKey>,
+        expected_recipients: usize,
+        message: Vec<u8>,
+        priority: bool,
+    ) -> SystemTime {
+        loop {
+            let checked = sender.check(recipients.clone()).unwrap();
+            if checked.recipients().len() == expected_recipients {
+                checked.send(message, priority).unwrap();
+                return context.current();
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    }
 
     /// [`Network::new_with_peers`] seeds peers; controls can register channels and add a link once;
     /// a duplicate link between the same pair returns [`Error::LinkExists`].
@@ -2126,14 +2146,9 @@ mod tests {
                 .unwrap();
 
             let big_msg = vec![7u8; 10_000];
-            let start = loop {
-                let checked = sender.check(Recipients::All).unwrap();
-                if crate::CheckedSender::recipients(&checked).len() == 2 {
-                    checked.send(big_msg.clone(), false).unwrap();
-                    break context.current();
-                }
-                context.sleep(Duration::from_millis(1)).await;
-            };
+            let start =
+                send_when_ready(&context, &mut sender, Recipients::All, 2, big_msg.clone(), false)
+                    .await;
 
             let (_pk, received_a) = recv_a.recv().await.unwrap();
             assert_eq!(received_a, big_msg.as_slice());

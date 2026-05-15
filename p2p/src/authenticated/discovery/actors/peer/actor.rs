@@ -1,16 +1,15 @@
-use super::{Config, Error, Message};
+use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
     data::EncodedData,
     discovery::{
         actors::tracker,
-        channels::Channels,
+        channels::{self, Channels},
         metrics,
         types::{self, InfoVerifier},
     },
-    relay::{recv_prioritized, Prioritized, Relay},
-    Mailbox,
+    relay::{recv_prioritized, Message as RelayMessage, Prioritized, Relay},
 };
-use commonware_actor::mailbox;
+use commonware_actor::{mailbox, Feedback};
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -19,10 +18,7 @@ use commonware_runtime::{
     Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::{
-    channel::mpsc::{self, error::TrySendError},
-    time::SYSTEM_TIME_PRECISION,
-};
+use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
@@ -38,10 +34,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_bit_vec: u64,
     max_peers: usize,
 
-    mailbox: Mailbox<Message<C>>,
-    control: mpsc::Receiver<Message<C>>,
-    high: mpsc::Receiver<EncodedData>,
-    low: mpsc::Receiver<EncodedData>,
+    mailbox: Mailbox<C>,
+    control: mailbox::Receiver<Message<C>>,
+    high: mailbox::Receiver<RelayMessage<EncodedData>>,
+    low: mailbox::Receiver<RelayMessage<EncodedData>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -52,8 +48,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
+        let (relay, receivers) = Relay::new(cfg.mailbox_size);
         (
             Self {
                 context,
@@ -64,14 +59,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
                 control: control_receiver,
-                high: high_receiver,
-                low: low_receiver,
+                high: receivers.high,
+                low: receivers.low,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 dropped_messages: cfg.dropped_messages,
                 rate_limited: cfg.rate_limited,
             },
-            Relay::new(low_sender, high_sender),
+            relay,
         )
     }
 
@@ -131,10 +126,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mpsc::Receiver<Message<C>>,
+        control: &mut mailbox::Receiver<Message<C>>,
         pool: &commonware_runtime::BufferPool,
-        high: &mut mpsc::Receiver<EncodedData>,
-        low: &mut mpsc::Receiver<EncodedData>,
+        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
@@ -145,11 +140,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 continue;
             }
             if let Ok(msg) = high.try_recv() {
+                let msg = msg.0;
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
             if let Ok(msg) = low.try_recv() {
+                let msg = msg.0;
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
@@ -363,20 +360,16 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
                     match msg {
                         types::Payload::Data(data) => {
-                            // Send message to application using non-blocking try_send.
-                            //
-                            // We intentionally drop messages when the application buffer is
-                            // full rather than blocking. Blocking here would also block
-                            // processing of gossip messages (BitVec, Peers), causing the
-                            // peer connection to stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
-                            if let Err(e) = sender.try_send((peer.clone(), data.message)) {
-                                if matches!(e, TrySendError::Full(_)) {
-                                    self.dropped_messages
-                                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                        .inc();
-                                }
-                                debug!(err=?e, channel=data.channel, "failed to send message to client");
+                            let feedback =
+                                sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                            if feedback == Feedback::Backoff {
+                                self.dropped_messages
+                                    .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                                    .inc();
+                            }
+                            if feedback != Feedback::Ok {
+                                debug!(?feedback, channel=data.channel, "failed to send message to client");
                             }
                         }
                         types::Payload::Greeting(_) => unreachable!(),
