@@ -39,7 +39,8 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     /// that can be used to send messages to the router.
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
-        let (control_sender, control_receiver) = mailbox::new::<Message<P>>(cfg.mailbox_size);
+        let (control_sender, control_receiver) =
+            mailbox::new::<Message<P>>(context.child("mailbox"), cfg.mailbox_size);
         let pool = context.network_buffer_pool().clone();
 
         // Create metrics

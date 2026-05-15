@@ -134,9 +134,15 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<mocks::Sink, mocks::Stream, PublicKey>>::new(NZUsize!(1));
+                Mailbox::<Message<mocks::Sink, mocks::Stream, PublicKey>>::new(
+                    context.child("spawner_mailbox"),
+                    NZUsize!(1),
+                );
             let (tracker_sender, mut tracker_receiver) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(10));
+                mailbox::new::<tracker::Message<PublicKey>>(
+                    context.child("tracker_mailbox"),
+                    NZUsize!(10),
+                );
             let releaser = tracker::ingress::Releaser::new(tracker_sender);
 
             let reservation_1 =

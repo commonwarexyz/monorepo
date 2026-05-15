@@ -283,8 +283,10 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -300,7 +302,8 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(NZUsize!(1));
+            let (supervisor_mailbox, mut supervisor_rx) =
+                Mailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -426,8 +429,10 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -443,7 +448,8 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(NZUsize!(1));
+            let (supervisor_mailbox, mut supervisor_rx) =
+                Mailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });

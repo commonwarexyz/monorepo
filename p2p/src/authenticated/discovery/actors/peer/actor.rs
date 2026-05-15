@@ -45,8 +45,9 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (relay, receivers) = Relay::new(cfg.mailbox_size);
+        let (control_sender, control_receiver) =
+            Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
+        let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
         (
             Self {
                 context,
@@ -421,7 +422,7 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_peer_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    fn default_peer_config(context: &impl Metrics, me: PublicKey) -> Config<PublicKey> {
+    fn default_peer_config(context: impl Metrics, me: PublicKey) -> Config<PublicKey> {
         Config {
             mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
@@ -451,9 +452,12 @@ mod tests {
         }
     }
 
-    fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
-        let (router_sender, _router_receiver) =
-            commonware_actor::mailbox::new::<router::Message<PublicKey>>(NZUsize!(10));
+    fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
+        let (router_sender, _router_receiver) = commonware_actor::mailbox::new::<
+            router::Message<PublicKey>,
+        >(
+            context.child("router_mailbox"), NZUsize!(10)
+        );
         let messenger = router::Messenger::new(
             context.network_buffer_pool().clone(),
             router::Mailbox::new(router_sender),
@@ -514,7 +518,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.child("context"),
-                default_peer_config(&context, remote_pk),
+                default_peer_config(context.child("config"), remote_pk),
             );
 
             // Create greeting info for the peer actor to send
@@ -526,11 +530,13 @@ mod tests {
             );
 
             // Create tracker mailbox
-            let (tracker_mailbox, _tracker_receiver) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
             // Create empty channels
-            let channels = create_channels(&context);
+            let channels = create_channels(context.child("channels"));
 
             // Send a non-greeting message first (BitVec)
             let bit_vec = types::Payload::<PublicKey>::BitVec(types::BitVec {
@@ -613,7 +619,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.child("context"),
-                default_peer_config(&context, remote_pk),
+                default_peer_config(context.child("config"), remote_pk),
             );
 
             // Create greeting info for the peer actor to send
@@ -625,11 +631,13 @@ mod tests {
             );
 
             // Create tracker mailbox
-            let (tracker_mailbox, _tracker_receiver) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
             // Create empty channels
-            let channels = create_channels(&context);
+            let channels = create_channels(context.child("channels"));
 
             // Send first greeting (valid)
             let first_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
@@ -718,7 +726,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.child("context"),
-                default_peer_config(&context, remote_pk),
+                default_peer_config(context.child("config"), remote_pk),
             );
 
             // Create greeting info for the peer actor to send
@@ -730,11 +738,13 @@ mod tests {
             );
 
             // Create tracker mailbox
-            let (tracker_mailbox, _tracker_receiver) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
             // Create empty channels
-            let channels = create_channels(&context);
+            let channels = create_channels(context.child("channels"));
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
@@ -826,7 +836,7 @@ mod tests {
             );
             let cfg = Config {
                 received_messages: received_messages.clone(),
-                ..default_peer_config(&context, remote_pk)
+                ..default_peer_config(context.child("config"), remote_pk)
             };
             let (peer_actor, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
@@ -839,12 +849,14 @@ mod tests {
                 context.current().epoch().as_millis() as u64,
             );
 
-            let (tracker_mailbox, _tracker_receiver) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
             // Only channel 0 is registered -- any other channel value is
             // attacker-controlled and must not produce a metric label.
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.child("channels"));
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
