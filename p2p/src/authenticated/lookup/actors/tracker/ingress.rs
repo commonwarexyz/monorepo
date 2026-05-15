@@ -20,7 +20,7 @@ use commonware_utils::{
     channel::{mpsc, oneshot},
     ordered::Map,
 };
-use std::{collections::VecDeque, future::Future, net::IpAddr};
+use std::{collections::VecDeque, net::IpAddr};
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -143,9 +143,8 @@ impl<C: PublicKey> Mailbox<C> {
     /// Request dialable peers from the tracker.
     ///
     /// Returns an empty response if the tracker is shut down.
-    pub(crate) fn dialable(&self) -> impl Future<Output = Dialable<C>> + Send {
-        let sender = self.0.clone();
-        async move { request_or_default(&sender, |responder| Message::Dialable { responder }).await }
+    pub(crate) async fn dialable(&self) -> Dialable<C> {
+        request_or_default(&self.0, |responder| Message::Dialable { responder }).await
     }
 
     /// Send a `Dial` message to the tracker.
@@ -163,24 +162,17 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
-    pub(crate) fn acceptable(
-        &self,
-        public_key: C,
-        source_ip: IpAddr,
-    ) -> impl Future<Output = bool> + Send {
-        let sender = self.0.clone();
-        async move {
-            request_or(
-                &sender,
-                move |responder| Message::Acceptable {
-                    public_key,
-                    source_ip,
-                    responder,
-                },
-                false,
-            )
-            .await
-        }
+    pub(crate) async fn acceptable(&self, public_key: C, source_ip: IpAddr) -> bool {
+        request_or(
+            &self.0,
+            move |responder| Message::Acceptable {
+                public_key,
+                source_ip,
+                responder,
+            },
+            false,
+        )
+        .await
     }
 
     /// Send a `Listen` message to the tracker.

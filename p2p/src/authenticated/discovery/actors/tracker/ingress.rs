@@ -19,7 +19,7 @@ use commonware_actor::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::channel::{mpsc, oneshot};
-use std::{collections::VecDeque, future::Future};
+use std::collections::VecDeque;
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -165,20 +165,17 @@ impl<C: PublicKey> Mailbox<C> {
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
-    pub(crate) fn connect(
+    pub(crate) async fn connect(
         &self,
         public_key: C,
         dialer: bool,
-    ) -> impl Future<Output = Option<types::Info<C>>> + Send {
-        let sender = self.0.clone();
-        async move {
-            request(&sender, move |responder| Message::Connect {
-                public_key,
-                dialer,
-                responder,
-            })
-            .await
-        }
+    ) -> Option<types::Info<C>> {
+        request(&self.0, move |responder| Message::Connect {
+            public_key,
+            dialer,
+            responder,
+        })
+        .await
     }
 
     /// Send a `Construct` message to the tracker.
@@ -199,9 +196,8 @@ impl<C: PublicKey> Mailbox<C> {
     /// Request dialable peers from the tracker.
     ///
     /// Returns an empty response if the tracker is shut down.
-    pub(crate) fn dialable(&self) -> impl Future<Output = Dialable<C>> + Send {
-        let sender = self.0.clone();
-        async move { request_or_default(&sender, |responder| Message::Dialable { responder }).await }
+    pub(crate) async fn dialable(&self) -> Dialable<C> {
+        request_or_default(&self.0, |responder| Message::Dialable { responder }).await
     }
 
     /// Send a `Dial` message to the tracker.
@@ -219,19 +215,16 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
-    pub(crate) fn acceptable(&self, public_key: C) -> impl Future<Output = bool> + Send {
-        let sender = self.0.clone();
-        async move {
-            request_or(
-                &sender,
-                move |responder| Message::Acceptable {
-                    public_key,
-                    responder,
-                },
-                false,
-            )
-            .await
-        }
+    pub(crate) async fn acceptable(&self, public_key: C) -> bool {
+        request_or(
+            &self.0,
+            move |responder| Message::Acceptable {
+                public_key,
+                responder,
+            },
+            false,
+        )
+        .await
     }
 
     /// Send a `Listen` message to the tracker.
