@@ -964,26 +964,26 @@ impl TlsSizeClassCache {
     /// batch effectively, half the entries are drained to amortize global queue
     /// traffic across future returns.
     #[inline(always)]
-    fn push(&mut self, class: SizeClassLease, slot: u32, buffer: PooledBuffer) {
+    fn push(&mut self, lease: SizeClassLease, slot: u32, buffer: PooledBuffer) {
         let entry = TlsSizeClassCacheEntry { buffer, slot };
 
         if self.len < self.capacity {
             // Keep the returned entry local while there is room.
-            self.push_local(entry, class);
+            self.push_local(entry, lease);
             return;
         }
 
         // Handle overflow when the local stack is full.
-        self.push_full(class, entry);
+        self.push_full(entry, lease);
     }
 
     /// Pushes one entry onto this thread's local stack.
     ///
-    /// The caller must ensure the stack has room. `class` becomes the banked
+    /// The caller must ensure the stack has room. `lease` becomes the banked
     /// size-class reference represented by `entry`.
     #[inline(always)]
-    fn push_local(&mut self, entry: TlsSizeClassCacheEntry, class: SizeClassLease) {
-        class.into_banked();
+    fn push_local(&mut self, entry: TlsSizeClassCacheEntry, lease: SizeClassLease) {
+        lease.into_banked();
 
         // SAFETY: the caller ensured `self.len < self.capacity`, so this slot
         // is in bounds and currently uninitialized.
@@ -1005,11 +1005,11 @@ impl TlsSizeClassCache {
     /// to keep the spill and batching code out of pooled buffer drop when the
     /// local cache has room.
     #[inline(never)]
-    fn push_full(&mut self, class: SizeClassLease, entry: TlsSizeClassCacheEntry) {
+    fn push_full(&mut self, entry: TlsSizeClassCacheEntry, lease: SizeClassLease) {
         // Very small caches cannot spill enough entries to amortize a batch
         // insert, so overflow goes straight to the global freelist.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
-            class.return_global(entry.slot, entry.buffer);
+            lease.return_global(entry.slot, entry.buffer);
             return;
         }
 
@@ -1020,7 +1020,7 @@ impl TlsSizeClassCache {
         // Stop tracking slots before moving them out.
         self.len = start;
 
-        class
+        lease
             .class()
             .global
             .put_batch((start..end).rev().map(|index| {
@@ -1029,14 +1029,14 @@ impl TlsSizeClassCache {
                 // slot uninitialized.
                 let entry = unsafe { self.entries.as_mut_ptr().add(index).read().assume_init() };
                 // SAFETY: this drained entry carried one banked reference. The
-                // incoming `class` lease keeps the size class live while
+                // incoming class lease keeps the size class live while
                 // `put_batch` parks the spilled entries.
                 unsafe { self.class.release() };
                 (entry.slot, entry.buffer)
             }));
 
         // Keep the incoming entry local after making room.
-        self.push_local(entry, class);
+        self.push_local(entry, lease);
     }
 }
 
@@ -1206,14 +1206,10 @@ impl BufferPoolThreadCache {
     /// has not initialized this size class, the buffer goes to the global
     /// freelist rather than creating local state from a drop path.
     #[inline(always)]
-    pub(super) fn push(class: SizeClassLease, slot: u32, buffer: PooledBuffer) {
-        let (class_id, thread_cache_capacity) = {
-            let class_ref = class.class();
-            (class_ref.class_id, class_ref.thread_cache_capacity)
-        };
-
-        if thread_cache_capacity == 0 {
-            class.return_global(slot, buffer);
+    pub(super) fn push(lease: SizeClassLease, slot: u32, buffer: PooledBuffer) {
+        let class = lease.class();
+        if class.thread_cache_capacity == 0 {
+            lease.return_global(slot, buffer);
             return;
         }
 
@@ -1225,13 +1221,13 @@ impl BufferPoolThreadCache {
             // SAFETY: the fast pointer is set only from this thread's
             // `TLS_SIZE_CLASS_CACHES` value and cleared before that value
             // drops.
-            if let Some(cache) = unsafe { (&mut *caches).get(class_id) } {
-                cache.push(class, slot, buffer);
+            if let Some(cache) = unsafe { (&mut *caches).get(class.class_id) } {
+                cache.push(lease, slot, buffer);
                 return;
             }
         }
 
-        class.return_global(slot, buffer);
+        lease.return_global(slot, buffer);
     }
 
     /// Takes a buffer from the current thread's local cache for the given
