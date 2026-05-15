@@ -13,7 +13,7 @@
 //!
 //! # Pool Lifecycle
 //!
-//! Checked-out tracked buffers and buffers cached in thread-local bins keep a
+//! Tracked buffers held by pooled views or cached in thread-local bins keep a
 //! strong reference to the originating size class. Buffers can outlive the
 //! public [`BufferPool`] handle and still return to their original size class.
 //! - Untracked fallback allocations store no class reference and deallocate
@@ -21,9 +21,9 @@
 //! - Requests smaller than [`BufferPoolConfig::pool_min_size`] bypass pooling
 //!   entirely and return untracked aligned allocations from both
 //!   [`BufferPool::try_alloc`] and [`BufferPool::alloc`].
-//! - Dropping [`BufferPool`] drains only the shared global freelists,
-//!   checked-out buffers and buffers cached in a live thread's local cache can
-//!   keep their size class alive until they are dropped or the thread exits.
+//! - Dropping [`BufferPool`] drains only the shared global freelists; pooled
+//!   views and buffers cached in a live thread's local cache can keep their
+//!   size class alive until they are dropped or the thread exits.
 //!
 //! # Size Classes
 //!
@@ -484,34 +484,41 @@ impl PoolMetrics {
 /// `SizeClass` alive until it returns.
 ///
 /// The pool has three buffer states, and those states determine where the
-/// strong size-class references live:
+/// strong size-class references live.
+///
+/// A "banked" strong reference is an owned `Arc<SizeClass>` reference counted by
+/// TLS cache state instead of represented by a [`SizeClassLease`] value in each
+/// [`TlsSizeClassCacheEntry`]. For a cache with `len` local entries, the cache
+/// owns exactly `len` banked references. Increasing `len` banks one reference;
+/// decreasing `len` transfers one reference back into a `SizeClassLease` or
+/// releases it to the global freelist.
 ///
 /// - Global freelist: the buffer is parked in [`SizeClass::global`] and carries
 ///   no per-buffer strong reference. While the public pool exists, the
 ///   [`SizeClassHandle`] in [`BufferPoolInner::classes`] keeps the class alive.
-/// - Checked out: the buffer is owned by a pooled I/O buffer and carries one
-///   [`SizeClassLease`], which is one strong reference to the class.
+/// - Pooled view: the buffer is owned by mutable or immutable I/O view state and
+///   carries one [`SizeClassLease`], which is one strong reference to the class.
 /// - Thread-local cache: the cache stores this token once and owns one banked
 ///   strong reference for each initialized [`TlsSizeClassCacheEntry`].
 ///
-/// Moving a buffer from the global freelist to checked-out or TLS state retains
+/// Moving a buffer from the global freelist to pooled view or TLS state retains
 /// one class reference. Moving it back to the global freelist releases that
-/// reference. Moving between checked-out and TLS state transfers the same
+/// reference. Moving between pooled view and TLS state transfers the same
 /// reference without touching the refcount.
 ///
 /// Dropping the public [`BufferPool`] drains globally parked buffers, then drops
-/// its `SizeClassHandle`s. Checked-out buffers and non-empty TLS caches may
+/// its `SizeClassHandle`s. Pooled views and non-empty TLS caches may
 /// keep the `SizeClass` alive after that point. Empty TLS caches may still
 /// remember a token value, but with no banked references that token is only an
 /// inert identity value and must not be dereferenced.
 ///
-/// This is the one raw pointer shape used by all pool-owned, checked-out, and
+/// This is the one raw pointer shape used by all pool-owned, pooled view, and
 /// thread-local references to a [`SizeClass`]. The pointer is always derived
 /// from [`Arc::into_raw`], so it satisfies the documented contract for
 /// [`Arc::increment_strong_count`] and [`Arc::decrement_strong_count`].
 ///
 /// `SizeClassToken` itself owns nothing. It is only an identity token and raw
-/// `Arc` handle:
+/// pointer accepted by the `Arc` refcount APIs:
 /// - [`SizeClassHandle`] pairs a token with ownership of one strong reference.
 /// - [`SizeClassLease`] pairs a token with ownership of one strong reference.
 /// - [`TlsSizeClassCache`] stores a token plus `len` banked strong references.
@@ -580,34 +587,35 @@ impl SizeClassToken {
     }
 }
 
-/// Owned size-class reference for a checked-out pooled buffer.
+/// Owned size-class reference for a pooled buffer outside the global freelist.
 ///
-/// A checked-out pooled buffer must keep its originating [`SizeClass`] alive so
-/// it can be returned after the [`BufferPool`] handle is dropped. This is one
-/// strong `Arc<SizeClass>` reference represented by a [`SizeClassToken`], with
-/// retain and release performed explicitly at the boundaries where a buffer
-/// enters or leaves global pool state.
+/// A pooled buffer outside the global freelist must keep its originating
+/// [`SizeClass`] alive so it can be returned after the [`BufferPool`] handle is
+/// dropped. This is one strong `Arc<SizeClass>` reference represented by a
+/// [`SizeClassToken`], with retain and release performed explicitly at the
+/// boundaries where a buffer enters or leaves global pool state.
 ///
 /// Lifetime-wise this is the same kind of reference as [`SizeClassHandle`]: both
 /// own exactly one strong reference for a token. The types are separate because
 /// they live in different state machines. `SizeClassHandle` is ordinary RAII
-/// ownership for the pool's class vector. `SizeClassLease` is hot-path
-/// checked-out ownership that must be explicitly transferred into TLS banking or
+/// ownership for the pool's class vector. `SizeClassLease` is hot-path pooled
+/// view ownership that must be explicitly transferred into TLS cache state or
 /// returned to the global freelist.
 ///
 /// The raw representation matters because the hot path mostly transfers
-/// ownership between a checked-out buffer and this thread's local cache. A real
+/// ownership between pooled view state and this thread's local cache. A real
 /// `Arc<SizeClass>` field is pointer-sized too, but it is a non-`Copy` value
 /// with drop glue. Even when the strong count would not change, moving it
 /// through pooled buffer and cache-entry structs makes the compiler preserve
 /// destructor paths for those structs. `SizeClassLease` has no automatic drop:
-/// moving between checked-out and local-cache state is a plain pointer
+/// moving between pooled view and local-cache state is a plain pointer
 /// transfer, and only explicit calls such as [`Self::return_global`] adjust the
 /// strong count.
 ///
-/// A lease must be consumed by one of those explicit transitions. Dropping the
-/// value without calling anything would leak the strong reference, which is why
-/// this type intentionally has no `Drop` implementation.
+/// A lease must be consumed by one of those explicit transitions, such as
+/// [`Self::into_banked`] or [`Self::return_global`]. Dropping the value without
+/// calling anything would leak the strong reference, which is why this type
+/// intentionally has no `Drop` implementation.
 ///
 /// Thread-local cache entries do not store a lease per entry. The cache stores
 /// the class token once and owns one banked strong reference for each initialized
@@ -628,7 +636,11 @@ unsafe impl Send for SizeClassLease {}
 unsafe impl Sync for SizeClassLease {}
 
 impl SizeClassLease {
-    /// Builds a lease from a banked class reference.
+    /// Converts one banked class reference into a lease.
+    ///
+    /// This does not retain the class. It only changes how an already-owned
+    /// strong reference is represented: from TLS cache state into a
+    /// `SizeClassLease` value.
     ///
     /// # Safety
     ///
@@ -640,7 +652,11 @@ impl SizeClassLease {
         Self { token: class.token }
     }
 
-    /// Builds a lease from a banked class reference and raw class token.
+    /// Converts one retained class reference into a lease using a raw token.
+    ///
+    /// This does not retain the class. It is used when the caller has a live
+    /// token plus ownership of a strong reference represented outside a
+    /// `SizeClassLease` value, usually in TLS cache state.
     ///
     /// # Safety
     ///
@@ -654,7 +670,7 @@ impl SizeClassLease {
 
     /// Retains `class` for a buffer leaving the global freelist.
     ///
-    /// Moving between checked-out state and TLS transfers the lease without
+    /// Moving between pooled view state and TLS transfers the lease without
     /// touching the strong count.
     #[inline(always)]
     fn retain(class: &SizeClassHandle) -> Self {
@@ -666,11 +682,14 @@ impl SizeClassLease {
         unsafe { Self::from_banked_token(token) }
     }
 
-    /// Transfers this checked-out lease into a TLS cache entry.
+    /// Transfers this lease into a TLS cache entry.
     ///
-    /// The cache must later materialize or release exactly one lease for the
-    /// entry. This is a no-op at runtime; it exists to mark the ownership
-    /// transition.
+    /// This does not release the class. It consumes the lease and relies on the
+    /// caller to record one additional banked reference in TLS cache state,
+    /// normally by storing an entry and increasing the cache length. The cache
+    /// must later materialize or release exactly one lease for that entry.
+    ///
+    /// This is a no-op at runtime; it exists to mark the ownership transition.
     #[inline(always)]
     const fn into_banked(self) {}
 
@@ -707,10 +726,11 @@ impl SizeClassLease {
     /// their references.
     ///
     /// `count` must match the number of returned entries. All entries must
-    /// belong to this lease's size class. This method consumes one logical
-    /// lease value but releases `count` strong references because it is used for
-    /// TLS cache state, where entries own banked references without storing one
-    /// [`SizeClassLease`] value per entry.
+    /// belong to this lease's size class. This method consumes one
+    /// `SizeClassLease` value as the live class handle for the batch, but it
+    /// releases `count` strong references because it is used for TLS cache
+    /// state, where entries own banked references without storing one lease
+    /// value per entry.
     ///
     /// As with [`Self::return_global`], buffers are inserted into the global
     /// freelist before any class references are released.
@@ -738,19 +758,19 @@ impl SizeClassLease {
 ///
 /// The global freelist owns the allocation layout, slot reservation counter,
 /// and parking cells for this class. A tracked buffer can be globally parked,
-/// checked out, or parked in one thread's local cache, but the slot always
-/// belongs to this `SizeClass`.
+/// owned by a pooled backing, or parked in one thread's local cache, but the
+/// slot always belongs to this `SizeClass`.
 ///
-/// Liveness is tied to where the buffer is parked. Global freelist entries rely
-/// on the pool's [`SizeClassHandle`] while the pool is alive and are drained
-/// when the pool is dropped. Checked-out buffers carry a [`SizeClassLease`].
+/// Liveness follows the buffer ownership state. Global freelist entries rely on
+/// the pool's [`SizeClassHandle`] while the pool is alive and are drained when
+/// the pool is dropped. Pooled backing values carry a [`SizeClassLease`].
 /// Thread-local cache entries use banked strong references owned by the cache.
 /// Those non-global states are what allow a buffer to outlive the public
 /// [`BufferPool`] handle and still return to the correct freelist.
 ///
 /// The freelist is the only place that deallocates tracked buffers. Returning a
 /// buffer to the freelist transfers buffer ownership back to `SizeClass` and
-/// releases the checked-out or banked strong reference that kept the class
+/// releases the pooled-backing or banked strong reference that kept the class
 /// alive while the buffer was outside the global freelist.
 ///
 /// Allocation prefers the local cache, then refills from the global freelist,
@@ -791,13 +811,13 @@ impl SizeClass {
 ///
 /// `SizeClassHandle` is the long-lived owner for a class while the
 /// [`BufferPoolInner`] exists. Dropping the handle releases that pool-owned
-/// strong reference. A class may still outlive the handle if checked-out buffers
-/// or thread-local cache entries own additional references through
+/// strong reference. A class may still outlive the handle if pooled backing
+/// values or thread-local cache entries own additional references through
 /// [`SizeClassLease`] or banked TLS refs.
 ///
 /// Functionally this is an `Arc<SizeClass>` stored in raw-token form. It exists
 /// to keep the pool-owned reference alive and to provide a live token for
-/// allocation paths that need to retain checked-out or TLS-banked references.
+/// allocation paths that need to retain pooled-backing or TLS-banked references.
 /// The raw form keeps the already-loaded class pointer usable for explicit
 /// refcount operations without calling [`Arc::as_ptr`] or storing a second token
 /// alongside an `Arc`.
@@ -885,9 +905,9 @@ impl std::ops::Deref for SizeClassHandle {
 
 /// Free tracked buffer owned by a thread-local size-class cache.
 ///
-/// This is allocator cache state, not a checked-out buffer. While an entry is
-/// held here, the buffer is owned by the current thread and is not visible to
-/// the class-global freelist.
+/// This is allocator cache state, not a caller-visible pooled view. While an
+/// entry is held here, the buffer is owned by the current thread and is not
+/// visible to the class-global freelist.
 ///
 /// The `slot` identifies the buffer within its [`SizeClass`]. The enclosing
 /// cache owns one banked size-class reference for this entry. The entry itself
@@ -910,13 +930,12 @@ struct TlsSizeClassCacheEntry {
 /// while `len == 0`, because an empty cache does not keep its pool alive. When
 /// `len > 0`, each initialized entry in `entries[..len]` owns one banked
 /// size-class reference, which keeps the pointed-to class alive. The entry
-/// itself stays small (`buffer, slot`); popping it materializes a checked-out
+/// itself stays small (`buffer, slot`); popping it materializes a
 /// [`SizeClassLease`] from one banked reference.
 ///
-/// "Banked" means the strong reference is represented by cache state rather
-/// than by a Rust value stored in the entry. The invariant is simply
-/// `len == number of banked class references`. Changing `len` is therefore an
-/// ownership transition as well as a stack operation.
+/// As described in [`SizeClassToken`], a banked reference is represented by
+/// cache state rather than by a Rust value stored in the entry. Changing `len`
+/// is therefore an ownership transition as well as a stack operation.
 ///
 /// The stale-token case is intentionally narrow: an empty cache may keep the
 /// token value for indexing/debug assertions, but it must not dereference that
@@ -1051,7 +1070,7 @@ impl TlsSizeClassCache {
 
         if self.len < self.capacity {
             debug_assert_eq!(self.class, class.token);
-            // The checked-out lease becomes one banked reference represented
+            // The returned lease becomes one banked reference represented
             // by the new local stack entry.
             class.into_banked();
             self.push_local(entry);
@@ -1147,7 +1166,7 @@ impl Drop for TlsSizeClassCache {
 /// lifetime of the thread because class ids are monotonic and never reused.
 /// Empty initialized caches can also remain after their pool has been dropped;
 /// their class token is inert while the cache is empty. It becomes usable again
-/// only if another checked-out buffer or allocation for that same live class
+/// only if another pooled buffer or allocation for that same live class
 /// reaches the cache and provides a live reference.
 ///
 /// We intentionally use `Vec<Option<...>>` because class ids are dense enough
@@ -1397,10 +1416,10 @@ pub(crate) struct BufferPoolInner {
 impl Drop for BufferPoolInner {
     fn drop(&mut self) {
         // The public pool is going away. Drain globally parked buffers while
-        // the pool-owned class handles are still live. Checked-out buffers and
-        // live TLS cache entries own their own size-class references; if they
-        // return later, they will park their buffer and release the reference
-        // that kept the class alive.
+        // the pool-owned class handles are still live. Pooled views and live
+        // TLS cache entries own their own size-class references; if they return
+        // later, they will park their buffer and release the reference that kept
+        // the class alive.
         for class in &self.classes {
             class.global.drain();
         }
@@ -1465,9 +1484,9 @@ impl BufferPoolInner {
 
 /// A pool of reusable, aligned buffers.
 ///
-/// Buffers are organized into power-of-two size classes. When a buffer is requested,
-/// the smallest size class that fits is used. Buffers are automatically returned to
-/// the pool when dropped.
+/// Buffers are organized into power-of-two size classes. When a buffer is
+/// requested, the smallest size class that fits is used. Pooled buffers are
+/// automatically returned when their final owning view is dropped.
 ///
 /// # Alignment
 ///
@@ -1814,7 +1833,7 @@ mod tests {
         }
     }
 
-    /// Helper to get the number of checked-out tracked buffers for a size class.
+    /// Helper to get the number of caller-owned tracked buffers for a size class.
     ///
     /// With TLS enabled, tracked buffers can be free in either the shared
     /// freelist or the current thread's local cache.
@@ -2436,7 +2455,7 @@ mod tests {
 
         assert!(class.thread_cache_capacity >= MIN_TLS_BATCH_CAPACITY);
 
-        // Drop enough distinct checked-out buffers to force an overflow from a
+        // Drop enough distinct pooled buffers to force an overflow from a
         // full local cache. Large bins should spill half the entries to global
         // and keep the remainder local for fast same-thread reuse.
         let mut bufs = Vec::new();
@@ -2492,14 +2511,14 @@ mod tests {
         let lease = SizeClassLease::retain(&class);
         assert_eq!(class.strong_count(), 2);
 
-        // Moving a checked-out lease into the local cache banks the same strong
+        // Moving a pooled-buffer lease into the local cache banks the same strong
         // reference; it should not clone the class.
         cache.push(lease, slot, buffer);
         assert_eq!(class.strong_count(), 2);
 
         let entry = cache.pop(&class).expect("local cache pop");
         // SAFETY: `cache.pop` transferred one banked size-class reference to
-        // this checked-out entry.
+        // this returned entry.
         let lease = unsafe { SizeClassLease::from_banked(&class) };
         assert_eq!(class.strong_count(), 2);
         lease.return_global(entry.slot, entry.buffer);
@@ -2512,7 +2531,7 @@ mod tests {
 
         let entry = cache.pop(&class).expect("global refill");
         // SAFETY: `cache.pop` transferred one banked size-class reference to
-        // this checked-out entry.
+        // this returned entry.
         let lease = unsafe { SizeClassLease::from_banked(&class) };
         assert_eq!(class.strong_count(), 3);
 

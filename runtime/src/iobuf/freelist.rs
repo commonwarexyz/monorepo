@@ -2,8 +2,8 @@
 //!
 //! A [`Freelist`] owns the allocation layout for one [`super::pool::BufferPool`]
 //! size class and is responsible for deallocating every tracked buffer created
-//! with that layout. Buffers that are not checked out and not held in a
-//! thread-local cache are parked in the freelist, making them available for
+//! with that layout. Buffers that are not owned by pooled views and not held in
+//! a thread-local cache are parked in the freelist, making them available for
 //! reuse by any thread in the pool. Each tracked buffer has a stable slot id
 //! within its size class.
 //!
@@ -13,10 +13,10 @@
 //! [`Drop`] only release buffers currently parked here. **An outstanding buffer
 //! that is never returned will leak**.
 //!
-//! The buffer pool keeps this requirement by pairing every checked-out buffer
-//! with a size-class lease, and by banking one lease for every buffer held in a
-//! thread-local cache. Those leases keep the owning size class, and therefore
-//! this freelist, alive until the buffer returns here.
+//! The buffer pool keeps this requirement by pairing every pooled backing
+//! outside the freelist with a size-class lease, and by banking one lease for
+//! every buffer held in a thread-local cache. Those leases keep the owning size
+//! class, and therefore this freelist, alive until the buffer returns here.
 //!
 //! This is intentionally narrower than a general multi-producer, multi-consumer
 //! queue:
@@ -110,9 +110,9 @@
 //!
 //! The shared bitmap operations are lock-free, but the structure is not a
 //! standalone general-purpose container. It relies on the buffer pool's
-//! ownership discipline: a slot is either checked out, parked in a thread-local
-//! cache, or available in this freelist. Only the thread that owns a slot
-//! outside the freelist may access that slot's parking cell.
+//! ownership discipline: a slot is either owned by a pooled backing, parked in a
+//! thread-local cache, or available in this freelist. Only the thread that owns
+//! a slot outside the freelist may access that slot's parking cell.
 use super::buffer::PooledBuffer;
 use crossbeam_utils::CachePadded;
 use std::{
@@ -147,12 +147,12 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 /// Bounded lock-free freelist of tracked buffers for one size class.
 ///
 /// The freelist owns the [`Layout`] shared by every tracked buffer in the size
-/// class. Checked-out buffers and thread-local caches may temporarily hold
+/// class. Pooled backing values and thread-local caches may temporarily hold
 /// [`PooledBuffer`] handles, but those handles must eventually return here so
 /// they can be released with the correct layout. The buffer pool keeps the
-/// freelist alive for those outstanding handles with checked-out or banked
-/// size-class leases. Draining or dropping the freelist only deallocates
-/// buffers currently parked in it.
+/// freelist alive for those outstanding handles with pooled-backing or banked
+/// size-class leases. Draining or dropping the freelist only deallocates buffers
+/// currently parked in it.
 ///
 /// The bitmap is intentionally striped over a power-of-two number of words.
 /// That makes the slot-to-word mapping cheap and keeps small freelists from
@@ -164,7 +164,7 @@ pub struct Freelist {
     ///
     /// This is a monotonic high-water mark for slot assignment. Draining
     /// globally-free buffers does not decrement it because higher slot ids may
-    /// still be checked out or parked in thread-local caches.
+    /// still be owned by a pooled backing or parked in thread-local caches.
     created: AtomicUsize,
     /// Cache-line-padded striped bitmap of free slots.
     ///
@@ -581,9 +581,9 @@ impl Freelist {
     /// Drops every currently available buffer from the global freelist.
     ///
     /// This is a teardown operation. Drained slot ids are not made available for
-    /// new creations. Buffers currently checked out or parked in thread-local
-    /// caches are not visible to this method and remain the responsibility of
-    /// their current owner until they are returned.
+    /// new creations. Buffers currently owned by a pooled backing or parked in
+    /// thread-local caches are not visible to this method and remain the
+    /// responsibility of their current owner until they are returned.
     ///
     /// Returns the number of drained slots.
     #[inline]
@@ -905,7 +905,7 @@ pub(super) mod tests {
         assert!(seen.into_iter().all(|seen| seen));
         assert!(set.take().is_none());
 
-        // Return checked-out test buffers so the freelist owns deallocation.
+        // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
             set.put(slot, buffer);
         }
@@ -994,7 +994,7 @@ pub(super) mod tests {
         assert_eq!(slots, vec![1, 5, 7]);
         assert_eq!(len(&set), 0);
 
-        // Return checked-out test buffers so the freelist owns deallocation.
+        // Return taken test buffers so the freelist owns deallocation.
         set.put(single.0, single.1);
         for (slot, buffer) in taken {
             set.put(slot, buffer);
@@ -1040,7 +1040,7 @@ pub(super) mod tests {
         assert_eq!(slots, vec![0, 1, 64, 8192]);
         assert_eq!(len(&set), 0);
 
-        // Return checked-out test buffers so the freelist owns deallocation.
+        // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
             set.put(slot, buffer);
         }
@@ -1067,7 +1067,7 @@ pub(super) mod tests {
         assert_eq!(set.drain(), 3);
         assert_eq!(len(&set), 0);
 
-        // Return checked-out test buffer so the freelist owns deallocation.
+        // Return taken test buffer so the freelist owns deallocation.
         set.put(slot1, buffer1);
     }
 
@@ -1104,7 +1104,7 @@ pub(super) mod tests {
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1, 2]);
 
-        // Return checked-out test buffers so the freelist owns deallocation.
+        // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
             set.put(slot, buffer);
         }
@@ -1130,7 +1130,7 @@ pub(super) mod tests {
         assert_eq!(slots, vec![slot0, slot1]);
         assert_eq!(len(&set), 14);
 
-        // Return checked-out test buffers so the freelist owns deallocation.
+        // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
             set.put(slot, buffer);
         }
@@ -1162,7 +1162,7 @@ pub(super) mod tests {
         seen.sort_unstable();
         assert_eq!(seen, slots);
 
-        // Return checked-out test buffers so the freelist owns deallocation.
+        // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
             set.put(slot, buffer);
         }
@@ -1417,7 +1417,7 @@ mod loom_tests {
         }
     }
 
-    // Owns buffers that a loom model has checked out from the freelist. This
+    // Owns buffers that a loom model has taken from the freelist. This
     // keeps the test-side ownership rule in one place: every created buffer
     // must be returned to the same freelist before that freelist is dropped.
     struct Leases {
