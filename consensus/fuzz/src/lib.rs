@@ -19,7 +19,7 @@ use crate::{
     utils::{apply_partition, link_peers, register, Action, Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt};
+use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     simplex::{
         config,
@@ -39,10 +39,13 @@ use commonware_p2p::{
     Recipients,
 };
 use commonware_parallel::Sequential;
+use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor as _,
 };
-use commonware_utils::{channel::mpsc::Receiver, sync::Once, FuzzRng, NZUsize, NZU16};
+use commonware_utils::{
+    channel::mpsc::Receiver, sequence::U64, sync::Once, FuzzRng, NZUsize, NZU16,
+};
 use futures::future::join_all;
 #[cfg(feature = "mocks")]
 pub use simplex::SimplexCertificateMock;
@@ -1054,6 +1057,23 @@ fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput) {
     run_twins::<P>(input, TwinsRole::Campaign);
 }
 
+fn twins_resolver_view<P: simplex::Simplex>(
+    message: &IoBuf,
+    codec: &<<P::Scheme as Scheme>::Certificate as Read>::Cfg,
+) -> Option<View> {
+    let msg = ResolverMessage::<U64>::decode(message.clone()).ok()?;
+    match msg.payload {
+        ResolverPayload::Request(key) => Some(View::new(u64::from(key))),
+        ResolverPayload::Response(bytes) => {
+            let cert =
+                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut bytes.as_ref(), codec)
+                    .ok()?;
+            Some(cert.view())
+        }
+        ResolverPayload::Error => None,
+    }
+}
+
 /// Unified twins driver. The two existing modes (TwinsMutator / TwinsCampaign)
 /// share scenario sampling, forwarders/routers, twin-half splitting, the
 /// primary engine, the honest validators, and the byzantine-aware invariants.
@@ -1137,9 +1157,9 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             let make_vote_forwarder = || {
                 let participants = participants.clone();
                 let scenario = scenario.clone();
-                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
-                        return Some(recipients.clone());
+                        return None;
                     };
                     let (primary, secondary) =
                         scenario.partitions(msg.view(), participants.as_ref());
@@ -1153,12 +1173,12 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
                 let scenario = scenario.clone();
-                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
                         &mut message.as_ref(),
                         &codec,
                     ) else {
-                        return Some(recipients.clone());
+                        return None;
                     };
                     let (primary, secondary) =
                         scenario.partitions(msg.view(), participants.as_ref());
@@ -1192,6 +1212,32 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                     scenario.route(msg.view(), sender, participants.as_ref())
                 }
             };
+            let make_resolver_forwarder = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+                    let Some(view) = twins_resolver_view::<P>(message, &codec) else {
+                        return None;
+                    };
+                    let (primary, secondary) = scenario.partitions(view, participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_resolver_router = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Some(view) = twins_resolver_view::<P>(message, &codec) else {
+                        return SplitTarget::None;
+                    };
+                    scenario.route(view, sender, participants.as_ref())
+                }
+            };
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
@@ -1205,10 +1251,10 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             let (certificate_receiver_primary, certificate_receiver_secondary) =
                 certificate_receiver
                     .split_with(context.child("recovered_split"), make_certificate_router());
-            let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
-                .split_with(|_origin, recipients, _message| Some(recipients.clone()));
+            let (resolver_sender_primary, resolver_sender_secondary) =
+                resolver_sender.split_with(make_resolver_forwarder());
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.child("resolver_split"), |_| SplitTarget::Both);
+                .split_with(context.child("resolver_split"), make_resolver_router());
 
             // Primary: legitimate engine driven by the twins-aware elector.
             let primary_context = context.child("primary");
