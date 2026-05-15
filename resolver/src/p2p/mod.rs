@@ -126,7 +126,7 @@ mod tests {
     const LINK_UNRELIABLE: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 0.9,
+        success_rate: 0.5,
     };
 
     fn status_metric_total(metrics: &str, name: &str, status: &str) -> u64 {
@@ -937,7 +937,7 @@ mod tests {
     /// Also tests that the peer can get data from multiple peers that have different sets of data.
     #[test_traced]
     fn test_concurrent_fetch_requests() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
