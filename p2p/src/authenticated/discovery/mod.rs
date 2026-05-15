@@ -212,12 +212,10 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle
-//!         .track(
-//!             0,
-//!             Set::try_from([signer.public_key(), peer1, peer2, peer3]).unwrap(),
-//!         )
-//!         .await;
+//!     oracle.track(
+//!         0,
+//!         Set::try_from([signer.public_key(), peer1, peer2, peer3]).unwrap(),
+//!     );
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;

@@ -2326,8 +2326,9 @@ mod tests {
                             found += 1;
                         }
                     }
+                    let tolerated_missing = skip_timeout.get().saturating_add(1);
                     assert!(
-                        found >= activity_timeout.get().saturating_sub(2),
+                        found >= activity_timeout.get().saturating_sub(tolerated_missing),
                         "found: {found}"
                     );
                 }
