@@ -61,7 +61,7 @@ Links between specs are relative from `consensus/fuzz/src/byzzfuzz/specs/`. Sour
 - Check affected invariants after changing code or specs; every applicable invariant must still hold.
 - Update `invariants/invariants.md` when an invariant is added, removed, or changed.
 - Update `INDEX.md` after adding or removing a spec.
-- Create a new ADR after a new architectural decision.
+- Create or update an ADR after an architectural decision.
 
 ### How to Update
 
@@ -71,7 +71,7 @@ Links between specs are relative from `consensus/fuzz/src/byzzfuzz/specs/`. Sour
 4. Read the affected invariant group in `invariants/invariants.md`.
 5. Verify the invariants still hold after the change.
 6. Keep invariants affirmative and centralized in `invariants/invariants.md`.
-7. Keep accepted ADRs immutable. Supersede them with a new ADR.
+7. Prefer short ADRs. Supersede or consolidate ADRs when the decision set is clearer that way.
 
 ### Validation Checklist
 
@@ -106,7 +106,7 @@ The invariants catalog is read once at the start of the workflow (see "Step 4: I
 
 1. Read [Process Injection](domains/process-injection/README.md).
 2. Read [Mutator](domains/process-injection/mutator.md).
-3. Read [ADR-002](decisions/002-semantically-mutate-votes-only.md).
+3. Read [ADR-001](decisions/001-process-fault-model.md).
 4. Confirm certificate and resolver behavior remains omit-only or create a superseding ADR.
 5. Verify every affected invariant still holds.
 
@@ -133,11 +133,12 @@ The invariants catalog is read once at the start of the workflow (see "Step 4: I
 3. Fill every section.
 4. Add it to `INDEX.md`.
 
-### Superseding a Decision
+### Superseding Or Consolidating Decisions
 
-1. Create a new ADR with the updated decision.
-2. Change the old ADR status to `Superseded by [NNN](./NNN-slug.md)`.
-3. Do not otherwise edit the old accepted ADR.
+1. Prefer a new ADR when preserving history is useful.
+2. Prefer consolidation when multiple ADRs describe one current behavior.
+3. Update `INDEX.md` and all links after moving or deleting ADR files.
+4. Keep the resulting ADR short and decision-focused.
 
 ## 8. Content Formatting Principles
 

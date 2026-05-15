@@ -19,6 +19,7 @@
 
 use crate::{
     byzzfuzz::{
+        fault::ProcessAction,
         intercept::{Intercept, InterceptChannel},
         log,
     },
@@ -115,32 +116,23 @@ where
         VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
         R: Rng,
     {
-        // Cert and resolver process faults are omit-only: a single byzantine
-        // node cannot forge a valid quorum certificate or a meaningful
-        // recovery response, so byte mutation on those channels would be
-        // parser-fuzzing rather than consensus-semantic byzantine behavior.
-        // The forwarder's drop has already removed the original from the
-        // targeted recipients; the injector emits nothing.
-        let omit_only_channel = matches!(
-            item.channel,
-            InterceptChannel::Cert | InterceptChannel::Resolver
-        );
-        if item.omit || omit_only_channel {
-            // `reason` records the *dominant* cause (channel policy beats
-            // schedule); `scheduled_omit` preserves the schedule's flag so
-            // a Cert/Resolver intercept with `scheduled_omit=true` still
-            // shows both facts in the trace.
-            let reason = if omit_only_channel {
-                "omit_only_channel"
-            } else {
-                "scheduled_omit"
-            };
+        if item.action == ProcessAction::Omit {
             log::push(format!(
-                "byzzfuzz: omit channel={:?} view={} targets_n={} scheduled_omit={} reason={reason}",
+                "byzzfuzz: omit channel={:?} view={} targets_n={} action={:?}",
                 item.channel,
                 item.view,
                 item.targets.len(),
-                item.omit,
+                item.action,
+            ));
+            return;
+        }
+        if !matches!(item.channel, InterceptChannel::Vote) {
+            log::push(format!(
+                "byzzfuzz: skip channel={:?} view={} targets_n={} action={:?} reason=unsupported_action_channel",
+                item.channel,
+                item.view,
+                item.targets.len(),
+                item.action,
             ));
             return;
         }
