@@ -131,10 +131,9 @@ fn merge_targets<P: Clone + Eq>(
         return;
     };
 
+    // Merge target sets without duplicating peers
     let incoming = std::mem::replace(existing, incoming);
     let mut targets = incoming.into_vec();
-
-    // Merge target sets without duplicating peers
     for target in existing.iter() {
         if !targets.contains(target) {
             targets.push(target.clone());
@@ -168,10 +167,6 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
                 // Cancel supersedes pending fetches for the key
                 overflow.fetches.retain(|request| request.key != key);
 
-                if overflow.clear {
-                    return;
-                }
-
                 // Retain only the first queued cancel for a key
                 if overflow
                     .modifications
@@ -192,9 +187,6 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
             Self::Retain { predicate } => {
                 // Retain prunes pending fetches before queued fetches drain
                 overflow.fetches.retain(|request| predicate(&request.key));
-                if overflow.clear {
-                    return;
-                }
                 overflow
                     .modifications
                     .push_back(Modification::Retain { predicate });
