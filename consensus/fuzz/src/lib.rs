@@ -44,7 +44,10 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{
-    channel::mpsc::Receiver, sequence::U64, sync::Once, FuzzRng, NZUsize, NZU16,
+    channel::mpsc::{self, Receiver},
+    sequence::U64,
+    sync::Once,
+    FuzzRng, NZUsize, NZU16,
 };
 use futures::future::join_all;
 #[cfg(feature = "mocks")]
@@ -655,6 +658,52 @@ fn default_link() -> Link {
     }
 }
 
+fn scheduled_partition(
+    schedule: &[(View, SetPartition)],
+    executing_view: u64,
+) -> Option<SetPartition> {
+    schedule
+        .iter()
+        .find_map(|(view, p)| (*view == View::new(executing_view)).then_some(*p))
+}
+
+/// Look up the partition scheduled for view 1, the initial executing view.
+/// The caller applies this synchronously before validators run so early view-1
+/// traffic observes the scheduled topology.
+fn initial_network_partition(partition: &Partition) -> Option<SetPartition> {
+    partition
+        .schedule()
+        .and_then(|schedule| scheduled_partition(schedule, 1))
+}
+
+async fn reporter_view_stream<P: simplex::Simplex>(
+    context: &deterministic::Context,
+    reporters: &mut [ReporterEntry<P>],
+) -> Option<(u64, mpsc::UnboundedReceiver<u64>)> {
+    if reporters.is_empty() {
+        return None;
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut max_finalized_view = 0;
+    for (idx, (_, reporter)) in reporters.iter_mut().enumerate() {
+        let (latest, mut monitor) = reporter.subscribe().await;
+        max_finalized_view = max_finalized_view.max(latest.get());
+        let tx = tx.clone();
+        context
+            .child("reporter_view_watcher")
+            .with_attribute("index", idx)
+            .spawn(move |_| async move {
+                while let Some(next) = monitor.recv().await {
+                    if tx.send(next.get()).is_err() {
+                        break;
+                    }
+                }
+            });
+    }
+    drop(tx);
+    Some((max_finalized_view, rx))
+}
+
 async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -662,6 +711,7 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     reporters: &mut [ReporterEntry<P>],
     partition: Partition,
     required_containers: u64,
+    initial_partition: Option<SetPartition>,
 ) {
     let Some(schedule) = partition.schedule() else {
         return;
@@ -669,33 +719,33 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let (mut latest, mut monitor) = reporters[0].1.subscribe().await;
+    let Some((mut finalized_view, mut view_rx)) =
+        reporter_view_stream::<P>(context, reporters).await
+    else {
+        return;
+    };
     let oracle = oracle.clone();
     let participants: Vec<_> = participants.to_vec();
-    let base_partition: Option<SetPartition> = partition.set_partition().copied();
     let schedule = schedule.to_vec();
     context
         .child("network_fault_scheduler")
         .spawn(move |_| async move {
             let link = default_link();
-            let mut active: Option<SetPartition> = base_partition;
-            let mut current_view = latest.get();
+            let mut active = initial_partition;
             loop {
-                let target: Option<SetPartition> = schedule
-                    .iter()
-                    .find_map(|(view, p)| (*view == View::new(current_view)).then_some(*p));
+                let executing_view = finalized_view.saturating_add(1);
+                let target = scheduled_partition(&schedule, executing_view);
                 if target != active {
                     apply_partition(&oracle, &participants, target.as_ref(), &link).await;
                     active = target;
                 }
-                if current_view >= required_containers {
+                if executing_view > required_containers {
                     break;
                 }
-                let Some(next) = monitor.recv().await else {
+                let Some(next) = view_rx.recv().await else {
                     break;
                 };
-                latest = next;
-                current_view = latest.get();
+                finalized_view = finalized_view.max(next);
             }
         });
 }
@@ -738,12 +788,15 @@ async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let (mut latest, mut monitor) = reporters[0].1.subscribe().await;
+    let Some((mut finalized_view, mut view_rx)) =
+        reporter_view_stream::<P>(context, reporters).await
+    else {
+        return;
+    };
     context
         .child("messaging_fault_scheduler")
         .spawn(move |_| async move {
             let mut active: u8 = initial_rate;
-            let mut finalized_view = latest.get();
             loop {
                 let executing_view = finalized_view.saturating_add(1);
                 let target: u8 = schedule
@@ -757,11 +810,10 @@ async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
                 if executing_view > required_containers {
                     break;
                 }
-                let Some(next) = monitor.recv().await else {
+                let Some(next) = view_rx.recv().await else {
                     break;
                 };
-                latest = next;
-                finalized_view = latest.get();
+                finalized_view = finalized_view.max(next);
             }
         });
 }
@@ -834,6 +886,16 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
 
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
+        let initial_partition = initial_network_partition(&input.partition);
+        if initial_partition.is_some() {
+            apply_partition(
+                &oracle,
+                &participants,
+                initial_partition.as_ref(),
+                &default_link(),
+            )
+            .await;
+        }
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
@@ -882,6 +944,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
             &mut reporters,
             input.partition.clone(),
             input.required_containers,
+            initial_partition,
         )
         .await;
 
