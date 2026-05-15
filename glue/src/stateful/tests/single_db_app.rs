@@ -380,7 +380,7 @@ impl EngineDefinition for SingleDbEngine {
         // Buffered broadcast engine
         let broadcast_config = buffered::Config {
             public_key: public_key.clone(),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             deque_size: 10,
             priority: false,
             codec_config: (),
@@ -411,7 +411,7 @@ impl EngineDefinition for SingleDbEngine {
             provider,
             epocher: FixedEpocher::new(EPOCH_LENGTH),
             partition_prefix: partition_prefix.clone(),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             prunable_items_per_section: NZU64!(10),
             page_cache: page_cache.clone(),

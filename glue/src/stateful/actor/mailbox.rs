@@ -1,6 +1,7 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
 use crate::stateful::{db::Anchor, Application};
+use commonware_actor::Feedback;
 use commonware_consensus::{
     marshal::{
         ancestry::{AncestorStream, BlockProvider, ErasedBlockProvider},
@@ -13,7 +14,11 @@ use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{
     acknowledgement::Exact,
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    channel::{
+        fallible::AsyncFallibleExt,
+        mpsc::{self, error::TrySendError},
+        oneshot,
+    },
 };
 use rand::Rng;
 
@@ -208,21 +213,19 @@ where
 {
     type Activity = Update<A::Block>;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        match activity {
-            Update::Tip(_, height, digest) => {
-                self.sender
-                    .send_lossy(Message::Tip { height, digest })
-                    .await;
-            }
-            Update::Block(block, acknowledgement) => {
-                self.sender
-                    .send_lossy(Message::Finalized {
-                        block,
-                        acknowledgement,
-                    })
-                    .await;
-            }
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        let message = match activity {
+            Update::Tip(_, height, digest) => Message::Tip { height, digest },
+            Update::Block(block, acknowledgement) => Message::Finalized {
+                block,
+                acknowledgement,
+            },
+        };
+
+        match self.sender.try_send(message) {
+            Ok(()) => Feedback::Ok,
+            Err(TrySendError::Full(_)) => Feedback::Backoff,
+            Err(TrySendError::Closed(_)) => Feedback::Closed,
         }
     }
 }

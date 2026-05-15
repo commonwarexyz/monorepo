@@ -253,9 +253,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
                         height = processed_height.get(),
                         "processed block not yet in marshal archive, hinting fetch",
                     );
-                    marshal
-                        .hint_finalized(processed_height, Recipients::All)
-                        .await;
+                    marshal.hint_finalized(processed_height, Recipients::All);
                     loop {
                         context.sleep(Duration::from_millis(500)).await;
                         if let Some(result) =
@@ -332,7 +330,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
             let floor = last_processed.height;
             // Raising the marshal floor also clears marshal's pending application
             // acknowledgements below that floor.
-            marshal.set_floor(floor, true).await;
+            marshal.set_floor(floor, true);
             let processed_height = marshal
                 .get_processed_height()
                 .await

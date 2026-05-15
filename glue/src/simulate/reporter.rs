@@ -6,6 +6,7 @@
 //! reporter chain so the harness can track finalization progress.
 
 use super::tracker::FinalizationUpdate;
+use commonware_actor::Feedback;
 use commonware_consensus::{marshal::Update, Block, Reporter};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_utils::channel::mpsc;
@@ -42,17 +43,14 @@ where
 {
     type Activity = Update<B>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         if let Update::Tip(round, _, ref digest) = activity {
-            let _ = self
-                .monitor
-                .send(FinalizationUpdate {
-                    pk: self.pk.clone(),
-                    view: round.view(),
-                    block_digest: digest.as_ref().to_vec(),
-                })
-                .await;
+            let _ = self.monitor.try_send(FinalizationUpdate {
+                pk: self.pk.clone(),
+                view: round.view(),
+                block_digest: digest.as_ref().to_vec(),
+            });
         }
-        self.inner.report(activity).await;
+        self.inner.report(activity)
     }
 }
