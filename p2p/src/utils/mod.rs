@@ -18,6 +18,7 @@ pub mod limited;
 pub mod mocks;
 pub mod mux;
 
+/// Submit a message to a mailbox and return the enqueue feedback.
 pub(crate) fn mailbox_enqueue<T: mailbox::Policy>(
     sender: &mailbox::Sender<T>,
     message: T,
@@ -25,6 +26,7 @@ pub(crate) fn mailbox_enqueue<T: mailbox::Policy>(
     sender.enqueue(message)
 }
 
+/// Send a request message to a mailbox and await a one-shot response.
 pub(crate) async fn mailbox_request<T, R, F>(sender: &mailbox::Sender<T>, make_msg: F) -> Option<R>
 where
     T: mailbox::Policy,
@@ -36,6 +38,7 @@ where
     rx.await.ok()
 }
 
+/// Send a mailbox request and return `default` if no response is received.
 pub(crate) async fn mailbox_request_or<T, R, F>(
     sender: &mailbox::Sender<T>,
     make_msg: F,
@@ -49,6 +52,7 @@ where
     mailbox_request(sender, make_msg).await.unwrap_or(default)
 }
 
+/// Send a mailbox request and return `R::default()` if no response is received.
 pub(crate) async fn mailbox_request_or_default<T, R, F>(
     sender: &mailbox::Sender<T>,
     make_msg: F,

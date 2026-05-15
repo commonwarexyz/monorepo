@@ -241,7 +241,6 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use futures::StreamExt;
     use commonware_runtime::{
         deterministic::{self},
         Clock, Runner, Supervisor as _,
@@ -250,16 +249,14 @@ mod tests {
         ordered::{Map, Set},
         NZUsize,
     };
+    use futures::StreamExt;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
 
     // Test Configuration Setup
-    fn test_config<C: Signer>(
-        crypto: C,
-        bypass_ip_check: bool,
-    ) -> (Config<C>, listener::Updates) {
+    fn test_config<C: Signer>(crypto: C, bypass_ip_check: bool) -> (Config<C>, listener::Updates) {
         let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new();
         (
             Config {

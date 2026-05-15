@@ -165,11 +165,7 @@ impl<C: PublicKey> Mailbox<C> {
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
-    pub(crate) async fn connect(
-        &self,
-        public_key: C,
-        dialer: bool,
-    ) -> Option<types::Info<C>> {
+    pub(crate) async fn connect(&self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
         request(&self.0, move |responder| Message::Connect {
             public_key,
             dialer,

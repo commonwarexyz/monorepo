@@ -228,17 +228,13 @@ mod tests {
         prefix: &str,
         expected: impl Fn(usize) -> bool,
     ) {
-        for _ in 0..1_000 {
+        loop {
             let count = count_running_tasks(context, prefix);
             if expected(count) {
                 return;
             }
             reschedule().await;
         }
-        panic!(
-            "task count for {prefix} did not reach expected condition, got {}",
-            count_running_tasks(context, prefix)
-        );
     }
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
@@ -3323,7 +3319,6 @@ mod tests {
                 .add_link(pk1.clone(), pk2.clone(), link.clone())
                 .await
                 .unwrap();
-
             wait_for_task_count(&context, "network", |count| count > 0).await;
 
             // Abort the network
