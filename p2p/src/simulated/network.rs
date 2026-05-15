@@ -679,6 +679,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Peers used when expanding [`Recipients::All`] for a specific sender.
     fn connected_peers_except(&self, exclude: &P) -> Vec<P> {
+        // Senders for peers outside the tracked set should not broadcast to the tracked set.
         if !self.peer_ref_counts.contains_key(exclude) {
             return Vec::new();
         }
@@ -850,10 +851,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
-/// Provides online peers from the simulated network.
+/// Provides known peers from the simulated network.
 ///
-/// Implements [`crate::utils::limited::Connected`] to provide peer list updates
-/// to [`crate::utils::limited::LimitedSender`].
+/// This is derived from tracked peer sets and is not a liveness signal.
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     me: P,
     mailbox: mailbox::Sender<ConnectedMessage<P>>,
@@ -2222,16 +2222,9 @@ mod tests {
                 .unwrap();
 
             let msg = vec![42u8; 10];
-            let sent_to = loop {
-                let checked = sender1.check(Recipients::All).unwrap();
-                let sent_to = crate::CheckedSender::recipients(&checked);
-                if sent_to.is_empty() {
-                    context.sleep(Duration::from_millis(1)).await;
-                    continue;
-                }
-                checked.send(msg.clone(), true).unwrap();
-                break sent_to;
-            };
+            let checked = sender1.check(Recipients::All).unwrap();
+            let sent_to = crate::CheckedSender::recipients(&checked);
+            checked.send(msg.clone(), true).unwrap();
 
             let pk2_count = sent_to.iter().filter(|pk| *pk == &pk2).count();
             assert_eq!(pk2_count, 1, "pk2 received duplicate sends");

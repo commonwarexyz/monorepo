@@ -2471,14 +2471,7 @@ mod tests {
                     "Broadcast {i} should be accepted"
                 );
 
-                select! {
-                    message = fast_receiver.recv() => {
-                        assert!(message.is_some());
-                    },
-                    _ = context.sleep(Duration::from_secs(1)) => {
-                        panic!("fast peer did not receive broadcast");
-                    },
-                }
+                assert!(fast_receiver.recv().await.is_some());
             }
         });
     }

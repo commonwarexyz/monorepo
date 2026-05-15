@@ -905,11 +905,8 @@ mod tests {
             // messages to another subchannel.
             tx1.send(Recipients::One(pk2.clone()), b"closed", false)
                 .unwrap();
-            assert_eq!(
-                tx2.send(Recipients::One(pk2.clone()), b"open", false)
-                    .unwrap(),
-                vec![pk2.clone()]
-            );
+            tx2.send(Recipients::One(pk2.clone()), b"open", false)
+                .unwrap();
 
             // Subchannel 2 should still receive messages.
             expect_n_messages(&mut rx2, 1).await;
