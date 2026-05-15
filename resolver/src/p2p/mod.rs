@@ -44,9 +44,8 @@
 //! several local reasons can share the same peer-visible fetch. A fetch remains active while at
 //! least one attached subscriber satisfies the latest [`Resolver::retain`](crate::Resolver::retain)
 //! predicate. When the fetch resolves, the request key and currently retained subscribers are
-//! supplied to [`Consumer::deliver`](crate::Consumer::deliver). Ordinary fetches are represented by
-//! a [`FetchSubscriber::Request`](crate::FetchSubscriber::Request) marker rather than by cloning the
-//! request key into a local subscriber.
+//! supplied to [`Consumer::deliver`](crate::Consumer::deliver). Ordinary fetches use
+//! `Subscriber::from(request)` as their subscriber.
 //!
 //! # Peer Selection
 //!
@@ -95,7 +94,7 @@ mod tests {
         mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
     };
-    use crate::{FetchSubscriber, Resolver, Subscribers};
+    use crate::{Resolver, Subscribers};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -1924,14 +1923,14 @@ mod tests {
 
             let dropped_subscriber = Key(50);
             let kept_subscriber = Key(51);
-            mailbox1.fetch(Subscribers::with_subscriber(
-                key.clone(),
-                dropped_subscriber,
-            ));
-            mailbox1.fetch(Subscribers::with_subscriber(
-                key.clone(),
-                kept_subscriber.clone(),
-            ));
+            mailbox1.fetch(Subscribers {
+                request: key.clone(),
+                subscribers: vec![dropped_subscriber],
+            });
+            mailbox1.fetch(Subscribers {
+                request: key.clone(),
+                subscribers: vec![kept_subscriber.clone()],
+            });
 
             context.sleep(Duration::from_millis(100)).await;
             mailbox1.retain(move |subscriber| subscriber == &kept_subscriber);
@@ -1982,21 +1981,24 @@ mod tests {
 
             let first_subscriber = Key(50);
             let second_subscriber = Key(51);
-            mailbox1.fetch(Subscribers::with_subscriber(
-                key.clone(),
-                second_subscriber.clone(),
-            ));
-            mailbox1.fetch(Subscribers::with_subscriber(
-                key.clone(),
-                first_subscriber.clone(),
-            ));
+            mailbox1.fetch(Subscribers {
+                request: key.clone(),
+                subscribers: vec![second_subscriber.clone()],
+            });
+            mailbox1.fetch(Subscribers {
+                request: key.clone(),
+                subscribers: vec![first_subscriber.clone()],
+            });
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (subscribers, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
                 subscribers,
-                Subscribers::with_locals(key, vec![first_subscriber, second_subscriber])
+                Subscribers {
+                    request: key,
+                    subscribers: vec![first_subscriber, second_subscriber],
+                }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
         });
@@ -2039,21 +2041,20 @@ mod tests {
 
             let subscriber = Key(50);
             mailbox1.fetch(key.clone());
-            mailbox1
-                .fetch(Subscribers::with_subscriber(
-                    key.clone(),
-                    subscriber.clone(),
-                ));
+            mailbox1.fetch(Subscribers {
+                request: key.clone(),
+                subscribers: vec![subscriber.clone()],
+            });
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (subscribers, value) = cons_out1.recv().await.unwrap();
             assert_eq!(
                 subscribers,
-                Subscribers::with_subscribers(
-                    key,
-                    vec![FetchSubscriber::Request, FetchSubscriber::Local(subscriber)]
-                )
+                Subscribers {
+                    request: key.clone(),
+                    subscribers: vec![key, subscriber],
+                }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
         });

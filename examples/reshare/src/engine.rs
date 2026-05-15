@@ -60,6 +60,11 @@ const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 
+type MarshalResolver<H, C> = (
+    handler::Receiver<<H as Hasher>::Digest>,
+    marshal::resolver::p2p::Mailbox<<H as Hasher>::Digest, <C as Signer>::PublicKey>,
+);
+
 pub struct Config<C, P, B, V, T>
 where
     P: Manager<PublicKey = C::PublicKey>,
@@ -345,14 +350,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        marshal: (
-            handler::Receiver<H::Digest>,
-            commonware_resolver::p2p::Mailbox<
-                handler::Request<H::Digest>,
-                C::PublicKey,
-                handler::ResolverSubscriber<H::Digest>,
-            >,
-        ),
+        marshal: MarshalResolver<H, C>,
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(
@@ -392,14 +390,7 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        marshal: (
-            handler::Receiver<H::Digest>,
-            commonware_resolver::p2p::Mailbox<
-                handler::Request<H::Digest>,
-                C::PublicKey,
-                handler::ResolverSubscriber<H::Digest>,
-            >,
-        ),
+        marshal: MarshalResolver<H, C>,
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
         let dkg_handle = self.dkg.start(

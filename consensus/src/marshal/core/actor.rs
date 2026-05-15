@@ -26,7 +26,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{FetchSubscriber, Resolver, Subscribers};
+use commonware_resolver::{Resolver, Subscribers};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -184,14 +184,6 @@ struct BlockSubscription<V: Variant> {
     _aborter: Aborter,
 }
 
-/// A local request to subscribe to a block.
-struct BlockSubscriptionRequest<V: Variant> {
-    round: Option<Round>,
-    height: Option<Height>,
-    key: BlockSubscriptionKeyFor<V>,
-    response: oneshot::Sender<V::Block>,
-}
-
 /// The key used to track block subscriptions.
 ///
 /// Digest-scoped and commitment-scoped subscriptions are intentionally distinct
@@ -206,12 +198,6 @@ type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
 type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
 type ResolverSubscriberFor<V> = ResolverSubscriber<<V as Variant>::Commitment>;
-
-struct ResolverDelivery<V: Variant> {
-    subscribers: Subscribers<ResolverRequestFor<V>, ResolverSubscriberFor<V>>,
-    value: Bytes,
-    response: oneshot::Sender<bool>,
-}
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
@@ -661,13 +647,13 @@ where
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
-                            resolver.fetch(Subscribers::with_subscriber(
-                                Request::Block { commitment },
-                                ResolverSubscriber::block(
+                            resolver.fetch(Subscribers {
+                                request: Request::Block { commitment },
+                                subscribers: vec![ResolverSubscriber::Block {
                                     commitment,
-                                    BlockFetchContext::Finalized { round },
-                                ),
-                            ));
+                                    context: BlockFetchContext::Finalized { round },
+                                }],
+                            });
                         }
                     }
                     Message::GetBlock {
@@ -714,14 +700,11 @@ where
                         digest,
                         response,
                     } => {
-                        let subscription = BlockSubscriptionRequest {
-                            round,
-                            height: None,
-                            key: BlockSubscriptionKey::Digest(digest),
-                            response,
-                        };
                         self.handle_subscribe(
-                            subscription,
+                            round,
+                            None,
+                            BlockSubscriptionKey::Digest(digest),
+                            response,
                             &mut resolver,
                             &mut waiters,
                             &mut buffer,
@@ -738,14 +721,11 @@ where
                             CommitmentRequest::FetchByRound { round } => (Some(round), None),
                             CommitmentRequest::FetchByCommitment { height } => (None, Some(height)),
                         };
-                        let subscription = BlockSubscriptionRequest {
+                        self.handle_subscribe(
                             round,
                             height,
-                            key: BlockSubscriptionKey::Commitment(commitment),
+                            BlockSubscriptionKey::Commitment(commitment),
                             response,
-                        };
-                        self.handle_subscribe(
-                            subscription,
                             &mut resolver,
                             &mut waiters,
                             &mut buffer,
@@ -835,12 +815,9 @@ where
                         } => {
                             needs_sync |= self
                                 .handle_deliver(
-                                    ResolverDelivery {
-                                        subscribers,
-                                        value,
-                                        response,
-                                    },
-                                    &mut resolver,
+                                    subscribers,
+                                    value,
+                                    response,
                                     &mut delivers,
                                     &mut application,
                                 )
@@ -923,17 +900,14 @@ where
     /// Handle a local subscription request for a block.
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
-        subscription: BlockSubscriptionRequest<V>,
+        round: Option<Round>,
+        height: Option<Height>,
+        key: BlockSubscriptionKeyFor<V>,
+        response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
-        let BlockSubscriptionRequest {
-            round,
-            height,
-            key,
-            response,
-        } = subscription;
         let digest = match key {
             BlockSubscriptionKey::Digest(digest) => digest,
             BlockSubscriptionKey::Commitment(commitment) => V::commitment_to_inner(commitment),
@@ -980,13 +954,13 @@ where
                     resolver.fetch(request);
                 }
                 BlockSubscriptionKey::Commitment(commitment) => {
-                    resolver.fetch(Subscribers::with_subscriber(
+                    resolver.fetch(Subscribers {
                         request,
-                        ResolverSubscriber::block(
+                        subscribers: vec![ResolverSubscriber::Block {
                             commitment,
-                            BlockFetchContext::Finalized { round },
-                        ),
-                    ));
+                            context: BlockFetchContext::Finalized { round },
+                        }],
+                    });
                 }
             }
         } else if let (Some(height), BlockSubscriptionKey::Commitment(commitment)) = (height, key) {
@@ -1002,10 +976,13 @@ where
                 return;
             }
             debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
-            resolver.fetch(Subscribers::with_subscriber(
-                Request::Block { commitment },
-                ResolverSubscriber::block(commitment, BlockFetchContext::Ancestry { height }),
-            ));
+            resolver.fetch(Subscribers {
+                request: Request::Block { commitment },
+                subscribers: vec![ResolverSubscriber::Block {
+                    commitment,
+                    context: BlockFetchContext::Ancestry { height },
+                }],
+            });
         }
 
         // Register subscriber.
@@ -1044,20 +1021,16 @@ where
     /// Returns true if finalization archives were written and need syncing.
     async fn handle_deliver(
         &mut self,
-        delivery: ResolverDelivery<V>,
-        _resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = ResolverSubscriberFor<V>,
-        >,
+        subscribers: Subscribers<ResolverRequestFor<V>, ResolverSubscriberFor<V>>,
+        mut value: Bytes,
+        response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
-        let ResolverDelivery {
+        let Subscribers {
+            request: key,
             subscribers,
-            mut value,
-            response,
-        } = delivery;
-        let (key, subscribers) = subscribers.into_parts();
+        } = subscribers;
         match key {
             Request::Block { commitment } => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
@@ -1080,15 +1053,23 @@ where
                 let mut has_request_subscriber = false;
                 for subscriber in subscribers {
                     match subscriber {
-                        FetchSubscriber::Request => has_request_subscriber = true,
-                        FetchSubscriber::Local(ResolverSubscriber::Block {
+                        ResolverSubscriber::Request(Request::Block {
+                            commitment: retained_commitment,
+                        }) => {
+                            has_request_subscriber |= retained_commitment == commitment;
+                        }
+                        ResolverSubscriber::Request(_) => {}
+                        ResolverSubscriber::Block {
                             commitment: retained_commitment,
                             context,
-                        }) => {
+                        } => {
+                            let expected_height = match context {
+                                BlockFetchContext::Ancestry { height }
+                                | BlockFetchContext::Repair { height } => Some(height),
+                                BlockFetchContext::Finalized { .. } => None,
+                            };
                             if retained_commitment == commitment
-                                && context
-                                    .expected_height()
-                                    .is_none_or(|expected| expected == height)
+                                && expected_height.is_none_or(|expected| expected == height)
                             {
                                 contexts.push(context);
                             } else {
@@ -1100,7 +1081,6 @@ where
                                 );
                             }
                         }
-                        FetchSubscriber::Local(ResolverSubscriber::Request(_)) => {}
                     }
                 }
 
@@ -1511,7 +1491,7 @@ where
             // Cancel round-bound certified-parent fetches below the processed
             // round floor. Unlike known-finalized data, processed data is past
             // the point where proposal-construction assistance is useful.
-            resolver.retain(ResolverSubscriber::request(Request::Notarized { round }).predicate());
+            resolver.retain(ResolverSubscriber::Request(Request::Notarized { round }).predicate());
         }
     }
 
@@ -1827,15 +1807,15 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    resolver.fetch(Subscribers::with_subscriber(
-                        Request::Block { commitment },
-                        ResolverSubscriber::block(
+                    resolver.fetch(Subscribers {
+                        request: Request::Block { commitment },
+                        subscribers: vec![ResolverSubscriber::Block {
                             commitment,
-                            BlockFetchContext::Repair {
+                            context: BlockFetchContext::Repair {
                                 height: last_finalized,
                             },
-                        ),
-                    ));
+                        }],
+                    });
                 }
             }
         }
@@ -1888,17 +1868,17 @@ where
                         .height()
                         .previous()
                         .expect("gap repair cursor must be above genesis");
-                    resolver.fetch(Subscribers::with_subscriber(
-                        Request::Block {
+                    resolver.fetch(Subscribers {
+                        request: Request::Block {
                             commitment: parent_commitment,
                         },
-                        ResolverSubscriber::block(
-                            parent_commitment,
-                            BlockFetchContext::Repair {
+                        subscribers: vec![ResolverSubscriber::Block {
+                            commitment: parent_commitment,
+                            context: BlockFetchContext::Repair {
                                 height: parent_height,
                             },
-                        ),
-                    ));
+                        }],
+                    });
                     break 'cache_repair;
                 }
             }
@@ -1936,7 +1916,7 @@ where
             .try_set(self.last_processed_height.get());
 
         // Cancel any existing requests below the new floor.
-        resolver.retain(ResolverSubscriber::request(Request::Finalized { height }).predicate());
+        resolver.retain(ResolverSubscriber::Request(Request::Finalized { height }).predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.

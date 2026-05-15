@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::{Consumer, FetchSubscriber, Subscribers};
+use crate::{Consumer, Subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -23,7 +23,7 @@ use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
 use futures::future::{self, Either};
 use rand::Rng;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     marker::PhantomData,
 };
 use tracing::{debug, error, trace, warn};
@@ -76,7 +76,7 @@ pub struct Engine<
     inflight: Inflight<E, Con, P, Key>,
 
     /// Local reasons that keep each fetch key alive.
-    subscribers: HashMap<Key, BTreeSet<FetchSubscriber<Sub>>>,
+    subscribers: HashMap<Key, BTreeSet<Sub>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -239,7 +239,7 @@ where
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
                             if subscribers.is_empty() {
-                                subscribers.push(FetchSubscriber::Request);
+                                subscribers.push(Sub::from(key.clone()));
                             }
                             self.subscribers
                                 .entry(key.clone())
@@ -283,16 +283,14 @@ where
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.subscribers.retain(|key, subscribers| {
-                            subscribers.retain(|subscriber| match subscriber {
-                                FetchSubscriber::Request => predicate(&Sub::from(key.clone())),
-                                FetchSubscriber::Local(subscriber) => predicate(subscriber),
-                            });
+                        self.subscribers.retain(|_, subscribers| {
+                            subscribers.retain(|subscriber| predicate(subscriber));
                             !subscribers.is_empty()
                         });
-                        let retained: HashSet<_> = self.subscribers.keys().cloned().collect();
-                        self.fetcher.retain(|key| retained.contains(key));
-                        let count = self.inflight.retain(|key| retained.contains(key)) as u64;
+                        let subscribers = &self.subscribers;
+                        self.fetcher.retain(|key| subscribers.contains_key(key));
+                        let count =
+                            self.inflight.retain(|key| subscribers.contains_key(key)) as u64;
                         self.record_cancellations(count);
                     }
                     Message::Clear => {
@@ -441,7 +439,10 @@ where
             .get(&key)
             .map(|subscribers| subscribers.iter().cloned().collect())
             .unwrap_or_default();
-        let subscribers = Subscribers::with_subscribers(key.clone(), subscribers);
+        let subscribers = Subscribers {
+            request: key.clone(),
+            subscribers,
+        };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
         self.inflight.deliver(key, subscribers, peer, response);

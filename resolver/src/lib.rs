@@ -12,91 +12,26 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod p2p;
 
-    /// A subscriber that kept a fetch active.
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub enum FetchSubscriber<L> {
-        /// The peer-visible request key itself kept the fetch active.
-        Request,
-        /// A separate local subscriber kept the fetch active.
-        Local(L),
-    }
-
-    impl<L> FetchSubscriber<L> {
-        /// Return true if this is the peer-visible request subscriber.
-        pub const fn is_request(&self) -> bool {
-            matches!(self, Self::Request)
-        }
-
-        /// Return the local subscriber, if this is one.
-        pub const fn local(&self) -> Option<&L> {
-            match self {
-                Self::Request => None,
-                Self::Local(local) => Some(local),
-            }
-        }
-    }
-
     /// Subscribers attached to a resolved fetch.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub struct Subscribers<K, L> {
         /// The peer-visible request key.
         pub request: K,
         /// Subscribers that kept the fetch active.
-        pub subscribers: Vec<FetchSubscriber<L>>,
+        pub subscribers: Vec<L>,
     }
 
-    impl<K, L> Subscribers<K, L> {
+    impl<K: Clone, L: From<K>> Subscribers<K, L> {
         /// Create subscribers for an ordinary fetch.
         pub fn new(request: K) -> Self {
             Self {
+                subscribers: vec![L::from(request.clone())],
                 request,
-                subscribers: vec![FetchSubscriber::Request],
             }
-        }
-
-        /// Create subscribers for a fetch with explicit subscribers.
-        pub const fn with_subscribers(request: K, subscribers: Vec<FetchSubscriber<L>>) -> Self {
-            Self {
-                request,
-                subscribers,
-            }
-        }
-
-        /// Create subscribers for a fetch with local subscribers only.
-        pub fn with_locals(request: K, locals: Vec<L>) -> Self {
-            Self {
-                request,
-                subscribers: locals.into_iter().map(FetchSubscriber::Local).collect(),
-            }
-        }
-
-        /// Create subscribers for a fetch with one local subscriber.
-        pub fn with_subscriber(request: K, subscriber: L) -> Self {
-            Self::with_locals(request, vec![subscriber])
-        }
-
-        /// Split into the peer-visible request and subscribers.
-        pub fn into_parts(self) -> (K, Vec<FetchSubscriber<L>>) {
-            (self.request, self.subscribers)
-        }
-
-        /// Return true if the request key itself kept the fetch active.
-        pub fn has_request(&self) -> bool {
-            self.subscribers.iter().any(FetchSubscriber::is_request)
-        }
-
-        /// Return the local subscribers.
-        pub fn locals(&self) -> impl Iterator<Item = &L> {
-            self.subscribers.iter().filter_map(FetchSubscriber::local)
-        }
-
-        /// Return the peer-visible request key.
-        pub const fn request(&self) -> &K {
-            &self.request
         }
     }
 
-    impl<K, L> From<K> for Subscribers<K, L> {
+    impl<K: Clone, L: From<K>> From<K> for Subscribers<K, L> {
         fn from(request: K) -> Self {
             Self::new(request)
         }
@@ -128,9 +63,7 @@ commonware_macros::stability_scope!(BETA {
         /// `subscribers` contains the peer-visible request key and the currently
         /// retained subscribers for the fetch. Subscribers are local metadata for
         /// deciding who should observe a valid response; they do not define peer
-        /// validity. Ordinary fetches include a zero-payload
-        /// [`FetchSubscriber::Request`] marker, avoiding a duplicate local key
-        /// when the request key itself keeps the fetch active.
+        /// validity. Ordinary fetches include `Subscriber::from(request)`.
         fn deliver(
             &mut self,
             subscribers: Subscribers<Self::Key, Self::Subscriber>,
@@ -147,7 +80,7 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Implementations that also own the [`Consumer`] should supply subscribers to
         /// [`Consumer::deliver`] when a fetch resolves.
-        type Subscriber: Clone + Send + 'static;
+        type Subscriber: Clone + From<Self::Key> + Send + 'static;
 
         /// Type used to identify peers for targeted fetches.
         type PublicKey: PublicKey;

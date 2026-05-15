@@ -458,38 +458,7 @@ where
         &self,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::StoredBlock> {
-        // Check in reverse order
-        for cache in self.caches.values().rev() {
-            if let Some(block) = cache
-                .certified_blocks_by_height
-                .get(Identifier::Key(&digest))
-                .await
-                .expect("failed to get height-indexed certified block")
-            {
-                return Some(block);
-            }
-
-            // Check verified blocks
-            if let Some(block) = cache
-                .verified_blocks
-                .get(Identifier::Key(&digest))
-                .await
-                .expect("failed to get verified block")
-            {
-                return Some(block);
-            }
-
-            // Check notarized blocks
-            if let Some(block) = cache
-                .notarized_blocks
-                .get(Identifier::Key(&digest))
-                .await
-                .expect("failed to get notarized block")
-            {
-                return Some(block);
-            }
-        }
-        None
+        self.find_block_matching(digest, |_| true).await
     }
 
     /// Looks for a block (certified by height, verified, or notarized) that matches `predicate`.

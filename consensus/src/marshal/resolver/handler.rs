@@ -179,20 +179,6 @@ pub enum BlockFetchContext {
     Repair { height: Height },
 }
 
-impl BlockFetchContext {
-    /// Return the expected block height when it is known before the request.
-    ///
-    /// Round-bound fetches validate commitment immediately and can only learn
-    /// height from the decoded block, so they cannot be pruned by height before
-    /// the response arrives.
-    pub(crate) const fn expected_height(&self) -> Option<Height> {
-        match self {
-            Self::Ancestry { height } | Self::Repair { height } => Some(*height),
-            Self::Finalized { .. } => None,
-        }
-    }
-}
-
 /// A request for backfilling data.
 #[derive(Clone, Copy)]
 pub enum Request<D: Digest> {
@@ -209,14 +195,6 @@ pub enum Request<D: Digest> {
 }
 
 impl<D: Digest> Request<D> {
-    /// Return the block commitment, if this is a block request.
-    pub const fn block_commitment(&self) -> Option<D> {
-        match self {
-            Self::Block { commitment } => Some(*commitment),
-            _ => None,
-        }
-    }
-
     /// The subject of the request.
     const fn subject(&self) -> u8 {
         match self {
@@ -246,27 +224,6 @@ pub enum ResolverSubscriber<D: Digest> {
 }
 
 impl<D: Digest> ResolverSubscriber<D> {
-    /// Create a subscriber for a peer-visible request.
-    pub const fn request(request: Request<D>) -> Self {
-        Self::Request(request)
-    }
-
-    /// Create a subscriber for a locally annotated block request.
-    pub const fn block(commitment: D, context: BlockFetchContext) -> Self {
-        Self::Block {
-            commitment,
-            context,
-        }
-    }
-
-    /// Return the block commitment, if this is a block request.
-    pub const fn block_commitment(&self) -> Option<D> {
-        match self {
-            Self::Request(request) => request.block_commitment(),
-            Self::Block { commitment, .. } => Some(*commitment),
-        }
-    }
-
     /// The predicate to use when pruning subjects related to this subject.
     ///
     /// Unrelated subjects are retained. Related subjects are pruned if they are
@@ -287,9 +244,11 @@ impl<D: Digest> ResolverSubscriber<D> {
                     context: their_context,
                 },
             ) => mine != theirs || mine_context != their_context,
-            (Self::Request(Request::Block { commitment: mine }), _) => {
-                s.block_commitment() != Some(*mine)
-            }
+            (Self::Request(Request::Block { commitment: mine }), _) => match s {
+                Self::Request(Request::Block { commitment })
+                | Self::Block { commitment, .. } => commitment != mine,
+                _ => true,
+            },
             (Self::Block { .. }, _) => true,
             (
                 Self::Request(Request::Finalized { height: mine }),
@@ -627,81 +586,87 @@ mod tests {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
 
-        let predicate = ResolverSubscriber::request(r1).predicate();
-        assert!(predicate(&ResolverSubscriber::request(r2))); // r2.height > r1.height
-        assert!(predicate(&ResolverSubscriber::request(r3))); // Different variant (notarized)
+        let predicate = ResolverSubscriber::Request(r1).predicate();
+        assert!(predicate(&ResolverSubscriber::Request(r2))); // r2.height > r1.height
+        assert!(predicate(&ResolverSubscriber::Request(r3))); // Different variant (notarized)
 
         let r1_same = Request::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(&ResolverSubscriber::request(r1_same))); // Same height, should not pass
+        assert!(!predicate(&ResolverSubscriber::Request(r1_same))); // Same height, should not pass
     }
 
     #[test]
     fn test_block_subscriber_context_affects_identity() {
         let digest = Sha256::hash(b"annotated");
-        let ancestry = ResolverSubscriber::block(
-            digest,
-            BlockFetchContext::Ancestry {
+        let ancestry = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Ancestry {
                 height: Height::new(10),
             },
-        );
-        let repair = ResolverSubscriber::block(
-            digest,
-            BlockFetchContext::Repair {
+        };
+        let repair = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Repair {
                 height: Height::new(10),
             },
-        );
+        };
 
         assert_ne!(ancestry, repair);
-        assert_eq!(ancestry.block_commitment(), repair.block_commitment());
+        assert!(matches!(
+            (ancestry, repair),
+            (
+                ResolverSubscriber::Block { commitment: a, .. },
+                ResolverSubscriber::Block { commitment: b, .. },
+            ) if a == b
+        ));
     }
 
     #[test]
     fn test_subject_predicate_prunes_annotated_blocks() {
         let digest = Sha256::hash(b"prune");
-        let height_floor = ResolverSubscriber::request(Request::<D>::Finalized {
+        let height_floor = ResolverSubscriber::Request(Request::<D>::Finalized {
             height: Height::new(10),
         });
-        let keep_repair = ResolverSubscriber::block(
-            digest,
-            BlockFetchContext::Repair {
+        let keep_repair = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Repair {
                 height: Height::new(11),
             },
-        );
-        let drop_repair = ResolverSubscriber::block(
-            digest,
-            BlockFetchContext::Repair {
+        };
+        let drop_repair = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Repair {
                 height: Height::new(10),
             },
-        );
-        let drop_ancestry = ResolverSubscriber::block(
-            digest,
-            BlockFetchContext::Ancestry {
+        };
+        let drop_ancestry = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Ancestry {
                 height: Height::new(9),
             },
-        );
+        };
 
         let predicate = height_floor.predicate();
         assert!(predicate(&keep_repair));
         assert!(!predicate(&drop_repair));
         assert!(!predicate(&drop_ancestry));
 
-        let round_floor = ResolverSubscriber::request(Request::<D>::Notarized {
+        let round_floor = ResolverSubscriber::Request(Request::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(10)),
         });
-        let keep_finalized = ResolverSubscriber::block(
-            digest,
-            BlockFetchContext::Finalized {
+        let keep_finalized = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(11)),
             },
-        );
-        let drop_finalized = ResolverSubscriber::block(
-            digest,
-            BlockFetchContext::Finalized {
+        };
+        let drop_finalized = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Finalized {
                 round: Round::new(Epoch::new(1), View::new(10)),
             },
-        );
+        };
 
         let predicate = round_floor.predicate();
         assert!(predicate(&keep_finalized));
@@ -870,9 +835,9 @@ mod tests {
         assert_eq!(sorted.len(), 7);
 
         // Check that all blocks come first
-        assert!(sorted[0].block_commitment().is_some());
-        assert!(sorted[1].block_commitment().is_some());
-        assert!(sorted[2].block_commitment().is_some());
+        assert!(matches!(sorted[0], Request::Block { .. }));
+        assert!(matches!(sorted[1], Request::Block { .. }));
+        assert!(matches!(sorted[2], Request::Block { .. }));
 
         // Check that finalized come next
         assert_eq!(

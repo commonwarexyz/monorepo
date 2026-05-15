@@ -1,4 +1,4 @@
-use crate::{FetchSubscriber, Resolver, Subscribers};
+use crate::{Resolver, Subscribers};
 use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
     Feedback,
@@ -14,7 +14,7 @@ pub struct FetchRequest<K, P, R = K> {
     /// The key to fetch.
     pub key: K,
     /// The subscribers used to decide whether the fetch should be retained.
-    pub subscribers: Vec<FetchSubscriber<R>>,
+    pub subscribers: Vec<R>,
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
@@ -119,17 +119,14 @@ impl<K, P, R> Pending<K, P, R> {
 
 fn retain_subscribers<K: Clone, R: From<K>>(
     key: &K,
-    subscribers: &mut Vec<FetchSubscriber<R>>,
+    subscribers: &mut Vec<R>,
     predicate: &dyn Fn(&R) -> bool,
 ) -> bool {
     if subscribers.is_empty() {
         return predicate(&R::from(key.clone()));
     }
 
-    subscribers.retain(|subscriber| match subscriber {
-        FetchSubscriber::Request => predicate(&R::from(key.clone())),
-        FetchSubscriber::Local(subscriber) => predicate(subscriber),
-    });
+    subscribers.retain(|subscriber| predicate(subscriber));
     !subscribers.is_empty()
 }
 
@@ -362,7 +359,7 @@ mod tests {
     fn fetch(key: u8, targets: Option<NonEmptyVec<u8>>) -> Message<u8, u8> {
         Message::Fetch(vec![FetchRequest {
             key,
-            subscribers: vec![FetchSubscriber::Request],
+            subscribers: vec![key],
             targets,
         }])
     }

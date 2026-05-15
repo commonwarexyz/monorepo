@@ -748,9 +748,7 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
         let request = CommitmentRequest::FetchByCommitment {
             height: parent_height,
         };
-        let subscription = self
-            .mailbox
-            .subscribe_by_commitment(commitment, request);
+        let subscription = self.mailbox.subscribe_by_commitment(commitment, request);
         subscription.await.ok()
     }
 
