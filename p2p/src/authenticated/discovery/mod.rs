@@ -2418,7 +2418,7 @@ mod tests {
 
     #[test]
     fn test_broadcast_slow_peer_no_blocking() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create router
             let cfg = RouterConfig {
