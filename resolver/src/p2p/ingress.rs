@@ -66,7 +66,7 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
     where
         F: FnMut(Message<K, P>) -> Option<Message<K, P>>,
     {
-        // Clear drains before later fetches
+        // Clear drains before later modifications and fetches
         if self.clear {
             self.clear = false;
             if let Some(message) = push(Message::Clear) {
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_supersedes_modifications() {
+    fn clear_supersedes_prior_modifications() {
         let mut pending = Pending::default();
 
         Policy::handle(
@@ -474,7 +474,8 @@ mod tests {
         );
 
         let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Message::Clear));
+        assert!(matches!(messages[1], Message::Retain { .. }));
     }
 }
