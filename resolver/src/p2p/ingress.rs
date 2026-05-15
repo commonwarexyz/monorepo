@@ -35,73 +35,76 @@ pub enum Message<K, P> {
     Retain { predicate: Predicate<K> },
 }
 
+enum Prune<K> {
+    Clear,
+    Retain { predicate: Predicate<K> },
+}
+
 /// Pending resolver messages retained after the mailbox fills.
 pub struct Pending<K, P> {
-    messages: VecDeque<Message<K, P>>,
+    prunes: VecDeque<Prune<K>>,
+    cancels: VecDeque<K>,
+    fetches: Vec<FetchRequest<K, P>>,
 }
 
 impl<K, P> Default for Pending<K, P> {
     fn default() -> Self {
         Self {
-            messages: VecDeque::new(),
+            prunes: VecDeque::new(),
+            cancels: VecDeque::new(),
+            fetches: Vec::new(),
         }
     }
 }
 
 impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
     fn is_empty(&self) -> bool {
-        self.messages.is_empty()
+        self.prunes.is_empty() && self.cancels.is_empty() && self.fetches.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
         F: FnMut(Message<K, P>) -> Option<Message<K, P>>,
     {
-        while let Some(message) = self.messages.pop_front() {
+        while let Some(prune) = self.prunes.pop_front() {
+            let message = match prune {
+                Prune::Clear => Message::Clear,
+                Prune::Retain { predicate } => Message::Retain { predicate },
+            };
             if let Some(message) = push(message) {
-                self.messages.push_front(message);
-                break;
+                self.push_front(message);
+                return;
+            }
+        }
+
+        while let Some(key) = self.cancels.pop_front() {
+            if let Some(message) = push(Message::Cancel { key }) {
+                self.push_front(message);
+                return;
+            }
+        }
+
+        if !self.fetches.is_empty() {
+            let fetches = std::mem::take(&mut self.fetches);
+            if let Some(message) = push(Message::Fetch(fetches)) {
+                self.push_front(message);
             }
         }
     }
 }
 
-impl<K: Eq, P: Clone + Eq> Pending<K, P> {
-    fn push_request(&mut self, request: FetchRequest<K, P>) {
-        for message in self.messages.iter_mut().rev() {
-            match message {
-                Message::Fetch(requests) => {
-                    let Some(existing) = requests
-                        .iter_mut()
-                        .find(|existing| existing.key == request.key)
-                    else {
-                        continue;
-                    };
-                    merge_targets(&mut existing.targets, request.targets);
-                    return;
-                }
-                Message::Cancel { key } if key == &request.key => return,
-                Message::Clear | Message::Retain { .. } => break,
-                Message::Cancel { .. } => {}
+impl<K, P> Pending<K, P> {
+    fn push_front(&mut self, message: Message<K, P>) {
+        match message {
+            Message::Clear => self.prunes.push_front(Prune::Clear),
+            Message::Retain { predicate } => {
+                self.prunes.push_front(Prune::Retain { predicate });
+            }
+            Message::Cancel { key } => self.cancels.push_front(key),
+            Message::Fetch(fetches) => {
+                self.fetches.splice(0..0, fetches);
             }
         }
-        self.messages.push_back(Message::Fetch(vec![request]));
-    }
-
-    fn remove_fetches(&mut self, mut keep: impl FnMut(&K) -> bool) {
-        for message in &mut self.messages {
-            if let Message::Fetch(requests) = message {
-                requests.retain(|request| keep(&request.key));
-            }
-        }
-        self.messages
-            .retain(|message| !matches!(message, Message::Fetch(requests) if requests.is_empty()));
-    }
-
-    fn has_cancel(&self, key: &K) -> bool {
-        self.messages
-            .iter()
-            .any(|message| matches!(message, Message::Cancel { key: old } if old == key))
     }
 }
 
@@ -134,22 +137,50 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
         match message {
             Self::Fetch(requests) => {
                 for request in requests {
-                    overflow.push_request(request);
+                    let FetchRequest { key, targets } = request;
+
+                    // Drop fetches already canceled or pruned in overflow
+                    if overflow.cancels.iter().any(|old| old == &key) {
+                        continue;
+                    }
+                    if overflow.prunes.iter().any(|prune| match prune {
+                        Prune::Clear => true,
+                        Prune::Retain { predicate } => !predicate(&key),
+                    }) {
+                        continue;
+                    }
+
+                    // Merge duplicate fetches for the same key
+                    if let Some(existing) = overflow
+                        .fetches
+                        .iter_mut()
+                        .find(|existing| existing.key == key)
+                    {
+                        merge_targets(&mut existing.targets, targets);
+                    } else {
+                        overflow.fetches.push(FetchRequest { key, targets });
+                    }
                 }
             }
             Self::Cancel { key } => {
-                overflow.remove_fetches(|old| old != &key);
-                if !overflow.has_cancel(&key) {
-                    overflow.messages.push_back(Self::Cancel { key });
+                // Cancel supersedes pending fetches for the key
+                overflow.fetches.retain(|request| request.key != key);
+
+                // Retain only the first queued cancel for a key
+                if overflow.cancels.iter().all(|old| old != &key) {
+                    overflow.cancels.push_back(key);
                 }
             }
             Self::Clear => {
-                overflow.messages.clear();
-                overflow.messages.push_back(Self::Clear);
+                // Clear supersedes pending cancels and fetches, but preserves prune order
+                overflow.cancels.clear();
+                overflow.fetches.clear();
+                overflow.prunes.push_back(Prune::Clear);
             }
             Self::Retain { predicate } => {
-                overflow.remove_fetches(|key| predicate(key));
-                overflow.messages.push_back(Self::Retain { predicate });
+                // Retain prunes pending fetches before queued fetches drain
+                overflow.fetches.retain(|request| predicate(&request.key));
+                overflow.prunes.push_back(Prune::Retain { predicate });
             }
         }
     }
@@ -323,8 +354,8 @@ mod tests {
 
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 2);
-        assert_fetch(&messages[0], 2, None);
-        assert!(matches!(messages[1], Message::Cancel { key: 1 }));
+        assert!(matches!(messages[0], Message::Cancel { key: 1 }));
+        assert_fetch(&messages[1], 2, None);
     }
 
     #[test]
@@ -368,8 +399,8 @@ mod tests {
 
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 2);
-        assert_fetch(&messages[0], 2, None);
-        assert!(matches!(messages[1], Message::Retain { .. }));
+        assert!(matches!(messages[0], Message::Retain { .. }));
+        assert_fetch(&messages[1], 2, None);
     }
 
     #[test]
@@ -382,8 +413,51 @@ mod tests {
         Policy::handle(&mut pending, fetch(3, None));
 
         let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0], Message::Clear));
-        assert_fetch(&messages[1], 3, None);
+    }
+
+    #[test]
+    fn fetch_after_retain_is_ignored_when_key_is_dropped() {
+        let mut pending = Pending::default();
+
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(|key| *key != 1),
+            },
+        );
+        Policy::handle(&mut pending, fetch(1, None));
+        Policy::handle(&mut pending, fetch(2, None));
+
+        let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0], Message::Retain { .. }));
+        assert_fetch(&messages[1], 2, None);
+    }
+
+    #[test]
+    fn clear_and_retain_are_drained_in_received_order() {
+        let mut pending = Pending::default();
+
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(|key| *key != 1),
+            },
+        );
+        Policy::handle(&mut pending, Message::Clear);
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(|key| *key != 2),
+            },
+        );
+
+        let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0], Message::Retain { .. }));
+        assert!(matches!(messages[1], Message::Clear));
+        assert!(matches!(messages[2], Message::Retain { .. }));
     }
 }
