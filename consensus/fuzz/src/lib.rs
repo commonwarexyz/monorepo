@@ -971,6 +971,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
 
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
+            invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
@@ -1093,6 +1094,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         }
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
+            invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);

@@ -77,6 +77,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 
     // Invariant: no_conflicting_quorum_notarizations
     // In any view, there cannot be quorum notarizations for multiple digests.
+    // This is a payload-level check; duplicate certificates for the same
+    // (view, payload) are intentionally equivalent here.
+    // Reporter extraction retains one certificate per reporter/view, so
+    // same-reporter conflicts overwritten before extraction remain invisible.
     let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
     for (notarizations, _, _) in replicas.iter() {
         for (v, d) in notarizations {
@@ -90,6 +94,28 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         assert!(
             payloads.len() <= 1,
             "Invariant violation: conflicting quorum notarizations in view {v}: {payloads:?}"
+        );
+    }
+
+    // Invariant: no_conflicting_quorum_finalizations
+    // In any view, there cannot be quorum finalizations for multiple digests.
+    // This is a payload-level check; duplicate certificates for the same
+    // (view, payload) are intentionally equivalent here.
+    // Reporter extraction retains one certificate per reporter/view, so
+    // same-reporter conflicts overwritten before extraction remain invisible.
+    let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
+    for (_, _, finalizations) in replicas.iter() {
+        for (v, d) in finalizations {
+            let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
+            if is_quorum {
+                per_view.entry(*v).or_default().insert(d.payload);
+            }
+        }
+    }
+    for (v, payloads) in per_view {
+        assert!(
+            payloads.len() <= 1,
+            "Invariant violation: conflicting quorum finalizations in view {v}: {payloads:?}"
         );
     }
 
@@ -203,6 +229,30 @@ where
     check_vote_invariants_with_byzantine(&byzantine, reporters);
 }
 
+pub fn check_no_invalid_reports<E, S, L>(reporters: &[Reporter<E, S, L, Sha256Digest>])
+where
+    E: CryptoRngCore,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    for reporter in reporters {
+        reporter.assert_no_invalid();
+    }
+}
+
+pub fn check_no_invalid_reports_if_no_faults<E, S, L>(
+    faults: u32,
+    reporters: &[Reporter<E, S, L, Sha256Digest>],
+) where
+    E: CryptoRngCore,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    if faults == 0 {
+        check_no_invalid_reports(reporters);
+    }
+}
+
 /// Like [`check_vote_invariants`], but accepts an explicit set of Byzantine
 /// participant indices instead of assuming a positional `0..faults` prefix.
 ///
@@ -218,11 +268,36 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
     L: Elector<S>,
 {
     // Invariant: no_vote_equivocation
-    // A correct node cannot both nullify and finalize in the same view.
+    // A correct node cannot sign multiple payloads of the same vote kind in a
+    // view, or both nullify and finalize in the same view.
     // Aggregate across all reporters to get a global view of who sent what.
     let mut seen_nullify: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
     let mut seen_finalize: HashMap<u64, HashSet<S::PublicKey>> = HashMap::new();
+    let mut seen_notarize_payload: HashMap<(u64, S::PublicKey), Sha256Digest> = HashMap::new();
+    let mut seen_finalize_payload: HashMap<(u64, S::PublicKey), Sha256Digest> = HashMap::new();
     for reporter in reporters {
+        let notarizes = reporter.notarizes.lock();
+        for (view, by_digest) in notarizes.iter() {
+            for (digest, signers) in by_digest {
+                for pk in signers {
+                    if reporter
+                        .participants
+                        .index(pk)
+                        .is_some_and(|idx| !byzantine.contains(&usize::from(idx)))
+                    {
+                        let previous =
+                            seen_notarize_payload.insert((view.get(), pk.clone()), *digest);
+                        assert!(
+                            previous.is_none_or(|payload| payload == *digest),
+                            "Invariant violation: correct signer notarized multiple payloads in view {}",
+                            view.get()
+                        );
+                    }
+                }
+            }
+        }
+        drop(notarizes);
+
         let nullifies = reporter.nullifies.lock();
         for (view, signers) in nullifies.iter() {
             let entry = seen_nullify.entry(view.get()).or_default();
@@ -238,13 +313,12 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
         }
         drop(nullifies);
 
-        // `finalizes` is `HashMap<View, HashMap<Digest, HashSet<PublicKey>>>`;
-        // collapse across digests to "did this signer finalize anything in
-        // this view?"
+        // Also collapse across digests to track whether this signer finalized
+        // anything in this view.
         let finalizes = reporter.finalizes.lock();
         for (view, by_digest) in finalizes.iter() {
             let entry = seen_finalize.entry(view.get()).or_default();
-            for signers in by_digest.values() {
+            for (digest, signers) in by_digest {
                 for pk in signers {
                     if reporter
                         .participants
@@ -252,6 +326,13 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
                         .is_some_and(|idx| !byzantine.contains(&usize::from(idx)))
                     {
                         entry.insert(pk.clone());
+                        let previous =
+                            seen_finalize_payload.insert((view.get(), pk.clone()), *digest);
+                        assert!(
+                            previous.is_none_or(|payload| payload == *digest),
+                            "Invariant violation: correct signer finalized multiple payloads in view {}",
+                            view.get()
+                        );
                     }
                 }
             }
