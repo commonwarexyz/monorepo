@@ -59,7 +59,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         };
 
         // Create the mailboxes
-        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let oracle = Oracle::new(sender.clone());
         let releaser = Releaser::new(sender.clone());
 
@@ -306,7 +306,8 @@ mod tests {
             let TestHarness { mailbox, .. } = setup_actor(context.child("actor"), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_receiver) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
 
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox);
@@ -719,7 +720,8 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             mailbox.connect(peer_pk.clone(), peer_mailbox);
 
             // 3) Block it → should see exactly one Kill
@@ -783,7 +785,8 @@ mod tests {
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             mailbox.connect(my_pk.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
@@ -985,7 +988,8 @@ mod tests {
             let reservation = mailbox.listen(pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             mailbox.connect(pk.clone(), peer_mailbox);
 
             // Update address - should kill the connection
@@ -1023,7 +1027,8 @@ mod tests {
             let reservation = mailbox.listen(pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             mailbox.connect(pk.clone(), peer_mailbox);
 
             // Register new peer set with same peer at address B
@@ -1075,13 +1080,15 @@ mod tests {
             // Establish connection to pk_tracked
             let reservation = mailbox.listen(pk_tracked.clone()).await;
             assert!(reservation.is_some());
-            let (tracked_mailbox, mut tracked_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (tracked_mailbox, mut tracked_rx) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             mailbox.connect(pk_tracked.clone(), tracked_mailbox);
 
             // Establish connection to pk_unchanged
             let reservation = mailbox.listen(pk_unchanged.clone()).await;
             assert!(reservation.is_some());
-            let (unchanged_mailbox, mut unchanged_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (unchanged_mailbox, mut unchanged_rx) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);
 
             // Call overwrite with mix of tracked+changed, tracked+unchanged, and unknown peers

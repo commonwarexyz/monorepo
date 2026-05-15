@@ -9,7 +9,7 @@ use commonware_actor::{
     Feedback,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, IoBufs, Quota};
+use commonware_runtime::{Clock, IoBufs, Metrics, Quota};
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Debug,
@@ -156,7 +156,7 @@ impl<P: PublicKey> Channels<P> {
         }
     }
 
-    pub fn register<C: Clock>(
+    pub fn register<C: Clock + Metrics>(
         &mut self,
         channel: Channel,
         rate: Quota,
@@ -164,7 +164,7 @@ impl<P: PublicKey> Channels<P> {
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {
         let backlog = NonZeroUsize::new(backlog).expect("message backlog must be non-zero");
-        let (sender, receiver) = mailbox::new(backlog);
+        let (sender, receiver) = mailbox::new(clock.child("mailbox"), backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }

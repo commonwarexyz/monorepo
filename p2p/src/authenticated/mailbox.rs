@@ -1,4 +1,5 @@
 use commonware_actor::mailbox;
+use commonware_runtime::Metrics;
 use std::num::NonZeroUsize;
 
 /// A mailbox wraps a sender for messages of type `T`.
@@ -7,8 +8,8 @@ pub struct Mailbox<T: mailbox::Policy>(pub(crate) mailbox::Sender<T>);
 
 impl<T: mailbox::Policy> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
-    pub fn new(size: NonZeroUsize) -> (Self, mailbox::Receiver<T>) {
-        let (sender, receiver) = mailbox::new(size);
+    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, mailbox::Receiver<T>) {
+        let (sender, receiver) = mailbox::new(metrics, size);
         (Self(sender), receiver)
     }
 }

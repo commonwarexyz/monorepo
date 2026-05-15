@@ -1,6 +1,7 @@
 use crate::authenticated::discovery::types;
 use commonware_actor::mailbox::{self, Policy};
 use commonware_cryptography::PublicKey;
+use commonware_runtime::Metrics;
 use std::{collections::VecDeque, fmt, num::NonZeroUsize};
 
 /// Messages that can be sent to the peer [super::Actor].
@@ -30,8 +31,8 @@ impl<C: PublicKey> Policy for Message<C> {
 pub struct Mailbox<C: PublicKey>(mailbox::Sender<Message<C>>);
 
 impl<C: PublicKey> Mailbox<C> {
-    pub fn new(size: NonZeroUsize) -> (Self, mailbox::Receiver<Message<C>>) {
-        let (sender, receiver) = mailbox::new(size);
+    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, mailbox::Receiver<Message<C>>) {
+        let (sender, receiver) = mailbox::new(metrics, size);
         (Self(sender), receiver)
     }
 
@@ -68,7 +69,8 @@ mod tests {
 
     #[test]
     fn kill_retained_on_overflow() {
-        let (mailbox, mut receiver) = Mailbox::<ed25519::PublicKey>::new(NZUsize!(1));
+        let (mailbox, mut receiver) =
+            Mailbox::<ed25519::PublicKey>::new(crate::utils::mocks::Metrics, NZUsize!(1));
         mailbox.peers(Vec::new());
         mailbox.peers(Vec::new());
         mailbox.kill();

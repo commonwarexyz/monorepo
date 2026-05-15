@@ -241,12 +241,16 @@ mod tests {
 
             let dialer = Actor::new(context.child("dialer"), dialer_cfg);
 
-            let (tracker_mailbox, mut tracker_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
             // Create a releaser for reservations
-            let (releaser_mailbox, _releaser_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (releaser_mailbox, _releaser_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("releaser_mailbox"),
+                NZUsize!(1024),
+            );
             let releaser = Releaser::new(releaser_mailbox);
 
             // Generate 10 peers
@@ -255,8 +259,10 @@ mod tests {
                 .collect();
 
             // Create a supervisor that just drops spawn messages
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -320,10 +326,14 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -375,19 +385,25 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
-            let (releaser_mailbox, _releaser_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
+            let (releaser_mailbox, _releaser_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("releaser_mailbox"),
+                NZUsize!(1024),
+            );
             let releaser = Releaser::new(releaser_mailbox);
 
             let peers: Vec<PublicKey> = (0..3)
                 .map(|i| PrivateKey::from_seed(i).public_key())
                 .collect();
 
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -447,10 +463,14 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });

@@ -1,4 +1,5 @@
 use commonware_actor::mailbox::{self, Policy};
+use commonware_runtime::Metrics;
 use std::{collections::VecDeque, fmt, num::NonZeroUsize};
 
 /// Messages that can be sent to the peer [super::Actor].
@@ -20,8 +21,8 @@ impl Policy for Message {
 pub struct Mailbox(mailbox::Sender<Message>);
 
 impl Mailbox {
-    pub fn new(size: NonZeroUsize) -> (Self, mailbox::Receiver<Message>) {
-        let (sender, receiver) = mailbox::new(size);
+    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, mailbox::Receiver<Message>) {
+        let (sender, receiver) = mailbox::new(metrics, size);
         (Self(sender), receiver)
     }
 
@@ -49,7 +50,7 @@ mod tests {
 
     #[test]
     fn kill_retained_on_overflow() {
-        let (mailbox, mut receiver) = Mailbox::new(NZUsize!(1));
+        let (mailbox, mut receiver) = Mailbox::new(crate::utils::mocks::Metrics, NZUsize!(1));
         mailbox.kill();
         mailbox.kill();
 

@@ -3,9 +3,45 @@
 use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{IoBuf, IoBufs};
+use commonware_runtime::{
+    telemetry::metrics::{Metric, Registered, Registration},
+    IoBuf, IoBufs, Metrics as RuntimeMetrics, Name, Supervisor,
+};
 use core::future;
 use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
+
+/// Metrics implementation that registers nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Metrics;
+
+impl Supervisor for Metrics {
+    fn name(&self) -> Name {
+        Name::default()
+    }
+
+    fn child(&self, _label: &'static str) -> Self {
+        Self
+    }
+
+    fn with_attribute(self, _key: &'static str, _value: impl std::fmt::Display) -> Self {
+        self
+    }
+}
+
+impl RuntimeMetrics for Metrics {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        _name: N,
+        _help: H,
+        metric: M,
+    ) -> Registered<M> {
+        Registered::with_registration(metric, Registration::from(()))
+    }
+
+    fn encode(&self) -> String {
+        String::new()
+    }
+}
 
 /// Sender that accepts messages without delivering them.
 ///

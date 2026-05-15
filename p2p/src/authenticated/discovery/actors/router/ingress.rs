@@ -146,13 +146,16 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer as _,
     };
-    use commonware_runtime::{deterministic, BufferPooler as _, IoBuf, Runner as _};
+    use commonware_runtime::{
+        deterministic, BufferPooler as _, IoBuf, Runner as _, Supervisor as _,
+    };
 
     #[test]
     fn test_overflow_drops_content_but_retains_control() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (control_sender, mut receiver) = mailbox::new::<Message<PublicKey>>(NZUsize!(1));
+            let (control_sender, mut receiver) =
+                mailbox::new::<Message<PublicKey>>(context.child("control_mailbox"), NZUsize!(1));
             let mailbox = Mailbox::new(control_sender.clone());
             let messenger = Messenger::new(
                 context.network_buffer_pool().clone(),

@@ -48,7 +48,7 @@ impl<
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");
-        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         (
             Self {

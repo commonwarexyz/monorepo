@@ -952,8 +952,10 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         quota: Quota,
     ) -> (Self, Handle<()>) {
         // Listen for messages
-        let (high, mut high_receiver) = mailbox::new::<TaskMessage<P>>(NZUsize!(1024));
-        let (low, mut low_receiver) = mailbox::new::<TaskMessage<P>>(NZUsize!(1024));
+        let (high, mut high_receiver) =
+            mailbox::new::<TaskMessage<P>>(context.child("high"), NZUsize!(1024));
+        let (low, mut low_receiver) =
+            mailbox::new::<TaskMessage<P>>(context.child("low"), NZUsize!(1024));
         let task_sender = sender.clone();
         let processor = context.child("processor").spawn(move |_| async move {
             loop {

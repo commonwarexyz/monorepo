@@ -14,7 +14,7 @@ use commonware_utils::{
 
 pub mod codec;
 pub mod limited;
-#[cfg(feature = "mocks")]
+#[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 pub mod mux;
 

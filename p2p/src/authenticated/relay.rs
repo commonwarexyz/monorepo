@@ -3,6 +3,7 @@ use commonware_actor::{
     Feedback,
 };
 use commonware_macros::select;
+use commonware_runtime::Metrics;
 use std::{collections::VecDeque, num::NonZeroUsize};
 
 pub(crate) struct Message<T>(T);
@@ -31,9 +32,9 @@ pub struct Relay<T> {
 }
 
 impl<T> Relay<T> {
-    pub fn new(size: NonZeroUsize) -> (Self, Receivers<T>) {
-        let (low_sender, low_receiver) = mailbox::new(size);
-        let (high_sender, high_receiver) = mailbox::new(size);
+    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, Receivers<T>) {
+        let (low_sender, low_receiver) = mailbox::new(metrics.child("low"), size);
+        let (high_sender, high_receiver) = mailbox::new(metrics.child("high"), size);
         (
             Self {
                 low: low_sender,
@@ -83,11 +84,12 @@ pub(crate) fn try_recv<T>(receiver: &mut mailbox::Receiver<Message<T>>) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::mocks::Metrics;
     use commonware_utils::NZUsize;
 
     #[test]
     fn test_relay_content_priority() {
-        let (relay, mut receivers) = Relay::new(NZUsize!(1));
+        let (relay, mut receivers) = Relay::new(Metrics, NZUsize!(1));
 
         let data = 123;
         assert_eq!(relay.send(data, true), Feedback::Ok);
@@ -112,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_relay_drops_on_overflow() {
-        let (relay, mut receivers) = Relay::new(NZUsize!(1));
+        let (relay, mut receivers) = Relay::new(Metrics, NZUsize!(1));
 
         assert_eq!(relay.send(1, false), Feedback::Ok);
         assert_eq!(relay.send(2, false), Feedback::Backoff);

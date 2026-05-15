@@ -261,8 +261,7 @@ mod tests {
     /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
     /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
     /// ```
-    fn assert_no_rate_limiting(context: &impl Metrics) {
-        let metrics = context.encode();
+    fn assert_no_rate_limiting(metrics: &str) {
         assert!(
             !metrics.contains("messages_rate_limited_total{"),
             "no messages should be rate limited: {metrics}"
@@ -422,7 +421,7 @@ mod tests {
         }
 
         // Ensure no message rate limiting occurred
-        assert_no_rate_limiting(&context);
+        assert_no_rate_limiting(&context.encode());
     }
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
@@ -588,7 +587,7 @@ mod tests {
             }
 
             // Ensure no message rate limiting occurred
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
@@ -710,7 +709,7 @@ mod tests {
 
             // Give the metrics time to reflect the rate-limited message.
             for _ in 0..10 {
-                assert_no_rate_limiting(&context);
+                assert_no_rate_limiting(&context.encode());
                 context.sleep(Duration::from_millis(100)).await;
             }
         });
@@ -1143,7 +1142,7 @@ mod tests {
                 complete_receiver.recv().await.unwrap();
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
@@ -1274,7 +1273,7 @@ mod tests {
                 complete_receiver.recv().await.unwrap();
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
@@ -1671,7 +1670,7 @@ mod tests {
                 }
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
@@ -1856,7 +1855,7 @@ mod tests {
                 }
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
     #[test_traced]
@@ -2158,14 +2157,16 @@ mod tests {
             let _handle = router.start(channels);
 
             let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();
-            let (slow_relay, _slow_receivers) = Relay::new(NZUsize!(10));
+            let (slow_relay, _slow_receivers) =
+                Relay::new(context.child("slow_relay"), NZUsize!(10));
             assert!(
                 mailbox.ready(slow_peer, slow_relay).await.is_some(),
                 "Failed to register slow peer"
             );
 
             let fast_peer = ed25519::PrivateKey::from_seed(1).public_key();
-            let (fast_relay, mut fast_receivers) = Relay::new(NZUsize!(100));
+            let (fast_relay, mut fast_receivers) =
+                Relay::new(context.child("fast_relay"), NZUsize!(100));
             assert!(
                 mailbox.ready(fast_peer, fast_relay).await.is_some(),
                 "Failed to register fast peer"
