@@ -98,10 +98,8 @@ impl<
             .and_then(|index| participants.key(index))
             .cloned();
 
-        let (handler_tx, mut handler_rx) = mailbox::new(
-            self.context.as_ref().child("handler_mailbox"),
-            self.mailbox_size,
-        );
+        let (handler_tx, mut handler_rx) =
+            mailbox::new(self.context.as_ref().child("handler"), self.mailbox_size);
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
