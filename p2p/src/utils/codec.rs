@@ -266,8 +266,9 @@ mod tests {
     use super::*;
     use crate::{
         simulated::{self, Link, Network, Oracle},
-        Feedback, Manager as _, Recipients,
+        Manager as _, Recipients,
     };
+    use commonware_actor::Feedback;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},

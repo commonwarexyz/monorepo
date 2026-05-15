@@ -648,6 +648,7 @@ where
 mod tests {
     use super::*;
     use crate::{dkg::ContinueOnUpdate, orchestrator::Message, setup::PeerConfig};
+    use commonware_actor::Feedback;
     use commonware_cryptography::{
         bls12381::{dkg::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
@@ -656,7 +657,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_p2p::{utils::mocks::inert_channel, Feedback, PeerSetSubscription, Provider};
+    use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32};
     use core::marker::PhantomData;

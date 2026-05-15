@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_actor::Feedback;
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
     Write,
@@ -14,7 +15,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Committable, Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{Blocker, CheckedSender, Feedback, LimitedSender, Receiver, Recipients};
+use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
 };

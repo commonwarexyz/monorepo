@@ -14,6 +14,7 @@ use commonware_macros::{stability_mod, stability_scope};
 stability_mod!(ALPHA, pub mod simulated);
 
 stability_scope!(BETA {
+    use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
@@ -26,7 +27,6 @@ stability_scope!(BETA {
     pub mod types;
     pub mod utils;
 
-    pub use commonware_actor::Feedback;
     pub use types::{Address, Ingress};
 
     /// Tuple representing a message received from a given public key.
