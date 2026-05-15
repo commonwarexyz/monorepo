@@ -1051,32 +1051,27 @@ impl TlsSizeClassCache {
 
 impl Drop for TlsSizeClassCache {
     fn drop(&mut self) {
-        let count = self.len;
-        if count == 0 {
+        if self.len == 0 {
             return;
         }
 
-        let class = self.class;
-        let end = self.len;
-        self.len = 0;
         let entries = self.entries.as_mut_ptr();
-        {
-            let entries = (0..end).rev().map(move |index| {
-                // SAFETY: `0..end` was initialized before `len` was reset to 0.
-                // Reading each slot moves it out and leaves the slot
-                // uninitialized.
+        // SAFETY: each initialized entry carries one banked class reference out
+        // of this cache. Because `self.len > 0`, those references keep `class`
+        // live while the entries are parked.
+        unsafe { self.class.as_ref() }
+            .global
+            .put_batch((0..self.len).rev().map(move |index| {
+                // SAFETY: `0..self.len` is initialized. Reading each slot moves
+                // it out and leaves the slot uninitialized.
                 let entry = unsafe { entries.add(index).read().assume_init() };
                 (entry.slot, entry.buffer)
-            });
-            // SAFETY: each initialized entry carries one banked class reference
-            // out of this cache. Because `count > 0`, those references keep
-            // `class` live while the entries are parked.
-            unsafe { class.as_ref() }.global.put_batch(entries);
-        }
-        for _ in 0..count {
-            // SAFETY: each drained entry was returned to the global freelist, so
-            // its banked reference can be released.
-            unsafe { class.release() };
+            }));
+
+        for _ in 0..self.len {
+            // SAFETY: each drained entry was returned to the global freelist,
+            // so its banked reference can be released.
+            unsafe { self.class.release() };
         }
     }
 }
