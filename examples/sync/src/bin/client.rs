@@ -11,7 +11,10 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{self, compact},
+    qmdb::{
+        current as current_qmdb,
+        sync::{self, compact},
+    },
 };
 use commonware_sync::{
     any, crate_version, current,
@@ -218,14 +221,12 @@ where
 /// Repeatedly sync a Current database to the server's state.
 ///
 /// Uses the `current::sync::sync` wrapper. The wrapper verifies each target's `OpsRootWitness`
-/// before forwarding its ops root to the shared sync engine, then checks the canonical root for the
+/// before forwarding its ops root to the shared sync engine, then checks the database root for the
 /// target the engine finishes on.
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
-    use commonware_storage::qmdb::current as current_qmdb;
-
     info!("starting Current database sync process");
     let mut iteration = 0u32;
     loop {
@@ -235,7 +236,7 @@ where
 
         let initial_target = resolver.get_current_sync_target().await?;
         info!(
-            canonical_root = %initial_target.canonical_root,
+            root = %initial_target.root,
             ops_root = %initial_target.ops_root,
             range = ?initial_target.range,
             "received current sync target"
@@ -245,7 +246,7 @@ where
 
         let target_update_handle = {
             let resolver = resolver.clone();
-            let mut current_target_root = initial_target.canonical_root;
+            let mut current_target_root = initial_target.root;
             let target_update_interval = config.target_update_interval;
             context
                 .child("target_update")
@@ -254,8 +255,8 @@ where
                         context.sleep(target_update_interval).await;
                         match resolver.get_current_sync_target().await {
                             Ok(new_target) => {
-                                if current_target_root != new_target.canonical_root {
-                                    let new_root = new_target.canonical_root;
+                                if current_target_root != new_target.root {
+                                    let new_root = new_target.root;
                                     match update_sender.clone().try_send(new_target) {
                                         Ok(()) => {
                                             info!("target updated");
@@ -298,7 +299,7 @@ where
         target_update_handle.abort();
         info!(
             sync_iteration = iteration,
-            canonical_root = %database.root(),
+            root = %database.root(),
             ops_root = %database.ops_root(),
             sync_interval = ?config.sync_interval,
             "Current sync completed successfully"

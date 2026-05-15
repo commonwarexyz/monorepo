@@ -57,7 +57,7 @@ where
     pub target: Target<mmr::Family, D>,
 }
 
-/// Response with current-database sync target (canonical root + witness).
+/// Response with current-database sync target (database root + witness).
 #[derive(Debug)]
 pub struct GetCurrentSyncTargetResponse<D>
 where

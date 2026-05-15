@@ -74,7 +74,7 @@ where
         }
     }
 
-    /// Returns the current-database sync target (canonical root + witness).
+    /// Returns the current-database sync target (database root + witness).
     pub async fn get_current_sync_target(
         &self,
     ) -> Result<CurrentTarget<mmr::Family, D>, crate::Error> {

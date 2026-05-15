@@ -315,7 +315,7 @@
 //! partial.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
-//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
+//! returned by the `sync::Database` trait's `ops_root()` method, since the sync engine verifies batches
 //! against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers

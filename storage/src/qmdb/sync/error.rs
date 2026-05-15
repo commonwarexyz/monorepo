@@ -8,7 +8,7 @@ use commonware_cryptography::Digest;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError<F: Family, D: Digest> {
-    /// Hash mismatch after sync
+    /// Database root mismatch after sync.
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
     /// Compact proof did not verify against the requested root.
@@ -53,12 +53,9 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Error extracting pinned nodes
     #[error("error extracting pinned nodes: {0}")]
     PinnedNodes(String),
-    /// Ops root witness failed verification against the trusted canonical root
+    /// Witness for the `ops_root` failed verification against the root commitment.
     #[error("ops root witness failed verification")]
     OpsRootWitnessInvalid,
-    /// Canonical root mismatch after sync
-    #[error("canonical root mismatch - expected {expected:?}, got {actual:?}")]
-    CanonicalRootMismatch { expected: D, actual: D },
 }
 
 /// Errors that can occur during database synchronization.

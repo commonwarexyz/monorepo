@@ -455,7 +455,7 @@ where
             let old_target_size = self.target.range.end();
             assert!(
                 self.retained_roots
-                    .insert(old_target_size, self.target.root)
+                    .insert(old_target_size, self.target.ops_root)
                     .is_none(),
                 "duplicate retained root for tree size {old_target_size:?}"
             );
@@ -682,7 +682,7 @@ where
         // requests match a historical root that was explicitly retained.
         let is_current_target = request.target_size == self.target.range.end();
         let target_root = if is_current_target {
-            &self.target.root
+            &self.target.ops_root
         } else {
             let Some(root) = self.retained_roots.get(&request.target_size) else {
                 // No historical root to verify against (evicted or
@@ -820,7 +820,6 @@ where
             )
             .await?;
 
-            // Verify the final root digest matches the final target
             let got_root = database.root();
             let expected_root = self.target.root;
             if got_root != expected_root {

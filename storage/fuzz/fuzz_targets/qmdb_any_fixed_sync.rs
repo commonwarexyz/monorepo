@@ -131,7 +131,7 @@ where
     >,
 {
     let db_config = test_config(test_name, &context);
-    let expected_root = target.root;
+    let expected_root = target.ops_root;
 
     let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
         context: context.child("sync").with_attribute("id", sync_id),
@@ -240,6 +240,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
+                        ops_root: db.root(),
                         range: non_empty_range!(db.sync_boundary(), db.bounds().await.end),
                     };
 

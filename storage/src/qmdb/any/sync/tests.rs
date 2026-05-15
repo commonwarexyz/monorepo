@@ -108,7 +108,12 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
             Config: Clone,
         > + DbAny<Self::Family, Key = Digest, Digest = Digest>;
 
-    /// Return the root the sync engine targets.
+    /// Return the database root expected after sync completes.
+    fn target_root(db: &Self::Db) -> Digest {
+        qmdb::sync::Database::root(db)
+    }
+
+    /// Return the ops root the sync engine targets for range proof verification.
     fn sync_target_root(db: &Self::Db) -> Digest;
 
     /// Create a config with unique partition names
@@ -156,6 +161,7 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: Digest::from([1u8; 32]),
+                ops_root: Digest::from([1u8; 32]),
                 range: non_empty_range!(Location::new(0), Location::new(10)),
             },
             context: context.child("client"),
@@ -200,6 +206,7 @@ where
             context: context.child("client"),
             target: Target {
                 root: target_root,
+                ops_root: target_root,
                 range: non_empty_range!(Location::new(0), Location::new(5)),
             },
             resolver,
@@ -251,7 +258,8 @@ where
             db_config: db_config.clone(),
             fetch_batch_size,
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, target_op_count),
             },
             context: client_context.child("client"),
@@ -333,7 +341,8 @@ where
             db_config,
             fetch_batch_size: NZU64!(10),
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
@@ -413,7 +422,8 @@ where
             db_config: sync_db_config,
             fetch_batch_size: NZU64!(10),
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
@@ -516,7 +526,8 @@ where
             db_config: sync_config, // Use same config to access same partitions
             fetch_batch_size: NZU64!(10),
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("sync"),
@@ -578,6 +589,7 @@ where
         );
         let initial_upper_bound = target_db.bounds().await.end;
         let initial_root = H::sync_target_root(&target_db);
+        let initial_verification_root = H::target_root(&target_db);
 
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
@@ -587,7 +599,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
-                root: initial_root,
+                root: initial_verification_root,
+                ops_root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
@@ -603,7 +616,8 @@ where
         // Send target update with decreased lower bound
         update_sender
             .send(Target {
-                root: initial_root,
+                root: initial_verification_root,
+                ops_root: initial_root,
                 range: non_empty_range!(
                     initial_lower_bound.checked_sub(1).unwrap(),
                     initial_upper_bound.checked_add(1).unwrap()
@@ -647,6 +661,7 @@ where
         let initial_lower_bound = target_db.sync_boundary().await;
         let initial_upper_bound = target_db.bounds().await.end;
         let initial_root = H::sync_target_root(&target_db);
+        let initial_verification_root = H::target_root(&target_db);
 
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
@@ -656,7 +671,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
-                root: initial_root,
+                root: initial_verification_root,
+                ops_root: initial_root,
                 range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
@@ -672,7 +688,8 @@ where
         // Send target update with decreased upper bound
         update_sender
             .send(Target {
-                root: initial_root,
+                root: initial_verification_root,
+                ops_root: initial_root,
                 range: non_empty_range!(
                     initial_lower_bound,
                     initial_upper_bound.checked_sub(1).unwrap()
@@ -716,6 +733,7 @@ where
         let initial_lower_bound = target_db.sync_boundary().await;
         let initial_upper_bound = target_db.bounds().await.end;
         let initial_root = H::sync_target_root(&target_db);
+        let initial_verification_root = H::target_root(&target_db);
 
         // Apply more operations to the target database
         // (use different seed to avoid key collisions)
@@ -739,7 +757,8 @@ where
                 db_config: H::config(&context.next_u64().to_string(), &context),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
-                    root: initial_root,
+                    root: initial_verification_root,
+                    ops_root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
@@ -754,7 +773,8 @@ where
             // Send target update with increased bounds
             update_sender
                 .send(Target {
-                    root: new_sync_root,
+                    root: new_verification_root,
+                    ops_root: new_sync_root,
                     range: non_empty_range!(new_lower_bound, new_upper_bound),
                 })
                 .await
@@ -811,7 +831,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(20),
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -832,6 +853,7 @@ where
             .send(Target {
                 // Dummy target update
                 root: Digest::from([2u8; 32]),
+                ops_root: Digest::from([2u8; 32]),
                 range: non_empty_range!(lower_bound + 1, upper_bound + 1),
             })
             .await;
@@ -869,7 +891,8 @@ where
             "test setup requires lower bound that can advance twice"
         );
         let upper_bound = target_db.bounds().await.end;
-        let root = H::sync_target_root(&target_db);
+        let root = H::target_root(&target_db);
+        let ops_root = H::sync_target_root(&target_db);
 
         let (update_sender, update_receiver) = mpsc::channel(2);
         let target_db = Arc::new(target_db);
@@ -879,6 +902,7 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root,
+                ops_root,
                 range: non_empty_range!(initial_lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -893,10 +917,12 @@ where
 
         let first_target = Target {
             root,
+            ops_root,
             range: non_empty_range!(initial_lower_bound.checked_add(1).unwrap(), upper_bound),
         };
         let second_target = Target {
             root,
+            ops_root,
             range: non_empty_range!(initial_lower_bound.checked_add(2).unwrap(), upper_bound),
         };
         update_sender.send(first_target).await.unwrap();
@@ -930,7 +956,8 @@ where
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let initial_target = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -941,7 +968,8 @@ where
         let updated_lower_bound = target_db.sync_boundary().await;
         let updated_upper_bound = target_db.bounds().await.end;
         let updated_target = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(updated_lower_bound, updated_upper_bound),
         };
         let updated_verification_root = target_db.root();
@@ -1054,7 +1082,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops(8)).await;
         let initial_target = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1063,7 +1092,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
         let first_update = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1072,7 +1102,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 2)).await;
         let second_update = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1175,7 +1206,8 @@ where
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
         let target = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(lower_bound, upper_bound),
         };
         let verification_root = target_db.root();
@@ -1247,7 +1279,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
-                root: H::sync_target_root(&target_db),
+                root: H::target_root(&target_db),
+                ops_root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -1297,7 +1330,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: Target {
-                root: H::sync_target_root(&target_db),
+                root: H::target_root(&target_db),
+                ops_root: H::sync_target_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -1346,6 +1380,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         let initial_lower_bound = target_db.sync_boundary().await;
         let initial_upper_bound = target_db.bounds().await.end;
         let initial_sync_root = H::sync_target_root(&target_db);
+        let initial_verification_root = H::target_root(&target_db);
 
         // Wrap target database for shared mutable access (using Option so we can take ownership)
         let target_db = Arc::new(AsyncRwLock::new(Some(target_db)));
@@ -1358,7 +1393,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 context: context.child("client"),
                 db_config: H::config(&context.next_u64().to_string(), &context),
                 target: Target {
-                    root: initial_sync_root,
+                    root: initial_verification_root,
+                    ops_root: initial_sync_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
@@ -1402,7 +1438,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             // Send target update with new target
             update_sender
                 .send(Target {
-                    root: new_sync_root,
+                    root: new_verification_root,
+                    ops_root: new_sync_root,
                     range: non_empty_range!(new_lower_bound, new_upper_bound),
                 })
                 .await
@@ -1467,7 +1504,8 @@ where
             db_config: db_config.clone(),
             fetch_batch_size: NZU64!(5),
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.child("client"),
@@ -1525,6 +1563,7 @@ where
         target_db = H::apply_ops(target_db, target_ops).await;
 
         let sync_root = H::sync_target_root(&target_db);
+        let verification_root = H::target_root(&target_db);
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
         let target_db = Arc::new(target_db);
@@ -1534,7 +1573,8 @@ where
             db_config: config,
             fetch_batch_size: NZU64!(100),
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
@@ -1870,6 +1910,7 @@ where
             .unwrap();
 
         let sync_root = H::sync_target_root(&target_db);
+        let verification_root = H::target_root(&target_db);
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
 
@@ -1884,7 +1925,8 @@ where
             db_config,
             fetch_batch_size: NZU64!(100),
             target: Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.child("client"),
@@ -2016,7 +2058,8 @@ where
         }
 
         let old_target = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(
                 target_db.inactivity_floor_loc().await,
                 target_db.bounds().await.end
@@ -2025,7 +2068,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(3, seed + 1)).await;
         let new_target = Target {
-            root: H::sync_target_root(&target_db),
+            root: H::target_root(&target_db),
+            ops_root: H::sync_target_root(&target_db),
             range: non_empty_range!(
                 target_db.inactivity_floor_loc().await,
                 target_db.bounds().await.end

@@ -83,7 +83,7 @@ where
     matches!(
         peek,
         Ok(Some((_, journal_leaves, root)))
-            if journal_leaves == target.range.end() && root == target.root
+            if journal_leaves == target.range.end() && root == target.ops_root
     )
 }
 
@@ -210,6 +210,10 @@ macro_rules! impl_sync_database {
                     inactive_peaks,
                 )
                 .await
+            }
+
+            fn ops_root(&self) -> Self::Digest {
+                crate::qmdb::any::db::Db::root(self)
             }
 
             fn root(&self) -> Self::Digest {

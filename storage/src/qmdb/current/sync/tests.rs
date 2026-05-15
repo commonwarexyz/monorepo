@@ -3,14 +3,14 @@
 //! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
 //! implementing [SyncTestHarness] for current database types. The key difference from `any`
 //! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
-//! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
+//! [qmdb::sync::Database::ops_root](crate::qmdb::sync::Database::ops_root)), not the database root
 //! returned by `Db::root()`.
 //!
 //! Harnesses are instantiated for **both** MMR and MMB merkle families across each (ordered,
 //! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
 //!
 //! In addition to the shared harness-based suite, this module contains focused tests for
-//! `current`-specific sync behavior: overlay-state authentication (canonical-root check), pruned
+//! `current`-specific sync behavior: overlay-state authentication (database-root check), pruned
 //! MMB round-trip, and target-update regression coverage.
 
 use crate::qmdb::{
@@ -278,7 +278,7 @@ mod harnesses {
         type Db = UnorderedFixedDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            SyncDatabase::ops_root(db)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -325,7 +325,7 @@ mod harnesses {
         type Db = UnorderedVariableDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            SyncDatabase::ops_root(db)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -372,7 +372,7 @@ mod harnesses {
         type Db = OrderedFixedDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            SyncDatabase::ops_root(db)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -419,7 +419,7 @@ mod harnesses {
         type Db = OrderedVariableDb<F>;
 
         fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
+            SyncDatabase::ops_root(db)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -461,12 +461,12 @@ mod harnesses {
 }
 
 /// Regression test: sync a pruned MMB-backed current DB and verify the synced DB has the
-/// same canonical root, reopens cleanly, and returns the expected value.
+/// same database root, reopens cleanly, and returns the expected value.
 ///
 /// The target DB commits the same key 100 times, forcing the inactivity floor past a full
 /// 256-bit chunk boundary. Without overlay-state in the sync protocol, the receiver
 /// re-derives `pruned_chunks` from `range.start / chunk_bits` and builds a grafted tree
-/// whose pinned nodes don't match the sender's. The canonical roots diverge.
+/// whose pinned nodes don't match the sender's. The database roots diverge.
 #[test_traced("INFO")]
 fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
     let executor = deterministic::Runner::default();
@@ -514,7 +514,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 
         target_db.prune(target_db.sync_boundary()).await.unwrap();
 
-        let sync_root = SyncDatabase::root(&target_db);
+        let sync_root = SyncDatabase::ops_root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary();
         let upper_bound = target_db.bounds().await.end;
@@ -523,14 +523,15 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
         let target_db = std::sync::Arc::new(target_db);
         // This uses the shared sync engine's ops-root target directly. The focused
-        // `canonical_root_sync` tests below cover the current sync wrapper that authenticates ops
-        // roots against trusted canonical roots.
+        // `root_sync` tests below cover the current sync wrapper that authenticates ops
+        // roots against trusted database roots.
         let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
             target: crate::qmdb::sync::Target {
-                root: sync_root,
+                root: verification_root,
+                ops_root: sync_root,
                 range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
@@ -544,7 +545,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         .await
         .unwrap();
 
-        assert_eq!(SyncDatabase::root(&synced_db), sync_root);
+        assert_eq!(SyncDatabase::ops_root(&synced_db), sync_root);
         assert_eq!(synced_db.root(), verification_root);
         assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
@@ -554,7 +555,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let reopened: Db = Db::init(context.child("reopened"), client_config)
             .await
             .unwrap();
-        assert_eq!(SyncDatabase::root(&reopened), sync_root);
+        assert_eq!(SyncDatabase::ops_root(&reopened), sync_root);
         assert_eq!(reopened.root(), verification_root);
         assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
@@ -605,12 +606,14 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         let bounds = db.bounds().await;
         let local_start = bounds.start;
         let local_end = bounds.end;
-        let sync_root = SyncDatabase::root(&db);
+        let sync_root = SyncDatabase::ops_root(&db);
 
         assert!(local_start > crate::merkle::Location::new(0));
 
+        let root = db.root();
         let stale_target = crate::qmdb::sync::Target {
-            root: sync_root,
+            root,
+            ops_root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
@@ -623,7 +626,8 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         );
 
         let matching_target = crate::qmdb::sync::Target {
-            root: sync_root,
+            root,
+            ops_root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
@@ -789,7 +793,7 @@ current_sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
 
-mod canonical_root_sync {
+mod root_sync {
     use super::*;
     use crate::{
         merkle::mmr,
@@ -846,7 +850,7 @@ mod canonical_root_sync {
         let lower = db.sync_boundary();
         let upper = db.bounds().await.end;
         CurrentTarget {
-            canonical_root: db.root(),
+            root: db.root(),
             ops_root: db.ops_root(),
             witness,
             range: non_empty_range!(lower, upper),
@@ -854,12 +858,12 @@ mod canonical_root_sync {
     }
 
     #[test_traced("INFO")]
-    fn test_canonical_root_sync_succeeds() {
+    fn test_root_sync_succeeds() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let target_db = build_target_db(&mut context).await;
             let target = make_current_target(&target_db).await;
-            let canonical_root = target.canonical_root;
+            let root = target.root;
 
             let client_suffix = context.next_u64().to_string();
             let client_config =
@@ -882,7 +886,7 @@ mod canonical_root_sync {
             .await
             .unwrap();
 
-            assert_eq!(synced_db.root(), canonical_root);
+            assert_eq!(synced_db.root(), root);
 
             synced_db.destroy().await.unwrap();
             let target_db = std::sync::Arc::into_inner(target_db).unwrap();
@@ -891,7 +895,7 @@ mod canonical_root_sync {
     }
 
     #[test_traced("INFO")]
-    fn test_canonical_root_sync_tracks_target_update() {
+    fn test_root_sync_tracks_target_update() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let mut target_db = build_target_db(&mut context).await;
@@ -903,7 +907,7 @@ mod canonical_root_sync {
             }
             target_db.sync().await.unwrap();
             let updated_target = make_current_target(&target_db).await;
-            let expected_root = updated_target.canonical_root;
+            let expected_root = updated_target.root;
 
             let (update_sender, update_receiver) = commonware_utils::channel::mpsc::channel(1);
             let (finish_sender, finish_receiver) = commonware_utils::channel::mpsc::channel(1);
@@ -944,7 +948,7 @@ mod canonical_root_sync {
     }
 
     #[test_traced("INFO")]
-    fn test_canonical_root_sync_rejects_invalid_witness() {
+    fn test_root_sync_rejects_invalid_witness() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let target_db = build_target_db(&mut context).await;
@@ -988,7 +992,7 @@ mod canonical_root_sync {
     }
 
     #[test_traced("INFO")]
-    fn test_canonical_root_sync_rejects_invalid_update_witness() {
+    fn test_root_sync_rejects_invalid_update_witness() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let mut target_db = build_target_db(&mut context).await;
@@ -1048,12 +1052,12 @@ mod canonical_root_sync {
     /// future exits, update_tx must be dropped so the engine sees
     /// UpdateChannelClosed, and then finish completes sync.
     #[test_traced("INFO")]
-    fn test_canonical_root_sync_update_channel_close_unblocks_engine() {
+    fn test_root_sync_update_channel_close_unblocks_engine() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let target_db = build_target_db(&mut context).await;
             let target = make_current_target(&target_db).await;
-            let canonical_root = target.canonical_root;
+            let root = target.root;
 
             let client_suffix = context.next_u64().to_string();
             let client_config =
@@ -1086,7 +1090,7 @@ mod canonical_root_sync {
             finish_tx.send(()).await.unwrap();
 
             let synced_db: Db = sync_fut.await.unwrap();
-            assert_eq!(synced_db.root(), canonical_root);
+            assert_eq!(synced_db.root(), root);
 
             synced_db.destroy().await.unwrap();
             let target_db = std::sync::Arc::into_inner(target_db).unwrap();

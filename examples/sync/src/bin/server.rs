@@ -220,7 +220,7 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, sync_boundary, size) = {
+    let (ops_root, sync_boundary, size) = {
         let database = state.database.read().await;
         (
             database.root(),
@@ -231,7 +231,8 @@ where
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
-            root,
+            root: ops_root,
+            ops_root,
             range: non_empty_range!(sync_boundary, size),
         },
     };
@@ -754,7 +755,7 @@ where
 
 /// Run the Current database server.
 ///
-/// Uses `CurrentFullMode` to serve canonical-root-aware sync targets with an
+/// Uses `CurrentFullMode` to serve database-root-aware sync targets with an
 /// [OpsRootWitness](commonware_storage::qmdb::current::proof::OpsRootWitness).
 async fn run_current<E>(mut context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where

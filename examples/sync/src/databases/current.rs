@@ -2,15 +2,15 @@
 //!
 //! A `current` database extends an `any` database with an activity bitmap that tracks which
 //! operations are active (i.e. represent the current state of their key) vs inactive (superseded or
-//! deleted). Its canonical root folds the ops root, a grafted merkle root (combining bitmap chunks
+//! deleted). Its database root folds the ops root, a grafted merkle root (combining bitmap chunks
 //! with ops subtree roots), and an optional partial-chunk digest. See [current] module
 //! documentation for more details.
 //!
-//! For sync, the engine internally targets the **ops root** (not the canonical root). The
+//! For sync, the engine internally targets the **ops root** (not the database root). The
 //! operations and proof format are identical to `any`; direct proof verifiers should use
 //! `qmdb::hasher`. The bitmap is reconstructed deterministically from the operations after sync
 //! completes. The `current::sync` wrapper verifies each target's `OpsRootWitness` against its
-//! trusted canonical root, then checks the reconstructed canonical root for the target the
+//! trusted database root, then checks the reconstructed database root for the target the
 //! engine finishes on.
 //!
 //! This module re-uses the same [`Operation`] type as [`super::any`] since the underlying
@@ -194,7 +194,7 @@ pub async fn current_sync_target<E: Storage + Clock + Metrics>(
     let sync_boundary = db.sync_boundary();
     let size = db.bounds().await.end;
     Ok(CurrentTarget {
-        canonical_root: db.root(),
+        root: db.root(),
         ops_root: db.ops_root(),
         witness,
         range: non_empty_range!(sync_boundary, size),
