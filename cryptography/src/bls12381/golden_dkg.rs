@@ -547,11 +547,14 @@ pub fn deal(
         strategy,
     );
 
-    Ok(DealerLog {
-        dealing: Dealing::reckon(info, nonce, poly, masks)?,
-        commitments,
-    }
-    .sign(me, info))
+    Ok(SignedDealerLog::sign(
+        me,
+        info,
+        DealerLog {
+            dealing: Dealing::reckon(info, nonce, poly, masks)?,
+            commitments,
+        },
+    ))
 }
 
 struct Selection {
@@ -792,6 +795,17 @@ impl Read for SignedDealerLog {
 }
 
 impl SignedDealerLog {
+    fn sign(signer: &PrivateKey, info: &Info, log: DealerLog) -> Self {
+        let dealer = signer.public();
+        let msg = Self::signature_message(info, &log);
+        let signature = signer.sign(NAMESPACE, &msg);
+        Self {
+            dealer,
+            signature,
+            log,
+        }
+    }
+
     /// Verify the signature against a specific round [`Info`] and extract the
     /// dealer's public key and log.
     ///
@@ -892,17 +906,6 @@ impl DealerLog {
                 Some((d, dealing))
             })
             .collect()
-    }
-
-    fn sign(self, signer: &PrivateKey, info: &Info) -> SignedDealerLog {
-        let dealer = signer.public();
-        let msg = SignedDealerLog::signature_message(info, &self);
-        let signature = signer.sign(NAMESPACE, &msg);
-        SignedDealerLog {
-            dealer,
-            signature,
-            log: self,
-        }
     }
 }
 
@@ -1374,11 +1377,14 @@ mod test_plan {
                         );
                         let dealing = Dealing::reckon(&info, nonce, poly, masks)
                             .expect("reckon should succeed");
-                        DealerLog {
-                            dealing,
-                            commitments,
-                        }
-                        .sign(dk, &info)
+                        SignedDealerLog::sign(
+                            dk,
+                            &info,
+                            DealerLog {
+                                dealing,
+                                commitments,
+                            },
+                        )
                     } else {
                         deal(&mut rng, setup, &info, dk, share, strategy)
                             .map_err(|e| anyhow::anyhow!("{e:?}"))?
