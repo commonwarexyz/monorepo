@@ -9,6 +9,9 @@ use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
 use rand::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
+/// Mailbox type returned by the marshal resolver.
+pub type Mailbox<D, P> = p2p::Mailbox<handler::Request<D>, P, handler::ResolverSubscriber<D>>;
+
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
 pub struct Config<P, C, B>
 where
@@ -51,7 +54,7 @@ pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
-) -> (handler::Receiver<D>, p2p::Mailbox<handler::Request<D>, P>)
+) -> (handler::Receiver<D>, Mailbox<D, P>)
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,

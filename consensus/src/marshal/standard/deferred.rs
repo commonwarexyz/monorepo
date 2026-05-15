@@ -41,15 +41,19 @@
 //!   while subsequent epochs use the last block of the previous epoch as genesis
 //! - Blocks are automatically verified to be within the current epoch
 //!
-//! # Notarization and Data Availability
+//! # Certification and Data Availability
 //!
 //! In rare crash cases, it is possible for a notarization certificate to exist without a block being
 //! available to the honest parties if [`CertifiableAutomaton::certify`] fails after a notarization is
 //! formed.
 //!
-//! For this reason, it should not be expected that every notarized payload will be certifiable due
-//! to the lack of an available block. However, if even one honest and online party has the block,
-//! they will attempt to forward it to others via marshal's resolver.
+//! For this reason, it should not be expected that every certified payload will be finalizable due
+//! to the lack of an available block. Certification waits for local availability of the candidate
+//! proposal data and does not fetch a missing candidate block. During certification, once the
+//! candidate is locally available, its parent chain may be fetched because Simplex only verifies
+//! and proposes against certified parents. A certification path that did not run local
+//! verification may use the block's embedded context for that fetch; this is safe because honest
+//! validators checked the certified context before the certification path can succeed.
 //!
 //! ```text
 //!                                      ┌───────────────────────────────────────────────────┐
@@ -72,12 +76,11 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::{
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
         },
-        core::Mailbox,
+        core::{CommitmentRequest, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -123,9 +126,9 @@ use tracing::debug;
 /// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
 ///
-/// Verifying only the immediate parent is sufficient since the parent itself must have
-/// been notarized by consensus, which guarantees it was verified and accepted by a quorum.
-/// This means the entire ancestry chain back to genesis is transitively validated.
+/// Verifying only the immediate parent is sufficient since Simplex only builds on
+/// certified parents. This means the entire ancestry chain back to genesis is
+/// transitively validated and safe to fetch if it is missing locally.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 ///
@@ -135,8 +138,8 @@ use tracing::debug;
 /// before voting. If a validator crashes after voting but before certification, they lose their in-memory
 /// verification task. When recovering, validators extract context from a [`CertifiableBlock`].
 ///
-/// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
-/// validators) verified that the block's context matched the consensus context before voting._
+/// _This embedded context is trustworthy because the quorum that certified the block contains at least
+/// f+1 honest validators that verified the block's context matched the consensus context before voting._
 pub struct Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -364,10 +367,13 @@ where
             let (parent_view, parent_digest) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_digest,
-                // We are guaranteed that the parent round for any `consensus_context` is
-                // in the same epoch (recall, the boundary block of the previous epoch
-                // is the genesis block of the current epoch).
-                Some(Round::new(consensus_context.epoch(), parent_view)),
+                // Proposal context carries the certified parent
+                // view/commitment but not the parent height. The parent may be
+                // certified above the finalized tip, so this must stay
+                // round-bound until the block is returned.
+                CommitmentRequest::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
                 &mut application,
                 &mut marshal,
             )
@@ -417,7 +423,7 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let ancestor_stream = marshal.ancestor_stream([parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -482,9 +488,8 @@ where
             .child("optimistic_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
-                let block_request = marshal
-                    .subscribe_by_digest(Some(context.round), digest);
-                let block = select! {
+            let block_request = marshal.subscribe_by_commitment(digest, CommitmentRequest::Wait);
+            let block = select! {
                     _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
@@ -497,7 +502,7 @@ where
                         Err(_) => {
                             debug!(
                                 ?digest,
-                                reason = "failed to fetch block for optimistic verification",
+                                reason = "block unavailable for optimistic verification",
                                 "skipping optimistic verification"
                             );
                             return;
@@ -544,7 +549,7 @@ where
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.
                 //
-                // This is a critical step - the notarize quorum is guaranteed to have at least
+                // This is a critical step - the certifying quorum is guaranteed to have at least
                 // f+1 honest validators who will verify against this context, preventing a Byzantine
                 // proposer from embedding a malicious context. The other f honest validators who did
                 // not vote will later use the block-embedded context to help finalize if Byzantine
@@ -590,16 +595,22 @@ where
         // No in-progress task means we never verified this proposal locally. We can use the
         // block's embedded context to help complete finalization when Byzantine validators
         // withhold their finalize votes. If a Byzantine proposer embedded a malicious context,
-        // the f+1 honest validators from the notarizing quorum will verify against the proper
+        // the f+1 honest validators from the certifying quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
-        // Subscribe to the block and verify using its embedded context once available.
+        // Wait for the candidate block locally, then verify using its embedded
+        // context. Candidate data is not fetched just because it was notarized.
+        // The later parent fetch is safe because certification works over
+        // certified ancestry: honest validators checked the same block digest
+        // against the consensus context and certified its parent.
         debug!(
             ?round,
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest);
+        let block_rx = self
+            .marshal
+            .subscribe_by_commitment(digest, CommitmentRequest::Wait);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -623,7 +634,7 @@ where
                     Err(_) => {
                         debug!(
                             ?digest,
-                            reason = "failed to fetch block for certification",
+                            reason = "block unavailable for certification",
                             "skipping certification"
                         );
                         return;

@@ -44,9 +44,8 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::validation::Stage,
-        core::Mailbox,
+        core::{CommitmentRequest, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -78,8 +77,9 @@ use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
 use tracing::debug;
 
-/// Tracks `(round, digest)` pairs for which `verify` has already fetched the
-/// block, so `certify` can return immediately without re-subscribing to marshal.
+/// Tracks `(round, digest)` pairs for which `verify` has already observed and
+/// persisted the block, so `certify` can return immediately without
+/// re-subscribing to marshal.
 type AvailableBlocks<D> = Arc<Mutex<BTreeSet<(Round, D)>>>;
 
 /// Waits for a marshal block subscription while allowing consensus to cancel the work.
@@ -106,7 +106,7 @@ where
                 debug!(
                     stage,
                     ?digest,
-                    reason = "failed to fetch block",
+                    reason = "block unavailable",
                     "skipping block wait"
                 );
             }
@@ -277,10 +277,13 @@ where
             let (parent_view, parent_digest) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_digest,
-                // We are guaranteed that the parent round for any `consensus_context` is
-                // in the same epoch (recall, the boundary block of the previous epoch
-                // is the genesis block of the current epoch).
-                Some(Round::new(consensus_context.epoch(), parent_view)),
+                // Proposal context carries the certified parent
+                // view/commitment but not the parent height. The parent may be
+                // certified above the finalized tip, so this must stay
+                // round-bound until the block is returned.
+                CommitmentRequest::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
                 &mut application,
                 &mut marshal,
             )
@@ -328,7 +331,7 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let ancestor_stream = marshal.ancestor_stream([parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -380,7 +383,7 @@ where
     /// Performs complete verification inline.
     ///
     /// This method:
-    /// 1. Fetches the block by digest
+    /// 1. Waits for local block availability by digest
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
     /// 4. Runs application verification over ancestry
@@ -405,7 +408,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal.subscribe_by_digest(Some(context.round), digest);
+            let block_request = marshal.subscribe_by_commitment(digest, CommitmentRequest::Wait);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -493,7 +496,9 @@ where
         }
 
         // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest);
+        let block_rx = self
+            .marshal
+            .subscribe_by_commitment(digest, CommitmentRequest::Wait);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -616,7 +621,7 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_certify_returns_immediately_after_verify_fetches_block() {
+    fn test_certify_returns_immediately_after_verify_persists_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -686,7 +691,7 @@ mod tests {
                 result = certify_rx => {
                     assert!(
                         result.unwrap(),
-                        "certify should return immediately once verify has fetched the block"
+                        "certify should return immediately once verify has persisted the block"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {

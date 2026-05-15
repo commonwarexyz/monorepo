@@ -77,12 +77,12 @@ mod tests {
                     CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE,
                     NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK, V,
                 },
-                verifying::MockVerifyingApp,
+                verifying::{AncestryVerifyingApp, MockVerifyingApp},
             },
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton,
+        Automaton, CertifiableAutomaton, CertifiableBlock,
     };
     use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
@@ -198,8 +198,8 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_rejects_block_delivery_below_floor() {
-        harness::reject_stale_block_delivery_after_floor_update::<CodingHarness>();
+    fn test_coding_ignores_block_delivery_below_floor() {
+        harness::ignore_stale_block_delivery_after_floor_update::<CodingHarness>();
     }
 
     #[test_traced("WARN")]
@@ -364,6 +364,128 @@ mod tests {
             assert!(
                 parent.is_some(),
                 "parent must be archived from shard buffer before height-prune evicts it"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_marshaled_fetches_digest_ancestor_above_tip() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
+
+            let victim_setup = CodingHarness::setup_validator(
+                context.child("victim"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let peer_setup = CodingHarness::setup_validator(
+                context.child("peer"),
+                &mut oracle,
+                participants[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            let mut peer_handle = harness::ValidatorHandle::<CodingHarness> {
+                mailbox: peer_setup.mailbox,
+                extra: peer_setup.extra,
+            };
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let block1 = CodingHarness::make_test_block(
+                genesis.digest(),
+                genesis_commitment(),
+                Height::new(1),
+                100,
+                NUM_VALIDATORS as u16,
+            );
+            let block2 = CodingHarness::make_test_block(
+                CodingHarness::digest(&block1),
+                CodingHarness::commitment(&block1),
+                Height::new(2),
+                200,
+                NUM_VALIDATORS as u16,
+            );
+            let block3 = CodingHarness::make_test_block(
+                CodingHarness::digest(&block2),
+                CodingHarness::commitment(&block2),
+                Height::new(3),
+                300,
+                NUM_VALIDATORS as u16,
+            );
+            let round1 = Round::new(Epoch::zero(), View::new(1));
+            let round2 = Round::new(Epoch::zero(), View::new(2));
+            let round3 = Round::new(Epoch::zero(), View::new(3));
+
+            for (round, parent_view, block) in [
+                (round1, View::zero(), block1.clone()),
+                (round2, View::new(1), block2.clone()),
+                (round3, View::new(2), block3.clone()),
+            ] {
+                CodingHarness::propose(&mut peer_handle, round, &block).await;
+                let notarization = CodingHarness::make_notarization(
+                    Proposal {
+                        round,
+                        parent: parent_view,
+                        payload: CodingHarness::commitment(&block),
+                    },
+                    &schemes,
+                    QUORUM,
+                );
+                CodingHarness::report_notarization(&mut peer_handle.mailbox, notarization).await;
+            }
+            context.sleep(Duration::from_millis(100)).await;
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+            let victim_mailbox = victim_setup.mailbox.clone();
+            assert!(victim_mailbox.verified(round3, block3.clone()).await);
+
+            let app = AncestryVerifyingApp::<CodingB, S>::new(
+                genesis,
+                vec![Height::new(3), Height::new(2), Height::new(1)],
+            );
+            let cfg = MarshaledConfig {
+                application: app,
+                marshal: victim_setup.mailbox.clone(),
+                shards: victim_setup.extra.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let commitment = CodingHarness::commitment(&block3);
+            let _verify = marshaled.verify(block3.context(), commitment).await;
+            let certify = marshaled.certify(round3, commitment).await;
+            assert!(
+                certify.await.expect("certify result missing"),
+                "coding certify should fetch certified ancestry by digest"
+            );
+
+            assert!(
+                victim_mailbox.get_block(&block2.digest()).await.is_some(),
+                "coding certify should fetch the certified parent by digest"
+            );
+            assert!(
+                victim_mailbox.get_block(&block1.digest()).await.is_some(),
+                "coding certify should fetch missing certified ancestry by digest"
             );
         });
     }
@@ -1021,7 +1143,11 @@ mod tests {
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
-            let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
+            let block_rx = marshal
+                .subscribe_by_commitment(
+                    missing_commitment,
+                    crate::marshal::core::CommitmentRequest::FetchByRound { round },
+                );
 
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
@@ -1566,7 +1692,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Regression: when backfilling by Request::Block(digest), a peer may return
+        // Regression: when backfilling by Request::Block(commitment), a peer may return
         // a coded block with matching inner digest but a different coding commitment.
         // If a finalization for this digest is already cached, marshal must reject
         // the block unless V::commitment(block) matches the finalization payload.
@@ -1652,7 +1778,7 @@ mod tests {
             let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - it fetches Request::Block(digest)
+            //   - it fetches Request::Block(commitment_a)
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
             //   - finalization lookup is digest-indexed, so deliver path must still
             //     reject because cached finalization expects commitment_a

@@ -44,7 +44,7 @@ mod tests {
     use crate::{
         marshal::{
             config::Config,
-            core::{cache, Actor, Mailbox},
+            core::{cache, Actor, CommitmentRequest, Mailbox},
             mocks::{
                 application::Application,
                 harness::{
@@ -54,7 +54,7 @@ mod tests {
                     BLOCKS_PER_EPOCH, D, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
                     PAGE_SIZE, QUORUM, S, UNRELIABLE_LINK, V,
                 },
-                verifying::MockVerifyingApp,
+                verifying::{AncestryVerifyingApp, MockVerifyingApp},
             },
             resolver::handler,
             Identifier, Update,
@@ -81,7 +81,7 @@ mod tests {
         Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::Resolver;
+    use commonware_resolver::{Resolver, Subscribers};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
@@ -234,9 +234,9 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_reject_stale_block_delivery_after_floor_update() {
-        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
-        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
+    fn test_standard_ignore_stale_block_delivery_after_floor_update() {
+        harness::ignore_stale_block_delivery_after_floor_update::<InlineHarness>();
+        harness::ignore_stale_block_delivery_after_floor_update::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -1040,6 +1040,49 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_cache_load_persisted_epochs_finds_certified_blocks_by_height() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let prefix = "test-certified-by-height-cache";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let digest = block.digest();
+
+            {
+                let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                mgr.put_certified_block_by_height(
+                    Epoch::zero(),
+                    block.height(),
+                    digest,
+                    block.clone(),
+                )
+                .await;
+            }
+
+            let mut mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
+                    .await;
+            assert_eq!(mgr.find_block(digest).await, None);
+
+            mgr.load_persisted_epochs().await;
+            assert_eq!(mgr.find_block(digest).await, Some(block));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_get_block_by_commitment_from_sources_and_missing() {
         harness::get_block_by_commitment_from_sources_and_missing::<InlineHarness>();
         harness::get_block_by_commitment_from_sources_and_missing::<DeferredHarness>();
@@ -1082,9 +1125,9 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_standard_rejects_block_delivery_below_floor() {
-        harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
-        harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
+    fn test_standard_ignores_block_delivery_below_floor() {
+        harness::ignore_stale_block_delivery_after_floor_update::<InlineHarness>();
+        harness::ignore_stale_block_delivery_after_floor_update::<DeferredHarness>();
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1157,6 +1200,206 @@ mod tests {
                 Self::Deferred(deferred) => deferred.certify(round, digest).await,
             }
         }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_verify_waits_for_pending_block_without_fetch() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(3),
+                    participants.clone(),
+                )
+                .await;
+
+                let victim = participants[0].clone();
+                let peer = participants[1].clone();
+                let victim_setup = StandardHarness::setup_validator(
+                    context.child("victim"),
+                    &mut oracle,
+                    victim.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let mut peer_mailbox = StandardHarness::setup_validator(
+                    context.child("peer"),
+                    &mut oracle,
+                    peer.clone(),
+                    ConstantProvider::new(schemes[1].clone()),
+                )
+                .await
+                .mailbox;
+
+                setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let round1 = Round::new(Epoch::zero(), View::new(1));
+
+                let ctx1 = Ctx {
+                    round: round1,
+                    leader: victim.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let block1 = B::new::<Sha256>(ctx1.clone(), genesis.digest(), Height::new(1), 100);
+                assert!(peer_mailbox.verified(round1, block1.clone()).await);
+                let notarization = StandardHarness::make_notarization(
+                    Proposal::new(round1, View::zero(), block1.digest()),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_notarization(&mut peer_mailbox, notarization).await;
+                context.sleep(Duration::from_millis(100)).await;
+
+                let app = MockVerifyingApp::<B, S>::new(genesis);
+                let victim_mailbox = victim_setup.mailbox.clone();
+                let marshal = victim_setup.mailbox;
+                let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, marshal);
+                let verify = wrapper.verify(ctx1, block1.digest()).await;
+
+                select! {
+                    result = verify => {
+                        panic!(
+                            "verify should wait for local block availability, got {:?}",
+                            result
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {},
+                }
+
+                assert!(
+                    victim_mailbox.get_block(&block1.digest()).await.is_none(),
+                    "verify must not fetch pending proposal data before certification"
+                );
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_deferred_certify_fetches_digest_ancestor_above_tip() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
+
+            let victim = participants[0].clone();
+            let peer = participants[1].clone();
+            let victim_setup = StandardHarness::setup_validator(
+                context.child("victim"),
+                &mut oracle,
+                victim.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mut peer_mailbox = StandardHarness::setup_validator(
+                context.child("peer"),
+                &mut oracle,
+                peer,
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await
+            .mailbox;
+
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let round1 = Round::new(Epoch::zero(), View::new(1));
+            let round2 = Round::new(Epoch::zero(), View::new(2));
+            let round3 = Round::new(Epoch::zero(), View::new(3));
+
+            let ctx1 = Ctx {
+                round: round1,
+                leader: victim.clone(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let block1 = B::new::<Sha256>(ctx1, genesis.digest(), Height::new(1), 100);
+            let ctx2 = Ctx {
+                round: round2,
+                leader: victim.clone(),
+                parent: (View::new(1), block1.digest()),
+            };
+            let block2 = B::new::<Sha256>(ctx2, block1.digest(), Height::new(2), 200);
+            let ctx3 = Ctx {
+                round: round3,
+                leader: victim,
+                parent: (View::new(2), block2.digest()),
+            };
+            let block3 = B::new::<Sha256>(ctx3.clone(), block2.digest(), Height::new(3), 300);
+
+            for (round, parent_view, block) in [
+                (round1, View::zero(), block1.clone()),
+                (round2, View::new(1), block2.clone()),
+                (round3, View::new(2), block3.clone()),
+            ] {
+                assert!(peer_mailbox.verified(round, block.clone()).await);
+                let notarization = StandardHarness::make_notarization(
+                    Proposal::new(round, parent_view, block.digest()),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_notarization(&mut peer_mailbox, notarization).await;
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            let victim_mailbox = victim_setup.mailbox.clone();
+            assert!(victim_mailbox.verified(round3, block3.clone()).await);
+
+            let app = AncestryVerifyingApp::<B, S>::new(
+                genesis,
+                vec![Height::new(3), Height::new(2), Height::new(1)],
+            );
+            let block1_digest = block1.digest();
+            let block2_digest = block2.digest();
+            let marshal = victim_setup.mailbox;
+            let mut wrapper = Deferred::new(
+                context.child("deferred"),
+                app,
+                marshal,
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+            let verify = wrapper.verify(ctx3, block3.digest()).await;
+            assert!(
+                verify.await.expect("optimistic verify result missing"),
+                "deferred verify should pass optimistic pre-checks"
+            );
+            let certify = wrapper.certify(round3, block3.digest()).await;
+            assert!(
+                certify.await.expect("certify result missing"),
+                "certify should fetch certified ancestry by digest"
+            );
+
+            assert!(
+                victim_mailbox.get_block(&block2_digest).await.is_some(),
+                "certify should fetch the certified parent by digest"
+            );
+            assert!(
+                victim_mailbox.get_block(&block1_digest).await.is_some(),
+                "certify should fetch missing certified ancestry by digest"
+            );
+            assert!(
+                victim_mailbox.get_block(Height::new(1)).await.is_none(),
+                "certify must not store fetched ancestry as finalized"
+            );
+        });
     }
 
     #[test_traced("WARN")]
@@ -1672,14 +1915,17 @@ mod tests {
 
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
     type TargetedFetch = (handler::Request<D>, NonEmptyVec<PublicKey>);
+    /// Recorded non-targeted resolver fetch.
+    type ResolverFetch = handler::Request<D>;
 
-    /// A resolver that records each `fetch_targeted` invocation; other
+    /// A resolver that records fetch invocations; cancellation and retention
     /// methods are no-ops.
     ///
     /// `_keepalive` optionally retains a resolver-message sender so the
     /// actor's corresponding receiver stays alive when nothing else owns it.
     #[derive(Clone, Default)]
     struct RecordingResolver {
+        fetches: Arc<Mutex<Vec<ResolverFetch>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         _keepalive: Option<mailbox::Sender<handler::Message<D>>>,
     }
@@ -1690,10 +1936,19 @@ mod tests {
             (
                 handler::Receiver::new(receiver),
                 Self {
+                    fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     _keepalive: Some(sender),
                 },
             )
+        }
+
+        fn all_fetches_are_empty(&self) -> bool {
+            self.fetches.lock().is_empty() && self.targeted.lock().is_empty()
+        }
+
+        fn fetches(&self) -> Vec<ResolverFetch> {
+            self.fetches.lock().clone()
         }
 
         fn targeted(&self) -> Vec<TargetedFetch> {
@@ -1707,30 +1962,50 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = handler::Request<D>;
+        type Subscriber = handler::ResolverSubscriber<D>;
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, _key: Self::Key) -> Feedback {
+        fn fetch<R>(&mut self, request: R) -> Feedback
+        where
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
+        {
+            let key = request.into().request;
+            self.fetches.lock().push(key);
             Feedback::Ok
         }
 
-        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
+        fn fetch_all<R>(&mut self, requests: Vec<R>) -> Feedback
+        where
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.fetches
+                .lock()
+                .extend(requests.into_iter().map(|request| request.into().request));
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            key: Self::Key,
+            request: impl Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
+            let key = request.into().request;
             self.targeted.lock().push((key, targets));
             Feedback::Ok
         }
 
-        fn fetch_all_targeted(
+        fn fetch_all_targeted<R>(
             &mut self,
-            requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback {
-            self.targeted.lock().extend(requests);
+            requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.targeted.lock().extend(
+                requests
+                    .into_iter()
+                    .map(|(request, targets)| (request.into().request, targets)),
+            );
             Feedback::Ok
         }
 
@@ -1742,7 +2017,10 @@ mod tests {
             Feedback::Ok
         }
 
-        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
             Feedback::Ok
         }
     }
@@ -1904,9 +2182,210 @@ mod tests {
         (mailbox, buffer, resolver, actor_handle)
     }
 
+    #[test_traced("WARN")]
+    fn test_standard_propose_parent_fetches_by_round_when_height_unknown() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
+                let partition_prefix = format!("proposal-parent-round-fetch-{kind:?}-{me}");
+                let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context
+                        .child("validator")
+                        .with_attribute("kind", format!("{kind:?}")),
+                    &partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::default(),
+                    RecordingBuffer::default(),
+                )
+                .await;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let app = MockVerifyingApp::<B, S>::new(genesis.clone());
+                let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, mailbox);
+
+                let parent_round = Round::new(Epoch::zero(), View::new(1));
+                let parent_digest = Sha256::hash(b"certified-parent");
+                let proposal_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(2)),
+                    leader: me,
+                    parent: (parent_round.view(), parent_digest),
+                };
+                let _proposal = wrapper.propose(proposal_context).await;
+
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "proposal parent fetch",
+                    || !resolver.fetches().is_empty(),
+                )
+                .await;
+
+                let fetches = resolver.fetches();
+                assert_eq!(fetches.len(), 1, "proposal should issue one fetch");
+                match fetches[0] {
+                    handler::Request::Notarized { round } => {
+                        assert_eq!(round, parent_round);
+                    }
+                    _ => panic!("proposal parent fetch must be round-bound"),
+                }
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "proposal parent fetch should not be targeted"
+                );
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_verify_parent_fetches_by_height_when_child_available() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
+                let partition_prefix = format!("verify-parent-height-fetch-{kind:?}-{me}");
+                let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context
+                        .child("validator")
+                        .with_attribute("kind", format!("{kind:?}")),
+                    &partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::default(),
+                    RecordingBuffer::default(),
+                )
+                .await;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let app = MockVerifyingApp::<B, S>::new(genesis);
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), app, mailbox.clone());
+
+                let parent_digest = Sha256::hash(b"missing-certified-parent");
+                let round = Round::new(Epoch::zero(), View::new(2));
+                let verify_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::new(1), parent_digest),
+                };
+                let block =
+                    B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
+                let digest = block.digest();
+                assert!(mailbox.verified(round, block).await);
+
+                let _verify = wrapper.verify(verify_context, digest).await;
+
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "verification parent fetch",
+                    || !resolver.fetches().is_empty(),
+                )
+                .await;
+
+                let fetches = resolver.fetches();
+                assert_eq!(
+                    fetches.len(),
+                    1,
+                    "verification should issue one parent fetch"
+                );
+                match fetches[0] {
+                    handler::Request::Block { commitment } => {
+                        assert_eq!(commitment, parent_digest);
+                    }
+                    _ => panic!("verification parent fetch must be height-bound commitment fetch"),
+                }
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "verification parent fetch should not be targeted"
+                );
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_ancestry_subscription_uses_local_finalized_archive_without_fetch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let partition_prefix = format!("local-finalized-ancestry-{me}");
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), block.digest()),
+                &schemes,
+                QUORUM,
+            );
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                &partition_prefix,
+                &[block.clone()],
+                &[(block.height(), finalization)],
+            )
+            .await;
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                RecordingBuffer::default(),
+            )
+            .await;
+
+            assert!(
+                resolver.all_fetches_are_empty(),
+                "startup should not fetch because finalized block data is local"
+            );
+
+            let rx = mailbox
+                .subscribe_by_commitment(
+                    block.digest(),
+                    CommitmentRequest::FetchByCommitment {
+                        height: block.height(),
+                    },
+                );
+            let received = select! {
+                result = rx => result.expect("local finalized block subscription dropped"),
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("local finalized block did not satisfy ancestry subscription");
+                }
+            };
+
+            assert_eq!(received.digest(), block.digest());
+            assert_eq!(received.height(), block.height());
+            assert!(
+                resolver.all_fetches_are_empty(),
+                "locally finalized ancestry block must not trigger resolver fetch"
+            );
+        });
+    }
+
     /// When the provider has no verifier for an epoch, in-flight deliveries
-    /// for that epoch must be acknowledged (`true`) so the serving peer is
-    /// not blamed, rather than rejected (`false`).
+    /// for that epoch must complete so the serving peer is not blamed.
     #[test_traced("WARN")]
     fn test_standard_stale_finalized_delivery_does_not_block_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2014,13 +2493,15 @@ mod tests {
 
             // Inject a Finalized delivery with garbage payload. The
             // provider has no verifier, so the marshal cannot decode it and
-            // must ack (true) rather than blame the peer (false).
+            // must complete delivery rather than blame the peer.
             let (response, response_rx) = oneshot::channel();
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
-                    key: handler::Request::Finalized {
-                        height: Height::new(5),
-                    },
+                    subscribers: commonware_resolver::Subscribers::new(
+                        handler::Request::Finalized {
+                            height: Height::new(5),
+                        },
+                    ),
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
@@ -2031,9 +2512,11 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
-                    key: handler::Request::Notarized {
-                        round: Round::new(Epoch::zero(), View::new(1)),
-                    },
+                    subscribers: commonware_resolver::Subscribers::new(
+                        handler::Request::Notarized {
+                            round: Round::new(Epoch::zero(), View::new(1)),
+                        },
+                    ),
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })

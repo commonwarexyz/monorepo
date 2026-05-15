@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{p2p::Producer, Consumer, Subscribers};
 use commonware_utils::{channel::oneshot, Span};
 use std::{
     collections::VecDeque,
@@ -22,11 +22,11 @@ const NOTARIZED_REQUEST: u8 = 2;
 pub(crate) enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
-        /// The key of the value being delivered.
-        key: Request<D>,
+        /// The subscribers attached to the resolved value.
+        subscribers: Subscribers<Request<D>, ResolverSubscriber<D>>,
         /// The value being delivered.
         value: Bytes,
-        /// A channel to send the result of the delivery (true for success).
+        /// A channel to send the result of the delivery.
         response: oneshot::Sender<bool>,
     },
     /// A request to produce a value for a given key.
@@ -127,12 +127,17 @@ impl<D: Digest> Receiver<D> {
 
 impl<D: Digest> Consumer for Handler<D> {
     type Key = Request<D>;
+    type Subscriber = ResolverSubscriber<D>;
     type Value = Bytes;
 
-    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+    fn deliver(
+        &mut self,
+        subscribers: Subscribers<Self::Key, Self::Subscriber>,
+        value: Self::Value,
+    ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Deliver {
-            key,
+            subscribers,
             value,
             response,
         });
@@ -150,39 +155,134 @@ impl<D: Digest> Producer for Handler<D> {
     }
 }
 
+/// Local processing context for a resolved block request.
+///
+/// The resolver request key is the peer-visible lookup. A subscriber is local
+/// metadata attached to that lookup so marshal can decide how to process the
+/// response after validating it against the request key. Multiple local
+/// subscribers may share one peer request when they depend on the same block.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum BlockFetchContext {
+    /// A block requested only to satisfy certified ancestry verification.
+    ///
+    /// The expected height is known before the request from the child block.
+    Ancestry { height: Height },
+    /// A block requested from a certified round whose height is not known until
+    /// the response block is decoded.
+    ///
+    /// This covers certified parent fetches by round and finalized-block fetches
+    /// where the finalization names a commitment but not a height.
+    Finalized { round: Round },
+    /// A block requested while repairing an internal finalized-chain gap.
+    ///
+    /// The expected height is known before the request from the gap boundary.
+    Repair { height: Height },
+}
+
 /// A request for backfilling data.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum Request<D: Digest> {
-    Block(D),
-    Finalized { height: Height },
-    Notarized { round: Round },
+    /// Fetch a block by consensus commitment.
+    Block {
+        commitment: D,
+    },
+    Finalized {
+        height: Height,
+    },
+    Notarized {
+        round: Round,
+    },
 }
 
 impl<D: Digest> Request<D> {
     /// The subject of the request.
     const fn subject(&self) -> u8 {
         match self {
-            Self::Block(_) => BLOCK_REQUEST,
+            Self::Block { .. } => BLOCK_REQUEST,
             Self::Finalized { .. } => FINALIZED_REQUEST,
             Self::Notarized { .. } => NOTARIZED_REQUEST,
         }
     }
+}
 
+/// A local subscriber for a resolver fetch.
+///
+/// `Request` is the default subscriber: the resolved response is valid for the
+/// peer-visible request, but there is no extra local storage context. `Block`
+/// records why marshal asked for a block so delivery can notify local waiters,
+/// populate the certified ancestry cache, or finalize repaired data without
+/// exposing that context to peers.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ResolverSubscriber<D: Digest> {
+    /// A peer-visible request.
+    Request(Request<D>),
+    /// A locally annotated block fetch.
+    Block {
+        commitment: D,
+        context: BlockFetchContext,
+    },
+}
+
+impl<D: Digest> ResolverSubscriber<D> {
     /// The predicate to use when pruning subjects related to this subject.
     ///
-    /// Specifically, any subjects unrelated will be left unmodified. Any related
-    /// subjects will be pruned if they are "less than or equal to" this subject.
+    /// Unrelated subjects are retained. Related subjects are pruned if they are
+    /// "less than or equal to" this subscriber's floor. This keeps pending
+    /// candidate waits out of the resolver entirely, drops height-bound block
+    /// requests once the processed height reaches them, and drops round-bound
+    /// certified-parent fetches once the processed round reaches them.
     pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
-        let cloned = self.clone();
-        move |s| match (&cloned, &s) {
-            (Self::Block(_), _) => unreachable!("we should never retain by block"),
-            (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
-                *theirs > *mine
-            }
-            (Self::Finalized { .. }, _) => true,
-            (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => *theirs > *mine,
-            (Self::Notarized { .. }, _) => true,
+        let cloned = *self;
+        move |s| match (&cloned, s) {
+            (
+                Self::Block {
+                    commitment: mine,
+                    context: mine_context,
+                },
+                Self::Block {
+                    commitment: theirs,
+                    context: their_context,
+                },
+            ) => mine != theirs || mine_context != their_context,
+            (Self::Request(Request::Block { commitment: mine }), _) => match s {
+                Self::Request(Request::Block { commitment })
+                | Self::Block { commitment, .. } => commitment != mine,
+                _ => true,
+            },
+            (Self::Block { .. }, _) => true,
+            (
+                Self::Request(Request::Finalized { height: mine }),
+                Self::Request(Request::Finalized { height: theirs }),
+            ) => *theirs > *mine,
+            (
+                Self::Request(Request::Finalized { height: mine }),
+                Self::Block {
+                    context:
+                        BlockFetchContext::Ancestry { height: theirs }
+                        | BlockFetchContext::Repair { height: theirs },
+                    ..
+                },
+            ) => *theirs > *mine,
+            (Self::Request(Request::Finalized { .. }), _) => true,
+            (
+                Self::Request(Request::Notarized { round: mine }),
+                Self::Request(Request::Notarized { round: theirs }),
+            ) => *theirs > *mine,
+            (
+                Self::Request(Request::Notarized { round: mine }),
+                Self::Block {
+                    context: BlockFetchContext::Finalized { round: theirs },
+                    ..
+                },
+            ) => *theirs > *mine,
+            (Self::Request(Request::Notarized { .. }), _) => true,
         }
+    }
+}
+
+impl<D: Digest> From<Request<D>> for ResolverSubscriber<D> {
+    fn from(request: Request<D>) -> Self {
+        Self::Request(request)
     }
 }
 
@@ -190,7 +290,7 @@ impl<D: Digest> Write for Request<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.subject().write(buf);
         match self {
-            Self::Block(digest) => digest.write(buf),
+            Self::Block { commitment } => commitment.write(buf),
             Self::Finalized { height } => height.write(buf),
             Self::Notarized { round } => round.write(buf),
         }
@@ -202,7 +302,9 @@ impl<D: Digest> Read for Request<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request = match u8::read(buf)? {
-            BLOCK_REQUEST => Self::Block(D::read(buf)?),
+            BLOCK_REQUEST => Self::Block {
+                commitment: D::read(buf)?,
+            },
             FINALIZED_REQUEST => Self::Finalized {
                 height: Height::read(buf)?,
             },
@@ -218,7 +320,7 @@ impl<D: Digest> Read for Request<D> {
 impl<D: Digest> EncodeSize for Request<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Block(block) => block.encode_size(),
+            Self::Block { commitment } => commitment.encode_size(),
             Self::Finalized { height } => height.encode_size(),
             Self::Notarized { round } => round.encode_size(),
         }
@@ -230,7 +332,7 @@ impl<D: Digest> Span for Request<D> {}
 impl<D: Digest> PartialEq for Request<D> {
     fn eq(&self, other: &Self) -> bool {
         match (&self, &other) {
-            (Self::Block(a), Self::Block(b)) => a == b,
+            (Self::Block { commitment: a }, Self::Block { commitment: b }) => a == b,
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a == b,
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a == b,
             _ => false,
@@ -243,7 +345,7 @@ impl<D: Digest> Eq for Request<D> {}
 impl<D: Digest> Ord for Request<D> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (&self, &other) {
-            (Self::Block(a), Self::Block(b)) => a.cmp(b),
+            (Self::Block { commitment: a }, Self::Block { commitment: b }) => a.cmp(b),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a.cmp(b),
             (a, b) => a.subject().cmp(&b.subject()),
@@ -261,7 +363,7 @@ impl<D: Digest> Hash for Request<D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.subject().hash(state);
         match self {
-            Self::Block(digest) => digest.hash(state),
+            Self::Block { commitment } => commitment.hash(state),
             Self::Finalized { height } => height.hash(state),
             Self::Notarized { round } => round.hash(state),
         }
@@ -271,7 +373,7 @@ impl<D: Digest> Hash for Request<D> {
 impl<D: Digest> Display for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(digest) => write!(f, "Block({digest:?})"),
+            Self::Block { commitment } => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -281,7 +383,7 @@ impl<D: Digest> Display for Request<D> {
 impl<D: Digest> Debug for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(digest) => write!(f, "Block({digest:?})"),
+            Self::Block { commitment } => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -296,7 +398,10 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=2)?;
         match choice {
-            0 => Ok(Self::Block(u.arbitrary()?)),
+            0 => {
+                let commitment = u.arbitrary()?;
+                Ok(Self::Block { commitment })
+            }
             1 => Ok(Self::Finalized {
                 height: u.arbitrary()?,
             }),
@@ -320,6 +425,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     type D = Sha256Digest;
+
+    const fn block(digest: D) -> Request<D> {
+        Request::Block { commitment: digest }
+    }
 
     #[test]
     fn handler_drain_skips_closed_responses() {
@@ -389,7 +498,7 @@ mod tests {
     #[test]
     fn test_subject_block_encoding() {
         let digest = Sha256::hash(b"test");
-        let request = Request::<D>::Block(digest);
+        let request = Request::Block { commitment: digest };
 
         // Test encoding
         let encoded = request.encode();
@@ -399,8 +508,8 @@ mod tests {
         // Test decoding
         let mut buf = encoded.as_ref();
         let decoded = Request::<D>::read(&mut buf).unwrap();
-        assert_eq!(request, decoded);
-        assert_eq!(decoded, Request::Block(digest));
+        assert_eq!(decoded, block(digest));
+        assert_eq!(request.encode(), decoded.encode());
     }
 
     #[test]
@@ -477,20 +586,97 @@ mod tests {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
 
-        let predicate = r1.predicate();
-        assert!(predicate(&r2)); // r2.height > r1.height
-        assert!(predicate(&r3)); // Different variant (notarized)
+        let predicate = ResolverSubscriber::Request(r1).predicate();
+        assert!(predicate(&ResolverSubscriber::Request(r2))); // r2.height > r1.height
+        assert!(predicate(&ResolverSubscriber::Request(r3))); // Different variant (notarized)
 
         let r1_same = Request::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(&r1_same)); // Same height, should not pass
+        assert!(!predicate(&ResolverSubscriber::Request(r1_same))); // Same height, should not pass
+    }
+
+    #[test]
+    fn test_block_subscriber_context_affects_identity() {
+        let digest = Sha256::hash(b"annotated");
+        let ancestry = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Ancestry {
+                height: Height::new(10),
+            },
+        };
+        let repair = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Repair {
+                height: Height::new(10),
+            },
+        };
+
+        assert_ne!(ancestry, repair);
+        assert!(matches!(
+            (ancestry, repair),
+            (
+                ResolverSubscriber::Block { commitment: a, .. },
+                ResolverSubscriber::Block { commitment: b, .. },
+            ) if a == b
+        ));
+    }
+
+    #[test]
+    fn test_subject_predicate_prunes_annotated_blocks() {
+        let digest = Sha256::hash(b"prune");
+        let height_floor = ResolverSubscriber::Request(Request::<D>::Finalized {
+            height: Height::new(10),
+        });
+        let keep_repair = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Repair {
+                height: Height::new(11),
+            },
+        };
+        let drop_repair = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Repair {
+                height: Height::new(10),
+            },
+        };
+        let drop_ancestry = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Ancestry {
+                height: Height::new(9),
+            },
+        };
+
+        let predicate = height_floor.predicate();
+        assert!(predicate(&keep_repair));
+        assert!(!predicate(&drop_repair));
+        assert!(!predicate(&drop_ancestry));
+
+        let round_floor = ResolverSubscriber::Request(Request::<D>::Notarized {
+            round: Round::new(Epoch::new(1), View::new(10)),
+        });
+        let keep_finalized = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Finalized {
+                round: Round::new(Epoch::new(1), View::new(11)),
+            },
+        };
+        let drop_finalized = ResolverSubscriber::Block {
+            commitment: digest,
+            context: BlockFetchContext::Finalized {
+                round: Round::new(Epoch::new(1), View::new(10)),
+            },
+        };
+
+        let predicate = round_floor.predicate();
+        assert!(predicate(&keep_finalized));
+        assert!(!predicate(&drop_finalized));
     }
 
     #[test]
     fn test_encode_size() {
         let digest = Sha256::hash(&[0u8; 32]);
-        let r1 = Request::<D>::Block(digest);
+        let r1 = Request::Block { commitment: digest };
         let r2 = Request::<D>::Finalized {
             height: Height::new(u64::MAX),
         };
@@ -509,8 +695,8 @@ mod tests {
         // Test ordering within the same variant
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block(digest1);
-        let block2 = Request::<D>::Block(digest2);
+        let block1 = block(digest1);
+        let block2 = block(digest2);
 
         // Block ordering depends on digest ordering
         if digest1 < digest2 {
@@ -555,7 +741,7 @@ mod tests {
     #[test]
     fn test_request_ord_cross_variant() {
         let digest = Sha256::hash(b"test");
-        let block = Request::<D>::Block(digest);
+        let block = block(digest);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -585,8 +771,8 @@ mod tests {
     fn test_request_partial_ord() {
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block(digest1);
-        let block2 = Request::<D>::Block(digest2);
+        let block1 = block(digest1);
+        let block2 = block(digest2);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -624,18 +810,18 @@ mod tests {
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(300)),
             },
-            Request::<D>::Block(digest2),
+            block(digest2),
             Request::<D>::Finalized {
                 height: Height::new(200),
             },
-            Request::<D>::Block(digest1),
+            block(digest1),
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(250)),
             },
             Request::<D>::Finalized {
                 height: Height::new(100),
             },
-            Request::<D>::Block(digest3),
+            block(digest3),
         ];
 
         // Sort using BTreeSet (uses Ord)
@@ -649,9 +835,9 @@ mod tests {
         assert_eq!(sorted.len(), 7);
 
         // Check that all blocks come first
-        assert!(matches!(sorted[0], Request::<D>::Block(_)));
-        assert!(matches!(sorted[1], Request::<D>::Block(_)));
-        assert!(matches!(sorted[2], Request::<D>::Block(_)));
+        assert!(matches!(sorted[0], Request::Block { .. }));
+        assert!(matches!(sorted[1], Request::Block { .. }));
+        assert!(matches!(sorted[2], Request::Block { .. }));
 
         // Check that finalized come next
         assert_eq!(
@@ -704,7 +890,7 @@ mod tests {
 
         // Test self-comparison
         let digest = Sha256::hash(b"self");
-        let block = Request::<D>::Block(digest);
+        let block = block(digest);
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
         assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);

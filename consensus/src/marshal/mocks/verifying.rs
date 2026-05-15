@@ -6,6 +6,7 @@
 
 use crate::{
     marshal::ancestry::{AncestorStream, BlockProvider},
+    types::Height,
     CertifiableBlock, Epochable,
 };
 use commonware_runtime::deterministic;
@@ -13,6 +14,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
+use futures::StreamExt;
 use std::{marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
@@ -30,6 +32,63 @@ pub struct MockVerifyingApp<B, S> {
     /// The result returned by `verify`.
     pub verify_result: bool,
     _phantom: std::marker::PhantomData<S>,
+}
+
+/// A verifying mock that succeeds only after it observes the expected ancestry heights.
+#[derive(Clone)]
+pub struct AncestryVerifyingApp<B, S> {
+    genesis: B,
+    expected_heights: Vec<Height>,
+    _phantom: PhantomData<S>,
+}
+
+impl<B, S> AncestryVerifyingApp<B, S> {
+    /// Creates a new mock that drains ancestry and compares yielded heights.
+    pub fn new(genesis: B, expected_heights: Vec<Height>) -> Self {
+        Self {
+            genesis,
+            expected_heights,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<B, S> crate::Application<deterministic::Context> for AncestryVerifyingApp<B, S>
+where
+    B: CertifiableBlock + Clone + Send + Sync + 'static,
+    B::Context: Epochable + Clone + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+{
+    type Block = B;
+    type Context = B::Context;
+    type SigningScheme = S;
+
+    async fn genesis(&mut self) -> Self::Block {
+        self.genesis.clone()
+    }
+
+    async fn propose<A: BlockProvider<Block = Self::Block>>(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        _ancestry: AncestorStream<A>,
+    ) -> Option<Self::Block> {
+        None
+    }
+
+    async fn verify<A: BlockProvider<Block = Self::Block>>(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        mut ancestry: AncestorStream<A>,
+    ) -> bool {
+        let mut actual = Vec::with_capacity(self.expected_heights.len());
+        while actual.len() < self.expected_heights.len() {
+            let Some(block) = ancestry.next().await else {
+                break;
+            };
+            actual.push(block.height());
+        }
+        actual == self.expected_heights
+    }
 }
 
 impl<B, S> MockVerifyingApp<B, S> {
@@ -77,7 +136,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         self.propose_result.clone()
     }
@@ -85,7 +144,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> bool {
         self.verify_result
     }
@@ -138,7 +197,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         None
     }
@@ -146,7 +205,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());

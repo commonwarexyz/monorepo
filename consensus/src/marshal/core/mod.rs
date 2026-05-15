@@ -44,7 +44,7 @@ pub use actor::Actor;
 pub(crate) mod cache;
 
 mod mailbox;
-pub use mailbox::Mailbox;
+pub use mailbox::{CommitmentRequest, Mailbox};
 
 mod variant;
 pub use variant::{Buffer, Variant};

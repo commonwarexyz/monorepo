@@ -40,6 +40,13 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! Marshal does not fetch arbitrary pending proposal data. A missing candidate block is waited on
+//! locally until the broadcast or coding layer provides it. Once marshal has a candidate block, or is
+//! building on a certified parent, it may fetch missing parents because those requests are for
+//! certified ancestry. Parent fetches are keyed by height when a known child block provides the
+//! expected parent height, and by round only when proposal construction knows the certified parent
+//! round/commitment but not its height.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
