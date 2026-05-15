@@ -241,6 +241,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
+    use futures::StreamExt;
     use commonware_runtime::{
         deterministic::{self},
         Clock, Runner, Supervisor as _,
@@ -258,8 +259,8 @@ mod tests {
     fn test_config<C: Signer>(
         crypto: C,
         bypass_ip_check: bool,
-    ) -> (Config<C>, mailbox::Receiver<listener::Message>) {
-        let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new(NZUsize!(1));
+    ) -> (Config<C>, listener::Updates) {
+        let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new();
         (
             Config {
                 crypto,
@@ -776,7 +777,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&my_addr.ip()));
             assert!(registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
@@ -795,7 +796,7 @@ mod tests {
             );
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(!registered_ips.contains(&my_addr.ip()));
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
@@ -829,13 +830,13 @@ mod tests {
                 .unwrap(),
             );
 
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
 
             oracle.overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
         });
@@ -901,16 +902,16 @@ mod tests {
                 .unwrap(),
             );
 
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&addr_1.ip()));
 
             crate::block_peer(&mut oracle, pk_1.clone());
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
 
             oracle.overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
         });
@@ -1018,7 +1019,7 @@ mod tests {
                 0,
                 Map::<_, crate::Address>::try_from([(pk.clone(), addr_a.into())]).unwrap(),
             );
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
 
             // Establish connection to peer
@@ -1038,7 +1039,7 @@ mod tests {
             assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
 
             // Verify listenable IPs updated to new address
-            let registered_ips = listener_receiver.recv().await.unwrap();
+            let registered_ips = listener_receiver.next().await.unwrap();
             assert!(!registered_ips.contains(&addr_a.ip()));
             assert!(registered_ips.contains(&addr_b.ip()));
         });
@@ -1072,7 +1073,7 @@ mod tests {
                 ])
                 .unwrap(),
             );
-            let _ = listener_receiver.recv().await.unwrap();
+            let _ = listener_receiver.next().await.unwrap();
 
             // Establish connection to pk_tracked
             let reservation = mailbox.listen(pk_tracked.clone()).await;

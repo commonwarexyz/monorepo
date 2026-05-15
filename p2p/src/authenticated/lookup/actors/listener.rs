@@ -4,7 +4,7 @@ use crate::authenticated::{
     lookup::actors::{spawner, tracker},
     Mailbox as SpawnerMailbox,
 };
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::Feedback;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -14,12 +14,15 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
-use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
+use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
+use futures::{Sink, StreamExt};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
+    fmt,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
+    pin::Pin,
 };
 use tracing::debug;
 
@@ -29,36 +32,29 @@ const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Message(HashSet<IpAddr>);
+pub(crate) type Updates = ring::Receiver<HashSet<IpAddr>>;
 
-#[cfg(test)]
-impl Message {
-    pub(crate) fn contains(&self, ip: &IpAddr) -> bool {
-        self.0.contains(ip)
+#[derive(Clone)]
+pub(crate) struct Mailbox(ring::Sender<HashSet<IpAddr>>);
+
+impl fmt::Debug for Mailbox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Mailbox").finish()
     }
 }
-
-impl mailbox::Policy for Message {
-    type Overflow = VecDeque<Self>;
-
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.clear();
-        overflow.push_back(message);
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Mailbox(mailbox::Sender<Message>);
 
 impl Mailbox {
-    pub(crate) fn new(size: std::num::NonZeroUsize) -> (Self, mailbox::Receiver<Message>) {
-        let (sender, receiver) = mailbox::new(size);
+    pub(crate) fn new() -> (Self, Updates) {
+        let (sender, receiver) = ring::channel(NZUsize!(1));
         (Self(sender), receiver)
     }
 
-    pub(crate) fn set(&self, registered_ips: HashSet<IpAddr>) -> Feedback {
-        self.0.enqueue(Message(registered_ips))
+    pub(crate) fn set(&mut self, registered_ips: HashSet<IpAddr>) -> Feedback {
+        if Pin::new(&mut self.0).start_send(registered_ips).is_ok() {
+            Feedback::Ok
+        } else {
+            Feedback::Closed
+        }
     }
 }
 
@@ -84,7 +80,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
     registered_ips: HashSet<IpAddr>,
-    mailbox: mailbox::Receiver<Message>,
+    updates: Updates,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -92,7 +88,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, mailbox: mailbox::Receiver<Message>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -122,7 +118,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
             registered_ips: HashSet::new(),
-            mailbox,
+            updates,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
@@ -209,8 +205,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             on_stopped => {
                 debug!("context shutdown, stopping listener");
             },
-            Some(Message(registered_ips)) = self.mailbox.recv() else {
-                debug!("mailbox closed");
+            Some(registered_ips) = self.updates.next() else {
+                debug!("listener updates closed");
                 break;
             } => {
                 self.registered_ips = registered_ips;
@@ -302,6 +298,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -317,17 +314,16 @@ mod tests {
     fn mailbox_keeps_latest_registered_ips() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
-            let (mailbox, mut receiver) = Mailbox::new(NZUsize!(1));
+            let (mut mailbox, mut receiver) = Mailbox::new();
             let first = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]);
             let second = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
             let third = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3))]);
 
-            assert_eq!(mailbox.set(first.clone()), Feedback::Ok);
-            assert_eq!(mailbox.set(second), Feedback::Backoff);
-            assert_eq!(mailbox.set(third.clone()), Feedback::Backoff);
+            assert_eq!(mailbox.set(first), Feedback::Ok);
+            assert_eq!(mailbox.set(second), Feedback::Ok);
+            assert_eq!(mailbox.set(third.clone()), Feedback::Ok);
 
-            assert_eq!(receiver.recv().await, Some(Message(first)));
-            assert_eq!(receiver.recv().await, Some(Message(third)));
+            assert_eq!(receiver.next().await, Some(third));
         });
     }
 
@@ -350,7 +346,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (updates_tx, updates_rx) = Mailbox::new(NZUsize!(1));
+            let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -515,7 +511,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = Mailbox::new(NZUsize!(1));
+            let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -597,7 +593,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = Mailbox::new(NZUsize!(1));
+            let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -679,7 +675,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (updates_tx, updates_rx) = Mailbox::new(NZUsize!(1));
+            let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
