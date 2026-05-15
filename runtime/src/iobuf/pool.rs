@@ -456,50 +456,100 @@ impl PoolMetrics {
     }
 }
 
+/// Per-size-class state.
+///
+/// Each class is a small two-level allocator:
+/// - a shared global freelist for tracked buffers visible to all threads
+/// - a per-thread local cache for same-thread reuse
+///
+/// The global freelist owns the allocation layout, slot reservation counter,
+/// and parking cells for this class. A tracked buffer can be globally parked,
+/// owned by a pooled backing, or parked in one thread's local cache, but the
+/// slot always belongs to this `SizeClass`.
+///
+/// Liveness follows the buffer ownership state. Global freelist entries rely on
+/// the pool's [`SizeClassHandle`] while the pool is alive and are drained when
+/// the pool is dropped. Pooled backing values carry a [`SizeClassLease`].
+/// Thread-local cache entries use banked strong references owned by the cache.
+/// Those non-global states are what allow a buffer to outlive the public
+/// [`BufferPool`] handle and still return to the correct freelist.
+///
+/// The freelist is the only place that deallocates tracked buffers. Returning a
+/// buffer to the freelist transfers buffer ownership back to `SizeClass` and
+/// releases the pooled-backing or banked strong reference that kept the class
+/// alive while the buffer was outside the global freelist.
+///
+/// Allocation prefers the local cache, then refills from the global freelist,
+/// and only creates a new tracked buffer when no free buffer is available and
+/// the class still has remaining capacity.
+pub(super) struct SizeClass {
+    /// Dense global identifier for the TLS cache registry.
+    class_id: usize,
+    /// The buffer size for this class.
+    size: usize,
+    /// Global free list of tracked buffers available for reuse.
+    global: Freelist,
+    /// Maximum number of buffers retained in the current thread's local bin.
+    thread_cache_capacity: usize,
+}
+
+// SAFETY: shared state in `SizeClass` is synchronized through atomics and the
+// global free set. Per-thread bins are stored in thread-local registries and only
+// accessed by the current thread.
+unsafe impl Send for SizeClass {}
+// SAFETY: see above.
+unsafe impl Sync for SizeClass {}
+
+impl SizeClass {
+    /// Returns the buffer size for this class.
+    #[inline]
+    pub(super) const fn size(&self) -> usize {
+        self.size
+    }
+}
+
 /// Non-owning raw identity for a size class.
 ///
 /// # Size-class lifetime model
 ///
-/// A [`SizeClass`] owns the [`Freelist`] for one power-of-two buffer size. The
-/// freelist owns the allocation layout and deallocates every tracked
-/// [`PooledBuffer`] that is parked in it when the freelist is drained or
-/// dropped. A `PooledBuffer` does not carry enough information to deallocate
-/// itself, so any buffer outside the freelist must keep its originating
-/// `SizeClass` alive until it returns.
+/// A [`SizeClass`] owns the [`Freelist`] for one buffer size class. The
+/// freelist creates tracked [`PooledBuffer`]s, owns the allocation layout
+/// needed to deallocate them, and is the only place that releases their memory.
+/// A `PooledBuffer` outside the freelist does not carry enough information to
+/// deallocate itself, so it must keep its originating `SizeClass` alive until
+/// it can return to that freelist.
 ///
 /// The pool has three buffer states, and those states determine where the
 /// strong size-class references live.
 ///
-/// A "banked" strong reference is an owned `Arc<SizeClass>` reference counted by
-/// TLS cache state instead of represented by a [`SizeClassLease`] value in each
-/// [`TlsSizeClassCacheEntry`]. For a cache with `len` local entries, the cache
-/// owns exactly `len` banked references. Increasing `len` banks one reference;
-/// decreasing `len` transfers one reference back into a `SizeClassLease` or
-/// releases it to the global freelist.
-///
 /// - Global freelist: the buffer is parked in [`SizeClass::global`] and carries
 ///   no per-buffer strong reference. While the public pool exists, the
 ///   [`SizeClassHandle`] in [`BufferPoolInner::classes`] keeps the class alive.
-/// - Pooled view: the buffer is owned by mutable or immutable I/O view state and
-///   carries one [`SizeClassLease`], which is one strong reference to the class.
-/// - Thread-local cache: the cache stores this token once and owns one banked
-///   strong reference for each initialized [`TlsSizeClassCacheEntry`].
+/// - Pooled view: the buffer is owned by mutable or immutable I/O view state
+///   and carries one [`SizeClassLease`], which is one strong reference to the
+///   class.
+/// - Thread-local cache: the [`TlsSizeClassCache`] stores the
+///   [`SizeClassToken`] once, and owns one banked strong reference for each
+///   initialized [`TlsSizeClassCacheEntry`]. A banked reference is an owned
+///   `Arc<SizeClass>` reference counted by TLS cache state instead of
+///   represented by a `SizeClassLease` value in each entry. Increasing `len`
+///   banks one reference, decreasing `len` transfers one reference back into a
+///   `SizeClassLease` or releases it to the global freelist.
 ///
 /// Moving a buffer from the global freelist to pooled view or TLS state retains
 /// one class reference. Moving it back to the global freelist releases that
 /// reference. Moving between pooled view and TLS state transfers the same
 /// reference without touching the refcount.
 ///
-/// Dropping the public [`BufferPool`] drains globally parked buffers, then drops
-/// its `SizeClassHandle`s. Pooled views and non-empty TLS caches may
-/// keep the `SizeClass` alive after that point. Empty TLS caches may still
-/// remember a token value, but with no banked references that token is only an
-/// inert identity value and must not be dereferenced.
+/// Dropping the public [`BufferPool`] drains globally parked buffers, then
+/// drops its `SizeClassHandle`s. Pooled views and non-empty TLS caches may keep
+/// the `SizeClass` alive after that point. Empty TLS caches may still remember
+/// a token value, but with no banked references that token is only an inert
+/// identity value and must not be dereferenced.
 ///
 /// This is the one raw pointer shape used by all pool-owned, pooled view, and
 /// thread-local references to a [`SizeClass`]. The pointer is always derived
-/// from [`Arc::into_raw`], so it satisfies the documented contract for
-/// [`Arc::increment_strong_count`] and [`Arc::decrement_strong_count`].
+/// from [`Arc::into_raw`].
 ///
 /// `SizeClassToken` itself owns nothing. It is only an identity token and raw
 /// pointer accepted by the `Arc` refcount APIs:
@@ -510,31 +560,26 @@ impl PoolMetrics {
 /// Because the token is non-owning, it may be stale when held by an empty TLS
 /// cache. Code may dereference it or adjust the strong count only when another
 /// invariant proves the allocation is still live. For example, a
-/// [`SizeClassHandle`] proves liveness through its owned strong reference, and a
-/// non-empty [`TlsSizeClassCache`] proves liveness through its banked entries.
+/// [`SizeClassHandle`] proves liveness through its owned strong reference, and
+/// a non-empty [`TlsSizeClassCache`] proves liveness through its banked
+/// entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SizeClassToken {
     ptr: ptr::NonNull<SizeClass>,
 }
 
 impl SizeClassToken {
-    /// Creates a token from one owned `Arc` strong reference.
+    /// Creates a token and owns the initial strong reference for `class`.
     ///
     /// The returned token is non-owning in the type system, but the raw pointer
-    /// still represents the strong reference consumed from `class`. The caller
-    /// must wrap it in an owning type, such as [`SizeClassHandle`], or otherwise
-    /// arrange for that strong reference to be released.
-    fn from_arc(class: Arc<SizeClass>) -> Self {
-        let ptr = Arc::into_raw(class).cast_mut();
+    /// still represents one strong reference. The caller must wrap it in an
+    /// owning type, such as [`SizeClassHandle`], or otherwise arrange for that
+    /// strong reference to be released.
+    fn new(class: SizeClass) -> Self {
+        let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
         // SAFETY: `Arc::into_raw` never returns null.
         let ptr = unsafe { ptr::NonNull::new_unchecked(ptr) };
         Self { ptr }
-    }
-
-    /// Returns the raw pointer accepted by `Arc` raw refcount APIs.
-    #[inline(always)]
-    const fn as_ptr(self) -> *const SizeClass {
-        self.ptr.as_ptr()
     }
 
     /// Returns the referenced size class.
@@ -556,7 +601,7 @@ impl SizeClassToken {
     #[inline(always)]
     unsafe fn retain(self) {
         // SAFETY: guaranteed by the caller.
-        unsafe { Arc::increment_strong_count(self.as_ptr()) };
+        unsafe { Arc::increment_strong_count(self.ptr.as_ptr()) };
     }
 
     /// Releases one owned strong reference for this token.
@@ -567,7 +612,109 @@ impl SizeClassToken {
     #[inline(always)]
     unsafe fn release(self) {
         // SAFETY: guaranteed by the caller.
-        unsafe { Arc::decrement_strong_count(self.as_ptr()) };
+        unsafe { Arc::decrement_strong_count(self.ptr.as_ptr()) };
+    }
+}
+
+/// Owning pool reference to a size class.
+///
+/// This is the pool's strong `Arc<SizeClass>` reference represented by a
+/// [`SizeClassToken`]. Keeping the pool's class vector in this form means the
+/// pointer used on hot allocation paths already satisfies the contract required
+/// by `Arc::{increment,decrement}_strong_count`.
+///
+/// `SizeClassHandle` is the long-lived owner for a class while the
+/// [`BufferPoolInner`] exists. Dropping the handle releases that pool-owned
+/// strong reference. A class may still outlive the handle if pooled backing
+/// values or thread-local cache entries own additional references through
+/// [`SizeClassLease`] or banked TLS refs.
+///
+/// Functionally this is an `Arc<SizeClass>` stored in raw-token form. It exists
+/// to keep the pool-owned reference alive and to provide a live token for
+/// allocation paths that need to retain pooled-backing or TLS-banked references.
+/// The raw form keeps the already-loaded class pointer usable for explicit
+/// refcount operations without calling [`Arc::as_ptr`] or storing a second token
+/// alongside an `Arc`.
+struct SizeClassHandle {
+    token: SizeClassToken,
+}
+
+// SAFETY: `SizeClassHandle` owns a strong reference to a `SizeClass`, which is
+// `Send`.
+unsafe impl Send for SizeClassHandle {}
+// SAFETY: same argument as `Send`, shared access to `SizeClass` is synchronized.
+unsafe impl Sync for SizeClassHandle {}
+
+impl SizeClassHandle {
+    /// Creates a new size class and takes ownership of its initial strong ref.
+    ///
+    /// If `prefill` is true, the global freelist creates `max` buffers upfront
+    /// and makes them immediately available for reuse.
+    fn new(
+        class_id: usize,
+        size: usize,
+        alignment: usize,
+        max: NonZeroU32,
+        parallelism: NonZeroUsize,
+        thread_cache_capacity: usize,
+        prefill: bool,
+    ) -> Self {
+        let layout = Layout::from_size_align(size, alignment).expect("alignment is a power of two");
+        let freelist = Freelist::new(max, parallelism, layout, prefill);
+        let class = SizeClass {
+            class_id,
+            size,
+            global: freelist,
+            thread_cache_capacity,
+        };
+        Self {
+            token: SizeClassToken::new(class),
+        }
+    }
+
+    /// Creates a new tracked buffer and retains this size class for its slot.
+    #[inline(always)]
+    fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer, SizeClassLease)> {
+        let (slot, buffer) = self.global.try_create(zeroed)?;
+        let class = SizeClassLease::retain(self);
+        Some((slot, buffer, class))
+    }
+
+    #[cfg(test)]
+    fn strong_count(&self) -> usize {
+        // SAFETY: this handle owns one strong reference for `self.token` for
+        // the duration of this call.
+        unsafe { self.token.retain() };
+        // SAFETY: the increment above created the strong reference consumed by
+        // this temporary Arc.
+        let arc = unsafe { Arc::from_raw(self.token.as_ptr()) };
+        Arc::strong_count(&arc) - 1
+    }
+}
+
+#[cfg(test)]
+impl Clone for SizeClassHandle {
+    fn clone(&self) -> Self {
+        // SAFETY: this handle owns one strong reference for `self.token`.
+        unsafe { self.token.retain() };
+        Self { token: self.token }
+    }
+}
+
+impl Drop for SizeClassHandle {
+    fn drop(&mut self) {
+        // SAFETY: this handle owns one strong reference for `self.token`.
+        unsafe { self.token.release() };
+    }
+}
+
+impl std::ops::Deref for SizeClassHandle {
+    type Target = SizeClass;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: this handle owns one strong reference for `self.token`.
+        unsafe { self.token.as_ref() }
     }
 }
 
@@ -609,7 +756,7 @@ impl SizeClassToken {
 /// Globally parked buffers do not carry a class reference: taking from the
 /// global freelist retains the class, and returning to the global freelist
 /// releases it.
-#[must_use = "SizeClassLease owns one size-class reference and must be returned or banked"]
+#[must_use]
 pub(crate) struct SizeClassLease {
     token: SizeClassToken,
 }
@@ -687,160 +834,6 @@ impl SizeClassLease {
         self.class().global.put(slot, buffer);
         // SAFETY: this lease owns one strong reference.
         unsafe { self.token.release() };
-    }
-}
-
-/// Per-size-class state.
-///
-/// Each class is a small two-level allocator:
-/// - a shared global freelist for tracked buffers visible to all threads
-/// - a per-thread local cache for same-thread reuse
-///
-/// The global freelist owns the allocation layout, slot reservation counter,
-/// and parking cells for this class. A tracked buffer can be globally parked,
-/// owned by a pooled backing, or parked in one thread's local cache, but the
-/// slot always belongs to this `SizeClass`.
-///
-/// Liveness follows the buffer ownership state. Global freelist entries rely on
-/// the pool's [`SizeClassHandle`] while the pool is alive and are drained when
-/// the pool is dropped. Pooled backing values carry a [`SizeClassLease`].
-/// Thread-local cache entries use banked strong references owned by the cache.
-/// Those non-global states are what allow a buffer to outlive the public
-/// [`BufferPool`] handle and still return to the correct freelist.
-///
-/// The freelist is the only place that deallocates tracked buffers. Returning a
-/// buffer to the freelist transfers buffer ownership back to `SizeClass` and
-/// releases the pooled-backing or banked strong reference that kept the class
-/// alive while the buffer was outside the global freelist.
-///
-/// Allocation prefers the local cache, then refills from the global freelist,
-/// and only creates a new tracked buffer when no free buffer is available and
-/// the class still has remaining capacity.
-pub(super) struct SizeClass {
-    /// Dense global identifier for the TLS cache registry.
-    class_id: usize,
-    /// The buffer size for this class.
-    size: usize,
-    /// Global free list of tracked buffers available for reuse.
-    global: Freelist,
-    /// Maximum number of buffers retained in the current thread's local bin.
-    thread_cache_capacity: usize,
-}
-
-// SAFETY: shared state in `SizeClass` is synchronized through atomics and the
-// global free set. Per-thread bins are stored in thread-local registries and only
-// accessed by the current thread.
-unsafe impl Send for SizeClass {}
-// SAFETY: see above.
-unsafe impl Sync for SizeClass {}
-
-impl SizeClass {
-    /// Returns the buffer size for this class.
-    #[inline]
-    pub(super) const fn size(&self) -> usize {
-        self.size
-    }
-}
-
-/// Owning pool reference to a size class.
-///
-/// This is the pool's strong `Arc<SizeClass>` reference represented by a
-/// [`SizeClassToken`]. Keeping the pool's class vector in this form means the
-/// pointer used on hot allocation paths already satisfies the contract required
-/// by `Arc::{increment,decrement}_strong_count`.
-///
-/// `SizeClassHandle` is the long-lived owner for a class while the
-/// [`BufferPoolInner`] exists. Dropping the handle releases that pool-owned
-/// strong reference. A class may still outlive the handle if pooled backing
-/// values or thread-local cache entries own additional references through
-/// [`SizeClassLease`] or banked TLS refs.
-///
-/// Functionally this is an `Arc<SizeClass>` stored in raw-token form. It exists
-/// to keep the pool-owned reference alive and to provide a live token for
-/// allocation paths that need to retain pooled-backing or TLS-banked references.
-/// The raw form keeps the already-loaded class pointer usable for explicit
-/// refcount operations without calling [`Arc::as_ptr`] or storing a second token
-/// alongside an `Arc`.
-struct SizeClassHandle {
-    token: SizeClassToken,
-}
-
-// SAFETY: `SizeClassHandle` owns a strong reference to a `SizeClass`, which is
-// `Send`.
-unsafe impl Send for SizeClassHandle {}
-// SAFETY: same argument as `Send`, shared access to `SizeClass` is synchronized.
-unsafe impl Sync for SizeClassHandle {}
-
-impl SizeClassHandle {
-    /// Creates a new size class and takes ownership of its initial strong ref.
-    ///
-    /// If `prefill` is true, the global freelist creates `max` buffers upfront
-    /// and makes them immediately available for reuse.
-    fn new(
-        class_id: usize,
-        size: usize,
-        alignment: usize,
-        max: NonZeroU32,
-        parallelism: NonZeroUsize,
-        thread_cache_capacity: usize,
-        prefill: bool,
-    ) -> Self {
-        let layout = Layout::from_size_align(size, alignment).expect("alignment is a power of two");
-        let freelist = Freelist::new(max, parallelism, layout, prefill);
-        let class = SizeClass {
-            class_id,
-            size,
-            global: freelist,
-            thread_cache_capacity,
-        };
-        Self {
-            token: SizeClassToken::from_arc(Arc::new(class)),
-        }
-    }
-
-    /// Creates a new tracked buffer and retains this size class for its slot.
-    #[inline(always)]
-    fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer, SizeClassLease)> {
-        let (slot, buffer) = self.global.try_create(zeroed)?;
-        let class = SizeClassLease::retain(self);
-        Some((slot, buffer, class))
-    }
-
-    #[cfg(test)]
-    fn strong_count(&self) -> usize {
-        // SAFETY: this handle owns one strong reference for `self.token` for
-        // the duration of this call.
-        unsafe { self.token.retain() };
-        // SAFETY: the increment above created the strong reference consumed by
-        // this temporary Arc.
-        let arc = unsafe { Arc::from_raw(self.token.as_ptr()) };
-        Arc::strong_count(&arc) - 1
-    }
-}
-
-#[cfg(test)]
-impl Clone for SizeClassHandle {
-    fn clone(&self) -> Self {
-        // SAFETY: this handle owns one strong reference for `self.token`.
-        unsafe { self.token.retain() };
-        Self { token: self.token }
-    }
-}
-
-impl Drop for SizeClassHandle {
-    fn drop(&mut self) {
-        // SAFETY: this handle owns one strong reference for `self.token`.
-        unsafe { self.token.release() };
-    }
-}
-
-impl std::ops::Deref for SizeClassHandle {
-    type Target = SizeClass;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: this handle owns one strong reference for `self.token`.
-        unsafe { self.token.as_ref() }
     }
 }
 
