@@ -1,5 +1,5 @@
 use crate::{
-    journal::contiguous::Contiguous,
+    journal::contiguous::{Contiguous, Reader as _},
     merkle::{Family, Location},
 };
 use commonware_utils::range::NonEmptyRange;
@@ -124,6 +124,14 @@ where
             journal.prune(*range.start()).await?;
         }
 
+        // After a same-section crash during a previous clear_to_size, the journal may recover to a
+        // stale position ahead of the requested start. Re-clear so the sync engine starts from the
+        // correct location.
+        let bounds = journal.reader().await.bounds();
+        if bounds.is_empty() && bounds.start > *range.start() {
+            journal.clear_to_size(*range.start()).await?;
+        }
+
         Ok(journal)
     }
 
@@ -145,5 +153,70 @@ where
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
         Self::append(self, &op).await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::contiguous::fixed;
+    use commonware_cryptography::sha256::Digest;
+    use commonware_macros::test_traced;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Blob, BufferPooler, Runner, Storage,
+        Supervisor as _,
+    };
+    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+
+    type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
+    type F = crate::merkle::mmr::Family;
+
+    fn test_cfg(pooler: &impl BufferPooler) -> fixed::Config {
+        fixed::Config {
+            partition: "sync-journal-test".into(),
+            items_per_blob: NZU64!(5),
+            page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
+            write_buffer: NZUsize!(2048),
+        }
+    }
+
+    #[test_traced]
+    fn test_sync_journal_new_recovers_from_stale_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+
+            // Create a journal at pruning_boundary=9 (mid-section in section 1).
+            let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
+                .await
+                .unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Simulate clear_to_size(7) crash: blobs cleared, section 1 recreated
+            // empty, but metadata still says pruning_boundary=9.
+            let blob_part = format!("{}-blobs", cfg.partition);
+            context.remove(&blob_part, None).await.unwrap();
+            let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
+            blob.sync().await.unwrap();
+
+            // Without the fix, this reopens at 9..9 and the sync engine skips
+            // locations 7-8. With the fix, it re-clears to 7.
+            let range = non_empty_range!(
+                crate::merkle::Location::<F>::new(7),
+                crate::merkle::Location::<F>::new(20)
+            );
+            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                .await
+                .unwrap();
+
+            let size = Contiguous::size(&journal).await;
+            assert_eq!(size, 7);
+            let bounds = journal.reader().await.bounds();
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, 7);
+
+            journal.destroy().await.unwrap();
+        });
     }
 }

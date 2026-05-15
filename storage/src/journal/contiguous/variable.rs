@@ -602,6 +602,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             journal.prune(range.start).await?;
         }
 
+        // After a same-section crash during a previous clear_to_size, the journal may recover to a
+        // stale position ahead of the requested start.
+        let bounds = journal.reader().await.bounds();
+        if bounds.is_empty() && bounds.start > range.start {
+            journal.clear_to_size(range.start).await?;
+        }
+
         Ok(journal)
     }
 
