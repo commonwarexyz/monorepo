@@ -53,10 +53,6 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
     type PublicKey = P;
     type Error = Infallible;
 
-    fn is_empty(&self) -> bool {
-        self.recipients.is_empty()
-    }
-
     fn recipients(&self) -> Vec<Self::PublicKey> {
         self.recipients.clone()
     }

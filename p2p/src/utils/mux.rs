@@ -346,10 +346,6 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     type PublicKey = S::PublicKey;
     type Error = <S::Checked<'a> as CheckedSender>::Error;
 
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
     fn recipients(&self) -> Vec<Self::PublicKey> {
         self.inner.recipients()
     }

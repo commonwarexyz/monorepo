@@ -689,7 +689,7 @@ mod tests {
             loop {
                 // Confirm message is sent to peer
                 let checked = sender0.check(Recipients::One(pk1.clone())).unwrap();
-                if !checked.is_empty() {
+                if !checked.recipients().is_empty() {
                     checked.send(msg.clone(), true).unwrap();
                     break;
                 }

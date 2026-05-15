@@ -752,7 +752,7 @@ mod tests {
                 let checked = sender0
                     .check(Recipients::One(addresses[1].clone()))
                     .unwrap();
-                if !checked.is_empty() {
+                if !checked.recipients().is_empty() {
                     checked.send(msg.clone(), true).unwrap();
                     break;
                 }
@@ -1250,7 +1250,7 @@ mod tests {
 
             // Verify peer 0 cannot send to peer 1 yet
             let checked = sender0.check(Recipients::One(peer1.public_key())).unwrap();
-            assert!(checked.is_empty(), "should not be connected yet");
+            assert!(checked.recipients().is_empty(), "should not be connected yet");
 
             // Now register the DNS mapping
             context.resolver_register("boot.local", Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]));
@@ -1482,7 +1482,7 @@ mod tests {
             // Try to send from peer 1 - should not reach anyone since private IPs are blocked
             let checked = sender1.check(Recipients::All).unwrap();
             assert!(
-                checked.is_empty(),
+                checked.recipients().is_empty(),
                 "peer 1 should not have connected to peer 0 (private IP)"
             );
 
@@ -1571,7 +1571,7 @@ mod tests {
                 let pk0 = peer0.public_key();
                 loop {
                     let checked = sender1.check(Recipients::One(pk0.clone())).unwrap();
-                    if !checked.is_empty() {
+                    if !checked.recipients().is_empty() {
                         checked
                             .send(peer1.public_key().as_ref().to_vec(), true)
                             .unwrap();
@@ -2162,7 +2162,7 @@ mod tests {
 
             // Peer 0 can't send to anyone yet.
             let checked = sender0.check(Recipients::All).unwrap();
-            assert!(checked.is_empty());
+            assert!(checked.recipients().is_empty());
 
             // Start peer 1 with a wrong bootstrapper address for peer 0 so peer 0 must dial peer 1.
             let config1 = Config::test(

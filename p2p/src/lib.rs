@@ -120,9 +120,6 @@ stability_scope!(BETA {
         /// Error that can occur when sending a message.
         type Error: Debug + StdError + Send + Sync + 'static;
 
-        /// Returns whether the checked sender has no recipients.
-        fn is_empty(&self) -> bool;
-
         /// Returns the recipients retained by the check.
         fn recipients(&self) -> Vec<Self::PublicKey>;
 
@@ -190,11 +187,7 @@ stability_scope!(BETA {
         ) -> Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error> {
             match self.check(recipients) {
                 Ok(checked_sender) => {
-                    let recipients = if checked_sender.is_empty() {
-                        Vec::new()
-                    } else {
-                        checked_sender.recipients()
-                    };
+                    let recipients = checked_sender.recipients();
                     match checked_sender.send(message, priority)? {
                         Feedback::Ok | Feedback::Backoff => Ok(recipients),
                         Feedback::Closed => Ok(Vec::new()),

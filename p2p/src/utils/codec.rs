@@ -83,8 +83,8 @@ pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
 }
 
 impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
-    pub fn is_empty(&self) -> bool {
-        self.sender.is_empty()
+    pub fn recipients(&self) -> Vec<S::PublicKey> {
+        self.sender.recipients()
     }
 
     pub fn send(

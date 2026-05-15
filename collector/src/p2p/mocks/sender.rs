@@ -48,10 +48,6 @@ impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
     type PublicKey = P;
     type Error = Error;
 
-    fn is_empty(&self) -> bool {
-        false
-    }
-
     fn recipients(&self) -> Vec<Self::PublicKey> {
         Vec::new()
     }

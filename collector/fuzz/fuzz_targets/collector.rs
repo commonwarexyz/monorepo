@@ -231,10 +231,6 @@ impl CheckedSender for MockCheckedSender {
     type Error = MockSendError;
     type PublicKey = PublicKey;
 
-    fn is_empty(&self) -> bool {
-        false
-    }
-
     fn recipients(&self) -> Vec<Self::PublicKey> {
         Vec::new()
     }

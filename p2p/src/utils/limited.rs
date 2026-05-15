@@ -218,11 +218,6 @@ pub struct CheckedSender<'a, S: UnlimitedSender> {
 }
 
 impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
-    /// Returns the recipients retained after rate-limit and connectivity filtering.
-    pub const fn recipients(&self) -> &Recipients<S::PublicKey> {
-        &self.recipients
-    }
-
     /// Extracts the inner [`UnlimitedSender`] reference.
     ///
     /// # Warning
@@ -238,14 +233,6 @@ impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
 impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
     type Error = S::Error;
-
-    fn is_empty(&self) -> bool {
-        match &self.recipients {
-            Recipients::All => false,
-            Recipients::Some(peers) => peers.is_empty(),
-            Recipients::One(_) => false,
-        }
-    }
 
     fn recipients(&self) -> Vec<Self::PublicKey> {
         match &self.recipients {
@@ -490,7 +477,7 @@ mod tests {
 
             // First call establishes subscription - no known peers yet
             let checked = limited.check(Recipients::All).unwrap();
-            assert!(checked.is_empty());
+            assert!(crate::CheckedSender::recipients(&checked).is_empty());
             checked.send(IoBuf::from(b"empty"), false).unwrap();
 
             // Verify that the sender received the message with empty Recipients::Some

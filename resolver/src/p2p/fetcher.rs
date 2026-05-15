@@ -285,7 +285,7 @@ where
                         continue;
                     }
                 };
-                if checked.is_empty() {
+                if checked.recipients().is_empty() {
                     self.requests_sent.inc(Status::Dropped);
                     debug!(?peer, "peer unavailable");
                     self.update_performance(&peer, self.timeout);
@@ -605,14 +605,6 @@ mod tests {
     impl<'a, S: UnlimitedSender> commonware_p2p::CheckedSender for CheckedSender<'a, S> {
         type PublicKey = S::PublicKey;
         type Error = S::Error;
-
-        fn is_empty(&self) -> bool {
-            match &self.recipients {
-                Recipients::All => false,
-                Recipients::Some(peers) => peers.is_empty(),
-                Recipients::One(_) => false,
-            }
-        }
 
         fn recipients(&self) -> Vec<Self::PublicKey> {
             match &self.recipients {

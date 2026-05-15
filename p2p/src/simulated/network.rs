@@ -1117,10 +1117,6 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
     type PublicKey = P;
     type Error = Error;
 
-    fn is_empty(&self) -> bool {
-        self.checked.is_empty()
-    }
-
     fn recipients(&self) -> Vec<Self::PublicKey> {
         crate::CheckedSender::recipients(&self.checked)
     }
@@ -2038,7 +2034,7 @@ mod tests {
                 let msg = vec![i as u8; 64];
                 loop {
                     let checked = sender.check(Recipients::One(recipient_pk.clone())).unwrap();
-                    if checked.is_empty() {
+                    if checked.recipients().is_empty() {
                         context.sleep(Duration::from_millis(1)).await;
                         continue;
                     }
@@ -2393,7 +2389,7 @@ mod tests {
                         secondary_1.clone(),
                     ]))
                     .unwrap();
-                if checked.is_empty() {
+                if checked.recipients().is_empty() {
                     context.sleep(Duration::from_millis(1)).await;
                     continue;
                 }
@@ -2431,7 +2427,7 @@ mod tests {
                         secondary_1.clone(),
                     ]))
                     .unwrap();
-                if checked.is_empty() {
+                if checked.recipients().is_empty() {
                     context.sleep(Duration::from_millis(1)).await;
                     continue;
                 }
