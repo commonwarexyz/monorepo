@@ -122,11 +122,11 @@ impl<
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
-        let clock = self
+        let context = self
             .context
             .child("channel")
             .with_attribute("index", channel);
-        self.channels.register(channel, rate, backlog, clock)
+        self.channels.register(channel, rate, backlog, context)
     }
 
     /// Starts the network.

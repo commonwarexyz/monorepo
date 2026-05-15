@@ -615,7 +615,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -664,7 +664,7 @@ mod tests {
         let secondary_1 = PrivateKey::from_seed(5).public_key();
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
             assert!(directory.track(
@@ -714,7 +714,7 @@ mod tests {
 
         runtime.start(|context| async move {
             // pk_b in both roles; pk_c secondary-only. pk_b is deduplicated as primary only.
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
             assert!(directory.track(
@@ -761,7 +761,7 @@ mod tests {
         let pk_y = PrivateKey::from_seed(2).public_key();
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
             // Index 0: X is primary, Y is secondary.
@@ -842,7 +842,7 @@ mod tests {
 
         runtime.start(|context| async move {
             // pk_overlap is a primary member in set 0 and listed again as secondary in set 1.
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
             assert!(directory.track(
@@ -892,7 +892,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -976,7 +976,7 @@ mod tests {
         let pk_1 = PrivateKey::from_seed(1).public_key();
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1027,7 +1027,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1103,7 +1103,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1174,7 +1174,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1254,7 +1254,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1339,7 +1339,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1397,7 +1397,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1459,7 +1459,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1520,7 +1520,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1578,7 +1578,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1652,7 +1652,7 @@ mod tests {
 
         runtime.start(|context| async move {
             // Initialize with a bootstrapper
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("context"),
                 vec![(bootstrapper_pk.clone(), bootstrapper_ingress)],
@@ -1716,7 +1716,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1800,7 +1800,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1857,7 +1857,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1903,7 +1903,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1936,7 +1936,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -1978,7 +1978,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],
@@ -2034,7 +2034,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
                 context.child("directory"),
                 vec![],

@@ -573,7 +573,7 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let reset_peers = directory
@@ -654,7 +654,7 @@ mod tests {
         let secondary_1_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1239);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             assert!(directory
@@ -722,7 +722,7 @@ mod tests {
                 context.child("directory"),
                 my_pk.clone(),
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             directory.track(
@@ -842,7 +842,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             directory
@@ -902,7 +902,7 @@ mod tests {
 
         runtime.start(|context| async move {
             // Same pk in primary and secondary maps; deduplicated as primary only.
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let reset_peers = directory
@@ -956,7 +956,7 @@ mod tests {
         let addr_y = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2000);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Index 0: X is primary, Y is secondary.
@@ -1045,7 +1045,7 @@ mod tests {
         let new_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2235);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let initial_reset = directory
@@ -1110,7 +1110,7 @@ mod tests {
 
         runtime.start(|context| async move {
             // pk_overlap: primary in set 0 (address addr_overlap_p), secondary in set 1 (addr_overlap_s).
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             assert!(directory
@@ -1178,7 +1178,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
             directory
                 .track(
@@ -1232,7 +1232,7 @@ mod tests {
                 context.child("directory"),
                 my_pk.clone(),
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             directory.track(
@@ -1321,7 +1321,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             // Add set with asymmetric addresses
@@ -1417,7 +1417,7 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both socket and DNS addresses
@@ -1481,7 +1481,7 @@ mod tests {
         ));
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both public and private egress IPs
@@ -1547,7 +1547,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Add both peers with the same IP
@@ -1611,7 +1611,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             directory.track(
@@ -1698,7 +1698,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Initially no blocked peers
@@ -1790,7 +1790,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Add all peers
@@ -1850,7 +1850,7 @@ mod tests {
                 context.child("directory"),
                 my_pk.clone(),
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Blocking myself should be ignored (Myself is unblockable)
@@ -1894,7 +1894,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Block a peer that doesn't exist yet
@@ -1983,7 +1983,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Register a peer
@@ -2061,7 +2061,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Add peer to a set
@@ -2118,7 +2118,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
             directory.track(
                 0,
@@ -2173,7 +2173,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
             directory.track(
                 0,
@@ -2215,7 +2215,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             let dialable = directory.dialable();
@@ -2245,7 +2245,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
             directory.track(
                 0,
@@ -2286,7 +2286,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
             directory.track(
                 0,
@@ -2338,7 +2338,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
             directory.track(
                 0,
@@ -2385,7 +2385,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Add peer to a set
@@ -2442,7 +2442,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Add peer to a set
@@ -2499,7 +2499,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             // Add peer to a set
@@ -2553,7 +2553,7 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             directory.track(
@@ -2592,7 +2592,7 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let success = directory.overwrite(&pk_1, addr(addr_1));
@@ -2620,7 +2620,7 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             directory.track(
@@ -2660,7 +2660,7 @@ mod tests {
                 context.child("directory"),
                 my_pk,
                 config,
-                new_releaser(context.child("releaser_mailbox")),
+                new_releaser(context.child("releaser")),
             );
 
             directory.track(
@@ -2703,7 +2703,7 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             let success = directory.overwrite(&my_pk, addr(addr_1));
@@ -2728,7 +2728,7 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
 
         runtime.start(|context| async move {
-            let releaser = new_releaser(context.child("releaser_mailbox"));
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             directory.track(

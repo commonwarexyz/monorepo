@@ -247,11 +247,11 @@ mod tests {
             );
 
             // Create a releaser for reservations
-            let (releaser_mailbox, _releaser_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("releaser_mailbox"),
+            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("releaser"),
                 NZUsize!(1024),
             );
-            let releaser = Releaser::new(releaser_mailbox);
+            let releaser = Releaser::new(sender);
 
             // Generate 10 peers
             let peers: Vec<PublicKey> = (0..10)
@@ -390,11 +390,11 @@ mod tests {
                 NZUsize!(1024),
             );
 
-            let (releaser_mailbox, _releaser_rx) = mailbox::new::<tracker::Message<PublicKey>>(
-                context.child("releaser_mailbox"),
+            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("releaser"),
                 NZUsize!(1024),
             );
-            let releaser = Releaser::new(releaser_mailbox);
+            let releaser = Releaser::new(sender);
 
             let peers: Vec<PublicKey> = (0..3)
                 .map(|i| PrivateKey::from_seed(i).public_key())
