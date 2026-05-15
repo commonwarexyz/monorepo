@@ -319,7 +319,7 @@ impl Freelist {
     /// the matching `Acquire` operation before reading the buffer back out.
     ///
     /// The caller must own `slot`, and `slot` must not already be available in
-    /// this freelist. `buffer` must belong to this freelist, it must have been
+    /// this freelist. `buffer` must belong to this freelist and must have been
     /// allocated by this freelist.
     #[inline]
     pub fn put(&self, slot: u32, buffer: PooledBuffer) {

@@ -744,9 +744,10 @@ impl std::ops::Deref for SizeClassHandle {
 /// strong count.
 ///
 /// A lease must be consumed by one of those explicit transitions, such as
-/// [`Self::into_banked`] or [`Self::return_global`]. Dropping the value without
-/// calling anything would leak the strong reference, which is why this type
-/// intentionally has no `Drop` implementation.
+/// [`Self::into_banked`] or [`Self::return_global`]. Because this type
+/// intentionally has no `Drop` implementation, simply dropping a lease value
+/// would leak the strong reference. This keeps hot transfers free of drop glue,
+/// but means every owner must complete one of the explicit transitions.
 ///
 /// Thread-local cache entries do not store a lease per entry. The cache stores
 /// the class token once and owns one banked strong reference for each initialized
