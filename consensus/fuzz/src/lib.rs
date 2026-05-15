@@ -1323,7 +1323,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         relay: secondary_application.clone(),
                         reporter: secondary_reporter,
                         partition: secondary_label,
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(EPOCH),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_millis(1_500),
@@ -1331,7 +1331,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout: Delta::new(10),
                         skip_timeout: Delta::new(5),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: NZUsize!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(
