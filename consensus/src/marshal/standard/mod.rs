@@ -1898,7 +1898,7 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver_mailbox"));
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
@@ -1994,8 +1994,7 @@ mod tests {
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            let (resolver_tx, resolver_rx) =
-                mailbox::new(context.child("resolver_mailbox"), NZUsize!(100));
+            let (resolver_tx, resolver_rx) = mailbox::new(context.child("mailbox"), NZUsize!(100));
 
             let (actor, _mailbox, _) = Actor::init(
                 context.child("actor"),
