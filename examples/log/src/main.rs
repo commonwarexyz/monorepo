@@ -221,10 +221,13 @@ fn main() {
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
             activity_timeout: ViewDelta::new(10),
-            skip_timeout: ViewDelta::new(5),
+            skip_timeout: Duration::from_secs(11),
             fetch_concurrent: NZUsize!(32),
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
+            term_length: commonware_utils::NZU64!(1),
+            term_stop_notarize_on_nullify: false,
+            same_term_finalization_timeout: Duration::from_secs(12),
             forwarding: simplex::ForwardingPolicy::Disabled,
         };
         let engine = simplex::Engine::new(context.child("engine"), cfg);

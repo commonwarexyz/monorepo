@@ -122,18 +122,22 @@ mod tests {
     use super::*;
     use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard, N4F1C3};
     use commonware_macros::{test_group, test_traced};
+    use commonware_utils::NZU64;
+    use core::num::NonZeroU64;
     use proptest::prelude::*;
 
     const TEST_CONTAINERS: u64 = 1000;
     const PROPERTY_TEST_CONTAINERS: u64 = 30;
+    const TERM_LENGTH_BOUNDARIES: [NonZeroU64; 2] = [NZU64!(1), NZU64!(5)];
     const SEED: u64 = 0;
 
-    fn test_input(seed: u64, containers: u64) -> FuzzInput {
+    fn test_input(seed: u64, containers: u64, term_length: NonZeroU64) -> FuzzInput {
         FuzzInput {
             raw_bytes: seed.to_be_bytes().to_vec(),
             partition: Partition::Connected,
             configuration: N4F1C3,
             required_containers: containers,
+            term_length,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }
@@ -142,41 +146,55 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_ed25519_connected() {
-        fuzz::<SimplexEd25519, Standard>(test_input(SEED, TEST_CONTAINERS));
+        fuzz::<SimplexEd25519, Standard>(test_input(SEED, TEST_CONTAINERS, NZU64!(1)));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_secp256r1_connected() {
-        fuzz::<SimplexSecp256r1, Standard>(test_input(SEED, TEST_CONTAINERS));
+        fuzz::<SimplexSecp256r1, Standard>(test_input(SEED, TEST_CONTAINERS, NZU64!(1)));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_multisig_minpk_connected() {
-        fuzz::<SimplexBls12381MultisigMinPk, Standard>(test_input(SEED, TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MultisigMinPk, Standard>(test_input(
+            SEED,
+            TEST_CONTAINERS,
+            NZU64!(1),
+        ));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_multisig_minsig_connected() {
-        fuzz::<SimplexBls12381MultisigMinSig, Standard>(test_input(SEED, TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MultisigMinSig, Standard>(test_input(
+            SEED,
+            TEST_CONTAINERS,
+            NZU64!(1),
+        ));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_threshold_minpk_connected() {
-        fuzz::<SimplexBls12381MinPk, Standard>(test_input(SEED, TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MinPk, Standard>(test_input(SEED, TEST_CONTAINERS, NZU64!(1)));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_threshold_minsig_connected() {
-        fuzz::<SimplexBls12381MinSig, Standard>(test_input(SEED, TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MinSig, Standard>(test_input(SEED, TEST_CONTAINERS, NZU64!(1)));
     }
 
     fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
-        any::<u64>().prop_map(move |seed| test_input(seed, PROPERTY_TEST_CONTAINERS))
+        (
+            any::<u64>(),
+            prop::sample::select(TERM_LENGTH_BOUNDARIES.as_slice()),
+        )
+            .prop_map(move |(seed, term_length)| {
+                test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
+            })
     }
 
     proptest! {

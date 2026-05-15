@@ -10,7 +10,8 @@ use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
-use std::{num::NonZeroUsize, time::Duration};
+use core::num::{NonZeroU64, NonZeroUsize};
+use std::time::Duration;
 
 /// Controls whether and how the engine proactively forwards certified blocks
 /// when entering the next view.
@@ -117,28 +118,52 @@ where
 
     /// Amount of time to wait for certification progress in a view
     /// before attempting to skip the view.
+    ///
+    /// This timeout must be greater than the leader timeout.
     pub certification_timeout: Duration,
 
     /// Amount of time to wait before retrying a nullify broadcast if
     /// stuck in a view.
     pub timeout_retry: Duration,
 
-    /// Number of views behind finalized tip to track
-    /// and persist activity derived from validator messages.
+    /// Number of views behind the finalized tip to track for recent activity.
+    ///
+    /// Durable safety evidence may be retained longer when stable-leader terms
+    /// require it for same-term vote safety or skipped-view validation.
     pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for this many recent known views (we ignore views we don't have data for).
+    /// for at least this long.
     ///
-    /// This number should be less than or equal to `activity_timeout` (how
-    /// many views we are tracking below the finalized tip).
-    pub skip_timeout: ViewDelta,
+    /// This timeout must be greater than the certification timeout and timeout retry.
+    pub skip_timeout: Duration,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: NonZeroUsize,
+
+    /// Number of consecutive views in which a leader remains stable (a "term").
+    ///
+    /// When `term_length` is 1, every view has an independent leader (the default behavior).
+    /// When `term_length` is greater than 1, views are grouped into terms and the same
+    /// leader serves for each view in the term. If a nullification is formed in any view
+    /// of a term, participants skip the rest of the term.
+    pub term_length: NonZeroU64,
+
+    /// If true, stop voting to notarize later views in a term after voting to
+    /// nullify any earlier view in that term.
+    pub term_stop_notarize_on_nullify: bool,
+
+    /// Maximum time an entered view may remain unfinalized before we allow a
+    /// local nullify vote for the current view.
+    ///
+    /// This timeout must be greater than the certification timeout so normal
+    /// proposal and certification paths have a chance to complete before
+    /// term-level abandonment. When `term_length > 1`, this effectively tracks
+    /// the oldest entered, unfinalized view in the current term.
+    pub same_term_finalization_timeout: Duration,
 
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
@@ -162,17 +187,30 @@ impl<
             !self.scheme.participants().is_empty(),
             "there must be at least one participant"
         );
+
+        // Vote-to-nullify timeouts.
+        // same_term_finalization_timeout > certification_timeout > leader_timeout > 0.
+        // skip_timeout > certification_timeout and timeout_retry.
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
         );
         assert!(
-            self.certification_timeout > Duration::default(),
-            "certification timeout must be greater than zero"
+            self.certification_timeout > self.leader_timeout,
+            "certification timeout must be greater than leader timeout"
         );
         assert!(
-            self.leader_timeout <= self.certification_timeout,
-            "leader timeout must be less than or equal to certification timeout"
+            self.same_term_finalization_timeout > self.certification_timeout,
+            "same term finalization timeout must be greater than certification timeout"
+        );
+
+        assert!(
+            self.skip_timeout > self.certification_timeout,
+            "skip timeout must be greater than certification timeout"
+        );
+        assert!(
+            self.skip_timeout > self.timeout_retry,
+            "skip timeout must be greater than timeout retry"
         );
         assert!(
             self.timeout_retry > Duration::default(),
@@ -181,14 +219,6 @@ impl<
         assert!(
             !self.activity_timeout.is_zero(),
             "activity timeout must be greater than zero"
-        );
-        assert!(
-            !self.skip_timeout.is_zero(),
-            "skip timeout must be greater than zero"
-        );
-        assert!(
-            self.skip_timeout <= self.activity_timeout,
-            "skip timeout must be less than or equal to activity timeout"
         );
         assert!(
             self.fetch_timeout > Duration::default(),
