@@ -114,6 +114,15 @@ where
             return Ok(journal);
         }
 
+        // After a crash during a previous clear_to_size, the journal may recover empty at a stale
+        // position ahead of the requested start (possibly even beyond range.end). Re-clear so the
+        // sync engine starts from the correct location.
+        let bounds = journal.reader().await.bounds();
+        if bounds.is_empty() && bounds.start > *range.start() {
+            journal.clear_to_size(*range.start()).await?;
+            return Ok(journal);
+        }
+
         if size > *range.end() {
             return Err(crate::journal::Error::ItemOutOfRange(size));
         }
@@ -122,14 +131,6 @@ where
             journal.clear_to_size(*range.start()).await?;
         } else {
             journal.prune(*range.start()).await?;
-        }
-
-        // After a same-section crash during a previous clear_to_size, the journal may recover to a
-        // stale position ahead of the requested start. Re-clear so the sync engine starts from the
-        // correct location.
-        let bounds = journal.reader().await.bounds();
-        if bounds.is_empty() && bounds.start > *range.start() {
-            journal.clear_to_size(*range.start()).await?;
         }
 
         Ok(journal)
@@ -202,6 +203,39 @@ mod tests {
 
             // Without the fix, this reopens at 9..9 and the sync engine skips
             // locations 7-8. With the fix, it re-clears to 7.
+            let range = non_empty_range!(
+                crate::merkle::Location::<F>::new(7),
+                crate::merkle::Location::<F>::new(20)
+            );
+            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                .await
+                .unwrap();
+
+            let size = Contiguous::size(&journal).await;
+            assert_eq!(size, 7);
+            let bounds = journal.reader().await.bounds();
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, 7);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_journal_new_stale_empty_position_beyond_range_end() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+
+            // Create a journal at pruning_boundary=30, well beyond our intended range end.
+            let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)
+                .await
+                .unwrap();
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Open via Journal::new with a range whose end < 30. Without the fix this would
+            // return ItemOutOfRange because size(30) > range.end(20).
             let range = non_empty_range!(
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
