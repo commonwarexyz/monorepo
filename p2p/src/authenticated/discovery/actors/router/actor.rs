@@ -10,7 +10,7 @@ use crate::{
     },
     Recipients,
 };
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -63,17 +63,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool) {
         let channel = encoded.channel;
         if let Some(relay) = self.connections.get_mut(&recipient) {
-            match relay.send(encoded, priority) {
-                Feedback::Ok => {}
-                Feedback::Backoff => {
-                    debug!(?recipient, channel, "relay mailbox requested backoff");
-                }
-                Feedback::Closed => {
-                    self.messages_dropped
-                        .get_or_create(&metrics::Message::new_data(&recipient, channel))
-                        .inc();
-                }
-            }
+            let _ = relay.send(encoded, priority);
         } else {
             self.messages_dropped
                 .get_or_create(&metrics::Message::new_data(&recipient, channel))
@@ -83,7 +73,6 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 
     /// Routes content to the configured recipients.
     fn route(&mut self, recipients: Recipients<P>, encoded: EncodedData, priority: bool) {
-        let channel = encoded.channel;
         match recipients {
             Recipients::One(recipient) => {
                 self.send(recipient, encoded, priority);
@@ -95,18 +84,8 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             }
             Recipients::All => {
                 // Send to all connected peers
-                for (recipient, relay) in self.connections.iter_mut() {
-                    match relay.send(encoded.clone(), priority) {
-                        Feedback::Ok => {}
-                        Feedback::Backoff => {
-                            debug!(?recipient, channel, "relay mailbox requested backoff");
-                        }
-                        Feedback::Closed => {
-                            self.messages_dropped
-                                .get_or_create(&metrics::Message::new_data(recipient, channel))
-                                .inc();
-                        }
-                    }
+                for relay in self.connections.values_mut() {
+                    let _ = relay.send(encoded.clone(), priority);
                 }
             }
         }
