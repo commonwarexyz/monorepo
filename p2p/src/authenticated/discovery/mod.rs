@@ -1250,7 +1250,10 @@ mod tests {
 
             // Verify peer 0 cannot send to peer 1 yet
             let checked = sender0.check(Recipients::One(peer1.public_key())).unwrap();
-            assert!(checked.recipients().is_empty(), "should not be connected yet");
+            assert!(
+                checked.recipients().is_empty(),
+                "should not be connected yet"
+            );
 
             // Now register the DNS mapping
             context.resolver_register("boot.local", Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]));
@@ -2424,7 +2427,7 @@ mod tests {
         executor.start(|context| async move {
             // Create router
             let cfg = RouterConfig {
-                mailbox_size: NZUsize!(10),
+                mailbox_size: NZUsize!(11),
             };
             let (router, mailbox, messenger) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);

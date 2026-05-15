@@ -75,6 +75,31 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
         }
     }
 
+    /// Routes content to the configured recipients.
+    fn route(&mut self, recipients: Recipients<P>, encoded: EncodedData, priority: bool) {
+        let channel = encoded.channel;
+        match recipients {
+            Recipients::One(recipient) => {
+                self.send(recipient, encoded, priority);
+            }
+            Recipients::Some(recipients) => {
+                for recipient in recipients {
+                    self.send(recipient, encoded.clone(), priority);
+                }
+            }
+            Recipients::All => {
+                // Send to all connected peers
+                for (recipient, relay) in self.connections.iter_mut() {
+                    if relay.send(encoded.clone(), priority).is_err() {
+                        self.messages_dropped
+                            .get_or_create(&metrics::Message::new_data(recipient, channel))
+                            .inc();
+                    }
+                }
+            }
+        }
+    }
+
     /// Starts a new task that runs the router [Actor].
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed.
@@ -82,8 +107,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
         spawn_cell!(self.context, self.run(routing))
     }
 
-    /// Runs the [Actor] event loop, processing incoming messages control messages
-    /// ([Message::Ready], [Message::Release]) and content messages ([Message::Content]).
+    /// Runs the [Actor] event loop, processing incoming control and content messages.
     /// Returns when the `control` channel is closed or shutdown is signaled.
     async fn run(mut self, routing: Channels<P>) {
         select_loop! {
@@ -116,29 +140,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                         encoded,
                         priority,
                     } => {
-                        let channel = encoded.channel;
-                        match recipients {
-                            Recipients::One(recipient) => {
-                                self.send(recipient, encoded, priority);
-                            }
-                            Recipients::Some(recipients) => {
-                                for recipient in recipients {
-                                    self.send(recipient, encoded.clone(), priority);
-                                }
-                            }
-                            Recipients::All => {
-                                // Send to all connected peers
-                                for (recipient, relay) in self.connections.iter_mut() {
-                                    if relay.send(encoded.clone(), priority).is_err() {
-                                        self.messages_dropped
-                                            .get_or_create(&metrics::Message::new_data(
-                                                recipient, channel,
-                                            ))
-                                            .inc();
-                                    }
-                                }
-                            }
-                        }
+                        self.route(recipients, encoded, priority);
                     }
                     Message::SubscribePeers { mut sender } => {
                         let peers = self.connections.keys().cloned().collect();

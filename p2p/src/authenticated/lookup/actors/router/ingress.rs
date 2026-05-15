@@ -43,7 +43,10 @@ impl<P: PublicKey> Policy for Message<P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.push_back(message);
+        match message {
+            Self::Content { .. } => {}
+            message => overflow.push_back(message),
+        }
     }
 }
 

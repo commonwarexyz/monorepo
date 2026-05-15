@@ -43,7 +43,10 @@ impl<P: PublicKey> Policy for Message<P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.push_back(message);
+        match message {
+            Self::Content { .. } => {}
+            message => overflow.push_back(message),
+        }
     }
 }
 
@@ -136,5 +139,57 @@ impl<P: PublicKey> Connected for Messenger<P> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
         let _ = self.sender.0.enqueue(Message::SubscribePeers { sender });
         receiver
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Signer as _,
+    };
+    use commonware_runtime::{deterministic, BufferPooler as _, IoBuf, Runner as _};
+
+    #[test]
+    fn test_overflow_drops_content_but_retains_control() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (control_sender, mut receiver) = mailbox::new::<Message<PublicKey>>(NZUsize!(1));
+            let mailbox = Mailbox::new(control_sender.clone());
+            let mut messenger = Messenger::new(
+                context.network_buffer_pool().clone(),
+                Mailbox::new(control_sender),
+            );
+            let peer = PrivateKey::from_seed(1).public_key();
+
+            assert_eq!(
+                messenger.content(
+                    Recipients::One(peer.clone()),
+                    7,
+                    IoBuf::from(b"one").into(),
+                    false
+                ),
+                Feedback::Ok
+            );
+            assert_eq!(
+                messenger.content(Recipients::One(peer), 7, IoBuf::from(b"two").into(), false),
+                Feedback::Backoff
+            );
+            assert_eq!(
+                mailbox.release(PrivateKey::from_seed(2).public_key()),
+                Feedback::Backoff
+            );
+
+            match receiver.try_recv().unwrap() {
+                Message::Content { encoded, .. } => assert_eq!(encoded.channel, 7),
+                _ => panic!("expected content"),
+            }
+            match receiver.try_recv().unwrap() {
+                Message::Release { .. } => {}
+                _ => panic!("expected release"),
+            }
+            assert!(receiver.try_recv().is_err());
+        });
     }
 }
