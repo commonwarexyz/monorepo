@@ -475,9 +475,9 @@ impl PoolMetrics {
 /// [`BufferPool`] handle and still return to the correct freelist.
 ///
 /// The freelist is the only place that deallocates tracked buffers. Returning a
-/// buffer to the freelist transfers buffer ownership back to `SizeClass` and
-/// releases the pooled-backing or banked strong reference that kept the class
-/// alive while the buffer was outside the global freelist.
+/// buffer to the freelist transfers buffer ownership back to that freelist and
+/// releases the pooled-backing lease or banked strong reference that kept the
+/// class alive while the buffer was outside the global freelist.
 ///
 /// Allocation prefers the local cache, then refills from the global freelist,
 /// and only creates a new tracked buffer when no free buffer is available and
@@ -687,7 +687,7 @@ impl SizeClassHandle {
         unsafe { self.token.retain() };
         // SAFETY: the increment above created the strong reference consumed by
         // this temporary Arc.
-        let arc = unsafe { Arc::from_raw(self.token.as_ptr()) };
+        let arc = unsafe { Arc::from_raw(self.token.ptr.as_ptr()) };
         Arc::strong_count(&arc) - 1
     }
 }
