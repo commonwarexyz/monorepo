@@ -20,6 +20,7 @@ pub use reservation::Reservation;
 #[derive(Clone, Debug)]
 pub struct Config<C: Signer> {
     pub crypto: C,
+    pub mailbox_size: NonZeroUsize,
     pub tracked_peer_sets: NonZeroUsize,
     pub peer_connection_cooldown: Duration,
     pub allow_private_ips: bool,

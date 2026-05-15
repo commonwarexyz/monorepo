@@ -7,9 +7,10 @@ use super::{
     types,
 };
 use crate::{
-    authenticated::{mailbox::UnboundedMailbox, Mailbox},
+    authenticated::Mailbox,
     Channel,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -35,7 +36,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: mailbox::Sender<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
     listener: mpsc::Receiver<HashSet<IpAddr>>,
@@ -57,11 +58,12 @@ impl<
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
+        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size.get());
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
+                mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 allow_private_ips: cfg.allow_private_ips,

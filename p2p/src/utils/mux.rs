@@ -556,8 +556,7 @@ mod tests {
             .track(
                 0,
                 Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
-            )
-            .await;
+            );
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }

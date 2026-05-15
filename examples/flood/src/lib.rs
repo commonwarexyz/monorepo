@@ -103,6 +103,7 @@
 )]
 
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 
 /// Configuration for flood.
 #[derive(Deserialize, Serialize)]
@@ -114,6 +115,6 @@ pub struct Config {
     pub worker_threads: usize,
     pub message_size: u32,
     pub message_backlog: usize,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub instrument: bool,
 }

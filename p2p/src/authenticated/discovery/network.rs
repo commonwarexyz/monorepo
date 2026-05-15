@@ -7,9 +7,10 @@ use super::{
     types,
 };
 use crate::{
-    authenticated::{discovery::types::InfoVerifier, mailbox::UnboundedMailbox, Mailbox},
+    authenticated::{discovery::types::InfoVerifier, Mailbox},
     Channel,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -37,7 +38,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: mailbox::Sender<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: Mailbox<router::Message<C::PublicKey>>,
     info_verifier: InfoVerifier<C::PublicKey>,
@@ -69,6 +70,7 @@ impl<
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
                 synchrony_bound: cfg.synchrony_bound,
+                mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,

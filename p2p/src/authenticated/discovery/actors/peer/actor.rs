@@ -7,10 +7,10 @@ use crate::authenticated::{
         metrics,
         types::{self, InfoVerifier},
     },
-    mailbox::UnboundedMailbox,
     relay::{recv_prioritized, Prioritized, Relay},
     Mailbox,
 };
+use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -26,6 +26,7 @@ use commonware_utils::{
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
+use tracker::ingress::SenderExt as _;
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
@@ -50,9 +51,9 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
+        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
         (
             Self {
                 context,
@@ -163,7 +164,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: C,
         greeting: types::Info<C>,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
-        mut tracker: UnboundedMailbox<tracker::Message<C>>,
+        tracker: mailbox::Sender<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
@@ -194,7 +195,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
             let peer = peer.clone();
-            let mut tracker = tracker.clone();
+            let tracker = tracker.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
@@ -422,7 +423,6 @@ mod tests {
             actors::{router, tracker},
             channels::Channels,
         },
-        mailbox::UnboundedMailbox,
         Mailbox,
     };
     use commonware_codec::Encode;
@@ -447,7 +447,7 @@ mod tests {
 
     fn default_peer_config(context: &impl Metrics, me: PublicKey) -> Config<PublicKey> {
         Config {
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             gossip_bit_vec_frequency: Duration::from_secs(30),
             max_peer_set_size: 128,
@@ -549,7 +549,7 @@ mod tests {
 
             // Create tracker mailbox
             let (tracker_mailbox, _tracker_receiver) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             // Create empty channels
             let channels = create_channels(&context);
@@ -648,7 +648,7 @@ mod tests {
 
             // Create tracker mailbox
             let (tracker_mailbox, _tracker_receiver) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             // Create empty channels
             let channels = create_channels(&context);
@@ -753,7 +753,7 @@ mod tests {
 
             // Create tracker mailbox
             let (tracker_mailbox, _tracker_receiver) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             // Create empty channels
             let channels = create_channels(&context);
@@ -845,7 +845,7 @@ mod tests {
 
             // Create peer config with our metric
             let config = Config {
-                mailbox_size: 10,
+                mailbox_size: NZUsize!(10),
                 send_batch_size: NZUsize!(8),
                 gossip_bit_vec_frequency: Duration::from_secs(30),
                 max_peer_set_size: 128,
@@ -881,7 +881,7 @@ mod tests {
 
             // Create tracker mailbox
             let (tracker_mailbox, _tracker_receiver) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             // Create channels with a very small backlog (1) to force drops
             let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
@@ -1015,7 +1015,7 @@ mod tests {
             );
 
             let (tracker_mailbox, _tracker_receiver) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             // Only channel 0 is registered -- any other channel value is
             // attacker-controlled and must not produce a metric label.

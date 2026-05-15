@@ -125,8 +125,7 @@ mod tests {
         }
         oracle
             .manager()
-            .track(0, Set::from_iter_dedup(peers.clone()))
-            .await;
+            .track(0, Set::from_iter_dedup(peers.clone()));
 
         (oracle, schemes, peers, connections)
     }

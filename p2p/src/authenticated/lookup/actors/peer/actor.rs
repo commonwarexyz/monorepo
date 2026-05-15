@@ -40,9 +40,9 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
+        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
         (
             Self {
                 context,
@@ -375,7 +375,7 @@ mod tests {
 
     fn default_peer_config(context: &impl Metrics) -> Config<PublicKey> {
         Config {
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             ping_frequency: Duration::from_secs(30),
             sent_messages: context.family("sent_messages", "test sent messages"),

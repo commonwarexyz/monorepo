@@ -1508,6 +1508,7 @@ name = "commonware-p2p"
 version = "2026.4.0"
 dependencies = [
  "arbitrary",
+ "commonware-actor",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",

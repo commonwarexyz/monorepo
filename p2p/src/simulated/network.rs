@@ -7,13 +7,13 @@ use super::{
     Error,
 };
 use crate::{
-    authenticated::UnboundedMailbox,
     utils::{
         limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
         PeerSetsAtIndex as PeerSetsAtIndexBase,
     },
     Channel, Message, PeerSetUpdate, Recipients, TrackedPeers, UnlimitedSender as _,
 };
+use commonware_actor::mailbox::{self, Policy};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -34,7 +34,7 @@ use futures::{future, SinkExt};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -47,6 +47,20 @@ type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
+
+enum ConnectedMessage<P: PublicKey> {
+    Subscribe {
+        response: oneshot::Sender<ring::Receiver<Vec<P>>>,
+    },
+}
+
+impl<P: PublicKey> Policy for ConnectedMessage<P> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        overflow.push_back(message);
+    }
+}
 
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,10 +147,11 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     next_addr: SocketAddr,
 
     // Channel to receive messages from the oracle
-    ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
+    ingress: mailbox::Receiver<ingress::Message<P, E>>,
 
-    // Mailbox for the oracle channel (passed to Senders for PeerSource subscriptions)
-    oracle_mailbox: UnboundedMailbox<ingress::Message<P, E>>,
+    // Mailbox for peer list subscriptions used by rate-limited senders.
+    connected_mailbox: mailbox::Sender<ConnectedMessage<P>>,
+    connected_ingress: mailbox::Receiver<ConnectedMessage<P>>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
@@ -183,7 +198,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
+        let (oracle_mailbox, oracle_receiver) =
+            mailbox::new::<ingress::Message<P, E>>(NZUsize!(1024));
+        let (connected_mailbox, connected_ingress) =
+            mailbox::new::<ConnectedMessage<P>>(NZUsize!(1024));
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
 
@@ -198,7 +216,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
                 ingress: oracle_receiver,
-                oracle_mailbox: oracle_mailbox.clone(),
+                connected_mailbox,
+                connected_ingress,
                 sender,
                 receiver,
                 links: HashMap::new(),
@@ -410,7 +429,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
-                // Broadcast updated tracked membership to SubscribeConnected subscribers
+                // Broadcast updated tracked membership to connected peer subscribers.
                 self.broadcast_peer_list().await;
             }
             ingress::Message::Register {
@@ -436,7 +455,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     channel,
                     self.max_size,
                     self.sender.clone(),
-                    self.oracle_mailbox.clone(),
+                    self.connected_mailbox.clone(),
                     clock,
                     quota,
                 );
@@ -468,20 +487,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.subscribers.push(sender);
 
                 // Return the receiver to the caller
-                let _ = response.send(receiver);
-            }
-            ingress::Message::SubscribeConnected { response } => {
-                // Create a ring channel for the subscriber
-                let (mut sender, receiver) = ring::channel(NZUsize!(1));
-
-                // Send current peer list immediately
-                let peer_list = self.all_connected_peers();
-                let _ = sender.send(peer_list).await;
-
-                // Store sender for future broadcasts
-                self.peer_subscribers.push(sender);
-
-                // Return the receiver to the subscriber
                 let _ = response.send(receiver);
             }
             ingress::Message::LimitBandwidth {
@@ -577,7 +582,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    /// Broadcast updated peer list to all [`ingress::Message::SubscribeConnected`] subscribers.
+    async fn handle_connected(&mut self, message: ConnectedMessage<P>) {
+        match message {
+            ConnectedMessage::Subscribe { response } => {
+                let (mut sender, receiver) = ring::channel(NZUsize!(1));
+                let _ = sender.send(self.all_connected_peers()).await;
+                self.peer_subscribers.push(sender);
+                let _ = response.send(receiver);
+            }
+        }
+    }
+
+    /// Broadcast updated peer list to all connected peer subscribers.
     ///
     /// This runs when tracked membership changes ([`ingress::Message::Track`]), not when peers
     /// are first discovered via register, links, or bandwidth limits.
@@ -798,6 +814,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             Some(message) = self.ingress.recv() else break => {
                 self.handle_ingress(message).await;
             },
+            Some(message) = self.connected_ingress.recv() else break => {
+                self.handle_connected(message).await;
+            },
             Some(task) = self.receiver.recv() else break => {
                 self.handle_task(task);
             },
@@ -805,25 +824,38 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
+async fn request_connected<P: PublicKey>(
+    mailbox: &mailbox::Sender<ConnectedMessage<P>>,
+) -> Option<ring::Receiver<Vec<P>>> {
+    let (response, receiver) = oneshot::channel();
+    let _ = mailbox.enqueue(ConnectedMessage::Subscribe { response });
+    receiver.await.ok()
+}
+
 /// Provides online peers from the simulated network.
 ///
 /// Implements [`crate::utils::limited::Connected`] to provide peer list updates
 /// to [`crate::utils::limited::LimitedSender`].
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
-    mailbox: UnboundedMailbox<ingress::Message<P, E>>,
+    mailbox: mailbox::Sender<ConnectedMessage<P>>,
+    _clock: std::marker::PhantomData<E>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
     fn clone(&self) -> Self {
         Self {
             mailbox: self.mailbox.clone(),
+            _clock: std::marker::PhantomData,
         }
     }
 }
 
 impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
-    const fn new(mailbox: UnboundedMailbox<ingress::Message<P, E>>) -> Self {
-        Self { mailbox }
+    fn new(mailbox: mailbox::Sender<ConnectedMessage<P>>) -> Self {
+        Self {
+            mailbox,
+            _clock: std::marker::PhantomData,
+        }
     }
 }
 
@@ -831,9 +863,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-        self.mailbox
-            .0
-            .request(|response| ingress::Message::SubscribeConnected { response })
+        request_connected(&self.mailbox)
             .await
             .unwrap_or_else(|| {
                 let (_sender, receiver) = ring::channel(NZUsize!(1));
@@ -914,7 +944,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         channel: Channel,
         max_size: u32,
         sender: mpsc::UnboundedSender<Task<P>>,
-        oracle_mailbox: UnboundedMailbox<ingress::Message<P, E>>,
+        connected_mailbox: mailbox::Sender<ConnectedMessage<P>>,
         clock: E,
         quota: Quota,
     ) -> (Self, Handle<()>) {
@@ -954,7 +984,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             high,
             low,
         };
-        let peer_source = ConnectedPeerProvider::new(oracle_mailbox);
+        let peer_source = ConnectedPeerProvider::new(connected_mailbox);
         let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
         (Self { limited_sender }, processor)
@@ -1516,8 +1546,7 @@ mod tests {
                 .track(
                     0,
                     Set::try_from([twin.clone(), peer_a.clone(), peer_b.clone()]).unwrap(),
-                )
-                .await;
+                );
 
             // Register normal peers
             let (mut peer_a_sender, mut peer_a_recv) = oracle
@@ -1640,8 +1669,7 @@ mod tests {
             // Register all peers
             let mut manager = oracle.manager();
             manager
-                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap())
-                .await;
+                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
 
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
@@ -1713,8 +1741,7 @@ mod tests {
             // Register all peers
             let mut manager = oracle.manager();
             manager
-                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap())
-                .await;
+                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
 
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
@@ -1802,8 +1829,7 @@ mod tests {
 
             // Register initial peer set
             manager
-                .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
-                .await;
+                .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 10);
             assert_eq!(update.latest.primary.len(), 2);
@@ -1814,14 +1840,12 @@ mod tests {
             // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
             manager
-                .track(9, Set::try_from([pk3.clone()]).unwrap())
-                .await;
+                .track(9, Set::try_from([pk3.clone()]).unwrap());
 
             // Add new peer set
             let pk4 = ed25519::PrivateKey::from_seed(4).public_key();
             manager
-                .track(11, Set::try_from([pk4.clone()]).unwrap())
-                .await;
+                .track(11, Set::try_from([pk4.clone()]).unwrap());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
             assert_eq!(update.latest.primary, Set::try_from([pk4.clone()]).unwrap());
@@ -1862,8 +1886,7 @@ mod tests {
                         Set::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
                         Set::default(),
                     ),
-                )
-                .await;
+                );
             let _ = subscription.recv().await.unwrap();
 
             manager
@@ -1873,8 +1896,7 @@ mod tests {
                         Set::try_from([pk_b.clone()]).unwrap(),
                         Set::try_from([pk_overlap.clone(), pk_sec.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
 
@@ -1956,8 +1978,7 @@ mod tests {
                 .track(
                     0,
                     Set::try_from([sender_pk.clone(), recipient_pk.clone()]).unwrap(),
-                )
-                .await;
+                );
             let (mut sender, _sender_recv) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -2038,8 +2059,7 @@ mod tests {
                     0,
                     Set::try_from([sender_pk.clone(), recipient_a.clone(), recipient_b.clone()])
                         .unwrap(),
-                )
-                .await;
+                );
             let (mut sender, _recv_sender) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -2135,8 +2155,7 @@ mod tests {
                         Set::try_from([pk1.clone(), pk2.clone()]).unwrap(),
                         Set::try_from([pk2.clone(), pk3.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let mut updates = manager.subscribe().await;
             let update = updates.recv().await.unwrap();
@@ -2231,8 +2250,7 @@ mod tests {
                         Set::try_from([pk_x.clone()]).unwrap(),
                         Set::try_from([pk_y.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let update = sub.recv().await.unwrap();
             assert!(update.all.primary.position(&pk_x).is_some());
@@ -2246,8 +2264,7 @@ mod tests {
                         Set::try_from([pk_y.clone()]).unwrap(),
                         Set::try_from([pk_x.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             // Both indices retained: both peers are primary somewhere -> aggregate primary.
             let update = sub.recv().await.unwrap();
@@ -2263,8 +2280,7 @@ mod tests {
                         Set::try_from([pk_y.clone()]).unwrap(),
                         Set::try_from([pk_x.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             // Index 0 evicted. X is now purely secondary.
             let update = sub.recv().await.unwrap();
@@ -2302,8 +2318,7 @@ mod tests {
                         Set::try_from([primary_0.clone()]).unwrap(),
                         Set::try_from([secondary_0.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
             manager
                 .track(
                     1,
@@ -2311,8 +2326,7 @@ mod tests {
                         Set::try_from([primary_1.clone()]).unwrap(),
                         Set::try_from([secondary_1.clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
 
             let link = ingress::Link {
                 latency: Duration::from_millis(1),
@@ -2360,8 +2374,7 @@ mod tests {
                 &mut manager,
                 2,
                 TrackedPeers::primary([primary_2.clone()].try_into().unwrap()),
-            )
-            .await;
+            );
             oracle
                 .add_link(primary_2.clone(), secondary_0.clone(), link.clone())
                 .await

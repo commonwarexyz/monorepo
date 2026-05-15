@@ -266,7 +266,7 @@ mod tests {
     use super::*;
     use crate::{
         simulated::{self, Link, Network, Oracle},
-        Manager as _, Recipients,
+        Feedback, Manager as _, Recipients,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -313,8 +313,7 @@ mod tests {
     {
         oracle
             .manager()
-            .track(index, Set::from_iter_dedup(peers))
-            .await;
+            .track(index, Set::from_iter_dedup(peers));
     }
 
     async fn link_bidirectional(
@@ -390,7 +389,9 @@ mod tests {
     impl crate::Blocker for NoopBlocker {
         type PublicKey = PublicKey;
 
-        async fn block(&mut self, _peer: Self::PublicKey) {}
+        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+            Feedback::Ok
+        }
     }
 
     #[test_traced]

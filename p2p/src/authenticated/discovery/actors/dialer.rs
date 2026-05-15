@@ -8,9 +8,9 @@ use crate::authenticated::{
         },
         metrics,
     },
-    mailbox::UnboundedMailbox,
     Mailbox,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -24,6 +24,7 @@ use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
+use tracker::ingress::SenderExt as _;
 
 // Mailbox for the spawner actor.
 type SupervisorMailbox<E, C> =
@@ -144,7 +145,7 @@ impl<
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
         supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -152,7 +153,7 @@ impl<
 
     async fn run(
         mut self,
-        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
@@ -207,6 +208,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_stream::encrypted::Config as StreamConfig;
+    use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
         time::Duration,
@@ -240,11 +242,11 @@ mod tests {
             let dialer = Actor::new(context.child("dialer"), dialer_cfg);
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             // Create a releaser for reservations
             let (releaser_mailbox, _releaser_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let releaser = Releaser::new(releaser_mailbox);
 
             // Generate 10 peers
@@ -318,7 +320,7 @@ mod tests {
             );
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
@@ -373,10 +375,10 @@ mod tests {
             );
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             let (releaser_mailbox, _releaser_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let releaser = Releaser::new(releaser_mailbox);
 
             let peers: Vec<PublicKey> = (0..3)
@@ -445,7 +447,7 @@ mod tests {
             );
 
             let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let (supervisor, mut supervisor_rx) =
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context

@@ -8,9 +8,9 @@ use crate::authenticated::{
         metrics,
         types::InfoVerifier,
     },
-    mailbox::UnboundedMailbox,
     Mailbox,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -22,6 +22,7 @@ use commonware_utils::channel::mpsc;
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
+use tracker::ingress::SenderExt as _;
 
 pub struct Actor<
     E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
@@ -31,7 +32,7 @@ pub struct Actor<
 > {
     context: ContextCell<E>,
 
-    mailbox_size: usize,
+    mailbox_size: NonZeroUsize,
     send_batch_size: NonZeroUsize,
     gossip_bit_vec_frequency: Duration,
     max_peer_set_size: u64,
@@ -62,7 +63,7 @@ impl<
             "messages dropped due to full application buffer",
         );
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");
-        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size.get());
 
         (
             Self {
@@ -85,7 +86,7 @@ impl<
 
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
+        tracker: mailbox::Sender<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, router))
@@ -93,7 +94,7 @@ impl<
 
     async fn run(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
+        tracker: mailbox::Sender<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
         select_loop! {
@@ -117,7 +118,7 @@ impl<
                             let received_messages = self.received_messages.clone();
                             let dropped_messages = self.dropped_messages.clone();
                             let rate_limited = self.rate_limited.clone();
-                            let mut tracker = tracker.clone();
+                            let tracker = tracker.clone();
                             let mut router = router.clone();
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
                             let info_verifier = self.info_verifier.clone();

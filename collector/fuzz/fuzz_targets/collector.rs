@@ -14,7 +14,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Committable, Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
+use commonware_p2p::{Blocker, CheckedSender, Feedback, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{
     deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _,
 };
@@ -200,7 +200,9 @@ struct FuzzBlocker;
 impl Blocker for FuzzBlocker {
     type PublicKey = PublicKey;
 
-    async fn block(&mut self, _peer: Self::PublicKey) {}
+    fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+        Feedback::Ok
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -191,8 +191,7 @@ mod tests {
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
         let mut manager = oracle.manager();
         manager
-            .track(0, Set::try_from(peers.clone()).unwrap())
-            .await;
+            .track(0, Set::try_from(peers.clone()).unwrap());
 
         let mut connections = Vec::new();
         for peer in &peers {
@@ -633,8 +632,7 @@ mod tests {
                 .track(
                     1,
                     Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
-                )
-                .await;
+                );
 
             let started_key = started.recv().await.expect("retry delivery did not start");
             assert_eq!(started_key, key);
@@ -929,8 +927,7 @@ mod tests {
 
             oracle
                 .manager()
-                .track(0, Set::try_from(peers.clone()).unwrap())
-                .await;
+                .track(0, Set::try_from(peers.clone()).unwrap());
 
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -2198,8 +2195,7 @@ mod tests {
                         Set::try_from([peers[1].clone()]).unwrap(),
                         Set::try_from([peers[2].clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(100)).await;
 
             let key = Key(1);
@@ -2301,8 +2297,7 @@ mod tests {
                 .track(
                     0,
                     Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(100)).await;
 
             let key = Key(7);
@@ -2360,8 +2355,7 @@ mod tests {
                 .track(
                     1,
                     Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(100)).await;
 
             mailbox1.fetch(key);
@@ -2432,8 +2426,7 @@ mod tests {
                 .track(
                     0,
                     Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(100)).await;
 
             let key = Key(9);
@@ -2491,8 +2484,7 @@ mod tests {
                 .track(
                     1,
                     Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(100)).await;
 
             mailbox1.fetch(key.clone());
@@ -2529,8 +2521,7 @@ mod tests {
                         Set::try_from([peers[0].clone()]).unwrap(),
                         Set::try_from([peers[1].clone()]).unwrap(),
                     ),
-                )
-                .await;
+                );
             context.sleep(Duration::from_millis(100)).await;
 
             let key = Key(9);

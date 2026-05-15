@@ -3,18 +3,21 @@ use crate::{
     authenticated::{
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
-        mailbox::UnboundedMailbox,
-        Mailbox,
+        Mailbox as PeerMailbox,
     },
     types::Address,
     AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
 };
+use commonware_actor::{
+    mailbox::{self, Policy},
+    Feedback,
+};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::{fallible::FallibleExt, mpsc, oneshot},
+    channel::{mpsc, oneshot},
     ordered::Map,
 };
-use std::net::IpAddr;
+use std::{collections::VecDeque, future::Future, net::IpAddr};
 
 /// Messages that can be sent to the tracker actor.
 #[derive(Debug)]
@@ -55,7 +58,7 @@ pub enum Message<C: PublicKey> {
         public_key: C,
 
         /// The mailbox of the peer actor.
-        peer: Mailbox<peer::Message>,
+        peer: PeerMailbox<peer::Message>,
     },
 
     // ---------- Used by dialer ----------
@@ -112,79 +115,139 @@ pub enum Message<C: PublicKey> {
     },
 }
 
-impl<C: PublicKey> UnboundedMailbox<Message<C>> {
-    /// Send a `Connect` message to the tracker.
-    pub fn connect(&mut self, public_key: C, peer: Mailbox<peer::Message>) {
-        self.0.send_lossy(Message::Connect { public_key, peer });
+impl<C: PublicKey> Policy for Message<C> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        overflow.push_back(message);
     }
+}
+
+fn enqueue<C: PublicKey>(sender: &mailbox::Sender<Message<C>>, message: Message<C>) -> Feedback {
+    sender.enqueue(message)
+}
+
+async fn request<C, R, F>(sender: &mailbox::Sender<Message<C>>, make_msg: F) -> Option<R>
+where
+    C: PublicKey,
+    R: Send,
+    F: FnOnce(oneshot::Sender<R>) -> Message<C> + Send,
+{
+    let (tx, rx) = oneshot::channel();
+    let _ = sender.enqueue(make_msg(tx));
+    rx.await.ok()
+}
+
+async fn request_or<C, R, F>(
+    sender: &mailbox::Sender<Message<C>>,
+    make_msg: F,
+    default: R,
+) -> R
+where
+    C: PublicKey,
+    R: Send,
+    F: FnOnce(oneshot::Sender<R>) -> Message<C> + Send,
+{
+    request(sender, make_msg).await.unwrap_or(default)
+}
+
+async fn request_or_default<C, R, F>(sender: &mailbox::Sender<Message<C>>, make_msg: F) -> R
+where
+    C: PublicKey,
+    R: Default + Send,
+    F: FnOnce(oneshot::Sender<R>) -> Message<C> + Send,
+{
+    request(sender, make_msg).await.unwrap_or_default()
+}
+
+/// Convenience methods for the tracker mailbox sender.
+pub trait SenderExt<C: PublicKey> {
+    /// Send a `Connect` message to the tracker.
+    fn connect(&self, public_key: C, peer: PeerMailbox<peer::Message>) -> Feedback;
 
     /// Request dialable peers from the tracker.
     ///
     /// Returns an empty response if the tracker is shut down.
-    pub async fn dialable(&mut self) -> Dialable<C> {
-        self.0
-            .request_or_default(|responder| Message::Dialable { responder })
-            .await
-    }
+    fn dialable(&self) -> impl Future<Output = Dialable<C>> + Send;
 
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub async fn dial(&mut self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
-        self.0
-            .request(|reservation| Message::Dial {
-                public_key,
-                reservation,
-            })
-            .await
-            .flatten()
-    }
+    fn dial(&self, public_key: C) -> impl Future<Output = Option<(Reservation<C>, Ingress)>> + Send;
 
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
-    pub async fn acceptable(&mut self, public_key: C, source_ip: IpAddr) -> bool {
-        self.0
-            .request_or(
-                |responder| Message::Acceptable {
-                    public_key,
-                    source_ip,
-                    responder,
-                },
-                false,
-            )
-            .await
-    }
+    fn acceptable(&self, public_key: C, source_ip: IpAddr) -> impl Future<Output = bool> + Send;
 
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub async fn listen(&mut self, public_key: C) -> Option<Reservation<C>> {
-        self.0
-            .request(|reservation| Message::Listen {
+    fn listen(&self, public_key: C) -> impl Future<Output = Option<Reservation<C>>> + Send;
+}
+
+impl<C: PublicKey> SenderExt<C> for mailbox::Sender<Message<C>> {
+    fn connect(&self, public_key: C, peer: PeerMailbox<peer::Message>) -> Feedback {
+        enqueue(self, Message::Connect { public_key, peer })
+    }
+
+    fn dialable(&self) -> impl Future<Output = Dialable<C>> + Send {
+        request_or_default(self, |responder| Message::Dialable { responder })
+    }
+
+    fn dial(
+        &self,
+        public_key: C,
+    ) -> impl Future<Output = Option<(Reservation<C>, Ingress)>> + Send {
+        async move {
+            request(self, move |reservation| Message::Dial {
                 public_key,
                 reservation,
             })
             .await
             .flatten()
+        }
+    }
+
+    fn acceptable(&self, public_key: C, source_ip: IpAddr) -> impl Future<Output = bool> + Send {
+        request_or(
+            self,
+            move |responder| Message::Acceptable {
+                public_key,
+                source_ip,
+                responder,
+            },
+            false,
+        )
+    }
+
+    fn listen(&self, public_key: C) -> impl Future<Output = Option<Reservation<C>>> + Send {
+        async move {
+            request(self, move |reservation| Message::Listen {
+                public_key,
+                reservation,
+            })
+            .await
+            .flatten()
+        }
     }
 }
 
 /// Allows releasing reservations
 #[derive(Clone, Debug)]
 pub struct Releaser<C: PublicKey> {
-    sender: UnboundedMailbox<Message<C>>,
+    sender: mailbox::Sender<Message<C>>,
 }
 
 impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(crate) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(crate) fn new(sender: mailbox::Sender<Message<C>>) -> Self {
         Self { sender }
     }
 
     /// Release a reservation.
-    pub fn release(&mut self, metadata: Metadata<C>) {
-        self.sender.0.send_lossy(Message::Release { metadata });
+    pub fn release(&mut self, metadata: Metadata<C>) -> Feedback {
+        enqueue(&self.sender, Message::Release { metadata })
     }
 }
 
@@ -194,11 +257,11 @@ impl<C: PublicKey> Releaser<C> {
 /// will be blocked by commonware-p2p.
 #[derive(Debug, Clone)]
 pub struct Oracle<C: PublicKey> {
-    sender: UnboundedMailbox<Message<C>>,
+    sender: mailbox::Sender<Message<C>>,
 }
 
 impl<C: PublicKey> Oracle<C> {
-    pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
+    pub(super) fn new(sender: mailbox::Sender<Message<C>>) -> Self {
         Self { sender }
     }
 }
@@ -207,20 +270,16 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        self.sender
-            .0
-            .request(|responder| Message::PeerSet {
-                index: id,
-                responder,
-            })
-            .await
-            .flatten()
+        request(&self.sender, move |responder| Message::PeerSet {
+            index: id,
+            responder,
+        })
+        .await
+        .flatten()
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-        self.sender
-            .0
-            .request(|responder| Message::Subscribe { responder })
+        request(&self.sender, |responder| Message::Subscribe { responder })
             .await
             .unwrap_or_else(|| {
                 let (_, rx) = mpsc::unbounded_channel();
@@ -230,25 +289,25 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
-    async fn track<R>(&mut self, index: u64, peers: R)
+    fn track<R>(&mut self, index: u64, peers: R) -> Feedback
     where
         R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
     {
-        self.sender.0.send_lossy(Message::Register {
+        enqueue(&self.sender, Message::Register {
             index,
             peers: peers.into(),
-        });
+        })
     }
 
-    async fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) {
-        self.sender.0.send_lossy(Message::Overwrite { peers });
+    fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Feedback {
+        enqueue(&self.sender, Message::Overwrite { peers })
     }
 }
 
 impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
-    async fn block(&mut self, public_key: Self::PublicKey) {
-        self.sender.0.send_lossy(Message::Block { public_key });
+    fn block(&mut self, public_key: Self::PublicKey) -> Feedback {
+        enqueue(&self.sender, Message::Block { public_key })
     }
 }

@@ -2,9 +2,9 @@
 
 use crate::authenticated::{
     discovery::actors::{spawner, tracker},
-    mailbox::UnboundedMailbox,
     Mailbox,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -18,6 +18,7 @@ use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use rand_core::CryptoRngCore;
 use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
+use tracker::ingress::SenderExt as _;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
 const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
@@ -93,7 +94,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let (peer, send, recv) = match listen(
@@ -127,7 +128,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -136,7 +137,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     #[allow(clippy::type_complexity)]
     async fn run(
         self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Create the rate limiters
@@ -241,12 +242,12 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::ed25519::PrivateKey;
+    use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, Error as RuntimeError, Runner as _, Stream, Supervisor as _,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{NZUsize, NZU32};
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Duration,
@@ -283,7 +284,8 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) =
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -424,7 +426,8 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) =
+                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {

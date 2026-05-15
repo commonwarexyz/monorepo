@@ -10,7 +10,7 @@ pub use ingress::Message;
 
 /// Configuration for the spawner [Actor].
 pub struct Config<C: PublicKey> {
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub send_batch_size: NonZeroUsize,
     pub gossip_bit_vec_frequency: Duration,
     pub max_peer_set_size: u64,

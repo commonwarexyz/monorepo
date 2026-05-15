@@ -14,7 +14,7 @@ mod ingress;
 pub use ingress::Message;
 
 pub struct Config<C: PublicKey> {
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub send_batch_size: NonZeroUsize,
     pub ping_frequency: std::time::Duration,
     pub sent_messages: CounterFamily<metrics::Message<C>>,

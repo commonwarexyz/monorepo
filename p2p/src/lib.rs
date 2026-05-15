@@ -26,6 +26,7 @@ stability_scope!(BETA {
     pub mod types;
     pub mod utils;
 
+    pub use commonware_actor::Feedback;
     pub use types::{Address, Ingress};
 
     /// Tuple representing a message received from a given public key.
@@ -346,7 +347,7 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
+        fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
             R: Into<TrackedPeers<Self::PublicKey>> + Send;
     }
@@ -378,7 +379,7 @@ stability_scope!(BETA {
         /// "follow that progress" (but not contribute to it). We call the former "primary" and the latter "secondary".
         /// When both are tracked, mechanisms favor "primary" peers but continue to replicate data to "secondary" peers (
         /// often both gossiping data to them and answering requests from them).
-        fn track<R>(&mut self, id: u64, peers: R) -> impl Future<Output = ()> + Send
+        fn track<R>(&mut self, id: u64, peers: R) -> Feedback
         where
             R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
 
@@ -391,7 +392,7 @@ stability_scope!(BETA {
         fn overwrite(
             &mut self,
             peers: Map<Self::PublicKey, Address>,
-        ) -> impl Future<Output = ()> + Send;
+        ) -> Feedback;
     }
 
     /// Interface for blocking other peers.
@@ -400,7 +401,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Block a peer, disconnecting them if currently connected and preventing future connections.
-        fn block(&mut self, peer: Self::PublicKey) -> impl Future<Output = ()> + Send;
+        fn block(&mut self, peer: Self::PublicKey) -> Feedback;
     }
 });
 
@@ -428,8 +429,7 @@ macro_rules! block {
     ($blocker:expr, $peer:expr, $($arg:tt)+) => {
         let peer = $peer;
         tracing::warn!(peer = ?peer, $($arg)+);
-        #[allow(clippy::disallowed_methods)]
-        $blocker.block(peer).await;
+        $blocker.block(peer)
     };
 }
 
@@ -439,6 +439,6 @@ macro_rules! block {
     reason = "test helper that bypasses the block! macro"
 )]
 #[cfg(test)]
-pub async fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) {
-    blocker.block(peer).await;
+pub fn block_peer<B: Blocker>(blocker: &mut B, peer: B::PublicKey) -> Feedback {
+    blocker.block(peer)
 }
