@@ -21,7 +21,7 @@
 //! - Requests smaller than [`BufferPoolConfig::pool_min_size`] bypass pooling
 //!   entirely and return untracked aligned allocations from both
 //!   [`BufferPool::try_alloc`] and [`BufferPool::alloc`].
-//! - Dropping [`BufferPool`] drains only the shared global freelists; pooled
+//! - Dropping [`BufferPool`] drains only the shared global freelists, pooled
 //!   views and buffers cached in a live thread's local cache can keep their
 //!   size class alive until they are dropped or the thread exits.
 //!
@@ -167,10 +167,6 @@ pub struct BufferPoolConfig {
     /// heap allocation.
     pub prefill: bool,
     /// Buffer alignment. Must be a power of two.
-    ///
-    /// Use page alignment for storage I/O that needs direct-I/O/DMA-compatible
-    /// buffers, and cache-line alignment for network I/O where smaller
-    /// alignment reduces internal fragmentation.
     pub alignment: NonZeroUsize,
     /// Expected number of threads concurrently accessing the pool.
     ///
@@ -389,9 +385,6 @@ impl BufferPoolConfig {
     }
 
     /// Returns the number of size classes between validated bounds.
-    ///
-    /// This assumes `min_size` and `max_size` came from a config that passed
-    /// [`Self::validate_size_class_bounds`]. No checking is repeated here.
     #[inline]
     const fn num_classes(min_size: usize, max_size: usize) -> usize {
         // Since sizes are powers of two, trailing zeros is the size-class
@@ -400,15 +393,6 @@ impl BufferPoolConfig {
     }
 
     /// Returns the buffer size for a validated size-class index.
-    ///
-    /// This assumes `min_size` is a validated power-of-two minimum and `index`
-    /// is less than [`Self::num_classes`] for the same validated bounds. No
-    /// range checking is done here.
-    ///
-    /// # Panics
-    ///
-    /// Panics on arithmetic overflow if `index` is outside the validated
-    /// size-class range.
     #[inline]
     const fn class_size(min_size: usize, index: usize) -> usize {
         min_size << index
