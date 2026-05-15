@@ -481,15 +481,22 @@ where
 
         // Create two databases with their own configs
         let target_config = H::config(&context.next_u64().to_string(), &context);
-        let mut target_db = H::init_db_with_config(context.child("target"), target_config).await;
+        let mut target_db = Box::pin(H::init_db_with_config(
+            context.child("target"),
+            target_config,
+        ))
+        .await;
         let sync_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
-        let mut sync_db =
-            H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
+        let mut sync_db = Box::pin(H::init_db_with_config(
+            client_context.child("client"),
+            sync_config.clone(),
+        ))
+        .await;
 
         // Apply the same operations to both databases
-        target_db = H::apply_ops(target_db, target_ops.clone()).await;
-        sync_db = H::apply_ops(sync_db, target_ops.clone()).await;
+        target_db = Box::pin(H::apply_ops(target_db, target_ops.clone())).await;
+        sync_db = Box::pin(H::apply_ops(sync_db, target_ops.clone())).await;
         // commit already done in apply_ops
         // commit already done in apply_ops
 
@@ -528,7 +535,7 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        let synced_db: H::Db = sync::sync(config).await.unwrap();
+        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
 
         // Verify database state
         let bounds = synced_db.bounds().await;
