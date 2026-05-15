@@ -116,10 +116,7 @@ impl<K, P> Pending<K, P> {
 }
 
 // Merge target metadata for duplicate pending fetches
-fn merge_targets<P: Eq>(
-    existing: &mut Option<NonEmptyVec<P>>,
-    incoming: Option<NonEmptyVec<P>>,
-) {
+fn merge_targets<P: Eq>(existing: &mut Option<NonEmptyVec<P>>, incoming: Option<NonEmptyVec<P>>) {
     // An unrestricted fetch clears existing targets
     let Some(incoming) = incoming else {
         *existing = None;
