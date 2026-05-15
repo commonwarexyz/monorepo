@@ -66,6 +66,7 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
     where
         F: FnMut(Message<K, P>) -> Option<Message<K, P>>,
     {
+        // Clear drains before later fetches
         if self.clear {
             self.clear = false;
             if let Some(message) = push(Message::Clear) {
@@ -74,6 +75,7 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
             }
         }
 
+        // Drain cancels and retains in the order they were received
         while let Some(modification) = self.modifications.pop_front() {
             let message = match modification {
                 Modification::Cancel { key } => Message::Cancel { key },
@@ -85,6 +87,7 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
             }
         }
 
+        // Fetches are deduplicated and drained as one batch
         if !self.fetches.is_empty() {
             let fetches = std::mem::take(&mut self.fetches);
             if let Some(message) = push(Message::Fetch(fetches)) {
@@ -112,20 +115,26 @@ impl<K, P> Pending<K, P> {
     }
 }
 
+// Merge target metadata for duplicate pending fetches
 fn merge_targets<P: Clone + Eq>(
     existing: &mut Option<NonEmptyVec<P>>,
     incoming: Option<NonEmptyVec<P>>,
 ) {
+    // An unrestricted fetch clears existing targets
     let Some(incoming) = incoming else {
         *existing = None;
         return;
     };
+
+    // Existing unrestricted fetch already covers all targets
     let Some(existing) = existing else {
         return;
     };
 
     let incoming = std::mem::replace(existing, incoming);
     let mut targets = incoming.into_vec();
+
+    // Merge target sets without duplicating peers
     for target in existing.iter() {
         if !targets.contains(target) {
             targets.push(target.clone());
@@ -138,22 +147,10 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
     type Overflow = Pending<K, P>;
 
     fn handle(overflow: &mut Pending<K, P>, message: Self) {
-        if overflow.clear {
-            return;
-        }
-
         match message {
             Self::Fetch(requests) => {
                 for request in requests {
                     let FetchRequest { key, targets } = request;
-
-                    // Drop fetches already canceled or pruned in overflow
-                    if overflow.modifications.iter().any(|modification| {
-                        matches!(modification, Modification::Cancel { key: cancel } if cancel == &key)
-                            || matches!(modification, Modification::Retain { predicate } if !predicate(&key))
-                    }) {
-                        continue;
-                    }
 
                     // Merge duplicate fetches for the same key
                     if let Some(existing) = overflow
@@ -170,6 +167,10 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
             Self::Cancel { key } => {
                 // Cancel supersedes pending fetches for the key
                 overflow.fetches.retain(|request| request.key != key);
+
+                if overflow.clear {
+                    return;
+                }
 
                 // Retain only the first queued cancel for a key
                 if overflow
@@ -191,6 +192,9 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
             Self::Retain { predicate } => {
                 // Retain prunes pending fetches before queued fetches drain
                 overflow.fetches.retain(|request| predicate(&request.key));
+                if overflow.clear {
+                    return;
+                }
                 overflow
                     .modifications
                     .push_back(Modification::Retain { predicate });
@@ -332,6 +336,14 @@ mod tests {
         }
     }
 
+    fn assert_fetch_keys(message: &Message<u8, u8>, expected: &[u8]) {
+        let Message::Fetch(requests) = message else {
+            panic!("expected fetch");
+        };
+        let keys: Vec<_> = requests.iter().map(|request| request.key).collect();
+        assert_eq!(keys, expected);
+    }
+
     #[test]
     fn targeted_fetches_for_same_key_are_merged() {
         let mut pending = Pending::default();
@@ -372,15 +384,16 @@ mod tests {
     }
 
     #[test]
-    fn fetch_after_cancel_is_ignored() {
+    fn fetch_after_cancel_is_retained() {
         let mut pending = Pending::default();
 
         Policy::handle(&mut pending, Message::Cancel { key: 1 });
         Policy::handle(&mut pending, fetch(1, None));
 
         let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Message::Cancel { key: 1 }));
+        assert_fetch(&messages[1], 1, None);
     }
 
     #[test]
@@ -426,12 +439,13 @@ mod tests {
         Policy::handle(&mut pending, fetch(3, None));
 
         let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Message::Clear));
+        assert_fetch(&messages[1], 3, None);
     }
 
     #[test]
-    fn fetch_after_retain_is_ignored_when_key_is_dropped() {
+    fn fetch_after_retain_is_retained_when_key_is_dropped() {
         let mut pending = Pending::default();
 
         Policy::handle(
@@ -446,7 +460,7 @@ mod tests {
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Message::Retain { .. }));
-        assert_fetch(&messages[1], 2, None);
+        assert_fetch_keys(&messages[1], &[1, 2]);
     }
 
     #[test]
