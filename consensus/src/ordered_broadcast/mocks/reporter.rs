@@ -12,7 +12,7 @@ use commonware_actor::{
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, NZUsize};
 use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
@@ -60,7 +60,7 @@ pub struct Reporter<R: CryptoRngCore, C: PublicKey, S: Scheme, D: Digest> {
 
 impl<R, C, S, D> Reporter<R, C, S, D>
 where
-    R: CryptoRngCore,
+    R: CryptoRngCore + Metrics,
     C: PublicKey,
     S: Scheme,
     D: Digest,
@@ -71,7 +71,7 @@ where
         scheme: S,
         limit_misses: Option<usize>,
     ) -> (Self, Mailbox<C, S, D>) {
-        let (sender, receiver) = mailbox::new(NZUsize!(1024));
+        let (sender, receiver) = mailbox::new(rng.child("mailbox"), NZUsize!(1024));
         (
             Self {
                 context: ContextCell::new(rng),

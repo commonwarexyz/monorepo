@@ -143,7 +143,7 @@ where
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
-        let (sender, mailbox) = mailbox::new(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
 
         // Create metrics
         let successful_epochs = context.counter("successful_epochs", "successful epochs");

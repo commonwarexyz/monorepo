@@ -117,7 +117,8 @@ where
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
     pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
-        let (mailbox_sender, mailbox_receiver) = mailbox::new(cfg.mailbox_size);
+        let (mailbox_sender, mailbox_receiver) =
+            mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
         let metrics = metrics::Metrics::init(&context);

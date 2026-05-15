@@ -56,7 +56,7 @@ impl<
     > Actor<E, S, B, D, T>
 {
     pub fn new(context: E, cfg: Config<S, B, T>) -> (Self, Mailbox<S, D>) {
-        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -98,7 +98,8 @@ impl<
             .and_then(|index| participants.key(index))
             .cloned();
 
-        let (handler_tx, mut handler_rx) = mailbox::new(self.mailbox_size);
+        let (handler_tx, mut handler_rx) =
+            mailbox::new(self.context.as_ref().child("handler"), self.mailbox_size);
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
