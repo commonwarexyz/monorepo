@@ -33,6 +33,7 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
+use core::num::NonZeroU64;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -77,8 +78,27 @@ impl Scenario {
     ///
     /// Views after the configured adversarial rounds use full synchrony
     /// (`all -> all`) to model eventual synchrony for liveness checks.
+    /// Use [`Self::partitions_with_term_length`] when stable-leader terms
+    /// should consume one scripted round per term.
     pub fn partitions<P: Clone>(&self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
-        let idx = view.get().saturating_sub(1) as usize;
+        let idx = view_index(view);
+        self.partitions_at(idx, participants)
+    }
+
+    /// Returns recipient sets for the leader term containing `view`.
+    ///
+    /// This keeps scripted network splits aligned with stable-leader terms.
+    pub fn partitions_with_term_length<P: Clone>(
+        &self,
+        view: View,
+        term_length: NonZeroU64,
+        participants: &[P],
+    ) -> (Vec<P>, Vec<P>) {
+        let idx = term_index(view, term_length);
+        self.partitions_at(idx, participants)
+    }
+
+    fn partitions_at<P: Clone>(&self, idx: usize, participants: &[P]) -> (Vec<P>, Vec<P>) {
         if let Some(round) = self.rounds.get(idx) {
             return masks_to_partitions(round.primary_mask, round.secondary_mask, participants);
         }
@@ -90,8 +110,26 @@ impl Scenario {
     /// Unlike [`partitions`](Self::partitions), this avoids allocating temporary
     /// Vecs by comparing bitmasks directly for inbound twin traffic. When a
     /// sender appears in both masks, this returns [`SplitTarget::Both`].
+    /// Use [`Self::route_with_term_length`] when stable-leader terms should
+    /// consume one scripted round per term.
     pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
-        let idx = view.get().saturating_sub(1) as usize;
+        let idx = view_index(view);
+        self.route_at(idx, sender, participants)
+    }
+
+    /// Routes a message using the scripted network split for `view`'s leader term.
+    pub fn route_with_term_length<P: PartialEq>(
+        &self,
+        view: View,
+        term_length: NonZeroU64,
+        sender: &P,
+        participants: &[P],
+    ) -> SplitTarget {
+        let idx = term_index(view, term_length);
+        self.route_at(idx, sender, participants)
+    }
+
+    fn route_at<P: PartialEq>(&self, idx: usize, sender: &P, participants: &[P]) -> SplitTarget {
         if let Some(round) = self.rounds.get(idx) {
             let sender_idx = participants
                 .iter()
@@ -110,6 +148,16 @@ impl Scenario {
         // After attack rounds, both halves see everyone.
         SplitTarget::Both
     }
+}
+
+fn view_index(view: View) -> usize {
+    usize::try_from(view.get().saturating_sub(1)).expect("view index fits in usize")
+}
+
+fn term_index(view: View, term_length: NonZeroU64) -> usize {
+    let term_start = view.term_start(term_length);
+    let idx = term_start.get().saturating_sub(1) / term_length.get();
+    usize::try_from(idx).expect("term index fits in usize")
 }
 
 /// Routes a sender according to explicit primary and secondary recipient sets.
@@ -131,9 +179,29 @@ pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec
     (primary.to_vec(), secondary.to_vec())
 }
 
+/// Returns the strict disjoint split for the leader term containing `view`.
+pub fn view_partitions_with_term_length<P: Clone>(
+    view: View,
+    term_length: NonZeroU64,
+    participants: &[P],
+) -> (Vec<P>, Vec<P>) {
+    view_partitions(view.term_start(term_length), participants)
+}
+
 /// Routes a sender according to [`view_partitions`].
 pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
     let (primary, secondary) = view_partitions(view, participants);
+    route_with_groups(sender, &primary, &secondary)
+}
+
+/// Routes a sender according to [`view_partitions_with_term_length`].
+pub fn view_route_with_term_length<P: Clone + PartialEq>(
+    view: View,
+    term_length: NonZeroU64,
+    sender: &P,
+    participants: &[P],
+) -> SplitTarget {
+    let (primary, secondary) = view_partitions_with_term_length(view, term_length, participants);
     route_with_groups(sender, &primary, &secondary)
 }
 
@@ -180,6 +248,7 @@ impl<C> Elector<C> {
 pub struct ElectorState<E> {
     fallback: E,
     round_leaders: Arc<[Participant]>,
+    term_length: NonZeroU64,
 }
 
 impl<S, C> ElectorConfig<S> for Elector<C>
@@ -189,10 +258,11 @@ where
 {
     type Elector = ElectorState<C::Elector>;
 
-    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+    fn build(self, participants: &Set<S::PublicKey>, term_length: NonZeroU64) -> Self::Elector {
         ElectorState {
-            fallback: self.fallback.build(participants),
+            fallback: self.fallback.build(participants, term_length),
             round_leaders: self.round_leaders,
+            term_length,
         }
     }
 }
@@ -203,7 +273,7 @@ where
     E: Elected<S>,
 {
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
-        let idx = round.view().get().saturating_sub(1) as usize;
+        let idx = term_index(round.view(), self.term_length);
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
         }
@@ -779,7 +849,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
+    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, NZU64};
     use std::collections::HashSet;
 
     fn expected_single_round_transitions(n: usize) -> HashSet<(RoundScenario, Vec<usize>)> {
@@ -954,6 +1024,53 @@ mod tests {
     }
 
     #[test]
+    fn scripted_partitions_can_follow_stable_leader_terms() {
+        let scenario = Scenario {
+            rounds: vec![
+                RoundScenario {
+                    leader: 0,
+                    primary_mask: 0b001,
+                    secondary_mask: 0b010,
+                },
+                RoundScenario {
+                    leader: 2,
+                    primary_mask: 0b100,
+                    secondary_mask: 0b011,
+                },
+            ],
+        };
+        let participants: Vec<u32> = (0..3).collect();
+        let term_length = NZU64!(3);
+
+        let (primary, secondary) =
+            scenario.partitions_with_term_length(View::new(3), term_length, &participants);
+        assert_eq!(primary, vec![0]);
+        assert_eq!(secondary, vec![1]);
+        assert_eq!(
+            scenario.route_with_term_length(View::new(2), term_length, &0, &participants),
+            SplitTarget::Primary
+        );
+
+        let (primary, secondary) =
+            scenario.partitions_with_term_length(View::new(6), term_length, &participants);
+        assert_eq!(primary, vec![2]);
+        assert_eq!(secondary, vec![0, 1]);
+        assert_eq!(
+            scenario.route_with_term_length(View::new(5), term_length, &0, &participants),
+            SplitTarget::Secondary
+        );
+
+        let (primary, secondary) =
+            scenario.partitions_with_term_length(View::new(7), term_length, &participants);
+        assert_eq!(primary, participants);
+        assert_eq!(secondary, vec![0, 1, 2]);
+        assert_eq!(
+            scenario.route_with_term_length(View::new(7), term_length, &2, &[0, 1, 2]),
+            SplitTarget::Both
+        );
+    }
+
+    #[test]
     fn route_with_groups_covers_reachable_split_targets() {
         let primary = vec![1u32, 2];
         let secondary = vec![2u32, 3];
@@ -1003,6 +1120,29 @@ mod tests {
         );
         assert_eq!(
             view_route(View::new(4), &0, &participants),
+            SplitTarget::Secondary
+        );
+    }
+
+    #[test]
+    fn view_helpers_can_follow_stable_leader_terms() {
+        let participants: Vec<u32> = (0..5).collect();
+        let term_length = NZU64!(3);
+
+        assert_eq!(
+            view_partitions_with_term_length(View::new(3), term_length, &participants),
+            view_partitions(View::new(1), &participants)
+        );
+        assert_eq!(
+            view_partitions_with_term_length(View::new(6), term_length, &participants),
+            view_partitions(View::new(4), &participants)
+        );
+        assert_eq!(
+            view_route_with_term_length(View::new(2), term_length, &0, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            view_route_with_term_length(View::new(6), term_length, &4, &participants),
             SplitTarget::Secondary
         );
     }
@@ -1339,10 +1479,12 @@ mod tests {
                 framework.participants,
             ),
             &participants,
+            NZU64!(1),
         );
         let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
             RoundRobin::<Sha256>::default(),
             &participants,
+            NZU64!(1),
         );
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
@@ -1358,5 +1500,50 @@ mod tests {
             let round = Round::new(Epoch::new(333), View::new(view));
             assert_eq!(twins.elect(round, None), fallback.elect(round, None));
         }
+    }
+
+    #[test]
+    fn twins_elector_uses_scenario_leaders_by_term() {
+        let scenario = Scenario {
+            rounds: vec![
+                RoundScenario {
+                    leader: 0,
+                    primary_mask: 0b001,
+                    secondary_mask: 0b010,
+                },
+                RoundScenario {
+                    leader: 2,
+                    primary_mask: 0b100,
+                    secondary_mask: 0b011,
+                },
+            ],
+        };
+        let participants: Vec<_> = (0..3)
+            .map(|seed| PrivateKey::from_seed(seed).public_key())
+            .collect();
+        let participants = Set::try_from(participants).expect("participants should be unique");
+        let term_length = NZU64!(3);
+        let twins = <Elector<RoundRobin<Sha256>> as ElectorConfig<ed25519::Scheme>>::build(
+            Elector::new(RoundRobin::<Sha256>::default(), &scenario, 3),
+            &participants,
+            term_length,
+        );
+        let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
+            RoundRobin::<Sha256>::default(),
+            &participants,
+            term_length,
+        );
+
+        for view in 1..=3 {
+            let round = Round::new(Epoch::new(0), View::new(view));
+            assert_eq!(twins.elect(round, None), Participant::new(0));
+        }
+        for view in 4..=6 {
+            let round = Round::new(Epoch::new(0), View::new(view));
+            assert_eq!(twins.elect(round, None), Participant::new(2));
+        }
+
+        let round = Round::new(Epoch::new(333), View::new(7));
+        assert_eq!(twins.elect(round, None), fallback.elect(round, None));
     }
 }

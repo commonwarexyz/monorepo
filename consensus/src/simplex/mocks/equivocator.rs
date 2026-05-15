@@ -15,6 +15,7 @@ use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use commonware_utils::ordered::Quorum;
+use core::num::NonZeroU64;
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
@@ -22,6 +23,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
+    pub term_length: NonZeroU64,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
     pub hasher: H,
 }
@@ -46,7 +48,9 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 {
     pub fn new(context: E, cfg: Config<S, L, H>) -> Self {
         // Build elector with participants
-        let elector = cfg.elector.build(cfg.scheme.participants());
+        let elector = cfg
+            .elector
+            .build(cfg.scheme.participants(), cfg.term_length);
 
         Self {
             context: ContextCell::new(context),

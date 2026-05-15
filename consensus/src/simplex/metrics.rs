@@ -10,6 +10,7 @@ pub struct Peer<P: PublicKey> {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum TimeoutReason {
+    Retry,
     Inactivity,
     LeaderNullify,
     LeaderTimeout,
@@ -18,6 +19,7 @@ pub enum TimeoutReason {
     IgnoredProposal,
     InvalidProposal,
     FailedCertification,
+    SameTermFinalizationTimeout,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]

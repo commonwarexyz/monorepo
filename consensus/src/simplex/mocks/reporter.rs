@@ -23,8 +23,9 @@ use commonware_utils::{
     },
     ordered::{Quorum, Set},
     sync::Mutex,
-    N3f1,
+    N3f1, NZU64,
 };
+use core::num::NonZeroU64;
 use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
@@ -49,6 +50,7 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
+    term_length: NonZeroU64,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
     pub certified: Arc<Mutex<HashSet<View>>>,
@@ -80,6 +82,7 @@ where
             participants: self.participants.clone(),
             scheme: self.scheme.clone(),
             elector: self.elector.clone(),
+            term_length: self.term_length,
             leaders: self.leaders.clone(),
             certified: self.certified.clone(),
             notarizes: self.notarizes.clone(),
@@ -105,14 +108,19 @@ where
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
+        Self::new_with_term_length(context, cfg, NZU64!(1))
+    }
+
+    pub fn new_with_term_length(context: E, cfg: Config<S, L>, term_length: NonZeroU64) -> Self {
         // Build elector with participants
-        let elector = cfg.elector.build(&cfg.participants);
+        let elector = cfg.elector.build(&cfg.participants, term_length);
 
         Self {
             context: Arc::new(Mutex::new(context)),
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
+            term_length,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
@@ -129,12 +137,12 @@ where
         }
     }
 
-    fn certified(&self, round: Round, certificate: &S::Certificate) {
+    fn certified(&self, round: Round, next_view: View, certificate: &S::Certificate) {
         // Record that this view has a certificate
         self.certified.lock().insert(round.view());
 
-        // We use the certificate from view N to determine the leader for view N+1.
-        let next_round = Round::new(round.epoch(), round.view().next());
+        // Use the certificate to determine the leader for the view it unlocks.
+        let next_round = Round::new(round.epoch(), next_view);
         let mut leaders = self.leaders.lock();
         leaders.entry(next_round.view()).or_insert_with(|| {
             let leader = self.elector.elect(next_round, Some(certificate));
@@ -203,7 +211,11 @@ where
                 Notarization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.notarizations.lock().insert(view, notarization.clone());
-                self.certified(notarization.round(), &notarization.certificate);
+                self.certified(
+                    notarization.round(),
+                    notarization.view().next(),
+                    &notarization.certificate,
+                );
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
@@ -239,7 +251,11 @@ where
                 self.nullifications
                     .lock()
                     .insert(view, nullification.clone());
-                self.certified(nullification.round, &nullification.certificate);
+                self.certified(
+                    nullification.round,
+                    nullification.view().next_term_start(self.term_length),
+                    &nullification.certificate,
+                );
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
@@ -275,7 +291,11 @@ where
                 Finalization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
                 self.finalizations.lock().insert(view, finalization.clone());
-                self.certified(finalization.round(), &finalization.certificate);
+                self.certified(
+                    finalization.round(),
+                    finalization.view().next(),
+                    &finalization.certificate,
+                );
 
                 // Send message to subscribers
                 *self.latest.lock() = finalization.view();

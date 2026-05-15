@@ -46,6 +46,7 @@ pub struct Round<S: Scheme, D: Digest> {
     proposal: ProposalSlot<D>,
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
+    same_term_finalization_deadline: Option<SystemTime>,
     timeout_retry: Option<SystemTime>,
     timeout_reason: Option<TimeoutReason>,
 
@@ -72,6 +73,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             proposal: ProposalSlot::new(),
             leader_deadline: None,
             certification_deadline: None,
+            same_term_finalization_deadline: None,
             timeout_retry: None,
             timeout_reason: None,
             notarization: None,
@@ -185,12 +187,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
-    /// Removes the leader and certification deadlines so timeouts stop firing.
-    pub const fn clear_deadlines(&mut self) {
-        self.leader_deadline = None;
-        self.certification_deadline = None;
-    }
-
     /// Sets the leader for this round using the pre-computed leader index.
     pub fn set_leader(&mut self, leader: Participant) {
         let key = self
@@ -299,9 +295,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         &mut self,
         leader_deadline: SystemTime,
         certification_deadline: SystemTime,
+        same_term_finalization_deadline: SystemTime,
     ) {
         self.leader_deadline = Some(leader_deadline);
         self.certification_deadline = Some(certification_deadline);
+        self.same_term_finalization_deadline = Some(same_term_finalization_deadline);
     }
 
     /// Overrides the timeout retry deadline, allowing callers to reschedule retries deterministically.
@@ -323,6 +321,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    /// Returns the latched explicit timeout reason, if any.
+    pub const fn timeout_reason(&self) -> Option<TimeoutReason> {
+        self.timeout_reason
+    }
+
+    /// Returns whether we have already emitted a nullify vote for this round.
+    pub const fn is_retrying_nullify(&self) -> bool {
+        self.broadcast_nullify
+    }
+
     /// Returns a nullify vote if we should timeout/retry.
     ///
     /// Returns `Some(true)` if this is a retry (we've already broadcast nullify before),
@@ -334,25 +342,51 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
         let retry = replace(&mut self.broadcast_nullify, true);
-        self.clear_deadlines();
+        self.leader_deadline = None;
+        self.certification_deadline = None;
         self.set_timeout_retry(None);
         Some(retry)
     }
 
-    /// Returns the next timeout deadline for the round.
-    pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
-        if let Some(deadline) = self.leader_deadline {
-            return deadline;
+    /// Returns the next round-local timeout and its reason.
+    pub fn next_timeout(
+        &mut self,
+        now: SystemTime,
+        retry: Duration,
+    ) -> Option<(SystemTime, TimeoutReason)> {
+        if self.broadcast_finalize || self.finalization().is_some() {
+            return None;
         }
-        if let Some(deadline) = self.certification_deadline {
-            return deadline;
+        if self.broadcast_nullify {
+            if let Some(deadline) = self.timeout_retry {
+                return Some((deadline, TimeoutReason::Retry));
+            }
+            let next = now + retry;
+            self.timeout_retry = Some(next);
+            return Some((next, TimeoutReason::Retry));
         }
-        if let Some(deadline) = self.timeout_retry {
-            return deadline;
+        if let Some(reason) = self.timeout_reason {
+            return Some((now, reason));
         }
-        let next = now + retry;
-        self.timeout_retry = Some(next);
-        next
+        if self.proposal().is_none() {
+            if let Some(deadline) = self.leader_deadline {
+                return Some((deadline, TimeoutReason::LeaderTimeout));
+            }
+        }
+        if !self.is_certified() {
+            if let Some(deadline) = self.certification_deadline {
+                return Some((deadline, TimeoutReason::CertificationTimeout));
+            }
+        }
+        None
+    }
+
+    /// Returns the same-term finalization deadline while the round remains unfinalized.
+    pub const fn same_term_finalization_deadline(&self) -> Option<SystemTime> {
+        if self.finalization.is_some() {
+            return None;
+        }
+        self.same_term_finalization_deadline
     }
 
     /// Adds a proposal recovered from a certificate (notarization or finalization).
@@ -413,7 +447,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.nullification.is_some() {
             return false;
         }
-        self.clear_deadlines();
         self.nullification = Some(nullification);
         true
     }
@@ -431,7 +464,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.finalization.is_some() {
             return (false, None);
         }
-        self.clear_deadlines();
 
         let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
         self.finalization = Some(finalization);

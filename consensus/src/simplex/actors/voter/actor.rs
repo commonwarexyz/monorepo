@@ -135,11 +135,6 @@ impl<
     > Actor<E, S, L, B, D, A, R, F>
 {
     pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
-        // Assert correctness of timeouts
-        if cfg.leader_timeout > cfg.certification_timeout {
-            panic!("leader timeout must be less than or equal to certification timeout");
-        }
-
         // Initialize metrics
         let outbound_messages = context.family("outbound_messages", "number of outbound messages");
         let notarization_latency =
@@ -161,6 +156,9 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
+                term_length: cfg.term_length,
+                term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
+                same_term_finalization_timeout: cfg.same_term_finalization_timeout,
             },
         );
         (
@@ -199,7 +197,7 @@ impl<
         Some(elapsed.as_secs_f64())
     }
 
-    /// Drops views that are below the activity floor.
+    /// Drops views and journal entries that are below their retention floors.
     async fn prune_views(&mut self) {
         let removed = self.state.prune();
         if removed.is_empty() {
@@ -214,7 +212,7 @@ impl<
         }
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .prune(self.state.min_active().get())
+                .prune(self.state.retention_floor().get())
                 .await
                 .expect("unable to prune journal");
         }
@@ -347,10 +345,15 @@ impl<
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
+        reason: TimeoutReason,
     ) {
+        let view = self.state.current_view();
+        if reason != TimeoutReason::Retry {
+            self.state.trigger_timeout(view, reason);
+        }
+
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
-        let view = self.state.current_view();
         let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
             return;
         };
@@ -362,10 +365,7 @@ impl<
         if !retry {
             return;
         }
-        let past_view = view
-            .previous()
-            .expect("we should never be in the genesis view");
-        if let Some(certificate) = self.state.get_best_certificate(past_view) {
+        if let Some(certificate) = self.state.get_best_certificate() {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }
@@ -835,7 +835,7 @@ impl<
                 let certify_wait = certify_pool.next_completed();
 
                 // Wait for a timeout to fire or for a message to arrive
-                let timeout = self.state.next_timeout_deadline();
+                let (timeout, timeout_reason) = self.state.next_timeout();
                 let start = self.state.current_view();
                 let mut resolved = Resolved::None;
                 let view;
@@ -845,7 +845,7 @@ impl<
             },
             _ = self.context.sleep_until(timeout) => {
                 // Process the timeout
-                self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender, timeout_reason)
                     .await;
                 view = self.state.current_view();
             },
@@ -950,7 +950,7 @@ impl<
                 match msg {
                     Message::Proposal(proposal) => {
                         view = proposal.view();
-                        if !self.state.is_interesting(view, false) {
+                        if !self.state.is_interesting_vote(view) {
                             trace!(%view, "proposal is not interesting");
                             continue;
                         }
@@ -962,7 +962,7 @@ impl<
                     Message::Verified(certificate, from_resolver) => {
                         // Certificates can come from future views (they advance our view)
                         view = certificate.view();
-                        if !self.state.is_interesting(view, true) {
+                        if !self.state.is_interesting_certificate(view) {
                             trace!(%view, "certificate is not interesting");
                             continue;
                         }

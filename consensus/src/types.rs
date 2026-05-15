@@ -312,6 +312,66 @@ impl View {
             inner: start.get()..end.get(),
         }
     }
+
+    /// Returns the first view of the term containing this view.
+    ///
+    /// Terms group consecutive views so that the same leader serves for
+    /// `term_length` views. View 0 (genesis) is its own term. For views >= 1,
+    /// term boundaries are: [1, term_length], [term_length+1, 2*term_length], ...
+    ///
+    /// When `term_length` is 1, every view is its own term (no grouping).
+    pub const fn term_start(self, term_length: NonZeroU64) -> Self {
+        let term_length = term_length.get();
+        if term_length == 1 {
+            return self;
+        }
+        let Self(view) = self;
+        if view == 0 {
+            return self;
+        }
+        let base = ((view - 1) / term_length)
+            .checked_mul(term_length)
+            .expect("view term_start overflow");
+        Self(base).next()
+    }
+
+    /// Returns whether this view is the first view of its term.
+    pub const fn is_term_start(self, term_length: NonZeroU64) -> bool {
+        let start = self.term_start(term_length);
+        self.get() == start.get()
+    }
+
+    /// Returns whether this view shares a term with `other`.
+    pub const fn same_term(self, other: Self, term_length: NonZeroU64) -> bool {
+        let start = self.term_start(term_length);
+        let other_start = other.term_start(term_length);
+        start.get() == other_start.get()
+    }
+
+    /// Returns the last view of the term containing this view.
+    ///
+    /// See [`term_start`](View::term_start) for term boundary semantics.
+    ///
+    /// When `term_length` is 1, returns `self`.
+    pub const fn term_end(self, term_length: NonZeroU64) -> Self {
+        if self.0 == 0 || term_length.get() == 1 {
+            return self;
+        }
+        let term_length = term_length.get();
+        let rounded = self
+            .0
+            .div_ceil(term_length)
+            .checked_mul(term_length)
+            .expect("view term_end overflow");
+        Self(rounded)
+    }
+
+    /// Returns the first view of the term that follows this view's term.
+    ///
+    /// When `term_length` is 1, returns `self.next()`.
+    pub const fn next_term_start(self, term_length: NonZeroU64) -> Self {
+        self.term_end(term_length).next()
+    }
 }
 
 impl Display for View {
@@ -1267,6 +1327,127 @@ mod tests {
             let decoded = View::decode(encoded).unwrap();
             assert_eq!(view, decoded);
         }
+    }
+
+    #[test]
+    fn test_view_term_start() {
+        let cases = [
+            (0, 5, 0),
+            (1, 1, 1),
+            (5, 1, 5),
+            (6, 1, 6),
+            (7, 1, 7),
+            (1, 5, 1),
+            (5, 5, 1),
+            (6, 5, 6),
+            (10, 5, 6),
+            (11, 5, 11),
+            (12, 3, 10),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).term_start(commonware_utils::NZU64!(term_length)),
+                View::new(expected),
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_term_end() {
+        let cases = [
+            (0, 5, 0),
+            (1, 1, 1),
+            (5, 1, 5),
+            (1, 5, 5),
+            (5, 5, 5),
+            (6, 5, 10),
+            (10, 5, 10),
+            (11, 5, 15),
+            (12, 3, 12),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).term_end(commonware_utils::NZU64!(term_length)),
+                View::new(expected),
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_is_term_start() {
+        let cases = [
+            (0, 1, true),
+            (1, 1, true),
+            (5, 1, true),
+            (1, 5, true),
+            (5, 5, false),
+            (6, 5, true),
+            (10, 5, false),
+            (11, 5, true),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).is_term_start(commonware_utils::NZU64!(term_length)),
+                expected,
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_same_term() {
+        let cases = [
+            (0, 0, 1, true),
+            (1, 1, 1, true),
+            (1, 2, 5, true),
+            (1, 5, 5, true),
+            (5, 6, 5, false),
+            (6, 10, 5, true),
+            (10, 11, 5, false),
+            (11, 15, 5, true),
+        ];
+        for (a, b, term_length, expected) in cases {
+            assert_eq!(
+                View::new(a).same_term(View::new(b), commonware_utils::NZU64!(term_length)),
+                expected,
+                "a={a}, b={b}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_next_term_start() {
+        let cases = [
+            (0, 1, 1),
+            (5, 1, 6),
+            (1, 5, 6),
+            (5, 5, 6),
+            (6, 5, 11),
+            (10, 5, 11),
+            (11, 5, 16),
+            (12, 3, 13),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).next_term_start(commonware_utils::NZU64!(term_length)),
+                View::new(expected),
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "view term_end overflow")]
+    fn test_view_term_end_overflow_panics() {
+        let _ = View::new(u64::MAX).term_end(commonware_utils::NZU64!(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "view overflow")]
+    fn test_view_next_term_start_overflow_panics() {
+        let _ = View::new(u64::MAX).next_term_start(commonware_utils::NZU64!(1));
     }
 
     #[test]
