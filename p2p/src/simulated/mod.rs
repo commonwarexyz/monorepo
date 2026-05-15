@@ -2837,7 +2837,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(sender.check(Recipients::All).unwrap().recipients().is_empty());
+            assert!(sender
+                .check(Recipients::All)
+                .unwrap()
+                .recipients()
+                .is_empty());
 
             let mut manager = oracle.manager();
             manager.track(1, Set::try_from([pk1, pk2.clone()]).unwrap());

@@ -5,11 +5,11 @@ use crate::{
         lookup::actors::{peer, tracker::Metadata},
     },
     types::Address,
+    utils::{
+        mailbox_enqueue as enqueue, mailbox_request as request, mailbox_request_or as request_or,
+        mailbox_request_or_default as request_or_default,
+    },
     AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
-};
-use crate::utils::{
-    mailbox_enqueue as enqueue, mailbox_request as request, mailbox_request_or as request_or,
-    mailbox_request_or_default as request_or_default,
 };
 use commonware_actor::{
     mailbox::{self, Policy},

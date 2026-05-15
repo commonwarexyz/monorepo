@@ -193,10 +193,12 @@ mod tests {
     #[test]
     fn subscribe_retains_only_open_initial_sender() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _, _) =
-                Actor::<deterministic::Context, PublicKey>::new(context, Config {
+            let (mut actor, _, _) = Actor::<deterministic::Context, PublicKey>::new(
+                context,
+                Config {
                     mailbox_size: NZUsize!(1),
-                });
+                },
+            );
             let (sender, receiver) = ring::channel(NZUsize!(1));
             drop(receiver);
 

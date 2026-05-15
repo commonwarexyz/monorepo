@@ -21,8 +21,7 @@ pub enum Message<O: Sink, I: Stream, P: PublicKey> {
 impl<P: PublicKey, O: Sink, I: Stream> Policy for Message<O, I, P> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(_overflow: &mut Self::Overflow, _message: Self) {
-    }
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
 }
 
 impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
@@ -64,7 +63,10 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>);
+    type Connection = (
+        EncryptedSender<mocks::Sink>,
+        EncryptedReceiver<mocks::Stream>,
+    );
 
     fn stream_config(key: PrivateKey) -> StreamConfig<PrivateKey> {
         StreamConfig {
@@ -126,12 +128,8 @@ mod tests {
     #[test]
     fn spawn_overflow_drops_message_and_releases_reservation() {
         deterministic::Runner::default().start(|context| async move {
-            let (connection_1, connection_2) = connections(
-                &context,
-                PrivateKey::from_seed(1),
-                PrivateKey::from_seed(2),
-            )
-            .await;
+            let (connection_1, connection_2) =
+                connections(&context, PrivateKey::from_seed(1), PrivateKey::from_seed(2)).await;
             let peer_1 = PrivateKey::from_seed(1).public_key();
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
@@ -146,7 +144,10 @@ mod tests {
             let reservation_2 = Reservation::new(Metadata::Listener(peer_2.clone()), releaser);
 
             assert_eq!(spawner.spawn(connection_1, reservation_1), Feedback::Ok);
-            assert_eq!(spawner.spawn(connection_2, reservation_2), Feedback::Backoff);
+            assert_eq!(
+                spawner.spawn(connection_2, reservation_2),
+                Feedback::Backoff
+            );
 
             let release = tracker_receiver
                 .recv()

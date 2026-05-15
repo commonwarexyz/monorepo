@@ -4,10 +4,7 @@ use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
-    channel::{
-        fallible::FallibleExt,
-        mpsc, oneshot, ring,
-    },
+    channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Map,
 };
 use rand_distr::Normal;
@@ -106,7 +103,10 @@ fn enqueue<P: PublicKey, E: Clock>(
     }
 }
 
-async fn request<P, E, R, F>(sender: &mpsc::UnboundedSender<Message<P, E>>, make_msg: F) -> Option<R>
+async fn request<P, E, R, F>(
+    sender: &mpsc::UnboundedSender<Message<P, E>>,
+    make_msg: F,
+) -> Option<R>
 where
     P: PublicKey,
     E: Clock,

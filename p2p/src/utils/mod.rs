@@ -25,10 +25,7 @@ pub(crate) fn mailbox_enqueue<T: mailbox::Policy>(
     sender.enqueue(message)
 }
 
-pub(crate) async fn mailbox_request<T, R, F>(
-    sender: &mailbox::Sender<T>,
-    make_msg: F,
-) -> Option<R>
+pub(crate) async fn mailbox_request<T, R, F>(sender: &mailbox::Sender<T>, make_msg: F) -> Option<R>
 where
     T: mailbox::Policy,
     R: Send,
