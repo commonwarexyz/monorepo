@@ -67,8 +67,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Genesis { epoch, response });
+        self.sender.send_lossy(Message::Genesis { epoch, response });
         receiver.await.expect("Failed to receive genesis")
     }
 

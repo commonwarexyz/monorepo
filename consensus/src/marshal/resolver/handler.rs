@@ -1,6 +1,6 @@
 use crate::types::{Height, Round};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_actor::mailbox::{Overflow, Policy, Sender};
+use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};
@@ -9,6 +9,7 @@ use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    sync::mpsc::TryRecvError,
 };
 
 /// The subject of a backfill request.
@@ -18,7 +19,7 @@ const NOTARIZED_REQUEST: u8 = 2;
 
 /// Messages sent from the resolver's [Consumer]/[Producer] implementation
 /// to the marshal actor.
-pub enum Message<D: Digest> {
+pub(crate) enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
         /// The key of the value being delivered.
@@ -48,7 +49,7 @@ impl<D: Digest> Message<D> {
 }
 
 /// Pending resolver handler messages retained after the mailbox fills.
-pub struct Pending<D: Digest>(VecDeque<Message<D>>);
+pub(crate) struct Pending<D: Digest>(VecDeque<Message<D>>);
 
 impl<D: Digest> Default for Pending<D> {
     fn default() -> Self {
@@ -94,14 +95,33 @@ impl<D: Digest> Policy for Message<D> {
 /// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
-pub struct Handler<D: Digest> {
+pub(crate) struct Handler<D: Digest> {
     sender: Sender<Message<D>>,
 }
 
 impl<D: Digest> Handler<D> {
     /// Creates a new handler.
-    pub const fn new(sender: Sender<Message<D>>) -> Self {
+    pub(crate) const fn new(sender: Sender<Message<D>>) -> Self {
         Self { sender }
+    }
+}
+
+/// Receiver for resolver handler messages.
+pub struct Receiver<D: Digest> {
+    inner: mailbox::Receiver<Message<D>>,
+}
+
+impl<D: Digest> Receiver<D> {
+    pub(crate) const fn new(inner: mailbox::Receiver<Message<D>>) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<Message<D>> {
+        self.inner.recv().await
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<Message<D>, TryRecvError> {
+        self.inner.try_recv()
     }
 }
 

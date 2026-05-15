@@ -51,10 +51,7 @@ pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
-) -> (
-    mailbox::Receiver<handler::Message<D>>,
-    p2p::Mailbox<handler::Request<D>, P>,
-)
+) -> (handler::Receiver<D>, p2p::Mailbox<handler::Request<D>, P>)
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
@@ -83,5 +80,5 @@ where
         },
     );
     resolver_engine.start(backfill);
-    (receiver, resolver)
+    (handler::Receiver::new(receiver), resolver)
 }

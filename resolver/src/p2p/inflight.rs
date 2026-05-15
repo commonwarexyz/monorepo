@@ -106,9 +106,9 @@ where
         let deliver_key = key.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(deliver_key, value);
-        let aborter = self.deliveries.push(async move {
-            (peer, key, receiver.await.unwrap_or(false))
-        });
+        let aborter = self
+            .deliveries
+            .push(async move { (peer, key, receiver.await.unwrap_or(false)) });
         let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
         assert!(entry.delivery.replace(aborter).is_none());
     }

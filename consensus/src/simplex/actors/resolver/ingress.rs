@@ -142,7 +142,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 }
 
 #[derive(Debug)]
-pub enum HandlerMessage {
+pub(crate) enum HandlerMessage {
     Deliver {
         view: View,
         data: Bytes,
@@ -166,7 +166,7 @@ impl HandlerMessage {
 
 /// Pending resolver handler messages retained after the mailbox fills.
 #[derive(Default)]
-pub struct HandlerPending(VecDeque<HandlerMessage>);
+pub(crate) struct HandlerPending(VecDeque<HandlerMessage>);
 
 impl Overflow<HandlerMessage> for HandlerPending {
     fn is_empty(&self) -> bool {
@@ -202,12 +202,12 @@ impl Policy for HandlerMessage {
 }
 
 #[derive(Clone)]
-pub struct Handler {
+pub(crate) struct Handler {
     sender: Sender<HandlerMessage>,
 }
 
 impl Handler {
-    pub const fn new(sender: Sender<HandlerMessage>) -> Self {
+    pub(crate) const fn new(sender: Sender<HandlerMessage>) -> Self {
         Self { sender }
     }
 }

@@ -1685,10 +1685,10 @@ mod tests {
     }
 
     impl RecordingResolver {
-        fn holding() -> (mailbox::Receiver<handler::Message<D>>, Self) {
+        fn holding() -> (handler::Receiver<D>, Self) {
             let (sender, receiver) = mailbox::new(NZUsize!(100));
             (
-                receiver,
+                handler::Receiver::new(receiver),
                 Self {
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     _keepalive: Some(sender),
@@ -2006,7 +2006,10 @@ mod tests {
             actor.start(
                 Application::<B>::default(),
                 buffer,
-                (resolver_rx, RecordingResolver::default()),
+                (
+                    handler::Receiver::new(resolver_rx),
+                    RecordingResolver::default(),
+                ),
             );
 
             // Inject a Finalized delivery with garbage payload. The
