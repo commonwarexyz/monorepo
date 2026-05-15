@@ -49,7 +49,7 @@ cargo_flags = ["--features", "test-traits"]
 
 [[packages.benchmarks]]
 name = "qmdb"
-criterion_args = ["--sample-size", "100", "--significance-level", "0.01"]
+criterion_args = ["--sample-size", "500", "--significance-level", "0.01"]
 variants = [
   "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false",
   "qmdb::merkleize/variant=current::ordered::fixed::mmb chunk=256 keys=10000 ch=true sync=false",
