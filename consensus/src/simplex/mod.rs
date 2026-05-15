@@ -3364,15 +3364,13 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
-            oracle
-                .manager()
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::from_iter_dedup(std::iter::once(me.clone())),
-                        Set::from_iter_dedup(std::iter::once(injector_pk.clone())),
-                    ),
-                );
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(std::iter::once(me.clone())),
+                    Set::from_iter_dedup(std::iter::once(injector_pk.clone())),
+                ),
+            );
             context.sleep(Duration::from_millis(1)).await;
 
             let quorum = quorum(n) as usize;
@@ -5146,15 +5144,13 @@ mod tests {
                     .await
                     .unwrap();
             }
-            oracle
-                .manager()
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::from_iter_dedup(participants.iter().cloned()),
-                        Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                    ),
-                );
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(participants.iter().cloned()),
+                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                ),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             // ========== Broadcast certificates over recovered network. ==========

@@ -2584,15 +2584,13 @@ mod tests {
                     )
                     .await
                     .expect("link should be added");
-                oracle
-                    .manager()
-                    .track(
-                        2,
-                        TrackedPeers::new(
-                            Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
-                            Set::from_iter_dedup([non_participant_pk.clone()]),
-                        ),
-                    );
+                oracle.manager().track(
+                    2,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
+                        Set::from_iter_dedup([non_participant_pk.clone()]),
+                    ),
+                );
                 context.sleep(Duration::from_millis(10)).await;
 
                 peers[2].mailbox.discovered(
@@ -2645,15 +2643,13 @@ mod tests {
                     )
                     .await
                     .expect("link should be added");
-                oracle
-                    .manager()
-                    .track(
-                        2,
-                        TrackedPeers::new(
-                            Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
-                            Set::from_iter_dedup([non_participant_pk.clone()]),
-                        ),
-                    );
+                oracle.manager().track(
+                    2,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
+                        Set::from_iter_dedup([non_participant_pk.clone()]),
+                    ),
+                );
                 context.sleep(Duration::from_millis(10)).await;
 
                 let peer2_index = peers[2].index.get() as u16;
@@ -3708,12 +3704,10 @@ mod tests {
                 .add_link(future_peer_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
                 .await
                 .expect("link should be added");
-            oracle
-                .manager()
-                .track(
-                    0,
-                    Set::from_iter_dedup([receiver_pk.clone(), future_peer_pk.clone()]),
-                );
+            oracle.manager().track(
+                0,
+                Set::from_iter_dedup([receiver_pk.clone(), future_peer_pk.clone()]),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             // Set up the receiver's engine with a multi-epoch provider.

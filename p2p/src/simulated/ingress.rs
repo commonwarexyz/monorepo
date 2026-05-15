@@ -266,9 +266,12 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 
     /// Get the primary and secondary peers for a given ID.
     async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
-        request(&self.sender, move |response| Message::PeerSet { id, response })
-            .await
-            .flatten()
+        request(&self.sender, move |response| Message::PeerSet {
+            id,
+            response,
+        })
+        .await
+        .flatten()
     }
 
     /// Subscribe to notifications when new peer sets are added.
@@ -431,9 +434,12 @@ impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
     type PublicKey = P;
 
     fn block(&mut self, public_key: P) -> Feedback {
-        enqueue(&self.sender, Message::Block {
-            from: self.me.clone(),
-            to: public_key,
-        })
+        enqueue(
+            &self.sender,
+            Message::Block {
+                from: self.me.clone(),
+                to: public_key,
+            },
+        )
     }
 }

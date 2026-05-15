@@ -6,10 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::{
-    authenticated::Mailbox,
-    Channel,
-};
+use crate::{authenticated::Mailbox, Channel};
 use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select;

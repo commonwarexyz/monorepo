@@ -164,11 +164,7 @@ where
     rx.await.ok()
 }
 
-async fn request_or<C, R, F>(
-    sender: &mailbox::Sender<Message<C>>,
-    make_msg: F,
-    default: R,
-) -> R
+async fn request_or<C, R, F>(sender: &mailbox::Sender<Message<C>>, make_msg: F, default: R) -> R
 where
     C: PublicKey,
     R: Send,
@@ -192,7 +188,11 @@ pub trait SenderExt<C: PublicKey> {
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
-    fn connect(&self, public_key: C, dialer: bool) -> impl Future<Output = Option<types::Info<C>>> + Send;
+    fn connect(
+        &self,
+        public_key: C,
+        dialer: bool,
+    ) -> impl Future<Output = Option<types::Info<C>>> + Send;
 
     /// Send a `Construct` message to the tracker.
     fn construct(&self, public_key: C, peer: PeerMailbox<peer::Message<C>>) -> Feedback;
@@ -347,10 +347,13 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     where
         R: Into<TrackedPeers<Self::PublicKey>> + Send,
     {
-        enqueue(&self.sender, Message::Register {
-            index,
-            peers: peers.into(),
-        })
+        enqueue(
+            &self.sender,
+            Message::Register {
+                index,
+                peers: peers.into(),
+            },
+        )
     }
 }
 

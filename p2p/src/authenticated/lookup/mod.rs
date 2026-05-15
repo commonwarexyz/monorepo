@@ -530,23 +530,20 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers at separate indices
-                oracle
-                    .track(0, Map::try_from([peers[0].clone()]).unwrap());
-                oracle
-                    .track(
-                        1,
-                        Map::try_from([peers[1].clone(), peers[2].clone()]).unwrap(),
-                    );
-                oracle
-                    .track(
-                        2,
-                        peers
-                            .iter()
-                            .skip(2)
-                            .cloned()
-                            .try_collect::<Map<_, _>>()
-                            .unwrap(),
-                    );
+                oracle.track(0, Map::try_from([peers[0].clone()]).unwrap());
+                oracle.track(
+                    1,
+                    Map::try_from([peers[1].clone(), peers[2].clone()]).unwrap(),
+                );
+                oracle.track(
+                    2,
+                    peers
+                        .iter()
+                        .skip(2)
+                        .cloned()
+                        .try_collect::<Map<_, _>>()
+                        .unwrap(),
+                );
 
                 // Register basic application
                 let (mut sender, mut receiver) =
@@ -1435,8 +1432,7 @@ mod tests {
                 let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
                 let (mut network0, mut oracle0) =
                     Network::new(context.child("peer").with_attribute("index", 0), config0);
-                oracle0
-                    .track(0, Map::try_from(peers.clone()).unwrap());
+                oracle0.track(0, Map::try_from(peers.clone()).unwrap());
                 let (_sender0, mut receiver0) =
                     network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network0.start();
@@ -1445,8 +1441,7 @@ mod tests {
                 let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
                 let (mut network1, mut oracle1) =
                     Network::new(context.child("peer").with_attribute("index", 1), config1);
-                oracle1
-                    .track(0, Map::try_from(peers.clone()).unwrap());
+                oracle1.track(0, Map::try_from(peers.clone()).unwrap());
                 let (mut sender1, _receiver1) =
                     network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network1.start();
@@ -1526,8 +1521,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, Map::try_from(peer_set.clone()).unwrap());
+                oracle.track(0, Map::try_from(peer_set.clone()).unwrap());
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1603,11 +1597,10 @@ mod tests {
 
                     // Update oracle on all running peers
                     for oracle in oracles.iter_mut().flatten() {
-                        oracle
-                            .track(
-                                (round * (n - 1) + restart_peer_idx) as u64,
-                                Map::try_from(updated_peer_set.clone()).unwrap(),
-                            );
+                        oracle.track(
+                            (round * (n - 1) + restart_peer_idx) as u64,
+                            Map::try_from(updated_peer_set.clone()).unwrap(),
+                        );
                     }
 
                     // Restart the peer with new port
@@ -1623,11 +1616,10 @@ mod tests {
                     let (mut network, mut oracle) =
                         Network::new(peer_context.child("network"), config);
 
-                    oracle
-                        .track(
-                            (round * (n - 1) + restart_peer_idx) as u64,
-                            Map::try_from(updated_peer_set.clone()).unwrap(),
-                        );
+                    oracle.track(
+                        (round * (n - 1) + restart_peer_idx) as u64,
+                        Map::try_from(updated_peer_set.clone()).unwrap(),
+                    );
 
                     let (sender, receiver) = network.register(
                         0,
@@ -1746,8 +1738,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, Map::try_from(peer_set.clone()).unwrap());
+                oracle.track(0, Map::try_from(peer_set.clone()).unwrap());
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1838,8 +1829,7 @@ mod tests {
                 );
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
-                oracle
-                    .track(1, Map::try_from(updated_peer_set.clone()).unwrap());
+                oracle.track(1, Map::try_from(updated_peer_set.clone()).unwrap());
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -2107,8 +2097,7 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle0
-                .track(0, Map::try_from(peer_set.clone()).unwrap());
+            oracle0.track(0, Map::try_from(peer_set.clone()).unwrap());
             oracle2.track(0, Map::try_from(peer_set).unwrap());
 
             // Wait for connections to be made

@@ -138,11 +138,7 @@ where
     rx.await.ok()
 }
 
-async fn request_or<C, R, F>(
-    sender: &mailbox::Sender<Message<C>>,
-    make_msg: F,
-    default: R,
-) -> R
+async fn request_or<C, R, F>(sender: &mailbox::Sender<Message<C>>, make_msg: F, default: R) -> R
 where
     C: PublicKey,
     R: Send,
@@ -173,7 +169,8 @@ pub trait SenderExt<C: PublicKey> {
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    fn dial(&self, public_key: C) -> impl Future<Output = Option<(Reservation<C>, Ingress)>> + Send;
+    fn dial(&self, public_key: C)
+        -> impl Future<Output = Option<(Reservation<C>, Ingress)>> + Send;
 
     /// Send an `Acceptable` message to the tracker.
     ///
@@ -293,10 +290,13 @@ impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
     where
         R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
     {
-        enqueue(&self.sender, Message::Register {
-            index,
-            peers: peers.into(),
-        })
+        enqueue(
+            &self.sender,
+            Message::Register {
+                index,
+                peers: peers.into(),
+            },
+        )
     }
 
     fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Feedback {

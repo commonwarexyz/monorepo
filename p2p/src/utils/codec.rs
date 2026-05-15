@@ -311,9 +311,7 @@ mod tests {
     ) where
         I: IntoIterator<Item = PublicKey>,
     {
-        oracle
-            .manager()
-            .track(index, Set::from_iter_dedup(peers));
+        oracle.manager().track(index, Set::from_iter_dedup(peers));
     }
 
     async fn link_bidirectional(

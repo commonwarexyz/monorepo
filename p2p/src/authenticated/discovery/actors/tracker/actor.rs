@@ -4,11 +4,9 @@ use super::{
     Config,
 };
 use crate::{
-    authenticated::{
-        discovery::{
-            actors::tracker::ingress::Releaser,
-            types::{self, Info, InfoVerifier},
-        },
+    authenticated::discovery::{
+        actors::tracker::ingress::Releaser,
+        types::{self, Info, InfoVerifier},
     },
     PeerSetUpdate,
 };
@@ -18,7 +16,10 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{channel::fallible::FallibleExt, channel::mpsc, union, SystemTimeExt};
+use commonware_utils::{
+    channel::{fallible::FallibleExt, mpsc},
+    union, SystemTimeExt,
+};
 use rand::{seq::SliceRandom, Rng};
 use tracing::debug;
 
@@ -284,7 +285,7 @@ mod tests {
     use crate::{
         authenticated::{
             discovery::{
-                actors::{peer, tracker},
+                actors::{peer, tracker, tracker::ingress::SenderExt as _},
                 config::Bootstrapper,
                 types,
             },
@@ -292,13 +293,12 @@ mod tests {
         },
         Ingress, Manager, Provider, TrackedPeers,
     };
-    use crate::authenticated::discovery::actors::tracker::ingress::SenderExt as _;
+    use commonware_actor::mailbox::Sender;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
         Signer,
     };
-    use commonware_actor::mailbox::Sender;
     use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect};
     use futures::future::Either;
@@ -459,8 +459,7 @@ mod tests {
                 .try_collect()
                 .unwrap();
             let primary: Set<PublicKey> = Set::default();
-            oracle
-                .track(0, TrackedPeers::new(primary, large_secondary));
+            oracle.track(0, TrackedPeers::new(primary, large_secondary));
             let _ = mailbox.dialable().await;
         });
     }
@@ -505,11 +504,10 @@ mod tests {
             } = setup_actor(context.child("actor"), cfg_initial);
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
-            oracle
-                .track(
-                    0,
-                    Set::try_from([tracker_pk.clone(), auth_pk.clone()]).unwrap(),
-                );
+            oracle.track(
+                0,
+                Set::try_from([tracker_pk.clone(), auth_pk.clone()]).unwrap(),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
@@ -570,8 +568,7 @@ mod tests {
             } = setup_actor(context.child("actor"), cfg_initial);
 
             let (_, pk1) = new_signer_and_pk(1);
-            oracle
-                .track(0, Set::try_from([tracker_pk, pk1.clone()]).unwrap());
+            oracle.track(0, Set::try_from([tracker_pk, pk1.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
@@ -603,8 +600,7 @@ mod tests {
             } = setup_actor(context.child("actor"), cfg_initial);
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
-            oracle
-                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
+            oracle.track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
             crate::block_peer(&mut oracle, pk1.clone());
@@ -636,8 +632,7 @@ mod tests {
             } = setup_actor(context.child("actor"), cfg_initial);
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
-            oracle
-                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
+            oracle.track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
             crate::block_peer(&mut oracle, pk1.clone());
@@ -684,8 +679,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
-            oracle
-                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
+            oracle.track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
             let pk2_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 2002);
@@ -833,11 +827,10 @@ mod tests {
             assert!(!mailbox.acceptable(peer_pk2.clone()).await);
             assert!(!mailbox.acceptable(peer_pk3.clone()).await);
 
-            oracle
-                .track(
-                    0,
-                    Set::try_from([peer_pk.clone(), peer_pk2.clone()]).unwrap(),
-                );
+            oracle.track(
+                0,
+                Set::try_from([peer_pk.clone(), peer_pk2.clone()]).unwrap(),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             // Not listenable because self
@@ -865,8 +858,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle
-                .track(0, Set::try_from([peer_pk.clone()]).unwrap());
+            oracle.track(0, Set::try_from([peer_pk.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.acceptable(peer_pk.clone()).await);
@@ -921,14 +913,13 @@ mod tests {
 
             let (_primary_signer, primary_pk) = new_signer_and_pk(1);
             let (mut secondary_signer, secondary_pk) = new_signer_and_pk(2);
-            oracle
-                .track(
-                    0,
-                    TrackedPeers::new(
-                        Set::try_from([primary_pk.clone()]).unwrap(),
-                        Set::try_from([secondary_pk.clone()]).unwrap(),
-                    ),
-                );
+            oracle.track(
+                0,
+                TrackedPeers::new(
+                    Set::try_from([primary_pk.clone()]).unwrap(),
+                    Set::try_from([secondary_pk.clone()]).unwrap(),
+                ),
+            );
 
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 0);
@@ -977,14 +968,13 @@ mod tests {
             let mut subscription = oracle.subscribe().await;
 
             let (_signer, pk) = new_signer_and_pk(1);
-            oracle
-                .track(
-                    0,
-                    TrackedPeers::new(
-                        Set::try_from([pk.clone()]).unwrap(),
-                        Set::try_from([pk.clone()]).unwrap(),
-                    ),
-                );
+            oracle.track(
+                0,
+                TrackedPeers::new(
+                    Set::try_from([pk.clone()]).unwrap(),
+                    Set::try_from([pk.clone()]).unwrap(),
+                ),
+            );
 
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 0);
@@ -1051,11 +1041,10 @@ mod tests {
 
             let (_s1, pk1) = new_signer_and_pk(1);
             let (_s2, pk2) = new_signer_and_pk(2);
-            oracle
-                .track(
-                    0,
-                    Set::try_from([tracker_pk, pk1.clone(), pk2.clone()]).unwrap(),
-                );
+            oracle.track(
+                0,
+                Set::try_from([tracker_pk, pk1.clone(), pk2.clone()]).unwrap(),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);

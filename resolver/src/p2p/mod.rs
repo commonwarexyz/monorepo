@@ -190,8 +190,7 @@ mod tests {
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
         let mut manager = oracle.manager();
-        manager
-            .track(0, Set::try_from(peers.clone()).unwrap());
+        manager.track(0, Set::try_from(peers.clone()).unwrap());
 
         let mut connections = Vec::new();
         for peer in &peers {
@@ -627,12 +626,10 @@ mod tests {
             wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            oracle
-                .manager()
-                .track(
-                    1,
-                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
-                );
+            oracle.manager().track(
+                1,
+                Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+            );
 
             let started_key = started.recv().await.expect("retry delivery did not start");
             assert_eq!(started_key, key);
@@ -2187,15 +2184,13 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
-            oracle
-                .manager()
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::try_from([peers[1].clone()]).unwrap(),
-                        Set::try_from([peers[2].clone()]).unwrap(),
-                    ),
-                );
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::try_from([peers[1].clone()]).unwrap(),
+                    Set::try_from([peers[2].clone()]).unwrap(),
+                ),
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             let key = Key(1);
@@ -2421,12 +2416,10 @@ mod tests {
 
             // Keep the requester in the peer set across the cutover while peer 2 remains connected
             // only through the overlap window after the latest primary advances to peer 3.
-            oracle
-                .manager()
-                .track(
-                    0,
-                    Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
-                );
+            oracle.manager().track(
+                0,
+                Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             let key = Key(9);
@@ -2479,12 +2472,10 @@ mod tests {
 
             context.sleep(Duration::from_millis(100)).await;
 
-            oracle
-                .manager()
-                .track(
-                    1,
-                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
-                );
+            oracle.manager().track(
+                1,
+                Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             mailbox1.fetch(key.clone());
@@ -2513,15 +2504,13 @@ mod tests {
             // requests are still answered).
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            oracle
-                .manager()
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::try_from([peers[0].clone()]).unwrap(),
-                        Set::try_from([peers[1].clone()]).unwrap(),
-                    ),
-                );
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::try_from([peers[0].clone()]).unwrap(),
+                    Set::try_from([peers[1].clone()]).unwrap(),
+                ),
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             let key = Key(9);

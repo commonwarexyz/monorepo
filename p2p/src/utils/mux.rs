@@ -552,11 +552,10 @@ mod tests {
     ) {
         let mut manager = oracle.manager();
         let peers = manager.peer_set(0).await.unwrap_or_default();
-        manager
-            .track(
-                0,
-                Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
-            );
+        manager.track(
+            0,
+            Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
+        );
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }

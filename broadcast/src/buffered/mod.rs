@@ -1525,12 +1525,10 @@ mod tests {
                 "without latest.primary, remote peers do not cache inbound messages"
             );
 
-            oracle
-                .manager()
-                .track(
-                    0,
-                    commonware_utils::ordered::Set::from_iter_dedup(peers.clone()),
-                );
+            oracle.manager().track(
+                0,
+                commonware_utils::ordered::Set::from_iter_dedup(peers.clone()),
+            );
             context.sleep(A_JIFFY).await;
 
             let after = TestMessage::shared(b"after-tracking");

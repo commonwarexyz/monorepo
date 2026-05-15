@@ -863,12 +863,10 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
     type PublicKey = P;
 
     async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-        request_connected(&self.mailbox)
-            .await
-            .unwrap_or_else(|| {
-                let (_sender, receiver) = ring::channel(NZUsize!(1));
-                receiver
-            })
+        request_connected(&self.mailbox).await.unwrap_or_else(|| {
+            let (_sender, receiver) = ring::channel(NZUsize!(1));
+            receiver
+        })
     }
 }
 
@@ -1542,11 +1540,10 @@ mod tests {
 
             // Register all peers
             let mut manager = oracle.manager();
-            manager
-                .track(
-                    0,
-                    Set::try_from([twin.clone(), peer_a.clone(), peer_b.clone()]).unwrap(),
-                );
+            manager.track(
+                0,
+                Set::try_from([twin.clone(), peer_a.clone(), peer_b.clone()]).unwrap(),
+            );
 
             // Register normal peers
             let (mut peer_a_sender, mut peer_a_recv) = oracle
@@ -1668,8 +1665,7 @@ mod tests {
 
             // Register all peers
             let mut manager = oracle.manager();
-            manager
-                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
+            manager.track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
 
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
@@ -1740,8 +1736,7 @@ mod tests {
 
             // Register all peers
             let mut manager = oracle.manager();
-            manager
-                .track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
+            manager.track(0, Set::try_from([twin.clone(), peer_c.clone()]).unwrap());
 
             // Register normal peer
             let (mut peer_c_sender, _peer_c_recv) = oracle
@@ -1828,8 +1823,7 @@ mod tests {
             let mut subscription = manager.subscribe().await;
 
             // Register initial peer set
-            manager
-                .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
+            manager.track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 10);
             assert_eq!(update.latest.primary.len(), 2);
@@ -1839,13 +1833,11 @@ mod tests {
 
             // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
-            manager
-                .track(9, Set::try_from([pk3.clone()]).unwrap());
+            manager.track(9, Set::try_from([pk3.clone()]).unwrap());
 
             // Add new peer set
             let pk4 = ed25519::PrivateKey::from_seed(4).public_key();
-            manager
-                .track(11, Set::try_from([pk4.clone()]).unwrap());
+            manager.track(11, Set::try_from([pk4.clone()]).unwrap());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
             assert_eq!(update.latest.primary, Set::try_from([pk4.clone()]).unwrap());
@@ -1879,24 +1871,22 @@ mod tests {
             let mut manager = oracle.manager();
             let mut subscription = manager.subscribe().await;
 
-            manager
-                .track(
-                    10,
-                    TrackedPeers::new(
-                        Set::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
-                        Set::default(),
-                    ),
-                );
+            manager.track(
+                10,
+                TrackedPeers::new(
+                    Set::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
+                    Set::default(),
+                ),
+            );
             let _ = subscription.recv().await.unwrap();
 
-            manager
-                .track(
-                    11,
-                    TrackedPeers::new(
-                        Set::try_from([pk_b.clone()]).unwrap(),
-                        Set::try_from([pk_overlap.clone(), pk_sec.clone()]).unwrap(),
-                    ),
-                );
+            manager.track(
+                11,
+                TrackedPeers::new(
+                    Set::try_from([pk_b.clone()]).unwrap(),
+                    Set::try_from([pk_overlap.clone(), pk_sec.clone()]).unwrap(),
+                ),
+            );
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
 
@@ -1974,11 +1964,10 @@ mod tests {
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
             let mut manager = oracle.manager();
-            manager
-                .track(
-                    0,
-                    Set::try_from([sender_pk.clone(), recipient_pk.clone()]).unwrap(),
-                );
+            manager.track(
+                0,
+                Set::try_from([sender_pk.clone(), recipient_pk.clone()]).unwrap(),
+            );
             let (mut sender, _sender_recv) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -2054,12 +2043,11 @@ mod tests {
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
             let mut manager = oracle.manager();
-            manager
-                .track(
-                    0,
-                    Set::try_from([sender_pk.clone(), recipient_a.clone(), recipient_b.clone()])
-                        .unwrap(),
-                );
+            manager.track(
+                0,
+                Set::try_from([sender_pk.clone(), recipient_a.clone(), recipient_b.clone()])
+                    .unwrap(),
+            );
             let (mut sender, _recv_sender) = oracle
                 .control(sender_pk.clone())
                 .register(0, TEST_QUOTA)
@@ -2148,14 +2136,13 @@ mod tests {
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
 
             let mut manager = oracle.manager();
-            manager
-                .track(
-                    0,
-                    TrackedPeers::new(
-                        Set::try_from([pk1.clone(), pk2.clone()]).unwrap(),
-                        Set::try_from([pk2.clone(), pk3.clone()]).unwrap(),
-                    ),
-                );
+            manager.track(
+                0,
+                TrackedPeers::new(
+                    Set::try_from([pk1.clone(), pk2.clone()]).unwrap(),
+                    Set::try_from([pk2.clone(), pk3.clone()]).unwrap(),
+                ),
+            );
 
             let mut updates = manager.subscribe().await;
             let update = updates.recv().await.unwrap();
@@ -2243,28 +2230,26 @@ mod tests {
             let mut sub = manager.subscribe().await;
 
             // Index 0: X is primary, Y is secondary.
-            manager
-                .track(
-                    0,
-                    TrackedPeers::new(
-                        Set::try_from([pk_x.clone()]).unwrap(),
-                        Set::try_from([pk_y.clone()]).unwrap(),
-                    ),
-                );
+            manager.track(
+                0,
+                TrackedPeers::new(
+                    Set::try_from([pk_x.clone()]).unwrap(),
+                    Set::try_from([pk_y.clone()]).unwrap(),
+                ),
+            );
 
             let update = sub.recv().await.unwrap();
             assert!(update.all.primary.position(&pk_x).is_some());
             assert!(update.all.secondary.position(&pk_y).is_some());
 
             // Index 1: X is demoted to secondary, Y is promoted to primary.
-            manager
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::try_from([pk_y.clone()]).unwrap(),
-                        Set::try_from([pk_x.clone()]).unwrap(),
-                    ),
-                );
+            manager.track(
+                1,
+                TrackedPeers::new(
+                    Set::try_from([pk_y.clone()]).unwrap(),
+                    Set::try_from([pk_x.clone()]).unwrap(),
+                ),
+            );
 
             // Both indices retained: both peers are primary somewhere -> aggregate primary.
             let update = sub.recv().await.unwrap();
@@ -2273,14 +2258,13 @@ mod tests {
             assert!(update.all.secondary.is_empty());
 
             // Index 2: same as index 1. Evicts index 0.
-            manager
-                .track(
-                    2,
-                    TrackedPeers::new(
-                        Set::try_from([pk_y.clone()]).unwrap(),
-                        Set::try_from([pk_x.clone()]).unwrap(),
-                    ),
-                );
+            manager.track(
+                2,
+                TrackedPeers::new(
+                    Set::try_from([pk_y.clone()]).unwrap(),
+                    Set::try_from([pk_x.clone()]).unwrap(),
+                ),
+            );
 
             // Index 0 evicted. X is now purely secondary.
             let update = sub.recv().await.unwrap();
@@ -2311,22 +2295,20 @@ mod tests {
             let secondary_1 = ed25519::PrivateKey::from_seed(5).public_key();
 
             let mut manager = oracle.manager();
-            manager
-                .track(
-                    0,
-                    TrackedPeers::new(
-                        Set::try_from([primary_0.clone()]).unwrap(),
-                        Set::try_from([secondary_0.clone()]).unwrap(),
-                    ),
-                );
-            manager
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::try_from([primary_1.clone()]).unwrap(),
-                        Set::try_from([secondary_1.clone()]).unwrap(),
-                    ),
-                );
+            manager.track(
+                0,
+                TrackedPeers::new(
+                    Set::try_from([primary_0.clone()]).unwrap(),
+                    Set::try_from([secondary_0.clone()]).unwrap(),
+                ),
+            );
+            manager.track(
+                1,
+                TrackedPeers::new(
+                    Set::try_from([primary_1.clone()]).unwrap(),
+                    Set::try_from([secondary_1.clone()]).unwrap(),
+                ),
+            );
 
             let link = ingress::Link {
                 latency: Duration::from_millis(1),

@@ -143,15 +143,13 @@ mod tests {
         primary: &[PublicKey],
         secondary: &[PublicKey],
     ) {
-        oracle
-            .manager()
-            .track(
-                id,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(primary.iter().cloned()),
-                    Set::from_iter_dedup(secondary.iter().cloned()),
-                ),
-            );
+        oracle.manager().track(
+            id,
+            TrackedPeers::new(
+                Set::from_iter_dedup(primary.iter().cloned()),
+                Set::from_iter_dedup(secondary.iter().cloned()),
+            ),
+        );
         context.sleep(Duration::from_millis(10)).await;
     }
 

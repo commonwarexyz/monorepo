@@ -1,10 +1,9 @@
 mod actor;
 mod ingress;
 
-use std::num::NonZeroUsize;
-
 pub use actor::Actor;
 pub use ingress::{Message, Messenger};
+use std::num::NonZeroUsize;
 
 /// Config for an [Actor].
 pub struct Config {

@@ -511,8 +511,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        authenticated::lookup::actors::tracker::directory::Directory,
-        types::Address,
+        authenticated::lookup::actors::tracker::directory::Directory, types::Address,
         AddressableTrackedPeers, Ingress,
     };
     use commonware_actor::mailbox;
