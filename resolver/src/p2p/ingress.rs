@@ -80,7 +80,7 @@ impl<K: Eq, P: Clone + Eq> Pending<K, P> {
                     merge_targets(&mut existing.targets, request.targets);
                     return;
                 }
-                Message::Cancel { key } if key == &request.key => break,
+                Message::Cancel { key } if key == &request.key => return,
                 Message::Clear | Message::Retain { .. } => break,
                 Message::Cancel { .. } => {}
             }
@@ -98,9 +98,10 @@ impl<K: Eq, P: Clone + Eq> Pending<K, P> {
             .retain(|message| !matches!(message, Message::Fetch(requests) if requests.is_empty()));
     }
 
-    fn remove_cancels(&mut self, key: &K) {
+    fn has_cancel(&self, key: &K) -> bool {
         self.messages
-            .retain(|message| !matches!(message, Message::Cancel { key: old } if old == key));
+            .iter()
+            .any(|message| matches!(message, Message::Cancel { key: old } if old == key))
     }
 }
 
@@ -138,8 +139,9 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
             }
             Self::Cancel { key } => {
                 overflow.remove_fetches(|old| old != &key);
-                overflow.remove_cancels(&key);
-                overflow.messages.push_back(Self::Cancel { key });
+                if !overflow.has_cancel(&key) {
+                    overflow.messages.push_back(Self::Cancel { key });
+                }
             }
             Self::Clear => {
                 overflow.messages.clear();
@@ -326,16 +328,29 @@ mod tests {
     }
 
     #[test]
-    fn fetch_after_cancel_preserves_order() {
+    fn fetch_after_cancel_is_ignored() {
         let mut pending = Pending::default();
 
         Policy::handle(&mut pending, Message::Cancel { key: 1 });
         Policy::handle(&mut pending, fetch(1, None));
 
         let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0], Message::Cancel { key: 1 }));
+    }
+
+    #[test]
+    fn duplicate_cancel_keeps_original_position() {
+        let mut pending = Pending::default();
+
+        Policy::handle(&mut pending, Message::Cancel { key: 1 });
+        Policy::handle(&mut pending, fetch(2, None));
+        Policy::handle(&mut pending, Message::Cancel { key: 1 });
+
+        let messages = drain(&mut pending);
         assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Message::Cancel { key: 1 }));
-        assert_fetch(&messages[1], 1, None);
+        assert_fetch(&messages[1], 2, None);
     }
 
     #[test]

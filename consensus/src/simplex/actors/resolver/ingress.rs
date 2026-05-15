@@ -164,15 +164,40 @@ impl HandlerMessage {
     }
 }
 
+/// Pending resolver handler messages retained after the mailbox fills.
+#[derive(Default)]
+pub struct HandlerPending(VecDeque<HandlerMessage>);
+
+impl Overflow<HandlerMessage> for HandlerPending {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(HandlerMessage) -> Option<HandlerMessage>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.response_closed() {
+                continue;
+            }
+
+            if let Some(message) = push(message) {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 impl Policy for HandlerMessage {
-    type Overflow = VecDeque<Self>;
+    type Overflow = HandlerPending;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
             return;
         }
-        overflow.retain(|message| !message.response_closed());
-        overflow.push_back(message);
+        overflow.0.push_back(message);
     }
 }
 
@@ -283,6 +308,42 @@ mod tests {
             None
         });
         messages
+    }
+
+    #[test]
+    fn handler_drain_skips_closed_responses() {
+        let mut overflow = HandlerPending::default();
+
+        let (closed_response, closed_receiver) = oneshot::channel();
+        HandlerMessage::handle(
+            &mut overflow,
+            HandlerMessage::Produce {
+                view: View::new(1),
+                response: closed_response,
+            },
+        );
+        drop(closed_receiver);
+
+        let (open_response, _open_receiver) = oneshot::channel();
+        HandlerMessage::handle(
+            &mut overflow,
+            HandlerMessage::Produce {
+                view: View::new(2),
+                response: open_response,
+            },
+        );
+
+        let mut messages = Vec::new();
+        Overflow::drain(&mut overflow, |message| {
+            messages.push(message);
+            None
+        });
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages.pop(),
+            Some(HandlerMessage::Produce { view, .. }) if view == View::new(2)
+        ));
     }
 
     #[test]

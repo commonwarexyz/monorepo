@@ -1685,11 +1685,15 @@ mod tests {
     }
 
     impl RecordingResolver {
-        fn holding(sender: mailbox::Sender<handler::Message<D>>) -> Self {
-            Self {
-                targeted: Arc::new(Mutex::new(Vec::new())),
-                _keepalive: Some(sender),
-            }
+        fn holding() -> (mailbox::Receiver<handler::Message<D>>, Self) {
+            let (sender, receiver) = mailbox::new(NZUsize!(100));
+            (
+                receiver,
+                Self {
+                    targeted: Arc::new(Mutex::new(Vec::new())),
+                    _keepalive: Some(sender),
+                },
+            )
         }
 
         fn targeted(&self) -> Vec<TargetedFetch> {
@@ -1894,8 +1898,7 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_tx, resolver_rx) = mailbox::new(NZUsize!(100));
-        let resolver = RecordingResolver::holding(resolver_tx);
+        let (resolver_rx, resolver) = RecordingResolver::holding();
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)

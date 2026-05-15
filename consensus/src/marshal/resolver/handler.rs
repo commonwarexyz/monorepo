@@ -1,6 +1,6 @@
 use crate::types::{Height, Round};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_actor::mailbox::{Policy, Sender};
+use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};
@@ -47,15 +47,45 @@ impl<D: Digest> Message<D> {
     }
 }
 
+/// Pending resolver handler messages retained after the mailbox fills.
+pub struct Pending<D: Digest>(VecDeque<Message<D>>);
+
+impl<D: Digest> Default for Pending<D> {
+    fn default() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+impl<D: Digest> Overflow<Message<D>> for Pending<D> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<D>) -> Option<Message<D>>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.response_closed() {
+                continue;
+            }
+
+            if let Some(message) = push(message) {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 impl<D: Digest> Policy for Message<D> {
-    type Overflow = VecDeque<Self>;
+    type Overflow = Pending<D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
             return;
         }
-        overflow.retain(|message| !message.response_closed());
-        overflow.push_back(message);
+        overflow.0.push_back(message);
     }
 }
 
@@ -270,6 +300,49 @@ mod tests {
     use std::collections::BTreeSet;
 
     type D = Sha256Digest;
+
+    #[test]
+    fn handler_drain_skips_closed_responses() {
+        let mut overflow = Pending::<D>::default();
+
+        let (closed_response, closed_receiver) = oneshot::channel();
+        Message::handle(
+            &mut overflow,
+            Message::Produce {
+                key: Request::Finalized {
+                    height: Height::new(1),
+                },
+                response: closed_response,
+            },
+        );
+        drop(closed_receiver);
+
+        let (open_response, _open_receiver) = oneshot::channel();
+        Message::handle(
+            &mut overflow,
+            Message::Produce {
+                key: Request::Finalized {
+                    height: Height::new(2),
+                },
+                response: open_response,
+            },
+        );
+
+        let mut messages = Vec::new();
+        Overflow::drain(&mut overflow, |message| {
+            messages.push(message);
+            None
+        });
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages.pop(),
+            Some(Message::Produce {
+                key: Request::Finalized { height },
+                ..
+            }) if height == Height::new(2)
+        ));
+    }
 
     #[test]
     fn test_cross_variant_hash_differs() {
