@@ -625,6 +625,7 @@ impl SizeClassToken {
 /// Globally parked buffers do not carry a class reference: taking from the
 /// global freelist retains the class, and returning to the global freelist
 /// releases it.
+#[must_use = "SizeClassLease owns one size-class reference and must be returned or banked"]
 pub(crate) struct SizeClassLease {
     token: SizeClassToken,
 }
@@ -652,22 +653,6 @@ impl SizeClassLease {
         Self { token: class.token }
     }
 
-    /// Converts one retained class reference into a lease using a raw token.
-    ///
-    /// This does not retain the class. It is used when the caller has a live
-    /// token plus ownership of a strong reference represented outside a
-    /// `SizeClassLease` value, usually in TLS cache state.
-    ///
-    /// # Safety
-    ///
-    /// The caller must have already retained one strong reference for `token`,
-    /// and that retained reference must be transferred to the returned lease.
-    /// The token must identify the class that owns the returned buffer.
-    #[inline(always)]
-    const unsafe fn from_banked_token(token: SizeClassToken) -> Self {
-        Self { token }
-    }
-
     /// Retains `class` for a buffer leaving the global freelist.
     ///
     /// Moving between pooled view state and TLS transfers the lease without
@@ -677,9 +662,7 @@ impl SizeClassLease {
         let token = class.token;
         // SAFETY: the borrowed `class` owns one strong reference for `token`.
         unsafe { token.retain() };
-        // SAFETY: `retain` above retained the strong reference
-        // transferred to the returned lease.
-        unsafe { Self::from_banked_token(token) }
+        Self { token }
     }
 
     /// Transfers this lease into a TLS cache entry.
@@ -720,33 +703,6 @@ impl SizeClassLease {
         self.class().global.put(slot, buffer);
         // SAFETY: this lease owns one strong reference.
         unsafe { self.token.release() };
-    }
-
-    /// Returns several buffers to this class's global freelist and releases
-    /// their references.
-    ///
-    /// `count` must match the number of returned entries. All entries must
-    /// belong to this lease's size class. This method consumes one
-    /// `SizeClassLease` value as the live class handle for the batch, but it
-    /// releases `count` strong references because it is used for TLS cache
-    /// state, where entries own banked references without storing one lease
-    /// value per entry.
-    ///
-    /// As with [`Self::return_global`], buffers are inserted into the global
-    /// freelist before any class references are released.
-    #[inline(always)]
-    fn return_global_batch(
-        self,
-        entries: impl IntoIterator<Item = (u32, PooledBuffer)>,
-        count: usize,
-    ) {
-        debug_assert!(count > 0);
-        self.class().global.put_batch(entries);
-        for _ in 0..count {
-            // SAFETY: each returned entry owned one strong reference to this
-            // same size class.
-            unsafe { self.token.release() };
-        }
     }
 }
 
@@ -878,6 +834,7 @@ impl SizeClassHandle {
     }
 }
 
+#[cfg(test)]
 impl Clone for SizeClassHandle {
     fn clone(&self) -> Self {
         // SAFETY: this handle owns one strong reference for `self.token`.
@@ -976,13 +933,15 @@ impl TlsSizeClassCache {
     /// batch-take from the global freelist, return the first claimed buffer,
     /// and retain the rest locally for future allocations.
     ///
-    /// A returned entry always carries one banked size-class reference. The
-    /// caller must materialize that reference as a [`SizeClassLease`] or release
-    /// it.
+    /// The returned lease is materialized from the banked size-class reference
+    /// associated with the returned entry.
     #[inline(always)]
-    fn pop(&mut self, class: &SizeClassHandle) -> Option<TlsSizeClassCacheEntry> {
+    fn pop(&mut self, class: &SizeClassHandle) -> Option<(TlsSizeClassCacheEntry, SizeClassLease)> {
         if let Some(entry) = self.pop_local() {
-            return Some(entry);
+            // SAFETY: the popped entry consumed one banked reference owned by
+            // this cache. Transfer that reference to the returned lease.
+            let lease = unsafe { SizeClassLease::from_banked(class) };
+            return Some((entry, lease));
         }
 
         // Take from the class-global freelist on a local miss.
@@ -1017,16 +976,16 @@ impl TlsSizeClassCache {
     /// the refill and batching code out of `BufferPoolInner::try_alloc`, reducing
     /// hot-path code size and register pressure.
     #[inline(never)]
-    fn pop_global(&mut self, class: &SizeClassHandle) -> Option<TlsSizeClassCacheEntry> {
+    fn pop_global(
+        &mut self,
+        class: &SizeClassHandle,
+    ) -> Option<(TlsSizeClassCacheEntry, SizeClassLease)> {
         // Tiny caches do not batch enough to justify the wider global
         // claim. Keep their miss path equivalent to a single take.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
             return class.global.take().map(|(slot, buffer)| {
-                // Convert the globally parked buffer into a banked entry for
-                // the caller; `BufferPoolThreadCache::pop` materializes the
-                // lease immediately.
-                SizeClassLease::retain(class).into_banked();
-                TlsSizeClassCacheEntry { buffer, slot }
+                let lease = SizeClassLease::retain(class);
+                (TlsSizeClassCacheEntry { buffer, slot }, lease)
             });
         }
 
@@ -1046,7 +1005,10 @@ impl TlsSizeClassCache {
             if entry.is_none() {
                 // Hand the first claimed buffer to the allocation that missed
                 // locally. Additional claimed buffers refill the local cache.
-                entry = Some(cache_entry);
+                // SAFETY: `class.token.retain()` above retained the strong
+                // reference transferred to this returned lease.
+                let lease = unsafe { SizeClassLease::from_banked(class) };
+                entry = Some((cache_entry, lease));
             } else {
                 // The take count is derived from the target occupancy, so refill
                 // cannot overflow the local cache. Push directly to avoid the
@@ -1123,13 +1085,41 @@ impl TlsSizeClassCache {
         // SAFETY: each spilled entry represents one banked class reference
         // owned by this cache. Because `spill > 0`, at least one of those
         // references keeps `self.class` live for the batch release.
-        unsafe { SizeClassLease::from_banked_token(self.class) }
-            .return_global_batch(spilled, spill);
+        unsafe { Self::return_banked_global_batch(self.class, spilled, spill) };
 
         debug_assert!(self.len < self.capacity);
         debug_assert_eq!(self.class, class.token);
         class.into_banked();
         self.push_local(entry);
+    }
+
+    /// Returns banked TLS entries to the class-global freelist.
+    ///
+    /// The caller passes the raw token instead of a [`SizeClassLease`] because
+    /// TLS cache entries do not store lease values. They store compact
+    /// `(buffer, slot)` entries, and the cache accounts for one banked strong
+    /// reference per initialized entry.
+    ///
+    /// # Safety
+    ///
+    /// `count` must match the number of returned entries. The caller must own
+    /// `count` banked strong references for `class`, and every entry must
+    /// belong to that size class. At least one of those references must keep
+    /// the class alive until after the entries are parked in the global
+    /// freelist.
+    #[inline(always)]
+    unsafe fn return_banked_global_batch(
+        class: SizeClassToken,
+        entries: impl IntoIterator<Item = (u32, PooledBuffer)>,
+        count: usize,
+    ) {
+        debug_assert!(count > 0);
+        // SAFETY: guaranteed by the caller.
+        unsafe { class.as_ref() }.global.put_batch(entries);
+        for _ in 0..count {
+            // SAFETY: guaranteed by the caller.
+            unsafe { class.release() };
+        }
     }
 }
 
@@ -1147,8 +1137,7 @@ impl Drop for TlsSizeClassCache {
         // SAFETY: each initialized entry represented one banked class
         // reference owned by this cache. Because `count > 0`, those references
         // keep `self.class` live for this drop.
-        unsafe { SizeClassLease::from_banked_token(self.class) }
-            .return_global_batch(entries, count);
+        unsafe { Self::return_banked_global_batch(self.class, entries, count) };
     }
 }
 
@@ -1340,12 +1329,8 @@ impl BufferPoolThreadCache {
         match Self::cache(class) {
             Some(mut cache) => {
                 // SAFETY: `cache` points to this thread's initialized TLS cache.
-                unsafe { cache.as_mut().pop(class) }.map(|entry| {
-                    // SAFETY: `TlsSizeClassCache::pop` returns entries that own
-                    // one banked class reference for `class`.
-                    let lease = unsafe { SizeClassLease::from_banked(class) };
-                    (entry.buffer, lease, entry.slot)
-                })
+                unsafe { cache.as_mut().pop(class) }
+                    .map(|(entry, lease)| (entry.buffer, lease, entry.slot))
             }
             None => class
                 .global
@@ -2516,10 +2501,7 @@ mod tests {
         cache.push(lease, slot, buffer);
         assert_eq!(class.strong_count(), 2);
 
-        let entry = cache.pop(&class).expect("local cache pop");
-        // SAFETY: `cache.pop` transferred one banked size-class reference to
-        // this returned entry.
-        let lease = unsafe { SizeClassLease::from_banked(&class) };
+        let (entry, lease) = cache.pop(&class).expect("local cache pop");
         assert_eq!(class.strong_count(), 2);
         lease.return_global(entry.slot, entry.buffer);
         assert_eq!(class.strong_count(), 1);
@@ -2529,10 +2511,7 @@ mod tests {
             class.global.put(slot, buffer);
         }
 
-        let entry = cache.pop(&class).expect("global refill");
-        // SAFETY: `cache.pop` transferred one banked size-class reference to
-        // this returned entry.
-        let lease = unsafe { SizeClassLease::from_banked(&class) };
+        let (entry, lease) = cache.pop(&class).expect("global refill");
         assert_eq!(class.strong_count(), 3);
 
         lease.return_global(entry.slot, entry.buffer);
