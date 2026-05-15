@@ -83,7 +83,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::Resolver;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -1685,7 +1685,7 @@ mod tests {
     }
 
     impl RecordingResolver {
-        fn holding(metrics: impl commonware_runtime::Metrics) -> (handler::Receiver<D>, Self) {
+        fn holding(metrics: impl Metrics) -> (handler::Receiver<D>, Self) {
             let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
                 handler::Receiver::new(receiver),
