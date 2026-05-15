@@ -2024,7 +2024,7 @@ mod tests {
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .processed());
+                .accepted());
             assert!(response_rx.await.unwrap());
 
             // Same for a Notarized delivery.
@@ -2037,7 +2037,7 @@ mod tests {
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .processed());
+                .accepted());
             assert!(response_rx.await.unwrap());
         });
     }

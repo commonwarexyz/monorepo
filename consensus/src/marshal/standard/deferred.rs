@@ -1193,13 +1193,13 @@ mod tests {
             assert!(
                 buffer
                     .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                    .processed(),
+                    .accepted(),
                 "buffer broadcast for parent should be accepted"
             );
             assert!(
                 buffer
                     .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                    .processed(),
+                    .accepted(),
                 "buffer broadcast for child should be accepted"
             );
 

@@ -575,7 +575,7 @@ mod tests {
                         types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
                         false,
                     )
-                    .processed(),
+                    .accepted(),
                 "first send failed"
             );
             assert!(
@@ -584,7 +584,7 @@ mod tests {
                         types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
                         false,
                     )
-                    .processed(),
+                    .accepted(),
                 "second send failed"
             );
 
