@@ -4,7 +4,8 @@
 //! - [`Bytes`]/[`BytesMut`]: standard heap allocation (from `From` conversions)
 //! - Aligned: untracked aligned allocation (from [`IoBufMut::with_alignment`],
 //!   pool bypass for small requests, or fallback)
-//! - Pooled: tracked aligned allocation returned to a [`BufferPool`] on drop
+//! - Pooled: tracked aligned allocation returned to its originating [`BufferPool`]
+//!   on drop
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
@@ -13,12 +14,12 @@
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
-mod aligned;
+mod buffer;
 mod freelist;
 mod pool;
 
-pub(crate) use aligned::AlignedBuffer;
-use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
+pub(crate) use buffer::AlignedBuffer;
+use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
@@ -26,12 +27,13 @@ use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBound
 
 #[cfg(feature = "bench")]
 pub mod bench {
-    pub use super::{aligned::AlignedBuffer, freelist::Freelist};
+    pub use super::{buffer::PooledBuffer, freelist::Freelist};
 }
 
 /// Immutable byte buffer.
 ///
-/// Backed by either [`Bytes`] or a pooled aligned allocation.
+/// Backed by [`Bytes`], an untracked aligned allocation, or a pooled
+/// allocation.
 ///
 /// Use this for immutable payloads. To build or mutate data, use
 /// [`IoBufMut`] and then [`IoBufMut::freeze`].
@@ -428,7 +430,8 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 
 /// Mutable byte buffer.
 ///
-/// Backed by either [`BytesMut`] or a pooled aligned allocation.
+/// Backed by [`BytesMut`], an untracked aligned allocation, or a pooled
+/// allocation.
 ///
 /// Use this to build or mutate payloads before freezing into [`IoBuf`].
 ///

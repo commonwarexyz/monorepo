@@ -16,15 +16,16 @@
 //! steady-state shape of multi-threaded freelist reuse.
 //!
 //! The benchmarked entries are synthetic slot ids paired with a small
-//! [`AlignedBuffer`]. That keeps the shape close to the real pooled freelist
+//! [`PooledBuffer`]. That keeps the shape close to the real pooled freelist
 //! while avoiding unrelated `BufferPool` logic.
 
 use super::utils::{measure, Threading};
-use commonware_runtime::iobuf::bench::{AlignedBuffer, Freelist};
+use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;
 use crossbeam_queue::ArrayQueue;
 use std::{
+    alloc::Layout,
     hint::black_box,
     num::{NonZeroU32, NonZeroUsize},
     sync::Arc,
@@ -35,16 +36,26 @@ const BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32];
 
 const BENCH_BUFFER_CAPACITY: usize = 256;
 const BENCH_BUFFER_ALIGNMENT: usize = 64;
+const BENCH_LAYOUT: Layout =
+    match Layout::from_size_align(BENCH_BUFFER_CAPACITY, BENCH_BUFFER_ALIGNMENT) {
+        Ok(layout) => layout,
+        Err(_) => panic!("valid bench layout"),
+    };
 
 #[derive(Debug)]
 struct Entry {
     slot: u32,
-    buffer: AlignedBuffer,
+    buffer: PooledBuffer,
 }
 
-// SAFETY: this entry uniquely owns its buffer and slot id, so moving it across
-// threads is equivalent to moving a uniquely-owned heap allocation.
-unsafe impl Send for Entry {}
+impl Entry {
+    fn new(slot: usize) -> Self {
+        Self {
+            slot: slot as u32,
+            buffer: PooledBuffer::new(BENCH_LAYOUT),
+        }
+    }
+}
 
 trait FreelistImplementation: Send + Sync {
     fn as_str() -> &'static str;
@@ -81,6 +92,12 @@ impl<S: FreelistImplementation> WorkerState<S> {
     fn step(&mut self) {
         self.shared.put_batch(black_box(&mut self.held));
         self.shared.fill_batch(&mut self.held, self.batch);
+    }
+}
+
+impl<S: FreelistImplementation> Drop for WorkerState<S> {
+    fn drop(&mut self) {
+        self.shared.put_batch(&mut self.held);
     }
 }
 
@@ -147,12 +164,7 @@ impl FreelistImplementation for MutexVec {
     }
 
     fn with_capacity(capacity: usize, _parallelism: usize) -> Self {
-        let slots = (0..capacity)
-            .map(|slot| Entry {
-                slot: slot as u32,
-                buffer: AlignedBuffer::new(BENCH_BUFFER_CAPACITY, BENCH_BUFFER_ALIGNMENT),
-            })
-            .collect();
+        let slots = (0..capacity).map(Entry::new).collect();
         Self(Mutex::new(slots))
     }
 
@@ -171,6 +183,15 @@ impl FreelistImplementation for MutexVec {
     }
 }
 
+impl Drop for MutexVec {
+    fn drop(&mut self) {
+        for entry in self.0.get_mut().drain(..) {
+            // SAFETY: benchmark entries are allocated with `BENCH_LAYOUT`.
+            unsafe { entry.buffer.deallocate(BENCH_LAYOUT) };
+        }
+    }
+}
+
 struct ArrayQueueFreelist(ArrayQueue<Entry>);
 
 impl FreelistImplementation for ArrayQueueFreelist {
@@ -182,10 +203,7 @@ impl FreelistImplementation for ArrayQueueFreelist {
         let queue = ArrayQueue::new(capacity);
         for slot in 0..capacity {
             queue
-                .push(Entry {
-                    slot: slot as u32,
-                    buffer: AlignedBuffer::new(BENCH_BUFFER_CAPACITY, BENCH_BUFFER_ALIGNMENT),
-                })
+                .push(Entry::new(slot))
                 .expect("array queue prefill must fit");
         }
         Self(queue)
@@ -212,24 +230,28 @@ impl FreelistImplementation for ArrayQueueFreelist {
     }
 }
 
+impl Drop for ArrayQueueFreelist {
+    fn drop(&mut self) {
+        while let Some(entry) = self.0.pop() {
+            // SAFETY: benchmark entries are allocated with `BENCH_LAYOUT`.
+            unsafe { entry.buffer.deallocate(BENCH_LAYOUT) };
+        }
+    }
+}
+
 impl FreelistImplementation for Freelist {
     fn as_str() -> &'static str {
         "freelist"
     }
 
     fn with_capacity(capacity: usize, parallelism: usize) -> Self {
-        let freelist = Self::new(
+        Self::new(
             NonZeroU32::new(u32::try_from(capacity).expect("bench capacity must fit in u32"))
                 .expect("bench capacity must be non-zero"),
             NonZeroUsize::new(parallelism).expect("bench parallelism must be non-zero"),
-        );
-        for slot in 0..capacity {
-            freelist.put(
-                slot as u32,
-                AlignedBuffer::new(BENCH_BUFFER_CAPACITY, BENCH_BUFFER_ALIGNMENT),
-            );
-        }
-        freelist
+            BENCH_LAYOUT,
+            true,
+        )
     }
 
     #[inline]

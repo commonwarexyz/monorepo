@@ -9,6 +9,7 @@ use crate::{
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
+use commonware_codec::Read;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
@@ -43,6 +44,13 @@ where
         block.parent()
     }
 
+    fn block_cfg(
+        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+        _expected: Self::Commitment,
+    ) -> <Self::Block as Read>::Cfg {
+        block_cfg.clone()
+    }
+
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
         block
     }
@@ -63,21 +71,21 @@ where
         self.find_by_digest(commitment).await
     }
 
-    async fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<B> {
+    fn subscribe_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<B> {
         let (tx, rx) = oneshot::channel();
-        self.subscribe_prepared(digest, tx).await;
+        self.subscribe_prepared(digest, tx);
         rx
     }
 
-    async fn subscribe_by_commitment(&self, commitment: B::Digest) -> oneshot::Receiver<B> {
-        self.subscribe_by_digest(commitment).await
+    fn subscribe_by_commitment(&self, commitment: B::Digest) -> oneshot::Receiver<B> {
+        self.subscribe_by_digest(commitment)
     }
 
-    async fn finalized(&self, _commitment: B::Digest) {
+    fn finalized(&self, _commitment: B::Digest) {
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    async fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
-        let _peers = Broadcaster::broadcast(self, recipients, block).await;
+    fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
+        Broadcaster::broadcast(self, recipients, block);
     }
 }

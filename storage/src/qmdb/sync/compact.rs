@@ -14,7 +14,7 @@
 //! A compact db persists two pieces of state that must always describe the same committed tip:
 //!
 //! 1. the compact Merkle frontier (persisted by [`crate::merkle::compact`]), and
-//! 2. a db-level witness for the last commit (persisted by `qmdb::compact_witness`).
+//! 2. a db-level witness for the last commit (persisted by `qmdb::compact::witness`).
 //!
 //! The witness exists because only the db layer knows how to encode and decode the typed commit
 //! operation. Without it, a compact db could recover its root and continue appending, but it could
@@ -71,6 +71,7 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage};
 use commonware_utils::{sync::AsyncRwLock, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
@@ -193,7 +194,7 @@ pub enum ServeError<F: Family, D: Digest> {
     /// The resolver wrapper did not currently hold a database.
     #[error("compact source missing")]
     MissingSource,
-    /// The caller requested a target different from the source's current servable state.
+    /// The caller requested a target different from the source's current witness.
     #[error("stale compact target - requested {requested:?}, current {current:?}")]
     StaleTarget {
         requested: Target<F, D>,
@@ -401,12 +402,13 @@ where
 // historical tip proof and current frontier pins from the full source.
 macro_rules! impl_compact_resolver_keyless {
     ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, V, H> Resolver for Arc<$db<F, E, V, H>>
+        impl<F, E, V, H, S> Resolver for Arc<$db<F, E, V, H, S>>
         where
             F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -438,12 +440,13 @@ macro_rules! impl_compact_resolver_keyless {
             }
         }
 
-        impl<F, E, V, H> Resolver for Arc<AsyncRwLock<$db<F, E, V, H>>>
+        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, S>>>
         where
             F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -476,12 +479,13 @@ macro_rules! impl_compact_resolver_keyless {
             }
         }
 
-        impl<F, E, V, H> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H>>>>
+        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, S>>>>
         where
             F: Family,
             E: crate::Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -521,7 +525,7 @@ macro_rules! impl_compact_resolver_keyless {
 // translator parameters carried by immutable variants.
 macro_rules! impl_compact_resolver_immutable {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
-        impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$db<F, E, K, V, H, T, S>>
         where
             F: Family,
             E: crate::Context,
@@ -530,6 +534,7 @@ macro_rules! impl_compact_resolver_immutable {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -561,7 +566,7 @@ macro_rules! impl_compact_resolver_immutable {
             }
         }
 
-        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -570,6 +575,7 @@ macro_rules! impl_compact_resolver_immutable {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -602,7 +608,7 @@ macro_rules! impl_compact_resolver_immutable {
             }
         }
 
-        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -611,6 +617,7 @@ macro_rules! impl_compact_resolver_immutable {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -647,10 +654,10 @@ macro_rules! impl_compact_resolver_immutable {
 }
 
 // Resolver impls for compact keyless databases. These already persist a compact witness, so serving
-// is just a validated `compact_state()` read rather than reconstructing anything from history.
+// is just a target check over the current witness rather than reconstructing anything from history.
 macro_rules! impl_compact_resolver_compact_keyless {
     ($db:ident, $op:ident) => {
-        impl<F, E, V, H, C> Resolver for Arc<$db<F, E, V, H, C>>
+        impl<F, E, V, H, C, S> Resolver for Arc<$db<F, E, V, H, C, S>>
         where
             F: Family,
             E: crate::Context,
@@ -658,6 +665,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             H: Hasher,
             $op<F, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -672,7 +680,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             }
         }
 
-        impl<F, E, V, H, C> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, C>>>
+        impl<F, E, V, H, C, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, C, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -680,6 +688,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             H: Hasher,
             $op<F, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -690,11 +699,12 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.read().await.compact_state(target)
+                let db = self.read().await;
+                db.compact_state(target)
             }
         }
 
-        impl<F, E, V, H, C> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, C>>>>
+        impl<F, E, V, H, C, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, C, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -702,6 +712,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             H: Hasher,
             $op<F, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -721,10 +732,10 @@ macro_rules! impl_compact_resolver_compact_keyless {
 }
 
 // Resolver impls for compact immutable databases. Like the keyless compact path, these read the
-// persisted witness/cache directly instead of rebuilding it from a full operation log.
+// persisted witness directly instead of rebuilding it from a full operation log.
 macro_rules! impl_compact_resolver_compact_immutable {
     ($db:ident, $op:ident) => {
-        impl<F, E, K, V, H, C> Resolver for Arc<$db<F, E, K, V, H, C>>
+        impl<F, E, K, V, H, C, S> Resolver for Arc<$db<F, E, K, V, H, C, S>>
         where
             F: Family,
             E: crate::Context,
@@ -733,6 +744,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             H: Hasher,
             $op<F, K, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -747,7 +759,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             }
         }
 
-        impl<F, E, K, V, H, C> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, C>>>
+        impl<F, E, K, V, H, C, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, C, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -756,6 +768,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             H: Hasher,
             $op<F, K, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -766,11 +779,12 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 &self,
                 target: Target<Self::Family, Self::Digest>,
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.read().await.compact_state(target)
+                let db = self.read().await;
+                db.compact_state(target)
             }
         }
 
-        impl<F, E, K, V, H, C> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, C>>>>
+        impl<F, E, K, V, H, C, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, C, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -779,6 +793,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             H: Hasher,
             $op<F, K, V>: Encode + Read<Cfg = C>,
             C: Clone + Send + Sync + 'static,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -809,8 +824,63 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 mod tests {
     use super::Target;
     use crate::merkle::mmr;
-    use commonware_codec::{DecodeExt as _, Encode as _};
+    use commonware_codec::{DecodeExt as _, Encode as _, RangeCfg};
     use commonware_cryptography::{sha256::Digest, Hasher as _};
+    use commonware_parallel::Rayon;
+    use commonware_runtime::deterministic;
+    use commonware_utils::sync::AsyncRwLock;
+    use std::sync::Arc;
+
+    macro_rules! assert_resolver_variants {
+        ($db:ty) => {
+            assert_resolver::<Arc<$db>>();
+            assert_resolver::<Arc<AsyncRwLock<$db>>>();
+            assert_resolver::<Arc<AsyncRwLock<Option<$db>>>>();
+        };
+    }
+
+    fn assert_resolver<R: super::Resolver>() {}
+
+    #[test]
+    fn test_all_compact_qmdb_variants_implement_strategy_resolvers() {
+        type KeylessFixedCompactDb = crate::qmdb::keyless::fixed::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            commonware_cryptography::Sha256,
+            Rayon,
+        >;
+        type KeylessVariableCompactDb = crate::qmdb::keyless::variable::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            Vec<u8>,
+            commonware_cryptography::Sha256,
+            (RangeCfg<usize>, ()),
+            Rayon,
+        >;
+        type ImmutableFixedCompactDb = crate::qmdb::immutable::fixed::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            Digest,
+            commonware_cryptography::Sha256,
+            Rayon,
+        >;
+        type ImmutableVariableCompactDb = crate::qmdb::immutable::variable::CompactDb<
+            mmr::Family,
+            deterministic::Context,
+            Digest,
+            Vec<u8>,
+            commonware_cryptography::Sha256,
+            ((), (RangeCfg<usize>, ())),
+            Rayon,
+        >;
+
+        assert_resolver_variants!(KeylessFixedCompactDb);
+        assert_resolver_variants!(KeylessVariableCompactDb);
+        assert_resolver_variants!(ImmutableFixedCompactDb);
+        assert_resolver_variants!(ImmutableVariableCompactDb);
+    }
 
     #[test]
     fn test_target_decode_rejects_zero_leaf_count() {

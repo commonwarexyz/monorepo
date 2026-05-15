@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`Marshaled`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
+//! [`Marshaled`] is an adapter that wraps any [`Application`] implementation to handle
 //! epoch transitions and erasure coded broadcast automatically. It intercepts consensus
 //! operations (propose, verify, certify) and ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -34,7 +34,7 @@
 //!
 //! # Usage
 //!
-//! Wrap your [`VerifyingApplication`] implementation with [`Marshaled::new`] and provide it to your
+//! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
 //! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
@@ -100,8 +100,9 @@ use crate::{
     simplex::{scheme::Scheme, types::Context, Plan},
     types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
-    Relay, Reporter, VerifyingApplication,
+    Relay, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -229,7 +230,7 @@ where
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: VerifyingApplication<
+    A: Application<
         E,
         Block = B,
         SigningScheme = Z::Scheme,
@@ -351,7 +352,7 @@ where
                 block
             } else {
                 let request = core::CommitmentRequest::Wait;
-                let block_request = marshal.subscribe_by_commitment(commitment, request).await;
+                let block_request = marshal.subscribe_by_commitment(commitment, request);
                 select! {
                     _ = tx.closed() => {
                         debug!(
@@ -469,7 +470,7 @@ where
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: VerifyingApplication<
+    A: Application<
         E,
         Block = B,
         SigningScheme = Z::Scheme,
@@ -781,8 +782,7 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(payload, core::CommitmentRequest::Wait)
-                .await;
+                .subscribe_by_commitment(payload, core::CommitmentRequest::Wait);
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
@@ -849,13 +849,11 @@ where
         }
 
         // Inform the shard engine of an externally proposed commitment.
-        self.shards
-            .discovered(
-                payload,
-                consensus_context.leader.clone(),
-                consensus_context.round,
-            )
-            .await;
+        self.shards.discovered(
+            payload,
+            consensus_context.leader.clone(),
+            consensus_context.round,
+        );
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
@@ -872,7 +870,7 @@ where
                 // assigned index has been verified. Reconstructing the block
                 // from peer gossip is useful for certification later, but is
                 // not enough to emit a notarize vote.
-                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload).await;
+                let validity_rx = self.shards.subscribe_assigned_shard_verified(payload);
                 let (tx, rx) = oneshot::channel();
                 let context = self
                     .context
@@ -903,7 +901,7 @@ where
 impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: VerifyingApplication<
+    A: Application<
         E,
         Block = B,
         SigningScheme = Z::Scheme,
@@ -941,8 +939,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(payload, core::CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(payload, core::CommitmentRequest::Wait);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -1002,13 +999,11 @@ where
             }
 
             // Inform the shard engine of an externally proposed commitment.
-            shards
-                .discovered(
-                    payload,
-                    embedded_context.leader.clone(),
-                    embedded_context.round,
-                )
-                .await;
+            shards.discovered(
+                payload,
+                embedded_context.leader.clone(),
+                embedded_context.round,
+            );
 
             // Use the block's embedded context for verification, passing the
             // prefetched block to avoid waiting on marshal again inside deferred_verify.
@@ -1042,17 +1037,15 @@ where
     type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
     type Plan = Plan<Self::PublicKey>;
 
-    async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
+    fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
         // Coding variant does not support targeted forwarding;
         // peers reconstruct blocks from erasure-coded shards.
         //
         // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
-            return;
+            return Feedback::Ok;
         };
-        self.marshal
-            .forward(round, commitment, Recipients::All)
-            .await;
+        self.marshal.forward(round, commitment, Recipients::All)
     }
 }
 
@@ -1074,12 +1067,12 @@ where
     type Activity = A::Activity;
 
     /// Relays a report to the underlying [`Application`] and cleans up old verification data.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         // Clean up verification tasks and contexts for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 
@@ -1129,11 +1122,7 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        Either::Right(
-            marshal
-                .subscribe_by_commitment(parent_commitment, request)
-                .await,
-        )
+        Either::Right(marshal.subscribe_by_commitment(parent_commitment, request))
     }
 }
 

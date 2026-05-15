@@ -6,7 +6,7 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous, Many, Mutable},
+        contiguous::{fixed, metrics::VariableMetrics as Metrics, Contiguous, Many, Mutable},
         segmented::variable,
         Error,
     },
@@ -153,12 +153,24 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         items_per_section: u64,
         offsets: &impl super::Reader<Item = u64>,
     ) -> Option<V> {
+        let mut buf = Vec::new();
+        self.try_read_sync_into(position, items_per_section, offsets, &mut buf)
+    }
+
+    /// Read an item synchronously using caller-provided buffer.
+    fn try_read_sync_into(
+        &self,
+        position: u64,
+        items_per_section: u64,
+        offsets: &impl super::Reader<Item = u64>,
+        buf: &mut Vec<u8>,
+    ) -> Option<V> {
         if position >= self.size || position < self.pruning_boundary {
             return None;
         }
         let offset = offsets.try_read_sync(position)?;
         let section = position_to_section(position, items_per_section);
-        self.data.try_get_sync(section, offset)
+        self.data.try_get_sync_into(section, offset, buf)
     }
 }
 
@@ -220,6 +232,9 @@ pub struct Journal<E: Context, V: Codec> {
 
     /// Optional compression level when encoding items.
     compression: Option<u8>,
+
+    /// Metrics for monitoring journal state and activity.
+    metrics: Metrics<E>,
 }
 
 /// A reader guard that holds a consistent snapshot of the variable journal's bounds.
@@ -227,6 +242,7 @@ pub struct Reader<'a, E: Context, V: Codec> {
     guard: AsyncRwLockReadGuard<'a, Inner<E, V>>,
     offsets: fixed::Reader<'a, E, u64>,
     items_per_section: u64,
+    metrics: &'a Metrics<E>,
 }
 
 impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
@@ -237,14 +253,123 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
-        self.guard
+        let _timer = self.metrics.read_timer();
+        self.metrics.read_calls.inc();
+        let result = match self
+            .guard
             .read(position, self.items_per_section, &self.offsets)
             .await
+        {
+            Ok(item) => {
+                self.metrics.items_read.inc();
+                Ok(item)
+            }
+            Err(error) => Err(error),
+        };
+        result
+    }
+
+    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
+        debug_assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be strictly increasing"
+        );
+        if positions[0] < self.guard.pruning_boundary {
+            return Err(Error::ItemPruned(positions[0]));
+        }
+        let last_position = *positions.last().expect("positions is not empty");
+        if last_position >= self.guard.size {
+            return Err(Error::ItemOutOfRange(last_position));
+        }
+
+        // Read the items from cache if possible.
+        let mut result: Vec<Option<V>> = Vec::with_capacity(positions.len());
+        let mut miss_indices = Vec::with_capacity(positions.len());
+        let mut miss_positions = Vec::with_capacity(positions.len());
+        let mut buf = Vec::new();
+        for (i, &position) in positions.iter().enumerate() {
+            if let Some(item) = self.guard.try_read_sync_into(
+                position,
+                self.items_per_section,
+                &self.offsets,
+                &mut buf,
+            ) {
+                result.push(Some(item));
+            } else {
+                result.push(None);
+                miss_indices.push(i);
+                miss_positions.push(position);
+            }
+        }
+
+        if miss_positions.is_empty() {
+            self.metrics.items_read.inc_by(positions.len() as u64);
+            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
+        }
+
+        // Read the offsets of all items that were not found in the cache.
+        let miss_offsets = self
+            .offsets
+            .read_many(&miss_positions)
+            .await
+            .map_err(|e| match e {
+                Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
+                    Error::Corruption(format!("section/item should be found, but got: {e}"))
+                }
+                other => other,
+            })?;
+
+        // Group runs of consecutive positions that fall into the same section and perform a
+        // consecutive read for each run.
+        let mut group_start = 0;
+        while group_start < miss_positions.len() {
+            let section = position_to_section(miss_positions[group_start], self.items_per_section);
+            let mut group_end = group_start + 1;
+            while group_end < miss_positions.len()
+                && position_to_section(miss_positions[group_end], self.items_per_section) == section
+            {
+                group_end += 1;
+            }
+
+            let mut run_start = group_start;
+            while run_start < group_end {
+                let mut run_end = run_start + 1;
+                while run_end < group_end
+                    && miss_positions[run_end - 1].checked_add(1) == Some(miss_positions[run_end])
+                {
+                    run_end += 1;
+                }
+
+                let items = self
+                    .guard
+                    .data
+                    .get_many_consecutive(section, &miss_offsets[run_start..run_end])
+                    .await?;
+
+                for (item, &miss_idx) in items.into_iter().zip(&miss_indices[run_start..run_end]) {
+                    result[miss_idx] = Some(item);
+                }
+                run_start = run_end;
+            }
+            group_start = group_end;
+        }
+
+        self.metrics.items_read.inc_by(positions.len() as u64);
+        Ok(result.into_iter().map(|r| r.unwrap()).collect())
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
-        self.guard
-            .try_read_sync(position, self.items_per_section, &self.offsets)
+        let item = self
+            .guard
+            .try_read_sync(position, self.items_per_section, &self.offsets)?;
+        self.metrics.try_read_sync_hits.inc();
+        self.metrics.items_read.inc();
+        Some(item)
     }
 
     async fn replay(
@@ -326,6 +451,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let (pruning_boundary, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
 
+        let metrics = Metrics::new(context);
+        metrics.update(size, pruning_boundary, items_per_section);
+
         Ok(Self {
             inner: UpgradableAsyncRwLock::new(Inner {
                 data,
@@ -335,6 +463,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             items_per_section,
             compression: cfg.compression,
+            metrics,
         })
     }
 
@@ -370,6 +499,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
+        let items_per_section = cfg.items_per_section.get();
+        let metrics = Metrics::new(context);
+        metrics.update(size, size, items_per_section);
+
         Ok(Self {
             inner: UpgradableAsyncRwLock::new(Inner {
                 data,
@@ -377,8 +510,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 pruning_boundary: size,
             }),
             offsets,
-            items_per_section: cfg.items_per_section.get(),
+            items_per_section,
             compression: cfg.compression,
+            metrics,
         })
     }
 
@@ -514,6 +648,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Update our size
         inner.size = size;
+        self.metrics
+            .update(inner.size, inner.pruning_boundary, self.items_per_section);
 
         Ok(())
     }
@@ -534,7 +670,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&self, item: &V) -> Result<u64, Error> {
-        self.append_many(Many::Flat(std::slice::from_ref(item)))
+        let _timer = self.metrics.append_timer();
+        self.metrics.append_calls.inc();
+        self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
             .await
     }
 
@@ -543,53 +681,100 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Acquires the write lock once for all items instead of per-item.
     /// Returns [Error::EmptyAppend] if items is empty.
     pub async fn append_many<'a>(&'a self, items: Many<'a, V>) -> Result<u64, Error> {
+        let _timer = self.metrics.append_many_timer();
+        self.metrics.append_many_calls.inc();
+        self.append_many_inner(items).await
+    }
+
+    async fn append_many_inner<'a>(&'a self, items: Many<'a, V>) -> Result<u64, Error> {
         if items.is_empty() {
             return Err(Error::EmptyAppend);
         }
+        let items_count = items.len();
 
-        // Encode before grabbing write guard.
-        let encode = |item: &V| variable::Journal::<E, V>::encode_item(self.compression, item);
-        let encoded: Vec<_> = match &items {
-            Many::Flat(s) => s.iter().map(encode).collect::<Result<Vec<_>, _>>()?,
-            Many::Nested(nested_items) => nested_items
-                .iter()
-                .flat_map(|items| items.iter())
-                .map(encode)
-                .collect::<Result<Vec<_>, _>>()?,
+        // Encode every item into a single buffer for bulk-writing before grabbing write guard.
+        let mut encoded = Vec::new();
+        let mut item_starts = Vec::with_capacity(items_count);
+        let mut encode = |item: &V| {
+            item_starts.push(encoded.len());
+            variable::Journal::<E, V>::encode_item_into(self.compression, item, &mut encoded)
         };
+        match &items {
+            Many::Flat(items) => {
+                for item in *items {
+                    encode(item)?;
+                }
+            }
+            Many::Nested(nested_items) => {
+                for items in *nested_items {
+                    for item in *items {
+                        encode(item)?;
+                    }
+                }
+            }
+        }
 
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
-        let mut last_position = 0;
-        for (index, (buf, _item_len)) in encoded.iter().enumerate() {
-            // Calculate which section this position belongs to.
+        let mut written = 0;
+        while written < items_count {
             let section = position_to_section(inner.size, self.items_per_section);
+            let pos_in_section = inner.size % self.items_per_section;
+            let remaining_space = (self.items_per_section - pos_in_section) as usize;
+            let batch_count = remaining_space.min(items_count - written);
+            let batch_start = item_starts[written];
+            let batch_end = item_starts
+                .get(written + batch_count)
+                .copied()
+                .unwrap_or(encoded.len());
 
-            // Append pre-encoded data to the data journal, get offset.
-            let offset = inner.data.append_raw(section, buf).await?;
+            // Append pre-encoded data to the data journal, then convert relative item starts
+            // into absolute offsets.
+            let base_offset = inner
+                .data
+                .append_raw(section, &encoded[batch_start..batch_end])
+                .await?;
 
-            // Append offset to offsets journal.
-            let offsets_pos = self.offsets.append(&offset).await?;
-            assert_eq!(offsets_pos, inner.size);
+            let absolute_offsets = item_starts[written..written + batch_count]
+                .iter()
+                .map(|&start| {
+                    base_offset
+                        .checked_add((start - batch_start) as u64)
+                        .ok_or(Error::OffsetOverflow)
+                })
+                .collect::<Result<Vec<u64>, _>>()?;
 
-            // Return the current position.
-            last_position = inner.size;
-            inner.size += 1;
+            // Persist the offsets for this section batch in the offsets journal.
+            let last_offsets_pos = self
+                .offsets
+                .append_many(Many::Flat(&absolute_offsets))
+                .await?;
+            assert_eq!(last_offsets_pos, inner.size + batch_count as u64 - 1);
+
+            inner.size += batch_count as u64;
+            written += batch_count;
 
             // The section was filled and must be synced. Downgrade so readers can continue
             // during the sync while mutators remain blocked.
             if inner.size.is_multiple_of(self.items_per_section) {
                 let inner_ref = inner.downgrade_to_upgradable();
                 futures::try_join!(inner_ref.data.sync(section), self.offsets.sync())?;
-                if index + 1 == encoded.len() {
-                    return Ok(last_position);
+                if written == items_count {
+                    self.metrics.update(
+                        inner_ref.size,
+                        inner_ref.pruning_boundary,
+                        self.items_per_section,
+                    );
+                    return Ok(inner_ref.size - 1);
                 }
                 inner = inner_ref.upgrade().await;
             }
         }
 
-        Ok(last_position)
+        self.metrics
+            .update(inner.size, inner.pruning_boundary, self.items_per_section);
+        Ok(inner.size - 1)
     }
 
     /// Acquire a reader guard that holds a consistent view of the journal.
@@ -598,6 +783,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             guard: self.inner.read().await,
             offsets: self.offsets.reader().await,
             items_per_section: self.items_per_section,
+            metrics: &self.metrics,
         }
     }
 
@@ -635,6 +821,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let new_oldest = (min_section * self.items_per_section).max(inner.pruning_boundary);
             inner.pruning_boundary = new_oldest;
             self.offsets.prune(new_oldest).await?;
+            self.metrics
+                .update(inner.size, inner.pruning_boundary, self.items_per_section);
         }
         Ok(pruned)
     }
@@ -644,18 +832,23 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// This is faster than `sync()` but recovery will be required on startup if a crash occurs
     /// before the next call to `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
+        let _timer = self.metrics.commit_timer();
+        self.metrics.record_commit();
         // Serialize with append/prune/rewind so section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
         let section = position_to_section(inner.size, self.items_per_section);
-        inner.data.sync(section).await
+        inner.data.sync(section).await?;
+        Ok(())
     }
 
     /// Durably persist the journal and ensure recovery is not required on startup.
     ///
     /// This is slower than `commit()` but ensures the journal doesn't require recovery on startup.
     pub async fn sync(&self) -> Result<(), Error> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         // Serialize with append/prune/rewind so section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
@@ -692,6 +885,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.offsets.clear_to_size(new_size).await?;
         inner.size = new_size;
         inner.pruning_boundary = new_size;
+        self.metrics
+            .update(inner.size, inner.pruning_boundary, self.items_per_section);
         Ok(())
     }
 
@@ -1078,9 +1273,9 @@ mod tests {
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Runner, Storage, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Metrics as _, Runner, Storage, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;
 
@@ -1090,6 +1285,116 @@ mod tests {
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
+
+    #[test_traced]
+    fn test_variable_append_many_compressed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "append-many-compressed".into(),
+                items_per_section: NZU64!(3),
+                compression: Some(1),
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, FixedBytes<32>>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            let items = [
+                FixedBytes::new([0; 32]),
+                FixedBytes::new([1; 32]),
+                FixedBytes::new([2; 32]),
+                FixedBytes::new([3; 32]),
+                FixedBytes::new([4; 32]),
+            ];
+
+            let last = journal.append_many(Many::Flat(&items)).await.unwrap();
+            assert_eq!(last, 4);
+            for (pos, item) in items.iter().enumerate() {
+                assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_after_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-many-after-reopen".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.reader().await;
+            let items = reader.read_many(&[1, 2, 3, 7, 8, 12, 18]).await.unwrap();
+            assert_eq!(items, vec![100, 200, 300, 700, 800, 1200, 1800]);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_consecutive_after_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-many-consecutive-after-reopen".into(),
+                items_per_section: NZU64!(20),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            let reader = journal.reader().await;
+            let positions: Vec<u64> = (3..10).collect();
+            let items = reader.read_many(&positions).await.unwrap();
+            assert_eq!(items, vec![300, 400, 500, 600, 700, 800, 900]);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
 
     /// Test that complete offsets partition loss after pruning is detected as unrecoverable.
     ///
@@ -3169,6 +3474,72 @@ mod tests {
             assert_eq!(bounds.start, 100);
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_journal_metrics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "metrics".into(),
+                items_per_section: NZU64!(2),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, u64>::init(context.child("variable_metrics"), cfg)
+                .await
+                .unwrap();
+
+            let items = [0, 1, 2, 3, 4];
+            journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal.append(&5).await.unwrap();
+            let reader = journal.reader().await;
+            reader.read(0).await.unwrap();
+            reader.read_many(&[1, 2]).await.unwrap();
+            reader.try_read_sync(3).unwrap();
+            drop(reader);
+            journal.commit().await.unwrap();
+            journal.sync().await.unwrap();
+            journal.prune(2).await.unwrap();
+            journal.rewind(4).await.unwrap();
+
+            let buffer = context.encode();
+            for expected in [
+                "variable_metrics_size 4",
+                "variable_metrics_pruning_boundary 2",
+                "variable_metrics_retained 2",
+                "variable_metrics_tail_items 2",
+                "variable_metrics_append_calls_total 1",
+                "variable_metrics_append_many_calls_total 1",
+                "variable_metrics_read_calls_total 1",
+                "variable_metrics_read_many_calls_total 1",
+                "variable_metrics_try_read_sync_hits_total 1",
+                "variable_metrics_items_read_total 4",
+                "variable_metrics_commit_calls_total 1",
+                "variable_metrics_sync_calls_total 1",
+                "variable_metrics_append_duration_count 1",
+                "variable_metrics_append_many_duration_count 1",
+                "variable_metrics_read_duration_count 1",
+                "variable_metrics_read_many_duration_count 1",
+                "variable_metrics_commit_duration_count 1",
+                "variable_metrics_sync_duration_count 1",
+                "variable_metrics_data_tracked",
+                "variable_metrics_offsets_size 4",
+                "variable_metrics_offsets_blobs_tracked",
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
+            for unexpected in [
+                "variable_metrics_cache_hits_total",
+                "variable_metrics_cache_misses_total",
+            ] {
+                assert!(!buffer.contains(unexpected), "{unexpected}\n{buffer}");
             }
 
             journal.destroy().await.unwrap();

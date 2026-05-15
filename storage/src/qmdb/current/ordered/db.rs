@@ -6,7 +6,7 @@
 use crate::{
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    merkle::{self, Location},
+    merkle::{self, hasher::Standard as StandardHasher, Location},
     qmdb::{
         any::{
             ordered::{Operation, Update},
@@ -21,24 +21,24 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<F: merkle::Family, K: Key, D: Digest, const N: usize> {
+pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize> {
     pub proof: OperationProof<F, D, N>,
     pub next_key: K,
 }
 
-impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
         self.next_key.write(buf);
     }
 }
 
-impl<F: merkle::Family, K: Key, D: Digest, const N: usize> EncodeSize
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> EncodeSize
     for KeyValueProof<F, K, D, N>
 {
     fn encode_size(&self) -> usize {
@@ -46,9 +46,9 @@ impl<F: merkle::Family, K: Key, D: Digest, const N: usize> EncodeSize
     }
 }
 
-impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
-    /// `(max_digests, key_cfg)`: the total digest cap for the embedded operation proof and the
-    /// read configuration for the key type.
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
+    /// `(max_digests, key_cfg)`: the Merkle digest cap forwarded to the embedded operation
+    /// proof and the read configuration for the key type.
     type Cfg = (usize, <K as Read>::Cfg);
 
     fn read_cfg(
@@ -62,11 +62,12 @@ impl<F: merkle::Family, K: Key, D: Digest, const N: usize> Read for KeyValueProo
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: merkle::Family, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
     for KeyValueProof<F, K, D, N>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
@@ -80,7 +81,7 @@ where
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<F, E, C, K, V, I, H, const N: usize, S = Sequential> =
+pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
     crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 // Shared read-only functionality.
@@ -106,7 +107,7 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<F, K, H::Digest, N>,
@@ -142,7 +143,7 @@ where
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
     /// provided `root`.
     pub fn verify_exclusion_proof(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         key: &K,
         proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
@@ -153,7 +154,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>>::span_contains(
+                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>, N, S>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,
@@ -204,7 +205,7 @@ where
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         key: K,
     ) -> Result<KeyValueProof<F, K, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;
@@ -226,7 +227,7 @@ where
     /// Returns [Error::KeyExists] if the key exists in the db.
     pub async fn exclusion_proof(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         key: &K,
     ) -> Result<super::ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
         match self.any.get_span(key).await? {

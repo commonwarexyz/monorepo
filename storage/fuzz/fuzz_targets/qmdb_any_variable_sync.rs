@@ -137,11 +137,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
+type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
 
 fn test_config(
     test_name: &str,
     pooler: &impl BufferPooler,
-) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+) -> Config<TwoCap, CodecConfig, Sequential> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
@@ -171,9 +172,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
     runner.start(|context| async move {
         let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
         let cfg = test_config(&test_name, &context);
-        let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.child("storage"), cfg)
-            .await
-            .expect("Failed to init source db");
+        let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
+            context.child("storage"),
+            cfg,
+        )
+        .await
+        .expect("Failed to init source db");
         let mut restarts = 0usize;
 
         let mut historical_roots: BTreeMap<
@@ -325,7 +329,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     drop(db);
 
                     let cfg = test_config(&test_name, &context);
-                    db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap>::init(
+                    db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
                     )

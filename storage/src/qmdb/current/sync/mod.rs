@@ -1,30 +1,29 @@
 //! Shared synchronization logic for [crate::qmdb::current] databases.
 //!
-//! Contains implementation of [crate::qmdb::sync::Database] for all [Db](crate::qmdb::current::db::Db)
-//! variants (ordered/unordered, fixed/variable).
+//! Contains implementation of [crate::qmdb::sync::Database] for all
+//! [Db](crate::qmdb::current::db::Db) variants (ordered/unordered, fixed/variable).
 //!
-//! The canonical root of a `current` database combines the ops root, grafted tree root, and
-//! optional partial chunk into a single hash (see the [Root structure](super) section in the
-//! module documentation). The sync engine operates on the **ops root**, not the canonical root:
+//! The canonical root of a `current` database combines the ops root, grafted root, and optional
+//! pending and partial chunk digests into a single hash (see the [Root structure](super) section in
+//! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
-//! (identical to `any` sync). Callers that verify current ops proofs directly should
-//! use `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be
-//! used by callers that need to authenticate the synced ops root against a trusted canonical root;
-//! the sync engine does not perform this check itself.
+//! (identical to `any` sync). Callers that verify current ops proofs directly should use
+//! `qmdb::hasher`. [crate::qmdb::current::proof::OpsRootWitness] can be used by callers that need
+//! to authenticate the synced ops root against a trusted canonical root; the sync engine does not
+//! perform this check itself.
 //!
-//! After all operations are synced, the bitmap and grafted tree are reconstructed
-//! deterministically from the operations. The canonical root is then computed from the
-//! ops root, the reconstructed grafted tree root, and any partial chunk.
+//! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
+//! from the operations. The canonical root is then computed from the ops root, the reconstructed
+//! grafted root, and any pending or partial chunk digests.
 //!
-//! The [Database]`::`[root()](crate::qmdb::sync::Database::root)
-//! implementation returns the **ops root** (not the canonical root) because that is what the
-//! sync engine verifies against.
+//! The [Database]`::`[root()](crate::qmdb::sync::Database::root) implementation returns the **ops
+//! root** (not the canonical root) because that is what the sync engine verifies against.
 //!
-//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are
-//! read directly from the ops tree after it is built. This works because of the zero-chunk
-//! identity: for all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals
-//! the ops subtree root, making the grafted tree structurally identical to the ops tree at
-//! and above the grafting height.
+//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
+//! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
+//! all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals the ops subtree
+//! root, making the grafted tree structurally identical to the ops tree at and above the grafting
+//! height.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -39,7 +38,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::Db as AnyDb,
+            db::{Db as AnyDb, Metrics as AnyMetrics},
             operation::{update::Update, Operation},
             ordered::{
                 fixed::{Operation as OrderedFixedOp, Update as OrderedFixedUpdate},
@@ -150,7 +149,9 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
-    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(index, log, Some(bitmap)).await?;
+    let any_metrics = AnyMetrics::new(context.child("any"));
+    let any: AnyDb<F, E, J, I, H, U, N, S> =
+        AnyDb::init_from_log(index, log, Some(bitmap), any_metrics).await?;
 
     // Fetch grafted pinned nodes from the ops tree. For each position the grafted family
     // needs at its pruning boundary, source the digest from the ops tree via the zero-chunk
@@ -178,11 +179,14 @@ where
 
     // Build grafted tree.
     let hasher = qmdb::hasher::<H>();
+    let ops_size = any.log.merkle.size();
+    let ops_leaves = Location::<F>::try_from(ops_size)?;
     let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
         &hasher,
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
+        ops_leaves,
         &strategy,
     )
     .await?;
@@ -201,6 +205,7 @@ where
         &hasher,
         any.bitmap.as_ref(),
         &storage,
+        ops_leaves,
         any.inactivity_floor_loc,
     )
     .await?;
@@ -209,10 +214,14 @@ where
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
+    let pending_digest =
+        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
+            .map(|chunk| hasher.digest(&chunk));
     let root = db::combine_roots(
         &hasher,
         &ops_root,
         &grafted_root,
+        pending_digest.as_ref(),
         partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
     );
 
@@ -221,13 +230,16 @@ where
         db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
+    let metrics = db::Metrics::new(context);
     let current_db = db::Db {
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
         root,
+        metrics,
     };
+    current_db.update_metrics();
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.
     current_db.sync_metadata().await?;
@@ -376,8 +388,8 @@ impl_current_sync_database!(
 
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
-            for std::sync::Arc<$db<F, E, K, V, H, T, N>>
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
+            for std::sync::Arc<$db<F, E, K, V, H, T, N, S>>
         where
             F: Graftable,
             E: Context,
@@ -386,6 +398,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
@@ -418,10 +431,10 @@ macro_rules! impl_current_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    $db<F, E, K, V, H, T, N>,
+                    $db<F, E, K, V, H, T, N, S>,
                 >,
             >
         where
@@ -432,6 +445,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;
@@ -465,10 +479,10 @@ macro_rules! impl_current_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
+        impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    Option<$db<F, E, K, V, H, T, N>>,
+                    Option<$db<F, E, K, V, H, T, N, S>>,
                 >,
             >
         where
@@ -479,6 +493,7 @@ macro_rules! impl_current_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
             $($($where_extra)+)?
         {
             type Family = F;

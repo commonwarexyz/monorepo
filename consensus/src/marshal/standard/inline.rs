@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`Inline`] adapts any [`VerifyingApplication`] to the marshal/consensus interfaces
+//! [`Inline`] adapts any [`Application`] to the marshal/consensus interfaces
 //! while keeping block validation in the [`Automaton::verify`] path. Unlike
 //! [`super::Deferred`], it does not defer application verification to certification.
 //! Instead, it only reports `true` from `verify` after parent/height checks and
@@ -57,8 +57,8 @@ use crate::{
     simplex::{types::Context, Plan},
     types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
-    VerifyingApplication,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -172,12 +172,7 @@ impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -207,12 +202,7 @@ impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -418,9 +408,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal
-                .subscribe_by_commitment(digest, CommitmentRequest::Wait)
-                .await;
+            let block_request = marshal.subscribe_by_commitment(digest, CommitmentRequest::Wait);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -485,12 +473,7 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
     ES: Epocher,
 {
@@ -515,8 +498,7 @@ where
         // Otherwise, subscribe to marshal for block availability.
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(digest, CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(digest, CommitmentRequest::Wait);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -561,12 +543,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+    fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients).await;
+        self.marshal.forward(round, digest, recipients)
     }
 }
 
@@ -582,13 +564,13 @@ where
     type Activity = A::Activity;
 
     /// Forwards consensus activity to the wrapped application reporter.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         if let Update::Tip(tip_round, _, _) = &update {
             self.available_blocks
                 .lock()
                 .retain(|(round, _)| round > tip_round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 
@@ -605,7 +587,7 @@ mod tests {
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
-        Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
+        Application, Automaton, Block, CertifiableAutomaton, Relay,
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
@@ -625,12 +607,7 @@ mod tests {
     where
         E: Rng + Spawner + Metrics + Clock,
         S: Scheme,
-        A: VerifyingApplication<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-        >,
+        A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
         B: Block + Clone,
         ES: crate::types::Epocher,
     {
@@ -949,16 +926,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             // Inline verify runs full validation inline and returns true only
             // after `marshal.verified` is enqueued. With the persistence-ack
@@ -1064,16 +1043,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             let certify_result = inline
@@ -1159,22 +1140,28 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             verify_started
                 .await
                 .expect("verify should reach application before marshal abort");
+
+            // Wait for marshal shutdown to complete before releasing `app.verify`.
+            // This makes the later persistence ack fail deterministically.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());
 
             select! {

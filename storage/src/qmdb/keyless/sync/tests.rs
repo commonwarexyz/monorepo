@@ -784,13 +784,13 @@ pub(crate) mod harnesses {
     use super::*;
     use commonware_parallel::Sequential;
 
-    type VariableDb<F> = variable::Db<F, deterministic::Context, Vec<u8>, Sha256>;
+    type VariableDb<F> = variable::Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type VariableOp<F> = Operation<F, crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
 
     fn variable_config(
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
-    ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
+    ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -1030,19 +1030,20 @@ mod compact_variable_mmr {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
-    type SourceDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256>;
+    type SourceDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type ClientDb = variable::CompactDb<
         mmr::Family,
         deterministic::Context,
         Vec<u8>,
         Sha256,
         (commonware_codec::RangeCfg<usize>, ()),
+        Sequential,
     >;
 
     fn source_config(
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
-    ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
+    ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
@@ -1066,7 +1067,7 @@ mod compact_variable_mmr {
 
     fn client_config(
         suffix: &str,
-    ) -> variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ())> {
+    ) -> variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
@@ -1497,19 +1498,20 @@ mod compact_variable_mmb {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
-    type SourceDb = variable::Db<mmb::Family, deterministic::Context, Vec<u8>, Sha256>;
+    type SourceDb = variable::Db<mmb::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type ClientDb = variable::CompactDb<
         mmb::Family,
         deterministic::Context,
         Vec<u8>,
         Sha256,
         (commonware_codec::RangeCfg<usize>, ()),
+        Sequential,
     >;
 
     fn source_config(
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
-    ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
+    ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
@@ -1533,7 +1535,7 @@ mod compact_variable_mmb {
 
     fn client_config(
         suffix: &str,
-    ) -> variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ())> {
+    ) -> variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),

@@ -132,8 +132,7 @@ impl<
                         if previous.proposal != notarize.proposal {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
                             self.reporter
-                                .report(Activity::ConflictingNotarize(activity))
-                                .await;
+                                .report(Activity::ConflictingNotarize(activity));
                             commonware_p2p::block!(self.blocker, sender, "conflicting notarize");
                         } else if previous != &notarize {
                             commonware_p2p::block!(self.blocker, sender, "invalid signature");
@@ -141,9 +140,7 @@ impl<
                         false
                     }
                     None => {
-                        self.reporter
-                            .report(Activity::Notarize(notarize.clone()))
-                            .await;
+                        self.reporter.report(Activity::Notarize(notarize.clone()));
                         self.pending_votes.insert_notarize(notarize.clone());
                         self.verifier.add(Vote::Notarize(notarize), false);
                         true
@@ -160,9 +157,7 @@ impl<
                 // Check if finalized
                 if let Some(previous) = self.pending_votes.finalize(index) {
                     let activity = NullifyFinalize::new(nullify, previous.clone());
-                    self.reporter
-                        .report(Activity::NullifyFinalize(activity))
-                        .await;
+                    self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "nullify after finalize");
                     return false;
                 }
@@ -176,9 +171,7 @@ impl<
                         false
                     }
                     None => {
-                        self.reporter
-                            .report(Activity::Nullify(nullify.clone()))
-                            .await;
+                        self.reporter.report(Activity::Nullify(nullify.clone()));
                         self.pending_votes.insert_nullify(nullify.clone());
                         self.verifier.add(Vote::Nullify(nullify), false);
                         true
@@ -195,9 +188,7 @@ impl<
                 // Check if nullified
                 if let Some(previous) = self.pending_votes.nullify(index) {
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
-                    self.reporter
-                        .report(Activity::NullifyFinalize(activity))
-                        .await;
+                    self.reporter.report(Activity::NullifyFinalize(activity));
                     commonware_p2p::block!(self.blocker, sender, "finalize after nullify");
                     return false;
                 }
@@ -208,8 +199,7 @@ impl<
                         if previous.proposal != finalize.proposal {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
                             self.reporter
-                                .report(Activity::ConflictingFinalize(activity))
-                                .await;
+                                .report(Activity::ConflictingFinalize(activity));
                             commonware_p2p::block!(self.blocker, sender, "conflicting finalize");
                         } else if previous != &finalize {
                             commonware_p2p::block!(self.blocker, sender, "invalid signature");
@@ -217,9 +207,7 @@ impl<
                         false
                     }
                     None => {
-                        self.reporter
-                            .report(Activity::Finalize(finalize.clone()))
-                            .await;
+                        self.reporter.report(Activity::Finalize(finalize.clone()));
                         self.pending_votes.insert_finalize(finalize.clone());
                         self.verifier.add(Vote::Finalize(finalize), false);
                         true
@@ -230,13 +218,11 @@ impl<
     }
 
     /// Adds a vote that we constructed ourselves to the verifier.
-    pub async fn add_constructed(&mut self, message: Vote<S, D>) {
+    pub fn add_constructed(&mut self, message: Vote<S, D>) {
         match &message {
             Vote::Notarize(notarize) => {
                 // Report activity
-                self.reporter
-                    .report(Activity::Notarize(notarize.clone()))
-                    .await;
+                self.reporter.report(Activity::Notarize(notarize.clone()));
 
                 // Our own votes are already verified
                 assert!(
@@ -246,9 +232,7 @@ impl<
             }
             Vote::Nullify(nullify) => {
                 // Report activity
-                self.reporter
-                    .report(Activity::Nullify(nullify.clone()))
-                    .await;
+                self.reporter.report(Activity::Nullify(nullify.clone()));
 
                 // Our own votes are already verified
                 assert!(
@@ -258,9 +242,7 @@ impl<
             }
             Vote::Finalize(finalize) => {
                 // Report activity
-                self.reporter
-                    .report(Activity::Finalize(finalize.clone()))
-                    .await;
+                self.reporter.report(Activity::Finalize(finalize.clone()));
 
                 // Our own votes are already verified
                 assert!(

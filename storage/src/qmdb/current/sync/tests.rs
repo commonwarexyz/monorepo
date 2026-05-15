@@ -20,6 +20,7 @@ use crate::qmdb::{
 };
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
 };
@@ -42,6 +43,7 @@ mod harnesses {
         Sha256,
         crate::translator::OneCap,
         32,
+        Sequential,
     >;
     type OrderedVariableDb<F> = crate::qmdb::current::ordered::variable::Db<
         F,
@@ -51,6 +53,7 @@ mod harnesses {
         Sha256,
         crate::translator::OneCap,
         32,
+        Sequential,
     >;
     type UnorderedFixedDb<F> = crate::qmdb::current::unordered::fixed::Db<
         F,
@@ -60,6 +63,7 @@ mod harnesses {
         Sha256,
         crate::translator::TwoCap,
         32,
+        Sequential,
     >;
     type UnorderedVariableDb<F> = crate::qmdb::current::unordered::variable::Db<
         F,
@@ -69,6 +73,7 @@ mod harnesses {
         Sha256,
         crate::translator::TwoCap,
         32,
+        Sequential,
     >;
 
     fn create_unordered_fixed_ops<F: merkle::Family>(
@@ -474,6 +479,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             Sha256,
             crate::translator::TwoCap,
             32,
+            Sequential,
         >;
 
         const COMMITS: u64 = 100;
@@ -572,6 +578,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         Sha256,
         crate::translator::TwoCap,
         32,
+        Sequential,
     >;
 
     let executor = deterministic::Runner::default();

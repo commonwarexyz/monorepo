@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`Deferred`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
+//! [`Deferred`] is an adapter that wraps any [`Application`] implementation to handle
 //! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
 //! ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -92,8 +92,8 @@ use crate::{
     simplex::{types::Context, Plan},
     types::{Epoch, Epocher, Round},
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
-    VerifyingApplication,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -181,12 +181,7 @@ impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -269,12 +264,7 @@ impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -498,10 +488,8 @@ where
             .child("optimistic_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
-            let block_request = marshal
-                .subscribe_by_commitment(digest, CommitmentRequest::Wait)
-                .await;
-                let block = select! {
+            let block_request = marshal.subscribe_by_commitment(digest, CommitmentRequest::Wait);
+            let block = select! {
                     _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
@@ -593,12 +581,7 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
-        E,
-        Block = B,
-        SigningScheme = S,
-        Context = Context<B::Digest, S::PublicKey>,
-    >,
+    A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
@@ -627,8 +610,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(digest, CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(digest, CommitmentRequest::Wait);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -708,12 +690,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+    fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients).await;
+        self.marshal.forward(round, digest, recipients)
     }
 }
 
@@ -729,12 +711,12 @@ where
     type Activity = A::Activity;
 
     /// Relays a report to the underlying [`Application`] and cleans up old verification tasks.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         // Clean up verification tasks for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 
@@ -1219,16 +1201,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             // Kick off the optimistic verify, which spawns `deferred_verify`.
             // Its gated `app.verify` blocks until we release it, giving us a
@@ -1238,7 +1222,11 @@ mod tests {
             verify_started
                 .await
                 .expect("verify should reach application before marshal abort");
+
+            // Wait for marshal shutdown to complete before releasing `app.verify`.
+            // This makes the later persistence ack fail deterministically.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());
 
             select! {

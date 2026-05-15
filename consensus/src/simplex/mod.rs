@@ -313,6 +313,27 @@
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
+//!
+//! ## Automaton Failure Semantics
+//!
+//! If a validator is the leader for a view but cannot build a valid payload yet (for example because
+//! it is still syncing), it should decline the [`Automaton::propose`](crate::Automaton::propose)
+//! request by dropping the response channel. Simplex treats this as a missing proposal, broadcasts
+//! `nullify(v)`, and other validators can use the leader-nullify fast path to skip the view.
+//!
+//! Once `propose` returns a payload, the local proposer is committed to that payload for verification
+//! and certification. [`Automaton::verify`](crate::Automaton::verify) and
+//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) are stable verdict APIs,
+//! not backpressure or syncing signals. While missing data may still arrive (and/or a validator cannot
+//! immediately determine if a payload is valid), implementations should keep these requests pending rather
+//! than returning `false` or closing the channel.
+//!
+//! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
+//! nullify. Returning `false` from `certify` means the notarized payload is permanently
+//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
+//! a fast-skip signal and can halt progress because certification requests are not retried. The safe
+//! way to stop working on certification is to keep the request pending until Simplex drops it after
+//! finalizing the block or a descendant.
 
 pub mod elector;
 pub mod scheme;
@@ -789,7 +810,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -797,7 +818,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1045,7 +1066,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -1053,7 +1074,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1204,7 +1225,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -1212,7 +1233,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1365,7 +1386,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
@@ -1373,7 +1394,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1549,7 +1570,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -1557,7 +1578,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1668,7 +1689,7 @@ mod tests {
                 reporter: reporter.clone(),
                 strategy: Sequential,
                 partition: me.to_string(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
@@ -1676,7 +1697,7 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                fetch_concurrent: 4,
+                fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1805,7 +1826,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -1813,7 +1834,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2040,7 +2061,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -2048,7 +2069,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2208,7 +2229,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -2216,7 +2237,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2408,7 +2429,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -2416,7 +2437,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2604,7 +2625,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -2612,7 +2633,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2856,7 +2877,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
@@ -2864,7 +2885,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3035,7 +3056,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -3043,7 +3064,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3209,7 +3230,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -3217,7 +3238,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3308,6 +3329,146 @@ mod tests {
         );
         received_certificates_are_reported::<_, _, RoundRobin>(0, ed25519::fixture);
         received_certificates_are_reported::<_, _, RoundRobin>(0, secp256r1::fixture);
+    }
+
+    #[test_traced]
+    fn test_survives_burst() {
+        let n = 4;
+        let epoch = Epoch::new(333);
+        let namespace = b"mailbox_size_one_certificate_burst".to_vec();
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = scheme_mocks::fixture(&mut context, &namespace, n);
+            let me = participants[0].clone();
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let (pending, recovered, resolver) = register_validator(&mut oracle, me.clone()).await;
+
+            let injector_pk = PrivateKey::from_seed(9_000_000).public_key();
+            let (mut injector_sender, _injector_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(injector_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+            oracle
+                .manager()
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(std::iter::once(me.clone())),
+                        Set::from_iter_dedup(std::iter::once(injector_pk.clone())),
+                    ),
+                )
+                .await;
+            context.sleep(Duration::from_millis(1)).await;
+
+            let quorum = quorum(n) as usize;
+            let notarization = |view: View, parent: View, payload: &[u8]| {
+                let proposal =
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(payload));
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .take(quorum)
+                    .map(|scheme| TNotarize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization requires quorum")
+            };
+            let finalization = |view: View, parent: View, payload: &[u8]| {
+                let proposal =
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(payload));
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .take(quorum)
+                    .map(|scheme| TFinalize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization requires quorum")
+            };
+
+            // Load the network with certificates that the batcher will want to pass to the voter
+            for certificate in [
+                Certificate::Notarization(notarization(View::new(1), View::zero(), b"payload-1")),
+                Certificate::Notarization(notarization(View::new(2), View::new(1), b"payload-2")),
+                Certificate::Notarization(notarization(View::new(3), View::new(2), b"payload-3")),
+                Certificate::Finalization(finalization(View::new(3), View::new(2), b"payload-3")),
+            ] {
+                injector_sender
+                    .send(Recipients::One(me.clone()), certificate.encode(), true)
+                    .await
+                    .unwrap();
+            }
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+            let mut monitor_reporter = reporter.clone();
+            let (mut latest, mut monitor) = monitor_reporter.subscribe().await;
+
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (0.0, 0.0),
+                verify_latency: (0.0, 0.0),
+                certify_latency: (0.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut application_actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
+            application_actor.set_stall_proposals(true);
+            application_actor.start();
+
+            let cfg = config::Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application,
+                reporter,
+                strategy: Sequential,
+                partition: me.to_string(),
+                mailbox_size: NZUsize!(1),
+                epoch,
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                fetch_concurrent: NZUsize!(4),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forwarding: ForwardingPolicy::Disabled,
+            };
+            let engine = Engine::new(context.child("engine"), cfg);
+            engine.start(pending, recovered, resolver);
+
+            while latest < View::new(3) {
+                latest = monitor.recv().await.expect("finalization event missing");
+            }
+        });
     }
 
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
@@ -3404,7 +3565,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.clone().to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
@@ -3412,7 +3573,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3568,7 +3729,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
@@ -3576,7 +3737,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3659,7 +3820,7 @@ mod tests {
                 reporter: reporter.clone(),
                 strategy: Sequential,
                 partition: validator.to_string(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
@@ -3667,7 +3828,7 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                fetch_concurrent: 4,
+                fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3886,7 +4047,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
@@ -3894,7 +4055,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4042,7 +4203,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.clone().to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
@@ -4050,7 +4211,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4215,7 +4376,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.clone().to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
@@ -4223,7 +4384,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4354,7 +4515,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -4362,7 +4523,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4516,7 +4677,7 @@ mod tests {
                 reporter: reporter.clone(),
                 strategy: Sequential,
                 partition: participants[0].clone().to_string(),
-                mailbox_size: 64,
+                mailbox_size: NZUsize!(64),
                 epoch: Epoch::new(333),
                 leader_timeout: Duration::from_millis(50),
                 certification_timeout: Duration::from_millis(100),
@@ -4524,7 +4685,7 @@ mod tests {
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: ViewDelta::new(2),
-                fetch_concurrent: 4,
+                fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4741,7 +4902,7 @@ mod tests {
                     reporter: attributable_reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -4749,7 +4910,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5104,7 +5265,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(10),
                         certification_timeout: Duration::from_secs(10),
@@ -5112,7 +5273,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5318,7 +5479,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_millis(100),
                     certification_timeout: Duration::from_millis(200),
@@ -5326,7 +5487,7 @@ mod tests {
                     fetch_timeout: Duration::from_millis(100),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5461,7 +5622,7 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -5469,7 +5630,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5560,7 +5721,7 @@ mod tests {
                     reporter: selected_reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
@@ -5568,7 +5729,7 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6058,7 +6219,7 @@ mod tests {
                             reporter: reporter.clone(),
                             strategy: Sequential,
                             partition,
-                            mailbox_size: 1024,
+                            mailbox_size: NZUsize!(1024),
                             epoch: Epoch::new(333),
                             leader_timeout: Duration::from_secs(1),
                             certification_timeout: Duration::from_millis(1_500),
@@ -6066,7 +6227,7 @@ mod tests {
                             fetch_timeout: Duration::from_secs(1),
                             activity_timeout,
                             skip_timeout,
-                            fetch_concurrent: 4,
+                            fetch_concurrent: NZUsize!(4),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6125,7 +6286,7 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition,
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_millis(1_500),
@@ -6133,7 +6294,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

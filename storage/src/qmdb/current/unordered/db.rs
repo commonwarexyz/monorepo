@@ -6,7 +6,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    merkle::{self, Location},
+    merkle::{self, hasher::Standard as StandardHasher, Location},
     qmdb::{
         any::{
             operation::update::Unordered as UnorderedUpdate,
@@ -20,7 +20,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::Array;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -30,7 +30,7 @@ pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<F, E, C, K, V, I, H, const N: usize, S = Sequential> =
+pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
     crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 // Shared read-only functionality.
@@ -56,7 +56,7 @@ where
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         key: K,
         value: V::Value,
         proof: &KeyValueProof<F, H::Digest, N>,
@@ -91,7 +91,7 @@ where
     /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
-        hasher: &mut H,
+        hasher: &StandardHasher<H>,
         key: K,
     ) -> Result<KeyValueProof<F, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;

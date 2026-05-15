@@ -1580,7 +1580,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
@@ -1785,14 +1785,14 @@ impl TestHarness for StandardHarness {
         mailbox: &mut Mailbox<S, Self::Variant>,
         finalization: Finalization<S, D>,
     ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
+        mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
         notarization: Notarization<S, D>,
     ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
+        mailbox.report(Activity::Notarization(notarization));
     }
 
     fn finalize_timeout() -> Duration {
@@ -1816,7 +1816,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -2385,7 +2385,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
@@ -2503,7 +2503,7 @@ impl TestHarness for CodingHarness {
             },
             block_codec_cfg: (),
             strategy: Sequential,
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
             peer_provider: oracle.manager(),
@@ -2623,14 +2623,14 @@ impl TestHarness for CodingHarness {
         mailbox: &mut Mailbox<S, Self::Variant>,
         finalization: Finalization<S, Commitment>,
     ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
+        mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
         notarization: Notarization<S, Commitment>,
     ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
+        mailbox.report(Activity::Notarization(notarization));
     }
 
     fn finalize_timeout() -> Duration {
@@ -2654,7 +2654,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -2690,7 +2690,7 @@ impl TestHarness for CodingHarness {
             },
             block_codec_cfg: (),
             strategy: Sequential,
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
             peer_provider: oracle.manager(),
@@ -3234,7 +3234,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             .await
             .unwrap();
 
-        mailbox.set_floor(Height::new(NEW_SYNC_FLOOR)).await;
+        mailbox.set_floor(Height::new(NEW_SYNC_FLOOR));
         H::report_finalization(&mut mailbox, latest_finalization).await;
 
         let mut finished = false;
@@ -3360,7 +3360,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
-        mailbox.prune(Height::new(25)).await;
+        mailbox.prune(Height::new(25));
         context.sleep(Duration::from_millis(50)).await;
         for i in 1..=20u64 {
             assert!(
@@ -3369,7 +3369,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
-        mailbox.prune(Height::new(10)).await;
+        mailbox.prune(Height::new(10));
         context.sleep(Duration::from_millis(100)).await;
         for i in 1..10u64 {
             assert!(
@@ -3393,7 +3393,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
-        mailbox.prune(Height::new(20)).await;
+        mailbox.prune(Height::new(20));
         context.sleep(Duration::from_millis(100)).await;
         for i in 10..20u64 {
             assert!(
@@ -3533,7 +3533,7 @@ pub fn ignore_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
         // Advance floor beyond the stale block and prune.
         let floor = Height::new(10);
-        victim_mailbox.set_floor(floor).await;
+        victim_mailbox.set_floor(floor);
         // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
         // has been processed before we re-enable the delayed delivery path.
         let _ = victim_mailbox.get_finalization(floor).await;
@@ -3616,9 +3616,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
 
         let subscription_rx = handle
             .mailbox
-            .subscribe_by_commitment(commitment, CommitmentRequest::Wait)
-            .await;
-
+            .subscribe_by_commitment(commitment, CommitmentRequest::Wait);
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
         H::verify(
             &mut handle,
@@ -3700,17 +3698,13 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait);
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait);
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
-            .await;
-
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait);
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
             H::propose(&mut handle, round, block).await;
@@ -3795,13 +3789,10 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait);
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait)
-            .await;
-
+            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait);
         drop(sub1_rx);
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
@@ -3901,24 +3892,19 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block1), CommitmentRequest::Wait);
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block2), CommitmentRequest::Wait);
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block3), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block3), CommitmentRequest::Wait);
         let sub4_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block4), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block4), CommitmentRequest::Wait);
         let sub5_rx = handle
             .mailbox
-            .subscribe_by_commitment(H::commitment(&block5), CommitmentRequest::Wait)
-            .await;
+            .subscribe_by_commitment(H::commitment(&block5), CommitmentRequest::Wait);
 
         // Block1: Broadcasted by the actor
         H::propose(
@@ -4540,8 +4526,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1
             .mailbox
-            .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()))
-            .await;
+            .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()));
 
         // Wait for the fetch to complete
         while handle1

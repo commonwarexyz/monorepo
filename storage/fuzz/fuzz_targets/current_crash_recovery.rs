@@ -7,7 +7,7 @@
 //! checkpoint and verifies that `init()` succeeds and the DB is usable.
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef,
@@ -17,7 +17,10 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
-    qmdb::current::{unordered::variable::Db as Current, VariableConfig},
+    qmdb::{
+        self,
+        current::{unordered::variable::Db as Current, VariableConfig},
+    },
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZU64};
@@ -35,7 +38,7 @@ type RawValue = [u8; 32];
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32, Sequential>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -96,7 +99,7 @@ fn make_config(
     merkle_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
-) -> VariableConfig<TwoCap, ((), ())> {
+) -> VariableConfig<TwoCap, ((), ()), Sequential> {
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
         merkle_config: MerkleConfig {
@@ -299,7 +302,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             .await
             .expect("recovery must succeed");
 
-            let mut hasher = Sha256::new();
+            let hasher = qmdb::hasher::<Sha256>();
 
             // Verify all committed KV pairs survived the crash and are provable.
             let root = db.root();
@@ -315,11 +318,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 );
 
                 let proof = db
-                    .key_value_proof(&mut hasher, k.clone())
+                    .key_value_proof(&hasher, k.clone())
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    Db::<F>::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(&hasher, k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -330,11 +333,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             for i in floor..size {
                 let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db
-                    .range_proof(&mut hasher, loc, NZU64!(4))
+                    .range_proof(&hasher, loc, NZU64!(4))
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::<F>::verify_range_proof(&hasher, &proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }

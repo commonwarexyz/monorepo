@@ -22,9 +22,9 @@ use crate::{
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 
-pub type Db<F, E, K, V, H, T, const N: usize, S = Sequential> = super::db::Db<
+pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
     E,
     Journal<E, Operation<F, K, V>>,
@@ -71,7 +71,7 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize, S = Sequential> =
+    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize, S> =
         crate::qmdb::current::ordered::db::Db<
             F,
             E,
@@ -121,8 +121,16 @@ mod test {
     use commonware_runtime::deterministic;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest =
-        super::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
+    type CurrentTest = super::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
 
     #[allow(dead_code)]
     fn _assert_stream_range_is_send(db: &CurrentTest, start: Digest) {

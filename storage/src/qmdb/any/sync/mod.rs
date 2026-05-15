@@ -14,7 +14,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::Db,
+            db::{Db, Metrics},
             operation::{update::Update, Operation},
             ordered::{
                 fixed::{
@@ -130,7 +130,8 @@ where
         apply_batch_size as u64,
     )
     .await?;
-    let db = Db::init_from_log(index, log, None).await?;
+    let metrics = Metrics::new(context);
+    let db = Db::init_from_log(index, log, None, metrics).await?;
 
     Ok(db)
 }

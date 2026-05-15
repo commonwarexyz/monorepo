@@ -232,8 +232,7 @@ where
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
                 self.marshal
-                    .hint_finalized(boundary_height, NonEmptyVec::new(from))
-                    .await;
+                    .hint_finalized(boundary_height, NonEmptyVec::new(from));
             },
             Some(transition) = self.mailbox.recv() else {
                 warn!("mailbox closed, shutting down orchestrator");
@@ -315,7 +314,7 @@ where
                 relay: self.application.clone(),
                 reporter: self.marshal.clone(),
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -325,7 +324,7 @@ where
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
-                fetch_concurrent: 32,
+                fetch_concurrent: NZUsize!(32),
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
                 forwarding: simplex::ForwardingPolicy::Disabled,

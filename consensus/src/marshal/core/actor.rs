@@ -17,6 +17,7 @@ use crate::{
     Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
+use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -37,7 +38,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,
@@ -69,6 +70,16 @@ enum PendingVerification<S: CertificateScheme, V: Variant> {
         block: V::Block,
         response: oneshot::Sender<bool>,
     },
+}
+
+impl<S: CertificateScheme, V: Variant> PendingVerification<S, V> {
+    fn response_closed(&self) -> bool {
+        match self {
+            Self::Notarized { response, .. } | Self::Finalized { response, .. } => {
+                response.is_closed()
+            }
+        }
+    }
 }
 
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
@@ -234,7 +245,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<P::Scheme, V>>,
+    mailbox: mailbox::Receiver<Message<P::Scheme, V>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -246,7 +257,7 @@ where
     // Maximum number of blocks to repair at once
     max_repair: NonZeroUsize,
     // Codec configuration for block type
-    block_codec_config: <V::Block as Read>::Cfg,
+    block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     // Strategy for parallel operations
     strategy: T,
 
@@ -301,7 +312,7 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<V::Block, P, ES, T>,
+        config: Config<V::ApplicationBlock, P, ES, T>,
     ) -> (Self, Mailbox<P::Scheme, V>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
@@ -340,7 +351,7 @@ where
         let _ = processed_height.try_set(last_processed_height.get());
 
         // Initialize mailbox
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -374,7 +385,7 @@ where
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
-        resolver: (mpsc::Receiver<handler::Message<V::Commitment>>, R),
+        resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
         R: Resolver<
@@ -392,7 +403,7 @@ where
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
-        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Commitment>>, R),
+        (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: Resolver<
             Key = ResolverRequestFor<V>,
@@ -407,7 +418,7 @@ where
         // Get tip and send to application
         let tip = self.get_latest().await;
         if let Some((height, digest, round)) = tip {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -470,7 +481,7 @@ where
                     match result {
                         Ok(()) => {
                             // Apply in-memory progress updates for this acknowledged block.
-                            self.handle_block_processed(height, &mut resolver).await;
+                            self.handle_block_processed(height, commitment, &mut resolver).await;
                         }
                         Err(e) => {
                             // Ack failures are fatal for marshal/application coordination.
@@ -494,7 +505,7 @@ where
                 }
 
                 // Inform the buffer of the last acknowledged commitment (anything below this is safe to prune).
-                buffer.finalized(last_acked_commitment).await;
+                buffer.finalized(last_acked_commitment);
 
                 // Fill the pipeline
                 self.try_dispatch_blocks(&mut application).await;
@@ -504,6 +515,10 @@ where
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
+                if message.response_closed() {
+                    continue;
+                }
+
                 match message {
                     Message::GetInfo {
                         identifier,
@@ -555,7 +570,7 @@ where
                                 block
                             }
                         };
-                        buffer.send(round, block, recipients).await;
+                        buffer.send(round, block, recipients);
                     }
                     Message::Proposed { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -570,7 +585,7 @@ where
                         // overwritten.
                         let commitment = V::commitment(&block);
                         self.last_proposed_block = Some((round, commitment, block));
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Verified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -578,7 +593,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_verified(round, block.digest(), block).await;
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Certified { round, block, ack } => {
                         // If the round has already been pruned by tip advancement,
@@ -586,7 +601,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_block(round, block.digest(), block).await;
-                        ack.send_lossy(());
+                        ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Notarization { notarization } => {
                         let round = notarization.round();
@@ -646,15 +661,13 @@ where
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
-                            resolver
-                                .fetch(Subscribers::with_subscriber(
-                                    Request::Block { commitment },
-                                    ResolverSubscriber::block(
-                                        commitment,
-                                        BlockFetchContext::Finalized { round },
-                                    ),
-                                ))
-                                .await;
+                            resolver.fetch(Subscribers::with_subscriber(
+                                Request::Block { commitment },
+                                ResolverSubscriber::block(
+                                    commitment,
+                                    BlockFetchContext::Finalized { round },
+                                ),
+                            ));
                         }
                     }
                     Message::GetBlock {
@@ -676,7 +689,7 @@ where
                             };
                             response.send_lossy(block);
                         }
-                    },
+                    }
                     Message::GetFinalization { height, response } => {
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
@@ -694,7 +707,7 @@ where
 
                         // Trigger a targeted fetch via the resolver
                         let request = Request::Finalized { height };
-                        resolver.fetch_targeted(request, targets).await;
+                        resolver.fetch_targeted(request, targets);
                     }
                     Message::SubscribeByDigest {
                         round,
@@ -750,7 +763,7 @@ where
                         }
 
                         // Update the processed height
-                        self.update_processed_height(height, &mut resolver).await;
+                        self.update_processed_height(height, &mut resolver);
                         self.cache.prune_by_height(height).await;
                         if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
@@ -799,12 +812,18 @@ where
                 // Drain up to max_repair messages: blocks handled immediately,
                 // certificates batched for verification, produces deferred.
                 let mut needs_sync = false;
+                let mut handled = false;
                 let mut produces = Vec::new();
                 let mut delivers = Vec::new();
                 for msg in std::iter::once(message)
                     .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
                     .take(self.max_repair.get())
                 {
+                    if msg.response_closed() {
+                        continue;
+                    }
+                    handled = true;
+
                     match msg {
                         handler::Message::Produce { key, response } => {
                             produces.push((key, response));
@@ -828,6 +847,9 @@ where
                                 .await;
                         }
                     }
+                }
+                if !handled {
+                    continue;
                 }
 
                 // Batch verify and process all delivers.
@@ -954,17 +976,17 @@ where
             debug!(?round, ?digest, "requested block missing");
             let request = Request::Notarized { round };
             match key {
-                BlockSubscriptionKey::Digest(_) => resolver.fetch(request).await,
+                BlockSubscriptionKey::Digest(_) => {
+                    resolver.fetch(request);
+                }
                 BlockSubscriptionKey::Commitment(commitment) => {
-                    resolver
-                        .fetch(Subscribers::with_subscriber(
-                            request,
-                            ResolverSubscriber::block(
-                                commitment,
-                                BlockFetchContext::Finalized { round },
-                            ),
-                        ))
-                        .await;
+                    resolver.fetch(Subscribers::with_subscriber(
+                        request,
+                        ResolverSubscriber::block(
+                            commitment,
+                            BlockFetchContext::Finalized { round },
+                        ),
+                    ));
                 }
             }
         } else if let (Some(height), BlockSubscriptionKey::Commitment(commitment)) = (height, key) {
@@ -980,12 +1002,10 @@ where
                 return;
             }
             debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
-            resolver
-                .fetch(Subscribers::with_subscriber(
-                    Request::Block { commitment },
-                    ResolverSubscriber::block(commitment, BlockFetchContext::Ancestry { height }),
-                ))
-                .await;
+            resolver.fetch(Subscribers::with_subscriber(
+                Request::Block { commitment },
+                ResolverSubscriber::block(commitment, BlockFetchContext::Ancestry { height }),
+            ));
         }
 
         // Register subscriber.
@@ -1003,11 +1023,9 @@ where
             }
             Entry::Vacant(entry) => {
                 let rx = match key {
-                    BlockSubscriptionKey::Digest(digest) => {
-                        buffer.subscribe_by_digest(digest).await
-                    }
+                    BlockSubscriptionKey::Digest(digest) => buffer.subscribe_by_digest(digest),
                     BlockSubscriptionKey::Commitment(commitment) => {
-                        buffer.subscribe_by_commitment(commitment).await
+                        buffer.subscribe_by_commitment(commitment)
                     }
                 };
                 let waiter_key = key;
@@ -1036,14 +1054,14 @@ where
     ) -> bool {
         let ResolverDelivery {
             subscribers,
-            value,
+            mut value,
             response,
         } = delivery;
         let (key, subscribers) = subscribers.into_parts();
         match key {
             Request::Block { commitment } => {
-                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config)
-                else {
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return false;
                 };
@@ -1149,20 +1167,21 @@ where
                     return false;
                 };
 
-                let Ok((finalization, block)) =
-                    <(Finalization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
-                        value,
-                        &(
-                            scheme.certificate_codec_config(),
-                            self.block_codec_config.clone(),
-                        ),
-                    )
+                let certificate_codec_config = scheme.certificate_codec_config();
+                let Ok(finalization) =
+                    Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
                     response.send_lossy(false);
                     return false;
                 };
 
                 let commitment = finalization.proposal.payload;
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                    response.send_lossy(false);
+                    return false;
+                };
+
                 if block.height() != height
                     || V::commitment(&block) != commitment
                     || finalization.epoch() != bounds.epoch()
@@ -1188,20 +1207,21 @@ where
                     return false;
                 };
 
-                let Ok((notarization, block)) =
-                    <(Notarization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
-                        value,
-                        &(
-                            scheme.certificate_codec_config(),
-                            self.block_codec_config.clone(),
-                        ),
-                    )
+                let certificate_codec_config = scheme.certificate_codec_config();
+                let Ok(notarization) =
+                    Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
                     response.send_lossy(false);
                     return false;
                 };
 
                 let commitment = notarization.proposal.payload;
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                    response.send_lossy(false);
+                    return false;
+                };
+
                 if notarization.round() != round || V::commitment(&block) != commitment {
                     response.send_lossy(false);
                     return false;
@@ -1224,6 +1244,7 @@ where
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
+        delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
             return false;
         }
@@ -1446,9 +1467,7 @@ where
 
             let (height, commitment) = (block.height(), V::commitment(&block));
             let (ack, ack_waiter) = A::handle();
-            application
-                .report(Update::Block(V::into_inner(block), ack))
-                .await;
+            application.report(Update::Block(V::into_inner(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
@@ -1464,11 +1483,15 @@ where
     async fn handle_block_processed(
         &mut self,
         height: Height,
+        commitment: V::Commitment,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
     ) {
         // Update the processed height (buffered, not synced)
-        self.update_processed_height(height, resolver).await;
+        self.update_processed_height(height, resolver);
         self.cache.prune_by_height(height).await;
+
+        // Cancel any useless requests
+        resolver.cancel(Request::Block { commitment });
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -1488,9 +1511,7 @@ where
             // Cancel round-bound certified-parent fetches below the processed
             // round floor. Unlike known-finalized data, processed data is past
             // the point where proposal-construction assistance is useful.
-            resolver
-                .retain(ResolverSubscriber::request(Request::Notarized { round }).predicate())
-                .await;
+            resolver.retain(ResolverSubscriber::request(Request::Notarized { round }).predicate());
         }
     }
 
@@ -1644,7 +1665,7 @@ where
 
         // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
-            application.report(Update::Tip(round, height, digest)).await;
+            application.report(Update::Tip(round, height, digest));
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
@@ -1806,17 +1827,15 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    resolver
-                        .fetch(Subscribers::with_subscriber(
-                            Request::Block { commitment },
-                            ResolverSubscriber::block(
-                                commitment,
-                                BlockFetchContext::Repair {
-                                    height: last_finalized,
-                                },
-                            ),
-                        ))
-                        .await;
+                    resolver.fetch(Subscribers::with_subscriber(
+                        Request::Block { commitment },
+                        ResolverSubscriber::block(
+                            commitment,
+                            BlockFetchContext::Repair {
+                                height: last_finalized,
+                            },
+                        ),
+                    ));
                 }
             }
         }
@@ -1869,19 +1888,17 @@ where
                         .height()
                         .previous()
                         .expect("gap repair cursor must be above genesis");
-                    resolver
-                        .fetch(Subscribers::with_subscriber(
-                            Request::Block {
-                                commitment: parent_commitment,
+                    resolver.fetch(Subscribers::with_subscriber(
+                        Request::Block {
+                            commitment: parent_commitment,
+                        },
+                        ResolverSubscriber::block(
+                            parent_commitment,
+                            BlockFetchContext::Repair {
+                                height: parent_height,
                             },
-                            ResolverSubscriber::block(
-                                parent_commitment,
-                                BlockFetchContext::Repair {
-                                    height: parent_height,
-                                },
-                            ),
-                        ))
-                        .await;
+                        ),
+                    ));
                     break 'cache_repair;
                 }
             }
@@ -1900,14 +1917,14 @@ where
             .map(|height| Request::Finalized { height })
             .collect();
         if !requests.is_empty() {
-            resolver.fetch_all(requests).await
+            resolver.fetch_all(requests);
         }
         wrote
     }
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync
     /// to durable storage. Sync metadata after buffered updates to make them durable.
-    async fn update_processed_height(
+    fn update_processed_height(
         &mut self,
         height: Height,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = ResolverSubscriberFor<V>>,
@@ -1919,9 +1936,7 @@ where
             .try_set(self.last_processed_height.get());
 
         // Cancel any existing requests below the new floor.
-        resolver
-            .retain(ResolverSubscriber::request(Request::Finalized { height }).predicate())
-            .await;
+        resolver.retain(ResolverSubscriber::request(Request::Finalized { height }).predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.

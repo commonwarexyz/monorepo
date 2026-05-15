@@ -15,6 +15,7 @@ use crate::{
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadRangeExt, Write};
+use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{Quorum, Set},
     Faults, Participant,
@@ -118,6 +119,7 @@ impl<N: Namespace> Generic<N> {
         rng: &mut R,
         subject: S::Subject<'a, D>,
         attestations: I,
+        strategy: &impl Strategy,
     ) -> Verification<S>
     where
         S: Scheme<Signature = Ed25519Signature>,
@@ -147,7 +149,7 @@ impl<N: Namespace> Generic<N> {
             candidates.push((attestation, public_key));
         }
 
-        if !candidates.is_empty() && !batch.verify(rng) {
+        if !candidates.is_empty() && !batch.verify(rng, strategy) {
             // Batch failed: fall back to per-signer verification to isolate faulty attestations.
             for (attestation, public_key) in &candidates {
                 let Some(signature) = attestation.signature.get() else {
@@ -259,6 +261,7 @@ impl<N: Namespace> Generic<N> {
         rng: &mut R,
         subject: S::Subject<'a, D>,
         certificate: &Certificate,
+        strategy: &impl Strategy,
     ) -> bool
     where
         S: Scheme,
@@ -272,11 +275,16 @@ impl<N: Namespace> Generic<N> {
             return false;
         }
 
-        batch.verify(rng)
+        batch.verify(rng, strategy)
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, S, R, D, I, M>(&self, rng: &mut R, certificates: I) -> bool
+    pub fn verify_certificates<'a, S, R, D, I, M>(
+        &self,
+        rng: &mut R,
+        certificates: I,
+        strategy: &impl Strategy,
+    ) -> bool
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
@@ -292,7 +300,7 @@ impl<N: Namespace> Generic<N> {
             }
         }
 
-        batch.verify(rng)
+        batch.verify(rng, strategy)
     }
 
     pub const fn is_attributable() -> bool {
@@ -513,7 +521,7 @@ macro_rules! impl_certificate_ed25519 {
                 rng: &mut R,
                 subject: Self::Subject<'_, D>,
                 attestations: I,
-                _strategy: &impl commonware_parallel::Strategy,
+                strategy: &impl commonware_parallel::Strategy,
             ) -> $crate::certificate::Verification<Self>
             where
                 R: rand_core::CryptoRngCore,
@@ -521,7 +529,7 @@ macro_rules! impl_certificate_ed25519 {
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
                 self.generic
-                    .verify_attestations::<_, _, D, _>(rng, subject, attestations)
+                    .verify_attestations::<_, _, D, _>(rng, subject, attestations, strategy)
             }
 
             fn assemble<I, M>(
@@ -541,7 +549,7 @@ macro_rules! impl_certificate_ed25519 {
                 rng: &mut R,
                 subject: Self::Subject<'_, D>,
                 certificate: &Self::Certificate,
-                _strategy: &impl commonware_parallel::Strategy,
+                strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
                 R: rand_core::CryptoRngCore,
@@ -549,14 +557,14 @@ macro_rules! impl_certificate_ed25519 {
                 M: commonware_utils::Faults,
             {
                 self.generic
-                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate, strategy)
             }
 
             fn verify_certificates<'a, R, D, I, M>(
                 &self,
                 rng: &mut R,
                 certificates: I,
-                _strategy: &impl commonware_parallel::Strategy,
+                strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
                 R: rand::Rng + rand::CryptoRng,
@@ -565,7 +573,7 @@ macro_rules! impl_certificate_ed25519 {
                 M: commonware_utils::Faults,
             {
                 self.generic
-                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
+                    .verify_certificates::<Self, _, D, _, M>(rng, certificates, strategy)
             }
 
             fn is_attributable() -> bool {

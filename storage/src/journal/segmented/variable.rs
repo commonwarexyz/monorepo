@@ -88,7 +88,7 @@ use commonware_codec::{
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
-    Blob, Buf, BufMut, IoBuf, IoBufMut, Metrics, Storage,
+    Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -496,6 +496,22 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Returns `(buf, item_len)` where `item_len` is the length of the encoded (and
     /// possibly compressed) payload, excluding the size prefix.
     pub(crate) fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
+        let mut buf = Vec::new();
+        let item_len = Self::encode_item_into(compression, item, &mut buf)?;
+        Ok((buf, item_len))
+    }
+
+    /// Encode an item with its length prefix, appending the encoded bytes to `buf`.
+    ///
+    /// Existing contents of `buf` are preserved; this allows callers to accumulate
+    /// multiple encoded items into a single buffer.
+    ///
+    /// Returns the payload length, excluding the size prefix.
+    pub(crate) fn encode_item_into(
+        compression: Option<u8>,
+        item: &V,
+        buf: &mut Vec<u8>,
+    ) -> Result<u32, Error> {
         if let Some(compression) = compression {
             // Compressed: encode first, then compress
             let encoded = item.encode();
@@ -511,11 +527,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 .checked_add(item_len)
                 .ok_or(Error::OffsetOverflow)?;
 
-            let mut buf = Vec::with_capacity(entry_len);
-            UInt(item_len_u32).write(&mut buf);
-            buf.put_slice(&compressed);
+            buf.reserve(entry_len);
+            UInt(item_len_u32).write(buf);
+            buf.extend_from_slice(&compressed);
 
-            Ok((buf, item_len_u32))
+            Ok(item_len_u32)
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
             let item_len = item.encode_size();
@@ -528,11 +544,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 .checked_add(item_len)
                 .ok_or(Error::OffsetOverflow)?;
 
-            let mut buf = Vec::with_capacity(entry_len);
-            UInt(item_len_u32).write(&mut buf);
-            item.write(&mut buf);
+            buf.reserve(entry_len);
+            UInt(item_len_u32).write(buf);
+            item.write(buf);
 
-            Ok((buf, item_len_u32))
+            Ok(item_len_u32)
         }
     }
 
@@ -580,8 +596,116 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(item)
     }
 
+    /// Read multiple items from the same section.
+    ///
+    /// Offsets should be sorted in ascending order.
+    pub async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
+        if offsets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let compressed = self.compression.is_some();
+        let cfg = &self.codec_config;
+        let mut items = Vec::with_capacity(offsets.len());
+        for &offset in offsets {
+            let (_, _, item) = Self::read(compressed, cfg, blob, offset).await?;
+            items.push(item);
+        }
+        Ok(items)
+    }
+
+    /// Read consecutive items from the same section. `offsets` must be sorted in strictly
+    /// ascending order and identify items that are adjacent in the section.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::OffsetDataMismatch`] if the on-disk varint at any offset reports a size
+    /// inconsistent with the gap to the next offset. This indicates either on-disk corruption or a
+    /// caller violation of the byte-adjacency precondition.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `offsets` is not strictly increasing.
+    pub(crate) async fn get_many_consecutive(
+        &self,
+        section: u64,
+        offsets: &[u64],
+    ) -> Result<Vec<V>, Error> {
+        if offsets.len() <= 1 {
+            return self.get_many(section, offsets).await;
+        }
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let start = offsets[0];
+        let end = offsets[offsets.len() - 1];
+        if end <= start {
+            return self.get_many(section, offsets).await;
+        }
+        let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
+        let bytes = blob.read_at(start, range_len).await?.coalesce();
+        let bytes = bytes.as_ref();
+
+        let compressed = self.compression.is_some();
+        let cfg = &self.codec_config;
+        let mut items = Vec::with_capacity(offsets.len());
+        let mut local_offset = 0usize;
+
+        for window in offsets.windows(2) {
+            let offset = window[0];
+            let next_offset = window[1];
+            assert!(offset < next_offset, "offsets must be strictly increasing");
+
+            let item_len =
+                usize::try_from(next_offset - offset).map_err(|_| Error::OffsetOverflow)?;
+
+            let mut cursor = Cursor::new(&bytes[local_offset..]);
+            let (size, varint_len) = decode_length_prefix(&mut cursor)?;
+            let actual_len = size + varint_len;
+            if actual_len != item_len {
+                return Err(Error::OffsetDataMismatch {
+                    section,
+                    offset,
+                    expected_len: item_len,
+                    actual_len,
+                });
+            }
+
+            let data_start = local_offset
+                .checked_add(varint_len)
+                .ok_or(Error::OffsetOverflow)?;
+            let data_end = local_offset
+                .checked_add(item_len)
+                .ok_or(Error::OffsetOverflow)?;
+
+            items.push(decode_item::<V>(
+                &bytes[data_start..data_end],
+                cfg,
+                compressed,
+            )?);
+
+            local_offset = data_end;
+        }
+
+        let (_, _, item) = Self::read(compressed, cfg, blob, end).await?;
+        items.push(item);
+        Ok(items)
+    }
+
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
+        let mut buf = Vec::new();
+        self.try_get_sync_into(section, offset, &mut buf)
+    }
+
+    /// Get an item synchronously using caller-provided buffer.
+    pub fn try_get_sync_into(&self, section: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
         let blob = self.manager.get(section).ok()??;
         let remaining = blob.try_size()?.checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
@@ -624,12 +748,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         }
 
         // Otherwise try reading the full item from cache.
-        let mut full = vec![0u8; item_len];
-        if !blob.try_read_sync(offset, &mut full) {
+        buf.resize(item_len, 0);
+        if !blob.try_read_sync(offset, buf) {
             return None;
         }
         decode_item::<V>(
-            &full[varint_len..varint_len + data_len],
+            &buf[varint_len..varint_len + data_len],
             &self.codec_config,
             self.compression.is_some(),
         )

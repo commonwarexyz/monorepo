@@ -27,6 +27,7 @@ use crate::{
     Context,
 };
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::Strategy;
 use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
@@ -90,7 +91,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
 macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$db<F, E, K, V, H, T, S>>
         where
             F: Family,
             E: Context,
@@ -99,6 +100,7 @@ macro_rules! impl_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -129,7 +131,7 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T, S>>>
         where
             F: Family,
             E: Context,
@@ -138,6 +140,7 @@ macro_rules! impl_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -168,7 +171,7 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T, S>>>>
         where
             F: Family,
             E: Context,
@@ -177,6 +180,7 @@ macro_rules! impl_resolver {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -227,7 +231,7 @@ impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 // always use Array.
 macro_rules! impl_resolver_immutable {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
-        impl<F, E, K, V, H, T> Resolver for Arc<$db<F, E, K, V, H, T>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$db<F, E, K, V, H, T, S>>
         where
             F: Family,
             E: Context,
@@ -236,6 +240,7 @@ macro_rules! impl_resolver_immutable {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -266,7 +271,7 @@ macro_rules! impl_resolver_immutable {
             }
         }
 
-        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T, S>>>
         where
             F: Family,
             E: Context,
@@ -275,6 +280,7 @@ macro_rules! impl_resolver_immutable {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -305,7 +311,7 @@ macro_rules! impl_resolver_immutable {
             }
         }
 
-        impl<F, E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T>>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T, S>>>>
         where
             F: Family,
             E: Context,
@@ -314,6 +320,7 @@ macro_rules! impl_resolver_immutable {
             H: Hasher,
             T: Translator + Send + Sync + 'static,
             T::Key: Send + Sync,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -356,12 +363,13 @@ impl_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue
 // Keyless types have no key or translator, so they need their own macro.
 macro_rules! impl_resolver_keyless {
     ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<F, E, V, H> Resolver for Arc<$db<F, E, V, H>>
+        impl<F, E, V, H, S> Resolver for Arc<$db<F, E, V, H, S>>
         where
             F: Family,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -392,12 +400,13 @@ macro_rules! impl_resolver_keyless {
             }
         }
 
-        impl<F, E, V, H> Resolver for Arc<AsyncRwLock<$db<F, E, V, H>>>
+        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, S>>>
         where
             F: Family,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -428,12 +437,13 @@ macro_rules! impl_resolver_keyless {
             }
         }
 
-        impl<F, E, V, H> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H>>>>
+        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, S>>>>
         where
             F: Family,
             E: Context,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
+            S: Strategy,
         {
             type Family = F;
             type Digest = H::Digest;
@@ -476,7 +486,25 @@ impl_resolver_keyless!(KeylessVariableDb, KeylessVariableOp, VariableValue);
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::marker::PhantomData;
+    use crate::{
+        merkle::mmr,
+        translator::{OneCap, TwoCap},
+    };
+    use commonware_cryptography::{sha256::Digest as ShaDigest, Sha256};
+    use commonware_parallel::Rayon;
+    use commonware_runtime::deterministic;
+    use commonware_utils::sync::AsyncRwLock;
+    use std::{marker::PhantomData, sync::Arc};
+
+    macro_rules! assert_resolver_variants {
+        ($db:ty) => {
+            assert_resolver::<Arc<$db>>();
+            assert_resolver::<Arc<AsyncRwLock<$db>>>();
+            assert_resolver::<Arc<AsyncRwLock<Option<$db>>>>();
+        };
+    }
+
+    fn assert_resolver<R: Resolver>() {}
 
     /// A resolver that always fails.
     #[derive(Clone)]
@@ -513,5 +541,130 @@ pub(crate) mod tests {
                 _phantom: PhantomData,
             }
         }
+    }
+
+    #[test]
+    fn test_all_qmdb_variants_implement_strategy_resolvers() {
+        type AnyOrderedFixed = crate::qmdb::any::ordered::fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            ShaDigest,
+            Sha256,
+            OneCap,
+            Rayon,
+        >;
+        type AnyOrderedVariable = crate::qmdb::any::ordered::variable::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Vec<u8>,
+            Sha256,
+            OneCap,
+            Rayon,
+        >;
+        type AnyUnorderedFixed = crate::qmdb::any::unordered::fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            ShaDigest,
+            Sha256,
+            TwoCap,
+            Rayon,
+        >;
+        type AnyUnorderedVariable = crate::qmdb::any::unordered::variable::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+            Rayon,
+        >;
+        type CurrentOrderedFixed = crate::qmdb::current::ordered::fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            ShaDigest,
+            Sha256,
+            OneCap,
+            32,
+            Rayon,
+        >;
+        type CurrentOrderedVariable = crate::qmdb::current::ordered::variable::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Vec<u8>,
+            Sha256,
+            OneCap,
+            32,
+            Rayon,
+        >;
+        type CurrentUnorderedFixed = crate::qmdb::current::unordered::fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            ShaDigest,
+            Sha256,
+            TwoCap,
+            32,
+            Rayon,
+        >;
+        type CurrentUnorderedVariable = crate::qmdb::current::unordered::variable::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+            32,
+            Rayon,
+        >;
+        type ImmutableFixed = crate::qmdb::immutable::fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            ShaDigest,
+            Sha256,
+            TwoCap,
+            Rayon,
+        >;
+        type ImmutableVariable = crate::qmdb::immutable::variable::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+            Rayon,
+        >;
+        type KeylessFixed = crate::qmdb::keyless::fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            ShaDigest,
+            Sha256,
+            Rayon,
+        >;
+        type KeylessVariable = crate::qmdb::keyless::variable::Db<
+            mmr::Family,
+            deterministic::Context,
+            Vec<u8>,
+            Sha256,
+            Rayon,
+        >;
+
+        assert_resolver_variants!(AnyOrderedFixed);
+        assert_resolver_variants!(AnyOrderedVariable);
+        assert_resolver_variants!(AnyUnorderedFixed);
+        assert_resolver_variants!(AnyUnorderedVariable);
+        assert_resolver_variants!(CurrentOrderedFixed);
+        assert_resolver_variants!(CurrentOrderedVariable);
+        assert_resolver_variants!(CurrentUnorderedFixed);
+        assert_resolver_variants!(CurrentUnorderedVariable);
+        assert_resolver_variants!(ImmutableFixed);
+        assert_resolver_variants!(ImmutableVariable);
+        assert_resolver_variants!(KeylessFixed);
+        assert_resolver_variants!(KeylessVariable);
     }
 }

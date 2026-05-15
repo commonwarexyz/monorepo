@@ -67,6 +67,7 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Reporter,
     };
     use bytes::Bytes;
+    use commonware_actor::{mailbox, Feedback};
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
@@ -90,7 +91,8 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        channel::{fallible::OneshotExt, mpsc, oneshot},
+        acknowledgement::Exact,
+        channel::{fallible::OneshotExt, oneshot},
         sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
@@ -1894,19 +1896,19 @@ mod tests {
             None
         }
 
-        async fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
             let (_sender, receiver) = oneshot::channel();
             receiver
         }
 
-        async fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
             let (_sender, receiver) = oneshot::channel();
             receiver
         }
 
-        async fn finalized(&self, _commitment: D) {}
+        fn finalized(&self, _commitment: D) {}
 
-        async fn send(&self, round: Round, block: B, recipients: Recipients<PublicKey>) {
+        fn send(&self, round: Round, block: B, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));
         }
     }
@@ -1925,16 +1927,20 @@ mod tests {
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<ResolverFetch>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
-        _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
+        _keepalive: Option<mailbox::Sender<handler::Message<D>>>,
     }
 
     impl RecordingResolver {
-        fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
-            Self {
-                fetches: Arc::new(Mutex::new(Vec::new())),
-                targeted: Arc::new(Mutex::new(Vec::new())),
-                _keepalive: Some(sender),
-            }
+        fn holding() -> (handler::Receiver<D>, Self) {
+            let (sender, receiver) = mailbox::new(NZUsize!(100));
+            (
+                handler::Receiver::new(receiver),
+                Self {
+                    fetches: Arc::new(Mutex::new(Vec::new())),
+                    targeted: Arc::new(Mutex::new(Vec::new())),
+                    _keepalive: Some(sender),
+                },
+            )
         }
 
         fn all_fetches_are_empty(&self) -> bool {
@@ -1959,30 +1965,39 @@ mod tests {
         type Subscriber = handler::ResolverSubscriber<D>;
         type PublicKey = PublicKey;
 
-        async fn fetch<R>(&mut self, request: R)
+        fn fetch<R>(&mut self, request: R) -> Feedback
         where
             R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
             let key = request.into().request;
             self.fetches.lock().push(key);
+            Feedback::Ok
         }
-        async fn fetch_all<R>(&mut self, requests: Vec<R>)
+
+        fn fetch_all<R>(&mut self, requests: Vec<R>) -> Feedback
         where
             R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
             self.fetches
                 .lock()
                 .extend(requests.into_iter().map(|request| request.into().request));
+            Feedback::Ok
         }
-        async fn fetch_targeted(
+
+        fn fetch_targeted(
             &mut self,
             request: impl Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
-        ) {
+        ) -> Feedback {
             let key = request.into().request;
             self.targeted.lock().push((key, targets));
+            Feedback::Ok
         }
-        async fn fetch_all_targeted<R>(&mut self, requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>)
+
+        fn fetch_all_targeted<R>(
+            &mut self,
+            requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
         where
             R: Into<Subscribers<Self::Key, Self::Subscriber>> + Send,
         {
@@ -1991,13 +2006,22 @@ mod tests {
                     .into_iter()
                     .map(|(request, targets)| (request.into().request, targets)),
             );
+            Feedback::Ok
         }
-        async fn cancel(&mut self, _key: Self::Key) {}
-        async fn clear(&mut self) {}
-        async fn retain(
+
+        fn cancel(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn clear(&mut self) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn retain(
             &mut self,
             _predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
-        ) {
+        ) -> Feedback {
+            Feedback::Ok
         }
     }
 
@@ -2017,45 +2041,41 @@ mod tests {
         }
     }
 
-    /// A reporter that blocks inside `Update::Block` so tests can abort marshal
-    /// exactly when application delivery starts.
+    /// A reporter that signals when application delivery starts and holds the
+    /// block acknowledgement open.
     #[derive(Clone)]
-    struct GatedBlockReporter {
+    struct HoldingBlockReporter {
         started: Arc<Mutex<Option<oneshot::Sender<Height>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        pending: Arc<Mutex<Vec<Exact>>>,
     }
 
-    impl GatedBlockReporter {
-        fn new() -> (Self, oneshot::Receiver<Height>, oneshot::Sender<()>) {
+    impl HoldingBlockReporter {
+        fn new() -> (Self, oneshot::Receiver<Height>) {
             let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
             (
                 Self {
                     started: Arc::new(Mutex::new(Some(started_tx))),
-                    release: Arc::new(Mutex::new(Some(release_rx))),
+                    pending: Arc::new(Mutex::new(Vec::new())),
                 },
                 started_rx,
-                release_tx,
             )
         }
     }
 
-    impl Reporter for GatedBlockReporter {
+    impl Reporter for HoldingBlockReporter {
         type Activity = Update<B>;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
             match activity {
-                Update::Block(block, _ack) => {
+                Update::Block(block, ack) => {
                     if let Some(started) = self.started.lock().take() {
                         started.send_lossy(block.height());
                     }
-                    let release = self.release.lock().take();
-                    if let Some(release) = release {
-                        let _ = release.await;
-                    }
+                    self.pending.lock().push(ack);
                 }
                 Update::Tip(_, _, _) => {}
             }
+            Feedback::Ok
         }
     }
 
@@ -2078,7 +2098,7 @@ mod tests {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -2156,8 +2176,7 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_tx, resolver_rx) = mpsc::channel(100);
-        let resolver = RecordingResolver::holding(resolver_tx);
+        let (resolver_rx, resolver) = RecordingResolver::holding();
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
@@ -2348,8 +2367,7 @@ mod tests {
                     CommitmentRequest::FetchByCommitment {
                         height: block.height(),
                     },
-                )
-                .await;
+                );
             let received = select! {
                 result = rx => result.expect("local finalized block subscription dropped"),
                 _ = context.sleep(Duration::from_secs(5)) => {
@@ -2395,7 +2413,7 @@ mod tests {
             let config = Config {
                 provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                mailbox_size: 100,
+                mailbox_size: NZUsize!(100),
                 view_retention_timeout: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
@@ -2445,7 +2463,7 @@ mod tests {
 
             let broadcast_config = buffered::Config {
                 public_key: me.clone(),
-                mailbox_size: 100,
+                mailbox_size: NZUsize!(100),
                 deque_size: 10,
                 priority: false,
                 codec_config: (),
@@ -2455,7 +2473,7 @@ mod tests {
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
+            let (resolver_tx, resolver_rx) = mailbox::new(NZUsize!(100));
 
             let (actor, _mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -2467,15 +2485,18 @@ mod tests {
             actor.start(
                 Application::<B>::default(),
                 buffer,
-                (resolver_rx, RecordingResolver::default()),
+                (
+                    handler::Receiver::new(resolver_rx),
+                    RecordingResolver::default(),
+                ),
             );
 
             // Inject a Finalized delivery with garbage payload. The
             // provider has no verifier, so the marshal cannot decode it and
             // must complete delivery rather than blame the peer.
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(resolver_tx
+                .enqueue(handler::Message::Deliver {
                     subscribers: commonware_resolver::Subscribers::new(
                         handler::Request::Finalized {
                             height: Height::new(5),
@@ -2484,14 +2505,13 @@ mod tests {
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .await
-                .unwrap();
+                .accepted());
             assert!(response_rx.await.unwrap());
 
             // Same for a Notarized delivery.
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(resolver_tx
+                .enqueue(handler::Message::Deliver {
                     subscribers: commonware_resolver::Subscribers::new(
                         handler::Request::Notarized {
                             round: Round::new(Epoch::zero(), View::new(1)),
@@ -2500,16 +2520,15 @@ mod tests {
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .await
-                .unwrap();
+                .accepted());
             assert!(response_rx.await.unwrap());
         });
     }
 
     /// Regression: application delivery of a finalized block must only happen
-    /// after the finalized archives are durably synced. Otherwise a crash in
-    /// the delivery callback can expose a block to another subsystem that then
-    /// persists derived state ahead of marshal's height-indexed finalization.
+    /// after the finalized archives are durably synced. Otherwise a crash after
+    /// the application observes the block, but before it acknowledges it, can
+    /// expose derived state ahead of marshal's height-indexed finalization.
     #[test_traced("WARN")]
     fn test_standard_dispatches_finalized_blocks_after_sync() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2529,7 +2548,7 @@ mod tests {
                 QUORUM,
             );
 
-            let (application, started, release) = GatedBlockReporter::new();
+            let (application, started) = HoldingBlockReporter::new();
             let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
@@ -2559,7 +2578,6 @@ mod tests {
             }
 
             actor_handle.abort();
-            let _ = release.send_lossy(());
             drop(mailbox);
 
             // Yield once so the aborted actor drops its storage handles before restart.
@@ -2768,13 +2786,11 @@ mod tests {
             )
             .await;
 
-            mailbox
-                .forward(
-                    round,
-                    unknown,
-                    Recipients::Some(vec![participants[1].clone()]),
-                )
-                .await;
+            mailbox.forward(
+                round,
+                unknown,
+                Recipients::Some(vec![participants[1].clone()]),
+            );
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
@@ -2816,10 +2832,7 @@ mod tests {
             assert!(mailbox.proposed(round, block.clone()).await);
 
             let targets = vec![participants[1].clone()];
-            mailbox
-                .forward(round, digest, Recipients::Some(targets.clone()))
-                .await;
-
+            mailbox.forward(round, digest, Recipients::Some(targets.clone()));
             wait_until(&context, Duration::from_secs(5), "first forward", || {
                 !buffer.sends.lock().is_empty()
             })
@@ -2833,9 +2846,7 @@ mod tests {
             // The in-memory slot was consumed; a second forward for the same
             // commitment must still succeed by falling back to storage (the
             // block was persisted by `Proposed`, mirroring `Verified`).
-            mailbox
-                .forward(round, digest, Recipients::Some(targets))
-                .await;
+            mailbox.forward(round, digest, Recipients::Some(targets));
             wait_until(&context, Duration::from_secs(5), "second forward", || {
                 buffer.sends.lock().len() >= 2
             })
@@ -2875,10 +2886,7 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await);
 
             let targets = vec![participants[1].clone(), participants[2].clone()];
-            mailbox
-                .forward(round, digest, Recipients::Some(targets.clone()))
-                .await;
-
+            mailbox.forward(round, digest, Recipients::Some(targets.clone()));
             wait_until(&context, Duration::from_secs(5), "buffer.send", || {
                 !buffer.sends.lock().is_empty()
             })
@@ -2919,12 +2927,10 @@ mod tests {
             .await;
 
             // Raise the floor above the hint we are about to send.
-            mailbox.set_floor(Height::new(10)).await;
+            mailbox.set_floor(Height::new(10));
             context.sleep(Duration::from_millis(50)).await;
 
-            mailbox
-                .hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()))
-                .await;
+            mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
@@ -2972,9 +2978,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            mailbox
-                .hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()))
-                .await;
+            mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
             context.sleep(Duration::from_millis(50)).await;
 
             assert!(
@@ -3007,10 +3011,7 @@ mod tests {
             .await;
 
             let target = participants[1].clone();
-            mailbox
-                .hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()))
-                .await;
-
+            mailbox.hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()));
             wait_until(&context, Duration::from_secs(5), "fetch_targeted", || {
                 !resolver.targeted.lock().is_empty()
             })
@@ -3066,7 +3067,7 @@ mod tests {
             }
 
             // Prune above the floor must be a no-op, not an error.
-            mailbox.prune(Height::new(100)).await;
+            mailbox.prune(Height::new(100));
             context.sleep(Duration::from_millis(50)).await;
 
             // The finalized block and its finalization must still be retrievable.

@@ -48,6 +48,7 @@ commonware_macros::stability_scope!(ALPHA {
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Strategy;
     use commonware_utils::Array;
     use rand::SeedableRng as _;
     use rand_chacha::ChaCha20Rng;
@@ -181,7 +182,7 @@ commonware_macros::stability_scope!(BETA {
         /// (`c_1 + d` and `c_2 - d`).
         ///
         /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-        fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool;
+        fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests

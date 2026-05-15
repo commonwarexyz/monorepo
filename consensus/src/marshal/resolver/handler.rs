@@ -1,17 +1,16 @@
 use crate::types::{Height, Round};
 use bytes::{Buf, BufMut, Bytes};
+use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer, Subscribers};
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    Span,
-};
+use commonware_utils::{channel::oneshot, Span};
 use std::{
+    collections::VecDeque,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    sync::mpsc::TryRecvError,
 };
-use tracing::error;
 
 /// The subject of a backfill request.
 const BLOCK_REQUEST: u8 = 0;
@@ -20,7 +19,7 @@ const NOTARIZED_REQUEST: u8 = 2;
 
 /// Messages sent from the resolver's [Consumer]/[Producer] implementation
 /// to the marshal actor.
-pub enum Message<D: Digest> {
+pub(crate) enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
         /// The subscribers attached to the resolved value.
@@ -39,19 +38,90 @@ pub enum Message<D: Digest> {
     },
 }
 
+impl<D: Digest> Message<D> {
+    /// Returns true if the requester has stopped waiting for this response.
+    pub(crate) fn response_closed(&self) -> bool {
+        match self {
+            Self::Deliver { response, .. } => response.is_closed(),
+            Self::Produce { response, .. } => response.is_closed(),
+        }
+    }
+}
+
+/// Pending resolver handler messages retained after the mailbox fills.
+pub(crate) struct Pending<D: Digest>(VecDeque<Message<D>>);
+
+impl<D: Digest> Default for Pending<D> {
+    fn default() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+impl<D: Digest> Overflow<Message<D>> for Pending<D> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(Message<D>) -> Option<Message<D>>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.response_closed() {
+                continue;
+            }
+
+            if let Some(message) = push(message) {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
+impl<D: Digest> Policy for Message<D> {
+    type Overflow = Pending<D>;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        if message.response_closed() {
+            return;
+        }
+        overflow.0.push_back(message);
+    }
+}
+
 /// A handler that forwards requests from the resolver to the marshal actor.
 ///
 /// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
-pub struct Handler<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+pub(crate) struct Handler<D: Digest> {
+    sender: Sender<Message<D>>,
 }
 
 impl<D: Digest> Handler<D> {
     /// Creates a new handler.
-    pub const fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+    pub(crate) const fn new(sender: Sender<Message<D>>) -> Self {
         Self { sender }
+    }
+}
+
+/// Receiver for resolver handler messages.
+pub struct Receiver<D: Digest> {
+    inner: mailbox::Receiver<Message<D>>,
+}
+
+impl<D: Digest> Receiver<D> {
+    pub(crate) const fn new(inner: mailbox::Receiver<Message<D>>) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<Message<D>> {
+        self.inner.recv().await
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<Message<D>, TryRecvError> {
+        self.inner.try_recv()
     }
 }
 
@@ -60,42 +130,27 @@ impl<D: Digest> Consumer for Handler<D> {
     type Subscriber = ResolverSubscriber<D>;
     type Value = Bytes;
 
-    async fn deliver(
+    fn deliver(
         &mut self,
         subscribers: Subscribers<Self::Key, Self::Subscriber>,
         value: Self::Value,
-    ) -> bool {
+    ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Deliver {
-                subscribers,
-                value,
-                response,
-            })
-            .await
-            .is_err()
-        {
-            error!("failed to send deliver message to actor: receiver dropped");
-            return false;
-        }
-        receiver.await.unwrap_or(false)
+        let _ = self.sender.enqueue(Message::Deliver {
+            subscribers,
+            value,
+            response,
+        });
+        receiver
     }
 }
 
 impl<D: Digest> Producer for Handler<D> {
     type Key = Request<D>;
 
-    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(Message::Produce { key, response })
-            .await
-            .is_err()
-        {
-            error!("failed to send produce message to actor: receiver dropped");
-        }
+        let _ = self.sender.enqueue(Message::Produce { key, response });
         receiver
     }
 }
@@ -414,6 +469,49 @@ mod tests {
 
     const fn block(digest: D) -> Request<D> {
         Request::Block { commitment: digest }
+    }
+
+    #[test]
+    fn handler_drain_skips_closed_responses() {
+        let mut overflow = Pending::<D>::default();
+
+        let (closed_response, closed_receiver) = oneshot::channel();
+        Message::handle(
+            &mut overflow,
+            Message::Produce {
+                key: Request::Finalized {
+                    height: Height::new(1),
+                },
+                response: closed_response,
+            },
+        );
+        drop(closed_receiver);
+
+        let (open_response, _open_receiver) = oneshot::channel();
+        Message::handle(
+            &mut overflow,
+            Message::Produce {
+                key: Request::Finalized {
+                    height: Height::new(2),
+                },
+                response: open_response,
+            },
+        );
+
+        let mut messages = Vec::new();
+        Overflow::drain(&mut overflow, |message| {
+            messages.push(message);
+            None
+        });
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages.pop(),
+            Some(Message::Produce {
+                key: Request::Finalized { height },
+                ..
+            }) if height == Height::new(2)
+        ));
     }
 
     #[test]

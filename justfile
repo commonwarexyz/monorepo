@@ -62,7 +62,7 @@ test *args='':
 
 # Run loom tests
 test-loom *args='':
-    cargo nextest run --release --features loom --lib {{ args }} ::loom_tests::
+    cargo nextest run --release --features loom --lib {{ args }} loom_tests
 
 # Test the Rust documentation
 test-docs *args='--all':
@@ -75,6 +75,11 @@ check-docs *args='':
 # Check publish workflow ordering against workspace dependencies
 check-publish-order:
     python3 .github/scripts/check_publish_order.py
+
+# Check that locked dependencies are at least 7 days old
+cooldown:
+    cargo cooldown --workspace --all-features check
+    git diff --exit-code Cargo.lock
 
 # Run custom Dylint lints
 dylint:

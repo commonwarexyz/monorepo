@@ -17,6 +17,7 @@ use crate::{
             operation::{update, Operation},
             ValueEncoding,
         },
+        batch_chain::Bounds,
         bitmap::Shared,
         current::{
             db::{compute_db_root, compute_grafted_leaves},
@@ -30,7 +31,7 @@ use crate::{
 use ahash::AHasher;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -123,7 +124,7 @@ impl<const N: usize> ChunkOverlay<N> {
 ///
 /// False positives can arise two ways:
 /// - In the committed prefix, an uncommitted ancestor batch in the chain may have superseded
-///   the location — the committed bitmap doesn't reflect uncommitted shadows.
+///   the location -- the committed bitmap doesn't reflect uncommitted shadows.
 /// - Beyond the committed bitmap, locations are returned as sequential candidates (one per
 ///   index) without per-location filtering, so any inactive uncommitted op shows up here.
 pub(crate) fn next_candidate<F: Graftable, B: bitmap::Readable<N>, const N: usize>(
@@ -203,7 +204,7 @@ impl<
 ///
 /// [`GenericMerkleizedBatch::get_node`] only covers the batch chain; committed positions
 /// return `None`. This adapter falls through to the committed Mem for those positions.
-struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy = Sequential> {
+struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy> {
     batch: &'a GenericMerkleizedBatch<F, D, S>,
     mem: &'a Mem<F, D>,
 }
@@ -234,7 +235,7 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
 ///
 /// Wraps a [`any::batch::UnmerkleizedBatch`] and adds bitmap and grafted MMR parent state
 /// needed to compute the current layer during [`merkleize`](Self::merkleize).
-pub struct UnmerkleizedBatch<F, H, U, const N: usize, S: Strategy = Sequential>
+pub struct UnmerkleizedBatch<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
     U: update::Update + Send + Sync,
@@ -293,7 +294,7 @@ pub struct MerkleizedBatch<
     D: Digest,
     U: update::Update + Send + Sync,
     const N: usize,
-    S: Strategy = Sequential,
+    S: Strategy,
 > where
     Operation<F, U>: Send + Sync,
 {
@@ -557,7 +558,7 @@ where
     Operation<F, U>: Codec,
 {
     let batch_len = inner.journal_batch.items().len();
-    let batch_base = *inner.new_last_commit_loc + 1 - batch_len as u64;
+    let batch_base = inner.bounds.total_size - batch_len as u64;
 
     // Build chunk overlay: materialized bytes for every dirty chunk.
     let overlay = build_chunk_overlay::<F, U, _, N>(
@@ -571,36 +572,41 @@ where
     let grafting_height = grafting::height::<N>();
     let ops_tree_adapter =
         BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
-    let base_ops_leaves = Location::<F>::try_from(current_db.any.log.merkle.size())?.as_u64();
 
-    // Recompute grafted leaves for dirty complete chunks. For MMB, the last complete chunk can
-    // still change while delayed merges finalize its grafting-height digest, so we force-refresh
-    // that chunk until its peak birth threshold is reached.
-    let new_grafted_leaves = overlay.complete_chunks();
+    // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
+    // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.
+    let overlay_ops_leaves = Location::<F>::new(inner.bounds.total_size);
+
+    // Distinguish three counters:
+    //   - new_complete_chunks: chunks with all bits filled in the post-batch bitmap
+    //   - graftable_overlay:      chunks committed by the grafted tree (have a single h=G ancestor)
+    //   - graftable_parent:       grafted-tree leaf count from the parent (structural source of truth)
+    //
+    // The pending chunk (if any) sits at index `graftable_overlay` and is excluded from the
+    // grafted tree; its digest is hashed directly into the canonical root.
+    let new_complete_chunks = overlay.complete_chunks();
+    let graftable_overlay = grafting::graftable_chunks::<F>(*overlay_ops_leaves, grafting_height)
+        .min(new_complete_chunks as u64) as usize;
+    let graftable_parent = *grafted_parent.leaves() as usize;
+    let pruned_chunks = bitmap_parent.pruned_chunks();
+    assert!(
+        pruned_chunks <= graftable_parent && graftable_parent <= graftable_overlay && graftable_overlay <= new_complete_chunks,
+        "invariant violated: pruned={pruned_chunks} graftable_parent={graftable_parent} graftable_overlay={graftable_overlay} new_complete={new_complete_chunks}"
+    );
+
+    // Build the set of chunk indices whose grafted-leaf needs (re)computing:
+    //   1) Dirty chunks (bits changed in this batch) within the graftable range.
+    //   2) Pending -> graftable transitions: chunks newly graftable because the ops tree built
+    //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
+    //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
     let mut chunk_indices_to_update: BTreeSet<usize> = overlay
         .chunks
         .iter()
-        .filter(|(&idx, _)| idx < new_grafted_leaves)
+        .filter(|(&idx, _)| idx < graftable_overlay && idx >= pruned_chunks)
         .map(|(&idx, _)| idx)
         .collect();
-    // Both are chunk indices (not bit positions); cast to u64 only for the shift arithmetic.
-    let pruned_chunks = bitmap_parent.pruned_chunks();
-    if new_grafted_leaves > 0 {
-        let last_complete_chunk = new_grafted_leaves - 1;
-        let chunk_start = (last_complete_chunk as u64)
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk start overflow"))?;
-        let chunk_end = ((last_complete_chunk + 1) as u64)
-            .checked_shl(grafting_height)
-            .ok_or(Error::DataCorrupted("chunk end overflow"))?;
-        let chunk_pos = F::subtree_root_position(Location::<F>::new(chunk_start), grafting_height);
-        let stable_after = F::peak_birth_size(chunk_pos, grafting_height);
-        if stable_after > chunk_end
-            && last_complete_chunk >= pruned_chunks // skip already-pruned chunks
-            && base_ops_leaves < stable_after
-        {
-            chunk_indices_to_update.insert(last_complete_chunk);
-        }
+    for idx in graftable_parent..graftable_overlay {
+        chunk_indices_to_update.insert(idx);
     }
     let chunks_to_update = chunk_indices_to_update.into_iter().map(|idx| {
         let chunk = overlay
@@ -654,13 +660,17 @@ where
     };
     let grafted_storage =
         grafting::Storage::new(&layered, grafting_height, &ops_tree_adapter, hasher.clone());
-    // Compute partial chunk (last incomplete chunk, if any).
+    // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
+    // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
+    // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
+    // coexist; this branch only handles partial. The pending chunk (when present) is read
+    // from the bitmap inside `compute_db_root` via `pending_chunk()`.
     let partial = {
         let rem = bitmap_batch.len() % BitmapBatch::<N>::CHUNK_SIZE_BITS;
         if rem == 0 {
             None
         } else {
-            let idx = new_grafted_leaves;
+            let idx = new_complete_chunks;
             let chunk = bitmap_batch.get_chunk(idx);
             Some((chunk, rem))
         }
@@ -669,8 +679,9 @@ where
         &hasher,
         &bitmap_batch,
         &grafted_storage,
+        overlay_ops_leaves,
         partial,
-        inner.new_inactivity_floor_loc,
+        inner.bounds.inactivity_floor,
         &ops_root,
     )
     .await?;
@@ -807,6 +818,11 @@ where
     /// Return the QMDB ops-only root.
     pub fn ops_root(&self) -> D {
         self.inner.root()
+    }
+
+    /// Return the [`Bounds`] of the batch.
+    pub fn bounds(&self) -> &Bounds<F> {
+        self.inner.bounds()
     }
 }
 
@@ -1351,7 +1367,7 @@ mod tests {
         lens
     }
 
-    /// Input is already a bare `Base` with no speculative layers on top — the loop body never
+    /// Input is already a bare `Base` with no speculative layers on top -- the loop body never
     /// runs, `kept` stays empty, and the result is a freshly constructed `Base` pointing at the
     /// same `Shared`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose
     /// chain was previously trimmed flat (e.g., immediately after an apply collapsed everything).
@@ -1367,7 +1383,7 @@ mod tests {
         }
     }
 
-    /// Every layer has been absorbed by prior applies — the loop breaks on the first iteration
+    /// Every layer has been absorbed by prior applies -- the loop breaks on the first iteration
     /// and `kept` stays empty, so the result is a bare `Base`. This is the steady-state
     /// "extend a just-applied batch" flow: after `apply_batch(A)`, `A`'s own layer has
     /// `overlay.len == committed` and the next `new_batch` call should start from a clean
@@ -1385,7 +1401,7 @@ mod tests {
         }
     }
 
-    /// Every layer is still speculative — the loop walks all the way to `Base` without
+    /// Every layer is still speculative -- the loop walks all the way to `Base` without
     /// breaking, and `kept` holds every overlay. The rebuilt chain is structurally equivalent
     /// to the input (same overlay lens, same shared terminal). Real-world trigger: speculating
     /// multiple batches deep (A, then B off A, then C off B) without `apply_batch` in between.
@@ -1399,7 +1415,7 @@ mod tests {
         assert_eq!(chain_overlays(&result), vec![64, 96]);
     }
 
-    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix — the
+    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix -- the
     /// dominant pattern in chained growth. The loop collects the one uncommitted overlay, and
     /// the rebuild produces `Layer(Base, overlay_B)`. Also verifies the rebuilt layer carries
     /// the cached `shared` reference correctly. Real-world trigger: apply parent A, then B
@@ -1416,7 +1432,7 @@ mod tests {
         assert!(Arc::ptr_eq(result.shared(), &shared));
     }
 
-    /// Two or more uncommitted layers on top of a committed prefix — exercises the loop's
+    /// Two or more uncommitted layers on top of a committed prefix -- exercises the loop's
     /// iterated `kept.push` and the rebuild's iterated `Arc::new(BitmapBatchLayer)`, including
     /// the cached `shared` wire-through on every reconstructed layer. Real-world trigger:
     /// build A, then B off A, then C off B; apply only A; then call `C.new_batch()`.

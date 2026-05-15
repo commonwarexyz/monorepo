@@ -592,66 +592,6 @@ impl<F: Family, D: Digest> Proof<F, D> {
             )
             .ok_or(ReconstructionError::InvalidProof)
     }
-
-    /// Authenticate the proven range without reconstructing the full generic Merkle root.
-    ///
-    /// This consumes only the sibling digests needed to rebuild the proven range peaks, then returns
-    /// those peak digests in `collected`. It deliberately does not consume peak-bagging witnesses
-    /// such as prefix peaks, after peaks, or backward-fold suffix accumulators.
-    ///
-    /// Current QMDB grafted proofs use this path because their final root is rebuilt by the wrapper
-    /// from the collected range peaks plus grafted prefix/suffix witnesses. Including generic
-    /// peak-bagging witnesses here would create proof bytes that the wrapper root ignores, making
-    /// those bytes malleable.
-    #[cfg(feature = "std")]
-    pub(crate) fn reconstruct_range_collecting<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        collected: &mut Vec<(Position<F>, D)>,
-    ) -> Result<(), ReconstructionError>
-    where
-        H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        if elements.is_empty() {
-            return Err(ReconstructionError::MissingElements);
-        }
-        if !start_loc.is_valid_index() {
-            return Err(ReconstructionError::InvalidStartLoc);
-        }
-        let end_loc = start_loc
-            .checked_add(elements.len() as u64)
-            .ok_or(ReconstructionError::InvalidEndLoc)?;
-        if end_loc > self.leaves {
-            return Err(ReconstructionError::InvalidEndLoc);
-        }
-
-        let range = start_loc..end_loc;
-        let peaks = range_peaks(self.leaves, self.inactive_peaks, &range)
-            .map_err(|_| ReconstructionError::InvalidSize)?;
-
-        let mut sibling_cursor = 0usize;
-        let mut elements_iter = elements.iter();
-        for peak in &peaks {
-            let peak_digest = peak.reconstruct_digest(
-                hasher,
-                &range,
-                &mut elements_iter,
-                &self.digests,
-                &mut sibling_cursor,
-                None,
-            )?;
-            collected.push((peak.pos, peak_digest));
-        }
-
-        if elements_iter.next().is_some() || sibling_cursor != self.digests.len() {
-            return Err(ReconstructionError::ExtraDigests);
-        }
-
-        Ok(())
-    }
 }
 
 /// A perfect binary subtree within a peak, identified by its root position, height,
@@ -679,6 +619,11 @@ impl<F: Family> Subtree<F> {
         self.is_before(range) || self.leaf_start >= range.end
     }
 
+    /// True if this subtree's leaves lie wholly inside `range`.
+    fn is_inside(&self, range: &Range<Location<F>>) -> bool {
+        self.leaf_start >= range.start && self.leaf_end() <= range.end
+    }
+
     fn children(&self) -> (Self, Self) {
         let (left_pos, right_pos) = F::children(self.pos, self.height);
         let child_height = self.height - 1;
@@ -700,11 +645,14 @@ impl<F: Family> Subtree<F> {
     /// Collect sibling positions needed to reconstruct this subtree digest from a range of
     /// elements, in left-first DFS order.
     ///
-    /// At each node: if the subtree is entirely outside the range, its root position is emitted. If
-    /// it's a leaf in the range, nothing is emitted. Otherwise, recurse into children.
+    /// Emits outside subtrees and skips fully covered subtrees.
     fn collect_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Position<F>>) {
         if self.is_outside(range) {
             out.push(self.pos);
+            return;
+        }
+
+        if self.is_inside(range) {
             return;
         }
 
@@ -718,10 +666,7 @@ impl<F: Family> Subtree<F> {
     /// Collect sibling subtrees that lie wholly before the proven range, in the same
     /// left-first DFS order as [`collect_siblings`](Self::collect_siblings).
     ///
-    /// Only `range.start` is consulted: the `range.end` side doesn't matter for prefix
-    /// siblings. Pruning on `range.start` also keeps the traversal O(height) per peak:
-    /// pruning only by `range.end` would recurse into both children whenever a subtree
-    /// sits entirely inside the proven range, costing O(2^height) per such peak.
+    /// Only `range.start` is consulted because the `range.end` side cannot affect prefix siblings.
     fn collect_prefix_siblings(&self, range: &Range<Location<F>>, out: &mut Vec<Self>) {
         if self.is_before(range) {
             out.push(*self);
@@ -844,20 +789,6 @@ impl<F: Family> Subtree<F> {
 /// The returned subtrees are bagging-independent: `Blueprint::new`'s prefix/suffix accumulator
 /// layout depends on bagging, but the per-peak partition of the proven range does not.
 ///
-/// # Errors
-///
-/// See [`Blueprint::new`].
-#[cfg(feature = "std")]
-pub(crate) fn range_peaks<F: Family>(
-    leaves: Location<F>,
-    inactive_peaks: usize,
-    range: &Range<Location<F>>,
-) -> Result<Vec<Subtree<F>>, super::Error<F>> {
-    // Bagging only affects `Blueprint`'s prefix/suffix bucketing; `range_peaks` is independent.
-    Blueprint::new(leaves, inactive_peaks, Bagging::ForwardFold, range.clone())
-        .map(|bp| bp.range_peaks)
-}
-
 /// Blueprint for a range proof, separating fold-prefix peaks from nodes that must be fetched.
 pub(crate) struct Blueprint<F: Family> {
     /// Total number of leaves in the structure this blueprint was built for.
@@ -1144,55 +1075,6 @@ where
         get_node,
         element_pruned,
     )
-}
-
-/// Return the node positions needed by [`build_range_collection_proof`].
-#[cfg(feature = "std")]
-pub(crate) fn range_collection_nodes<F: Family>(
-    leaves: Location<F>,
-    inactive_peaks: usize,
-    range: Range<Location<F>>,
-) -> Result<Vec<Position<F>>, super::Error<F>> {
-    let peaks = range_peaks(leaves, inactive_peaks, &range)?;
-    let mut fetch_nodes = Vec::new();
-    for peak in &peaks {
-        peak.collect_siblings(&range, &mut fetch_nodes);
-    }
-    Ok(fetch_nodes)
-}
-
-/// Build a proof containing only the sibling digests needed to authenticate the requested range.
-///
-/// `fetch_nodes` must be the slice returned by [`range_collection_nodes`] for the same `leaves` and
-/// `inactive_peaks`; the caller passes it in so the Blueprint traversal isn't repeated when the
-/// positions are already known (e.g., to drive concurrent fetching).
-///
-/// The resulting proof cannot reconstruct a complete generic Merkle root on its own. It is intended
-/// for wrappers that rebuild a custom root from separately supplied peak witnesses, such as current
-/// QMDB grafted proofs.
-#[cfg(feature = "std")]
-pub(crate) fn build_range_collection_proof<F, D, E>(
-    leaves: Location<F>,
-    inactive_peaks: usize,
-    fetch_nodes: &[Position<F>],
-    get_node: impl Fn(Position<F>) -> Option<D>,
-    element_pruned: impl Fn(Position<F>) -> E,
-) -> Result<Proof<F, D>, E>
-where
-    F: Family,
-    D: Digest,
-    E: From<super::Error<F>>,
-{
-    let mut digests = Vec::with_capacity(fetch_nodes.len());
-    for &pos in fetch_nodes {
-        digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
-    }
-
-    Ok(Proof {
-        leaves,
-        inactive_peaks,
-        digests,
-    })
 }
 
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
@@ -2568,6 +2450,22 @@ mod tests {
         }
     }
 
+    fn full_peak_range_blueprint_does_not_descend<F: Family>() {
+        let leaves = Location::new(1u64 << 40);
+        let range = Location::new(0)..leaves;
+
+        let bp = Blueprint::<F>::new(leaves, 0, Bagging::ForwardFold, range).unwrap();
+
+        assert!(
+            bp.range_peaks.iter().any(|peak| peak.height >= 39),
+            "test must include a large fully covered peak"
+        );
+        assert!(
+            bp.fetch_nodes.is_empty(),
+            "full-range proofs should not fetch per-peak siblings"
+        );
+    }
+
     /// `verify_proof_and_pinned_nodes` must accept pinned nodes at
     /// `F::nodes_to_pin(start_loc)` positions for any `(leaves, start_loc)` pair.
     ///
@@ -2715,6 +2613,10 @@ mod tests {
         no_duplicate_positions::<mmr::Family>();
     }
     #[test]
+    fn mmr_full_peak_range_blueprint_does_not_descend() {
+        full_peak_range_blueprint_does_not_descend::<mmr::Family>();
+    }
+    #[test]
     fn mmr_verify_proof_and_pinned_nodes_across_sizes() {
         verify_proof_and_pinned_nodes_across_sizes::<mmr::Family>();
     }
@@ -2814,6 +2716,10 @@ mod tests {
     #[test]
     fn mmb_no_duplicate_positions() {
         no_duplicate_positions::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_full_peak_range_blueprint_does_not_descend() {
+        full_peak_range_blueprint_does_not_descend::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_proof_and_pinned_nodes_across_sizes() {

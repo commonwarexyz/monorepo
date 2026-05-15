@@ -2,7 +2,7 @@ use crate::{
     marshal::{
         coding::{
             shards,
-            types::{CodedBlock, StoredCodedBlock},
+            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
         core::{Buffer, Variant},
     },
@@ -10,6 +10,7 @@ use crate::{
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
+use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
@@ -54,6 +55,16 @@ where
         block.context().parent.1
     }
 
+    fn block_cfg(
+        block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
+        expected: Self::Commitment,
+    ) -> <Self::Block as Read>::Cfg {
+        CodedBlockCfg {
+            inner: block_cfg.clone(),
+            expected,
+        }
+    }
+
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
         block.into_inner()
     }
@@ -79,26 +90,26 @@ where
         self.get(commitment).await
     }
 
-    async fn subscribe_by_digest(
+    fn subscribe_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
     ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
-        self.subscribe_by_digest(digest).await
+        self.subscribe_by_digest(digest)
     }
 
-    async fn subscribe_by_commitment(
+    fn subscribe_by_commitment(
         &self,
         commitment: Commitment,
     ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
-        self.subscribe(commitment).await
+        self.subscribe(commitment)
     }
 
-    async fn finalized(&self, commitment: Commitment) {
-        self.prune(commitment).await;
+    fn finalized(&self, commitment: Commitment) {
+        self.prune(commitment);
     }
 
-    async fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
+    fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
-        self.proposed(round, block).await;
+        self.proposed(round, block);
     }
 }

@@ -81,7 +81,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -100,7 +100,7 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy = Sequential> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle_config: MerkleConfig<S>,
 
@@ -112,10 +112,10 @@ pub struct Config<T: Translator, J, S: Strategy = Sequential> {
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
-pub type FixedConfig<T, S = Sequential> = Config<T, FConfig, S>;
+pub type FixedConfig<T, S> = Config<T, FConfig, S>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-pub type VariableConfig<T, C, S = Sequential> = Config<T, VConfig<C>, S>;
+pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 
 /// Initialize an `Any` authenticated db from the given config.
 pub async fn init<F, E, U, H, T, I, J, S>(
@@ -171,7 +171,8 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    db::Db::init_from_log(index, log, bitmap).await
+    let metrics = db::Metrics::new(context);
+    db::Db::init_from_log(index, log, bitmap, metrics).await
 }
 
 #[cfg(test)]
@@ -212,7 +213,7 @@ pub(crate) mod test {
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> FixedConfig<T> {
+    ) -> FixedConfig<T, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -236,7 +237,7 @@ pub(crate) mod test {
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> VariableConfig<T, ((), ())> {
+    ) -> VariableConfig<T, ((), ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
@@ -280,7 +281,7 @@ pub(crate) mod test {
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
-    impl<E, U, C, I, H> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U>
+    impl<E, U, C, I, H, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
     where
         E: crate::Context,
         U: UpdateTrait,
@@ -288,6 +289,7 @@ pub(crate) mod test {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         AnyOperation<mmr::Family, U>: Codec,
+        S: Strategy,
     {
         async fn rewind_to_size(&mut self, size: Location) -> Result<(), Error> {
             self.rewind(size).await?;
@@ -1090,16 +1092,28 @@ pub(crate) mod test {
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
     use commonware_macros::{test_group, test_traced};
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{deterministic, Runner as _};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
-    type UnorderedFixed = UnorderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedFixed =
+        UnorderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
     type UnorderedVariable =
-        UnorderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedFixed = OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedVariable = OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
-    type UnorderedFixedP1 =
-        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
+        UnorderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
+    type OrderedFixed =
+        OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
+    type OrderedVariable =
+        OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap, Sequential>;
+    type UnorderedFixedP1 = unordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        Sequential,
+    >;
     type UnorderedVariableP1 = unordered::variable::partitioned::Db<
         mmr::Family,
         Context,
@@ -1108,13 +1122,38 @@ pub(crate) mod test {
         Sha256,
         OneCap,
         1,
+        Sequential,
     >;
-    type OrderedFixedP1 =
-        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
-    type OrderedVariableP1 =
-        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
-    type UnorderedFixedP2 =
-        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
+    type OrderedFixedP1 = ordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        Sequential,
+    >;
+    type OrderedVariableP1 = ordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+        Sequential,
+    >;
+    type UnorderedFixedP2 = unordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        Sequential,
+    >;
     type UnorderedVariableP2 = unordered::variable::partitioned::Db<
         mmr::Family,
         Context,
@@ -1123,11 +1162,28 @@ pub(crate) mod test {
         Sha256,
         OneCap,
         2,
+        Sequential,
     >;
-    type OrderedFixedP2 =
-        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
-    type OrderedVariableP2 =
-        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
+    type OrderedFixedP2 = ordered::fixed::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        Sequential,
+    >;
+    type OrderedVariableP2 = ordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+        Sequential,
+    >;
 
     // MMB type aliases for with_all_variants.
     mod mmb_types {
@@ -1154,6 +1210,8 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, FixedEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
 
         pub type MmbUnorderedVariable = super::super::db::Db<
@@ -1166,6 +1224,8 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, VariableEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
 
         pub type MmbOrderedFixed = super::super::db::Db<
@@ -1178,6 +1238,8 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, FixedEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
 
         pub type MmbOrderedVariable = super::super::db::Db<
@@ -1190,6 +1252,8 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, VariableEncoding<Digest>>,
+            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+            Sequential,
         >;
     }
     use mmb_types::*;
@@ -1239,13 +1303,16 @@ pub(crate) mod test {
         };
     }
 
-    // Runner macros - each receives common args followed by (label, type, family, config) from with_all_variants.
-    // Uses Box::pin to move futures to the heap and avoid stack overflow.
+    // Runner macros - each receives common args followed by (label, type, family, config)
+    // from with_all_variants. Each variant constructs a fresh `deterministic::Runner` so
+    // the outer state machine of one variant never has to fit alongside the outer state
+    // machines of the others on the test thread stack.
     macro_rules! test_with_reopen {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
+        ($sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
-            Box::pin(async {
-                let ctx = $ctx.child($l);
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let ctx = context.child($l);
                 let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
@@ -1262,125 +1329,97 @@ pub(crate) mod test {
                     to_digest,
                 )
                 .await;
-            })
-            .await
+            });
         }};
     }
 
     macro_rules! test_with_make_value {
-        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
+        ($sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
-            Box::pin(async {
-                let ctx = $ctx.child($l);
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let ctx = context.child($l);
                 let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(ctx, db, to_digest).await;
-            })
-            .await
+            });
         }};
     }
 
     // Macro to run a test on all DB variants (MMR + MMB).
     macro_rules! for_all_variants {
-        ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
-            with_all_variants!(test_with_reopen!($ctx, $sfx, $f));
+        ($sfx:expr, with_reopen: $f:expr) => {{
+            with_all_variants!(test_with_reopen!($sfx, $f));
         }};
-        ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
-            with_all_variants!(test_with_make_value!($ctx, $sfx, $f));
+        ($sfx:expr, with_make_value: $f:expr) => {{
+            with_all_variants!(test_with_make_value!($sfx, $f));
         }};
     }
 
     // Macro to run a test on MMR-only DB variants (for tests that use mmr::Family-specific
     // features like Location::new or verify_proof).
     macro_rules! for_mmr_variants {
-        ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
-            with_mmr_variants!(test_with_reopen!($ctx, $sfx, $f));
+        ($sfx:expr, with_reopen: $f:expr) => {{
+            with_mmr_variants!(test_with_reopen!($sfx, $f));
         }};
-        ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
-            with_mmr_variants!(test_with_make_value!($ctx, $sfx, $f));
+        ($sfx:expr, with_make_value: $f:expr) => {{
+            with_mmr_variants!(test_with_make_value!($sfx, $f));
         }};
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_log_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(context, "lr", with_reopen: test_any_db_log_replay);
-        });
+        for_all_variants!("lr", with_reopen: test_any_db_log_replay);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_build_and_authenticate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "baa", with_reopen: test_any_db_build_and_authenticate);
-        });
+        for_mmr_variants!("baa", with_reopen: test_any_db_build_and_authenticate);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "hpb", with_make_value: test_any_db_historical_proof_basic);
-        });
+        for_mmr_variants!("hpb", with_make_value: test_any_db_historical_proof_basic);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_invalid() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "hpi", with_make_value: test_any_db_historical_proof_invalid);
-        });
+        for_mmr_variants!("hpi", with_make_value: test_any_db_historical_proof_invalid);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_historical_proof_edge_cases() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "hpec", with_make_value: test_any_db_historical_proof_edge_cases);
-        });
+        for_mmr_variants!("hpec", with_make_value: test_any_db_historical_proof_edge_cases);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_multiple_commits_delete_replayed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(context, "mcdr", with_reopen: test_any_db_multiple_commits_delete_replayed);
-        });
+        for_all_variants!("mcdr", with_reopen: test_any_db_multiple_commits_delete_replayed);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_non_empty_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(context, "ner", with_reopen: test_any_db_non_empty_recovery);
-        });
+        for_all_variants!("ner", with_reopen: test_any_db_non_empty_recovery);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_empty_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_all_variants!(context, "er", with_reopen: test_any_db_empty_recovery);
-        });
+        for_all_variants!("er", with_reopen: test_any_db_empty_recovery);
     }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_all_variants_rewind_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            for_mmr_variants!(context, "rr", with_reopen: test_any_db_rewind_recovery);
-        });
+        for_mmr_variants!("rr", with_reopen: test_any_db_rewind_recovery);
     }
 
     fn key(i: u64) -> Digest {
@@ -2377,6 +2416,8 @@ pub(crate) mod test {
         crate::index::unordered::Index<OneCap, crate::merkle::Location<crate::merkle::mmb::Family>>,
         Sha256,
         super::operation::update::Unordered<Digest, super::value::VariableEncoding<Digest>>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+        Sequential,
     >;
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
@@ -2633,7 +2674,9 @@ mod bitmap_tests {
                     .merkleize(&db, None)
                     .await
                     .unwrap();
-                commit_locs.push(batch.new_last_commit_loc);
+                commit_locs.push(Location::<crate::merkle::mmr::Family>::new(
+                    batch.bounds.total_size - 1,
+                ));
                 db.apply_batch(batch).await.unwrap();
             }
             db.commit().await.unwrap();
@@ -2754,7 +2797,7 @@ mod bitmap_tests {
                 .await
                 .unwrap();
             assert!(
-                parent.total_size > committed_bitmap_len,
+                parent.bounds.total_size > committed_bitmap_len,
                 "parent must extend past committed bitmap to exercise the tail path",
             );
 
@@ -2769,7 +2812,7 @@ mod bitmap_tests {
             }
             let child = child_batch.merkleize(&db, None).await.unwrap();
             assert!(
-                child.total_size > committed_bitmap_len,
+                child.bounds.total_size > committed_bitmap_len,
                 "child must include an uncommitted tail beyond committed bitmap",
             );
             let expected_root = child.root();

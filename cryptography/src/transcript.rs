@@ -416,6 +416,7 @@ mod test {
     use super::*;
     use crate::ed25519;
     use commonware_codec::{DecodeExt as _, Encode};
+    use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
 
     #[test]
@@ -547,8 +548,8 @@ mod test {
         let mut transcript_batch = ed25519::Batch::new();
         assert!(transcript.add_to_batch(&mut transcript_batch, &pk, &sig));
 
-        assert!(summary_batch.verify(&mut test_rng()));
-        assert!(transcript_batch.verify(&mut test_rng()));
+        assert!(summary_batch.verify(&mut test_rng(), &Sequential));
+        assert!(transcript_batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]

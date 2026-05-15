@@ -31,7 +31,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::{
     sequence::prefixed_u64::U64,
     sync::{AsyncMutex, RwLock},
@@ -39,7 +39,7 @@ use commonware_utils::{
 use std::sync::Arc;
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
-pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy = Sequential> {
+pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     inner: batch::UnmerkleizedBatch<F, D, S>,
 }
 
@@ -80,7 +80,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// Configuration for a compact Merkle structure.
 #[derive(Clone)]
-pub struct Config<S: Strategy = Sequential> {
+pub struct Config<S: Strategy> {
     /// Metadata partition used to persist the current compact state.
     pub partition: String,
 
@@ -89,7 +89,7 @@ pub struct Config<S: Strategy = Sequential> {
 }
 
 /// A Merkle structure that persists only the state required to continue appending.
-pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy = Sequential> {
+pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     inner: RwLock<Mem<F, D>>,
     metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
     sync_lock: AsyncMutex<()>,
@@ -354,11 +354,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// unexpectedly heavy work. In practice this closure is where callers capture a last-leaf
     /// proof or other small authenticated snapshot that would be impossible to reconstruct once the
     /// tree is pruned back to peaks.
-    pub(crate) async fn sync_with_witness<W: Clone>(
+    pub(crate) async fn sync_with_witness<W, R>(
         &self,
         build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
-        update: impl FnOnce(&mut Metadata<E, U64, Vec<u8>>, u8, W) -> Result<(), Error<F>>,
-    ) -> Result<W, Error<F>> {
+        update: impl FnOnce(&mut Metadata<E, U64, Vec<u8>>, u8, W) -> Result<R, Error<F>>,
+    ) -> Result<R, Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
 
         let current_slot = *self.active_slot.read();
@@ -374,8 +374,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             (leaves, pinned_nodes, witness)
         };
 
-        let cached_witness = witness.clone();
-        {
+        let result = {
             let mut metadata = self.metadata.lock().await;
             let old_target_leaves =
                 Self::read_slot_size(&metadata, target_slot)?.unwrap_or(Location::new(0));
@@ -390,14 +389,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                     digest.to_vec(),
                 );
             }
-            update(&mut metadata, target_slot, witness)?;
+            let result = update(&mut metadata, target_slot, witness)?;
             metadata.put(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot]);
             metadata.sync().await?;
-        }
+            result
+        };
 
         *self.active_slot.write() = target_slot;
         self.inner.write().prune_all();
-        Ok(cached_witness)
+        Ok(result)
     }
 
     /// Restore the state as of the sync before the most recent one.
@@ -487,10 +487,15 @@ mod tests {
         metadata::{Config as MConfig, Metadata},
     };
     use commonware_cryptography::Sha256;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
 
-    type TestMerkle<F> =
-        Merkle<F, deterministic::Context, <Sha256 as commonware_cryptography::Hasher>::Digest>;
+    type TestMerkle<F> = Merkle<
+        F,
+        deterministic::Context,
+        <Sha256 as commonware_cryptography::Hasher>::Digest,
+        Sequential,
+    >;
 
     async fn open<F: Family>(context: deterministic::Context, partition: &str) -> TestMerkle<F> {
         TestMerkle::<F>::init(
@@ -670,7 +675,7 @@ mod tests {
             drop(merkle);
 
             let reopened: TestMerkle<mmr::Family> =
-                Merkle::<mmr::Family, _, _>::init(context.child("second"), cfg)
+                Merkle::<mmr::Family, _, _, Sequential>::init(context.child("second"), cfg)
                     .await
                     .unwrap();
             assert_eq!(reopened.root(&hasher, 0).unwrap(), root_after_first);

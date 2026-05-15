@@ -229,7 +229,7 @@ fn main() {
                 hasher: Sha256::default(),
                 this_network,
                 other_network,
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
             },
         );
 
@@ -244,7 +244,7 @@ fn main() {
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
                 partition: String::from("log"),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch: Epoch::zero(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -254,7 +254,7 @@ fn main() {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
-                fetch_concurrent: 32,
+                fetch_concurrent: NZUsize!(32),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,
