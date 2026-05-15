@@ -223,7 +223,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
         assert!(
             self.sender
                 .enqueue(Message::GetTip(sequencer, sender))
-                .accepted(),
+                .processed(),
             "Failed to send get tip"
         );
         receiver.await.unwrap()
@@ -234,7 +234,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
         assert!(
             self.sender
                 .enqueue(Message::GetContiguousTip(sequencer, sender))
-                .accepted(),
+                .processed(),
             "Failed to send get contiguous tip"
         );
         receiver.await.unwrap()
@@ -245,7 +245,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Mailbox<C, S, D> {
         assert!(
             self.sender
                 .enqueue(Message::Get(sequencer, height, sender))
-                .accepted(),
+                .processed(),
             "Failed to send get"
         );
         receiver.await.unwrap()

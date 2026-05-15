@@ -1,17 +1,17 @@
 use super::{Error, Receiver, Sender};
 use crate::{Address, AddressableTrackedPeers, Channel, PeerSetSubscription, TrackedPeers};
-use commonware_actor::{
-    mailbox::{self, Policy},
-    Feedback,
-};
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
-    channel::{mpsc, oneshot},
+    channel::{
+        fallible::FallibleExt,
+        mpsc, oneshot, ring,
+    },
     ordered::Map,
 };
 use rand_distr::Normal;
-use std::{collections::VecDeque, time::Duration};
+use std::time::Duration;
 
 pub enum Message<P: PublicKey, E: Clock> {
     Register {
@@ -31,6 +31,10 @@ pub enum Message<P: PublicKey, E: Clock> {
     },
     Subscribe {
         response: oneshot::Sender<PeerSetSubscription<P>>,
+    },
+    SubscribePeers {
+        exclude: P,
+        sender: ring::Sender<Vec<P>>,
     },
     LimitBandwidth {
         public_key: P,
@@ -74,6 +78,10 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .field("id", id)
                 .finish_non_exhaustive(),
             Self::Subscribe { .. } => f.debug_struct("Subscribe").finish_non_exhaustive(),
+            Self::SubscribePeers { exclude, .. } => f
+                .debug_struct("SubscribePeers")
+                .field("exclude", exclude)
+                .finish_non_exhaustive(),
             Self::LimitBandwidth { .. } => f.debug_struct("LimitBandwidth").finish_non_exhaustive(),
             Self::AddLink { .. } => f.debug_struct("AddLink").finish_non_exhaustive(),
             Self::RemoveLink { .. } => f.debug_struct("RemoveLink").finish_non_exhaustive(),
@@ -87,31 +95,25 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> Policy for Message<P, E> {
-    type Overflow = VecDeque<Self>;
-
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.push_back(message);
+fn enqueue<P: PublicKey, E: Clock>(
+    sender: &mpsc::UnboundedSender<Message<P, E>>,
+    message: Message<P, E>,
+) -> Feedback {
+    if sender.send_lossy(message) {
+        Feedback::Ok
+    } else {
+        Feedback::Closed
     }
 }
 
-fn enqueue<P: PublicKey, E: Clock>(
-    sender: &mailbox::Sender<Message<P, E>>,
-    message: Message<P, E>,
-) -> Feedback {
-    sender.enqueue(message)
-}
-
-async fn request<P, E, R, F>(sender: &mailbox::Sender<Message<P, E>>, make_msg: F) -> Option<R>
+async fn request<P, E, R, F>(sender: &mpsc::UnboundedSender<Message<P, E>>, make_msg: F) -> Option<R>
 where
     P: PublicKey,
     E: Clock,
     R: Send,
     F: FnOnce(oneshot::Sender<R>) -> Message<P, E> + Send,
 {
-    let (tx, rx) = oneshot::channel();
-    let _ = sender.enqueue(make_msg(tx));
-    rx.await.ok()
+    sender.request(make_msg).await
 }
 
 /// Describes a connection between two peers.
@@ -136,7 +138,7 @@ pub struct Link {
 /// between said peers can be modified.
 #[derive(Debug)]
 pub struct Oracle<P: PublicKey, E: Clock> {
-    sender: mailbox::Sender<Message<P, E>>,
+    sender: mpsc::UnboundedSender<Message<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
@@ -149,7 +151,7 @@ impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
 
 impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new instance of the oracle.
-    pub(crate) const fn new(sender: mailbox::Sender<Message<P, E>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::UnboundedSender<Message<P, E>>) -> Self {
         Self { sender }
     }
 
@@ -394,7 +396,7 @@ pub struct Control<P: PublicKey, E: Clock> {
     me: P,
 
     /// Sender for messages to the oracle.
-    sender: mailbox::Sender<Message<P, E>>,
+    sender: mpsc::UnboundedSender<Message<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Control<P, E> {

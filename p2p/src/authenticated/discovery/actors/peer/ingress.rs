@@ -35,16 +35,16 @@ impl<C: PublicKey> Mailbox<C> {
         (Self(sender), receiver)
     }
 
-    pub fn bit_vec(&self, bit_vec: types::BitVec) -> bool {
-        self.0.enqueue(Message::BitVec(bit_vec)).accepted()
+    pub fn bit_vec(&self, bit_vec: types::BitVec) {
+        let _ = self.0.enqueue(Message::BitVec(bit_vec));
     }
 
-    pub fn peers(&self, peers: Vec<types::Info<C>>) -> bool {
-        self.0.enqueue(Message::Peers(peers)).accepted()
+    pub fn peers(&self, peers: Vec<types::Info<C>>) {
+        let _ = self.0.enqueue(Message::Peers(peers));
     }
 
-    pub fn kill(&self) -> bool {
-        self.0.enqueue(Message::Kill).accepted()
+    pub fn kill(&self) {
+        let _ = self.0.enqueue(Message::Kill);
     }
 }
 

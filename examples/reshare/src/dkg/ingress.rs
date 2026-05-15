@@ -88,7 +88,7 @@ where
             .enqueue(Message::Act {
                 response: response_tx,
             })
-            .accepted()
+            .processed()
         {
             error!("failed to send act message");
             return None;

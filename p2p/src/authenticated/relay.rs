@@ -5,7 +5,13 @@ use commonware_actor::{
 use commonware_macros::select;
 use std::{collections::VecDeque, num::NonZeroUsize};
 
-pub(crate) struct Message<T>(pub(crate) T);
+pub(crate) struct Message<T>(T);
+
+impl<T> Message<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
 
 impl<T> Policy for Message<T> {
     type Overflow = VecDeque<Self>;
@@ -64,9 +70,14 @@ pub async fn recv_prioritized<C: Policy, D>(
 ) -> Prioritized<C, D> {
     select! {
         msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
-        msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.0)),
-        msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.0)),
+        msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+        msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
     }
+}
+
+/// Attempts to receive one data message from a relay receiver.
+pub(crate) fn try_recv_data<T>(receiver: &mut mailbox::Receiver<Message<T>>) -> Option<T> {
+    receiver.try_recv().ok().map(Message::into_inner)
 }
 
 #[cfg(test)]
@@ -80,7 +91,7 @@ mod tests {
 
         let data = 123;
         assert_eq!(relay.send(data, true), Feedback::Ok);
-        match receivers.high.try_recv().map(|msg| msg.0) {
+        match receivers.high.try_recv().map(Message::into_inner) {
             Ok(received_data) => {
                 assert_eq!(data, received_data);
             }
@@ -90,7 +101,7 @@ mod tests {
 
         let data = 456;
         assert_eq!(relay.send(data, false), Feedback::Ok);
-        match receivers.low.try_recv().map(|msg| msg.0) {
+        match receivers.low.try_recv().map(Message::into_inner) {
             Ok(received_data) => {
                 assert_eq!(data, received_data);
             }
@@ -105,7 +116,7 @@ mod tests {
 
         assert_eq!(relay.send(1, false), Feedback::Ok);
         assert_eq!(relay.send(2, false), Feedback::Backoff);
-        assert_eq!(receivers.low.try_recv().map(|msg| msg.0), Ok(1));
+        assert_eq!(receivers.low.try_recv().map(Message::into_inner), Ok(1));
         assert!(receivers.low.try_recv().is_err());
     }
 }

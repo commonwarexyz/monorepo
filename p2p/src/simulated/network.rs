@@ -61,26 +61,6 @@ impl<P: PublicKey> Policy for TaskMessage<P> {
     fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
 }
 
-enum Message<P: PublicKey> {
-    Subscribe {
-        exclude: P,
-        sender: ring::Sender<Vec<P>>,
-    },
-}
-
-impl<P: PublicKey> Policy for Message<P> {
-    type Overflow = VecDeque<Self>;
-
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.push_back(message);
-    }
-}
-
-struct ConnectedPeers<P: PublicKey> {
-    sender: mailbox::Sender<Message<P>>,
-    receiver: mailbox::Receiver<Message<P>>,
-}
-
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
@@ -165,11 +145,11 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Incremented for each new peer
     next_addr: SocketAddr,
 
-    // Channel to receive messages from the oracle
-    ingress: mailbox::Receiver<ingress::Message<P, E>>,
+    // Channel to receive messages from the oracle and peer sources.
+    ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
 
-    // Mailbox for peer list subscriptions used by rate-limited senders.
-    connected: ConnectedPeers<P>,
+    // Sender for peer sources to subscribe through the main ingress path.
+    ingress_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
 
     // A channel to receive tasks from peers
     // The sender is cloned and given to each peer
@@ -216,9 +196,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let (oracle_mailbox, oracle_receiver) =
-            mailbox::new::<ingress::Message<P, E>>(NZUsize!(1024));
-        let (connected_sender, connected_receiver) = mailbox::new::<Message<P>>(NZUsize!(1));
+        let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
 
@@ -233,10 +211,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 next_addr,
                 ingress: oracle_receiver,
-                connected: ConnectedPeers {
-                    sender: connected_sender,
-                    receiver: connected_receiver,
-                },
+                ingress_sender: oracle_mailbox.clone(),
                 sender,
                 receiver,
                 links: HashMap::new(),
@@ -473,7 +448,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     channel,
                     self.max_size,
                     self.sender.clone(),
-                    self.connected.sender.clone(),
+                    self.ingress_sender.clone(),
                     self.connected_peers_for(&public_key),
                     clock,
                     quota,
@@ -486,7 +461,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     Err(err) => return send_result(result, Err(err)),
                 };
 
-                self.drain_connected();
                 send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::PeerSet { id, response } => {
@@ -508,6 +482,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Return the receiver to the caller
                 let _ = response.send(receiver);
+            }
+            ingress::Message::SubscribePeers { exclude, sender } => {
+                self.subscribe_connected(exclude, sender);
             }
             ingress::Message::LimitBandwidth {
                 public_key,
@@ -602,24 +579,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    fn handle_connected(&mut self, message: Message<P>) {
-        match message {
-            Message::Subscribe {
-                exclude,
-                mut sender,
-            } => {
-                let peers = self.connected_peers_for(&exclude);
-                if !peers.is_empty() && Pin::new(&mut sender).start_send(peers).is_err() {
-                    return;
-                }
-                self.peer_subscribers.push((exclude, sender));
-            }
-        }
-    }
-
-    fn drain_connected(&mut self) {
-        while let Ok(message) = self.connected.receiver.try_recv() {
-            self.handle_connected(message);
+    fn subscribe_connected(&mut self, exclude: P, mut sender: ring::Sender<Vec<P>>) {
+        let peers = self.connected_peers_for(&exclude);
+        if Pin::new(&mut sender).start_send(peers).is_ok() {
+            self.peer_subscribers.push((exclude, sender));
         }
     }
 
@@ -848,9 +811,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             Some(message) = self.ingress.recv() else break => {
                 self.handle_ingress(message).await;
             },
-            Some(message) = self.connected.receiver.recv() else break => {
-                self.handle_connected(message);
-            },
             Some(task) = self.receiver.recv() else break => {
                 self.handle_task(task);
             },
@@ -863,7 +823,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 /// This is derived from tracked peer sets and is not a liveness signal.
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     me: P,
-    mailbox: mailbox::Sender<Message<P>>,
+    ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
     peers: Vec<P>,
     _clock: std::marker::PhantomData<E>,
 }
@@ -872,7 +832,7 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
     fn clone(&self) -> Self {
         Self {
             me: self.me.clone(),
-            mailbox: self.mailbox.clone(),
+            ingress: self.ingress.clone(),
             peers: self.peers.clone(),
             _clock: std::marker::PhantomData,
         }
@@ -880,10 +840,14 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
-    const fn new(me: P, mailbox: mailbox::Sender<Message<P>>, peers: Vec<P>) -> Self {
+    const fn new(
+        me: P,
+        ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
+        peers: Vec<P>,
+    ) -> Self {
         Self {
             me,
-            mailbox,
+            ingress,
             peers,
             _clock: std::marker::PhantomData,
         }
@@ -899,7 +863,7 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
-        let _ = self.mailbox.enqueue(Message::Subscribe {
+        let _ = self.ingress.send_lossy(ingress::Message::SubscribePeers {
             exclude: self.me.clone(),
             sender,
         });
@@ -915,6 +879,7 @@ pub struct UnlimitedSender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: u32,
+    sender: mpsc::UnboundedSender<Task<P>>,
     high: mailbox::Sender<TaskMessage<P>>,
     low: mailbox::Sender<TaskMessage<P>>,
 }
@@ -934,6 +899,10 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         // Check message size
         if message.len() > self.max_size as usize {
             return Err(Error::MessageTooLarge(message.len()));
+        }
+
+        if self.sender.is_closed() {
+            return Ok(Feedback::Closed);
         }
 
         // Send message
@@ -977,7 +946,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         channel: Channel,
         max_size: u32,
         sender: mpsc::UnboundedSender<Task<P>>,
-        connected: mailbox::Sender<Message<P>>,
+        ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
         connected_peers: Vec<P>,
         clock: E,
         quota: Quota,
@@ -985,6 +954,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         // Listen for messages
         let (high, mut high_receiver) = mailbox::new::<TaskMessage<P>>(NZUsize!(1024));
         let (low, mut low_receiver) = mailbox::new::<TaskMessage<P>>(NZUsize!(1024));
+        let task_sender = sender.clone();
         let processor = context.child("processor").spawn(move |_| async move {
             loop {
                 // Wait for task
@@ -1015,10 +985,11 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             me: me.clone(),
             channel,
             max_size,
+            sender: task_sender,
             high,
             low,
         };
-        let peer_source = ConnectedPeerProvider::new(me, connected, connected_peers);
+        let peer_source = ConnectedPeerProvider::new(me, ingress, connected_peers);
         let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
         (Self { limited_sender }, processor)

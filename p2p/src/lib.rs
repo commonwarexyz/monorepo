@@ -169,8 +169,8 @@ stability_scope!(BETA {
         ///
         /// The recipients retained by the synchronous check, or an error if the
         /// message could not be sent due to a validation failure (e.g., too large).
-        /// Returns an empty list if all recipients are rate-limited or the sender
-        /// has closed.
+        /// Returns an empty list if all recipients are rate-limited, the sender
+        /// has closed, or the submission requested backoff.
         ///
         /// Note: a successful send does not guarantee that the recipient will
         /// receive the message.
@@ -189,8 +189,8 @@ stability_scope!(BETA {
                 Ok(checked_sender) => {
                     let recipients = checked_sender.recipients();
                     match checked_sender.send(message, priority)? {
-                        Feedback::Ok | Feedback::Backoff => Ok(recipients),
-                        Feedback::Closed => Ok(Vec::new()),
+                        Feedback::Ok => Ok(recipients),
+                        Feedback::Backoff | Feedback::Closed => Ok(Vec::new()),
                     }
                 }
                 Err(_) => Ok(Vec::new()),

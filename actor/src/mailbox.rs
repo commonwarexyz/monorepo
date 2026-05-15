@@ -1306,7 +1306,7 @@ mod loom_tests {
             let feedback = sender.enqueue(Message::Spill(0));
             close.join().unwrap();
 
-            if feedback.accepted() {
+            if feedback.processed() {
                 assert!(wakes.load(Ordering::Acquire) > 0);
             } else {
                 assert_eq!(feedback, Feedback::Closed);
@@ -1493,7 +1493,7 @@ mod loom_tests {
             let seen = Arc::new(AtomicUsize::new(0));
             let enqueue = thread::spawn(move || {
                 let feedback = sender.enqueue(Message::Spill(1));
-                assert!(feedback.accepted());
+                assert!(feedback.processed());
             });
 
             let seen_by_receiver = seen.clone();
@@ -1529,8 +1529,8 @@ mod loom_tests {
 
             let seen = Arc::new(AtomicUsize::new(0));
 
-            assert!(enqueue_1.join().unwrap().accepted());
-            assert!(enqueue_2.join().unwrap().accepted());
+            assert!(enqueue_1.join().unwrap().processed());
+            assert!(enqueue_2.join().unwrap().processed());
 
             while let Ok(message) = receiver.try_recv() {
                 record(&seen, message);
@@ -1610,7 +1610,7 @@ mod loom_tests {
             let mut observed = vec![value(receiver.try_recv().unwrap())];
             gate.store(2, Ordering::Release);
             let feedback = sender.enqueue(OrderedMessage::Item(3));
-            assert!(feedback.accepted());
+            assert!(feedback.processed());
 
             overflow.join().unwrap();
             while let Ok(message) = receiver.try_recv() {

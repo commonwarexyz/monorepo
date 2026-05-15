@@ -458,7 +458,6 @@ mod tests {
             // Send a truncated payload (1 byte, but u32 needs 4).
             let invalid = IoBuf::from(vec![0xFFu8]);
             let _ = sender1.send(Recipients::One(pk2.clone()), invalid, true);
-
             loop {
                 let blocked = oracle.blocked().await.unwrap();
                 if blocked.contains(&(pk2.clone(), pk1.clone())) {

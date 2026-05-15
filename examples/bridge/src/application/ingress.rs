@@ -63,7 +63,7 @@ impl<D: Digest> Au for Mailbox<D> {
         assert!(
             self.sender
                 .enqueue(Message::Genesis { epoch, response })
-                .accepted(),
+                .processed(),
             "Failed to send genesis"
         );
         receiver.await.expect("Failed to receive genesis")
@@ -82,7 +82,7 @@ impl<D: Digest> Au for Mailbox<D> {
                     round: context.round,
                     response,
                 })
-                .accepted(),
+                .processed(),
             "Failed to send propose"
         );
         receiver
@@ -99,7 +99,7 @@ impl<D: Digest> Au for Mailbox<D> {
         assert!(
             self.sender
                 .enqueue(Message::Verify { payload, response })
-                .accepted(),
+                .processed(),
             "Failed to send verify"
         );
         receiver

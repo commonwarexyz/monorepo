@@ -9,6 +9,10 @@ use crate::{
     },
     PeerSetSubscription, TrackedPeers,
 };
+use crate::utils::{
+    mailbox_enqueue as enqueue, mailbox_request as request, mailbox_request_or as request_or,
+    mailbox_request_or_default as request_or_default,
+};
 use commonware_actor::{
     mailbox::{self, Policy},
     Feedback,
@@ -146,39 +150,6 @@ impl<C: PublicKey> Policy for Message<C> {
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         overflow.push_back(message);
     }
-}
-
-fn enqueue<C: PublicKey>(sender: &mailbox::Sender<Message<C>>, message: Message<C>) -> Feedback {
-    sender.enqueue(message)
-}
-
-async fn request<C, R, F>(sender: &mailbox::Sender<Message<C>>, make_msg: F) -> Option<R>
-where
-    C: PublicKey,
-    R: Send,
-    F: FnOnce(oneshot::Sender<R>) -> Message<C> + Send,
-{
-    let (tx, rx) = oneshot::channel();
-    let _ = sender.enqueue(make_msg(tx));
-    rx.await.ok()
-}
-
-async fn request_or<C, R, F>(sender: &mailbox::Sender<Message<C>>, make_msg: F, default: R) -> R
-where
-    C: PublicKey,
-    R: Send,
-    F: FnOnce(oneshot::Sender<R>) -> Message<C> + Send,
-{
-    request(sender, make_msg).await.unwrap_or(default)
-}
-
-async fn request_or_default<C, R, F>(sender: &mailbox::Sender<Message<C>>, make_msg: F) -> R
-where
-    C: PublicKey,
-    R: Default + Send,
-    F: FnOnce(oneshot::Sender<R>) -> Message<C> + Send,
-{
-    request(sender, make_msg).await.unwrap_or_default()
 }
 
 /// Convenience methods for the tracker mailbox sender.

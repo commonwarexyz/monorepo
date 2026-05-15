@@ -223,6 +223,24 @@ mod tests {
         assert!(manager.peer_set(0).await.is_some());
     }
 
+    async fn wait_for_task_count(
+        context: &deterministic::Context,
+        prefix: &str,
+        expected: impl Fn(usize) -> bool,
+    ) {
+        for _ in 0..1_000 {
+            let count = count_running_tasks(context, prefix);
+            if expected(count) {
+                return;
+            }
+            reschedule().await;
+        }
+        panic!(
+            "task count for {prefix} did not reach expected condition, got {}",
+            count_running_tasks(context, prefix)
+        );
+    }
+
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
         executor.start(|context| async move {
@@ -2798,6 +2816,41 @@ mod tests {
     }
 
     #[test]
+    fn test_connected_subscription_updates_after_track() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(2),
+                },
+            );
+            network.start();
+
+            let pk1 = PrivateKey::from_seed(1).public_key();
+            let pk2 = PrivateKey::from_seed(2).public_key();
+            let (mut sender, _) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            assert!(sender.check(Recipients::All).unwrap().recipients().is_empty());
+
+            let mut manager = oracle.manager();
+            manager.track(1, Set::try_from([pk1, pk2.clone()]).unwrap());
+            assert!(manager.peer_set(1).await.is_some());
+
+            assert_eq!(
+                sender.check(Recipients::All).unwrap().recipients(),
+                vec![pk2]
+            );
+        });
+    }
+
+    #[test]
     fn test_sender_removed_from_peer_set_drops_message() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3267,9 +3320,12 @@ mod tests {
                 .await
                 .unwrap();
 
+            wait_for_task_count(&context, "network", |count| count > 0).await;
+
             // Abort the network
             handle.abort();
-            context.sleep(Duration::from_millis(100)).await;
+            let _ = handle.await;
+            wait_for_task_count(&context, "network", |count| count == 0).await;
 
             // All of these operations should not panic after shutdown
 
@@ -3339,10 +3395,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Allow tasks to start
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Count running tasks under the network prefix
+            // Wait until the network has started at least one task.
+            wait_for_task_count(&context, "network", |count| count > 0).await;
             let running_before = count_running_tasks(&context, "network");
             assert!(
                 running_before > 0,
@@ -3363,10 +3417,8 @@ mod tests {
             handle.abort();
             let _ = handle.await;
 
-            // Give the runtime a tick to process aborts
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Verify all network tasks are stopped
+            // Wait until task shutdown is reflected in the metrics.
+            wait_for_task_count(&context, "network", |count| count == 0).await;
             let running_after = count_running_tasks(&context, "network");
             assert_eq!(
                 running_after, 0,

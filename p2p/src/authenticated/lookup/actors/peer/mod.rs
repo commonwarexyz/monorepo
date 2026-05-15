@@ -19,7 +19,6 @@ pub struct Config<C: PublicKey> {
     pub ping_frequency: std::time::Duration,
     pub sent_messages: CounterFamily<metrics::Message<C>>,
     pub received_messages: CounterFamily<metrics::Message<C>>,
-    pub dropped_messages: CounterFamily<metrics::Message<C>>,
     pub rate_limited: CounterFamily<metrics::Message<C>>,
 }
 

@@ -25,8 +25,8 @@ impl Mailbox {
         (Self(sender), receiver)
     }
 
-    pub fn kill(&self) -> bool {
-        self.0.enqueue(Message::Kill).accepted()
+    pub fn kill(&self) {
+        let _ = self.0.enqueue(Message::Kill);
     }
 }
 

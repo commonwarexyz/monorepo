@@ -35,7 +35,6 @@ pub struct Actor<
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
-    dropped_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
@@ -49,10 +48,6 @@ impl<
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
-        let dropped_messages = context.family(
-            "messages_dropped",
-            "messages dropped due to full application buffer",
-        );
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");
         let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
@@ -65,7 +60,6 @@ impl<
                 receiver,
                 sent_messages,
                 received_messages,
-                dropped_messages,
                 rate_limited,
             },
             sender,
@@ -103,7 +97,6 @@ impl<
                         // Clone required variables
                         let sent_messages = self.sent_messages.clone();
                         let received_messages = self.received_messages.clone();
-                        let dropped_messages = self.dropped_messages.clone();
                         let rate_limited = self.rate_limited.clone();
                         let tracker = tracker.clone();
                         let router = router.clone();
@@ -118,7 +111,6 @@ impl<
                                     ping_frequency: self.ping_frequency,
                                     sent_messages,
                                     received_messages,
-                                    dropped_messages,
                                     rate_limited,
                                     mailbox_size: self.mailbox_size,
                                     send_batch_size: self.send_batch_size,

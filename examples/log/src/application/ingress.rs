@@ -53,7 +53,7 @@ impl<D: Digest> Au for Mailbox<D> {
         assert!(
             self.sender
                 .enqueue(Message::Genesis { epoch, response })
-                .accepted(),
+                .processed(),
             "Failed to send genesis"
         );
         receiver.await.expect("Failed to receive genesis")
@@ -69,7 +69,7 @@ impl<D: Digest> Au for Mailbox<D> {
         assert!(
             self.sender
                 .enqueue(Message::Propose { response })
-                .accepted(),
+                .processed(),
             "Failed to send propose"
         );
         receiver
@@ -86,7 +86,9 @@ impl<D: Digest> Au for Mailbox<D> {
         // the parent included in the payload matches the provided `Context`.
         let (response, receiver) = oneshot::channel();
         assert!(
-            self.sender.enqueue(Message::Verify { response }).accepted(),
+            self.sender
+                .enqueue(Message::Verify { response })
+                .processed(),
             "Failed to send verify"
         );
         receiver
