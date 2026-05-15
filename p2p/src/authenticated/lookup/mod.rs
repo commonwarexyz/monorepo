@@ -688,7 +688,7 @@ mod tests {
             let msg = vec![0u8; 1024]; // 1KB
             loop {
                 // Confirm message is sent to peer
-                let checked = sender0.check(Recipients::One(pk1.clone())).unwrap();
+                let checked = sender0.check(Recipients::All).unwrap();
                 if !checked.recipients().is_empty() {
                     checked.send(msg.clone(), true).unwrap();
                     break;
@@ -1433,26 +1433,25 @@ mod tests {
                     network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network1.start();
 
-                // Wait for peers to connect (may take multiple attempts due to random IP selection)
-                let pk0 = peer0.public_key();
+                // Send until peers connect (may take multiple attempts due to random IP selection).
                 loop {
-                    let sent = sender1
-                        .send(
-                            Recipients::One(pk0.clone()),
-                            peer1.public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .unwrap();
-                    if !sent.is_empty() {
-                        break;
+                    let checked = sender1.check(Recipients::All).unwrap();
+                    if !checked.recipients().is_empty() {
+                        checked
+                            .send(peer1.public_key().as_ref().to_vec(), true)
+                            .unwrap();
                     }
-                    context.sleep(Duration::from_millis(100)).await;
-                }
 
-                // Verify peer 0 received the message
-                let (sender, msg) = receiver0.recv().await.unwrap();
-                assert_eq!(sender, peer1.public_key());
-                assert_eq!(msg, peer1.public_key().as_ref());
+                    select! {
+                        result = receiver0.recv() => {
+                            let (sender, msg) = result.unwrap();
+                            assert_eq!(sender, peer1.public_key());
+                            assert_eq!(msg, peer1.public_key().as_ref());
+                            break;
+                        },
+                        _ = context.sleep(Duration::from_millis(100)) => {}
+                    }
+                }
             });
         }
     }

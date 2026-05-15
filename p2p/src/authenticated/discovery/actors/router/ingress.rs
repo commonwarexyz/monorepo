@@ -76,14 +76,11 @@ impl<P: PublicKey> Mailbox<P> {
     /// Returns `None` if the router has shut down.
     pub async fn ready(&self, peer: P, relay: Relay<EncodedData>) -> Option<Channels<P>> {
         let (channels, receiver) = oneshot::channel();
-        if self.0.enqueue(Message::Ready {
+        let _ = self.0.enqueue(Message::Ready {
             peer,
             relay,
             channels,
-        }) == Feedback::Closed
-        {
-            return None;
-        }
+        });
         receiver.await.ok()
     }
 

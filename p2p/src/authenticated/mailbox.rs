@@ -1,4 +1,5 @@
 use commonware_utils::channel::mpsc;
+use std::num::NonZeroUsize;
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]
@@ -6,8 +7,8 @@ pub struct Mailbox<T>(pub(crate) mpsc::Sender<T>);
 
 impl<T> Mailbox<T> {
     /// Returns a new mailbox with the given sender.
-    pub fn new(size: usize) -> (Self, mpsc::Receiver<T>) {
-        let (sender, receiver) = mpsc::channel(size);
+    pub fn new(size: NonZeroUsize) -> (Self, mpsc::Receiver<T>) {
+        let (sender, receiver) = mpsc::channel(size.get());
         (Self(sender), receiver)
     }
 }

@@ -55,7 +55,7 @@ impl<
             "messages dropped due to full application buffer",
         );
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");
-        let (sender, receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
 
         (
             Self {

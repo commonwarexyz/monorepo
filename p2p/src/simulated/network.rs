@@ -33,7 +33,7 @@ use commonware_utils::{
     NZUsize, TryCollect,
 };
 use either::Either;
-use futures::{future, SinkExt};
+use futures::{future, Sink};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -41,6 +41,7 @@ use std::{
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
+    pin::Pin,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -205,7 +206,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         let (oracle_mailbox, oracle_receiver) =
             mailbox::new::<ingress::Message<P, E>>(NZUsize!(1024));
         let (connected_mailbox, connected_ingress) =
-            mailbox::new::<ConnectedMessage<P>>(NZUsize!(1024));
+            mailbox::new::<ConnectedMessage<P>>(NZUsize!(1));
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
 
@@ -433,7 +434,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
-                self.broadcast_peer_list().await;
+                self.broadcast_peer_list();
             }
             ingress::Message::Register {
                 channel,
@@ -471,7 +472,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     Err(err) => return send_result(result, Err(err)),
                 };
 
-                self.drain_connected().await;
+                self.drain_connected();
                 send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::PeerSet { id, response } => {
@@ -587,14 +588,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    async fn handle_connected(&mut self, message: ConnectedMessage<P>) {
+    fn handle_connected(&mut self, message: ConnectedMessage<P>) {
         match message {
             ConnectedMessage::Subscribe {
                 exclude,
                 mut sender,
             } => {
                 let peers = self.connected_peers_except(&exclude);
-                if !peers.is_empty() && sender.send(peers).await.is_err() {
+                if !peers.is_empty() && Pin::new(&mut sender).start_send(peers).is_err() {
                     return;
                 }
                 self.peer_subscribers.push((exclude, sender));
@@ -602,9 +603,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    async fn drain_connected(&mut self) {
+    fn drain_connected(&mut self) {
         while let Ok(message) = self.connected_ingress.try_recv() {
-            self.handle_connected(message).await;
+            self.handle_connected(message);
         }
     }
 
@@ -615,7 +616,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
-    async fn broadcast_peer_list(&mut self) {
+    fn broadcast_peer_list(&mut self) {
         let peers = self.all_connected_peers();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for (exclude, mut subscriber) in self.peer_subscribers.drain(..) {
@@ -628,7 +629,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             } else {
                 Vec::new()
             };
-            if subscriber.send(peer_list.clone()).await.is_ok() {
+            if Pin::new(&mut subscriber).start_send(peer_list).is_ok() {
                 live_subscribers.push((exclude, subscriber));
             }
         }
@@ -840,7 +841,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.handle_ingress(message).await;
             },
             Some(message) = self.connected_ingress.recv() else break => {
-                self.handle_connected(message).await;
+                self.handle_connected(message);
             },
             Some(task) = self.receiver.recv() else break => {
                 self.handle_task(task);
@@ -856,6 +857,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     me: P,
     mailbox: mailbox::Sender<ConnectedMessage<P>>,
+    peers: Vec<P>,
     _clock: std::marker::PhantomData<E>,
 }
 
@@ -864,16 +866,18 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
         Self {
             me: self.me.clone(),
             mailbox: self.mailbox.clone(),
+            peers: self.peers.clone(),
             _clock: std::marker::PhantomData,
         }
     }
 }
 
 impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
-    const fn new(me: P, mailbox: mailbox::Sender<ConnectedMessage<P>>) -> Self {
+    const fn new(me: P, mailbox: mailbox::Sender<ConnectedMessage<P>>, peers: Vec<P>) -> Self {
         Self {
             me,
             mailbox,
+            peers,
             _clock: std::marker::PhantomData,
         }
     }
@@ -881,6 +885,10 @@ impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
 
 impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
     type PublicKey = P;
+
+    fn peers(&self) -> Vec<Self::PublicKey> {
+        self.peers.clone()
+    }
 
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
         let (sender, receiver) = ring::channel(NZUsize!(1));
@@ -1004,14 +1012,8 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             high,
             low,
         };
-        let peer_source = ConnectedPeerProvider::new(me, connected_mailbox);
-        let limited_sender = LimitedSender::new_with_peers(
-            unlimited_sender,
-            quota,
-            clock,
-            peer_source,
-            connected_peers,
-        );
+        let peer_source = ConnectedPeerProvider::new(me, connected_mailbox, connected_peers);
+        let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
         (Self { limited_sender }, processor)
     }
@@ -2032,15 +2034,11 @@ mod tests {
             let mut expected = Vec::with_capacity(COUNT);
             for i in 0..COUNT {
                 let msg = vec![i as u8; 64];
-                loop {
-                    let checked = sender.check(Recipients::One(recipient_pk.clone())).unwrap();
-                    if checked.recipients().is_empty() {
-                        context.sleep(Duration::from_millis(1)).await;
-                        continue;
-                    }
-                    checked.send(msg.clone(), false).unwrap();
-                    break;
-                }
+                sender
+                    .check(Recipients::One(recipient_pk.clone()))
+                    .unwrap()
+                    .send(msg.clone(), false)
+                    .unwrap();
                 expected.push(msg);
             }
 
@@ -2382,20 +2380,14 @@ mod tests {
                 .unwrap();
 
             let msg_1 = vec![1u8; 8];
-            loop {
-                let checked = sender_1
-                    .check(Recipients::Some(vec![
-                        secondary_0.clone(),
-                        secondary_1.clone(),
-                    ]))
-                    .unwrap();
-                if checked.recipients().is_empty() {
-                    context.sleep(Duration::from_millis(1)).await;
-                    continue;
-                }
-                checked.send(msg_1.clone(), true).unwrap();
-                break;
-            }
+            sender_1
+                .check(Recipients::Some(vec![
+                    secondary_0.clone(),
+                    secondary_1.clone(),
+                ]))
+                .unwrap()
+                .send(msg_1.clone(), true)
+                .unwrap();
             assert_eq!(receiver_0.recv().await.unwrap().1, msg_1.as_slice());
             assert_eq!(receiver_1.recv().await.unwrap().1, msg_1.as_slice());
 
@@ -2420,20 +2412,14 @@ mod tests {
                 .unwrap();
 
             let msg_2 = vec![2u8; 8];
-            loop {
-                let checked = sender_2
-                    .check(Recipients::Some(vec![
-                        secondary_0.clone(),
-                        secondary_1.clone(),
-                    ]))
-                    .unwrap();
-                if checked.recipients().is_empty() {
-                    context.sleep(Duration::from_millis(1)).await;
-                    continue;
-                }
-                checked.send(msg_2.clone(), true).unwrap();
-                break;
-            }
+            sender_2
+                .check(Recipients::Some(vec![
+                    secondary_0.clone(),
+                    secondary_1.clone(),
+                ]))
+                .unwrap()
+                .send(msg_2.clone(), true)
+                .unwrap();
             assert!(receiver_0.recv().now_or_never().is_none());
             assert_eq!(receiver_1.recv().await.unwrap().1, msg_2.as_slice());
         });

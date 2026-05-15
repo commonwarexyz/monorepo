@@ -201,8 +201,6 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
         &mut self,
         subchannel: Channel,
     ) -> Result<(SubSender<S>, SubReceiver<R>), Error> {
-        let _ = self.sender.check(Recipients::Some(Vec::new()));
-
         let (tx, rx) = oneshot::channel();
         self.control_tx
             .send(Control::Register {
@@ -907,11 +905,10 @@ mod tests {
             // messages to another subchannel.
             tx1.send(Recipients::One(pk2.clone()), b"closed", false)
                 .unwrap();
-            let checked = tx2.check(Recipients::One(pk2.clone())).unwrap();
-            assert_eq!(checked.recipients(), vec![pk2.clone()]);
             assert_eq!(
-                checked.with_subchannel(2).send(b"open", false).unwrap(),
-                Feedback::Ok
+                tx2.send(Recipients::One(pk2.clone()), b"open", false)
+                    .unwrap(),
+                vec![pk2.clone()]
             );
 
             // Subchannel 2 should still receive messages.

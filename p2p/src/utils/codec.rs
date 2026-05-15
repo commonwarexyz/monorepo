@@ -278,7 +278,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{deterministic, Clock as _, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{ordered::Set, NZUsize};
@@ -459,19 +459,20 @@ mod tests {
             let invalid = IoBuf::from(vec![0xFFu8]);
             let _ = sender1.send(Recipients::One(pk2.clone()), invalid, true);
 
-            let mut blocked = Vec::new();
-            for _ in 0..100 {
-                blocked = oracle.blocked().await.unwrap();
+            let deadline = context.current() + Duration::from_secs(5);
+            loop {
+                let blocked = oracle.blocked().await.unwrap();
                 if blocked.contains(&(pk2.clone(), pk1.clone())) {
                     break;
                 }
-                context.sleep(Duration::from_millis(1)).await;
+
+                select! {
+                    _ = context.sleep_until(deadline) => {
+                        panic!("expected pk1 to be blocked by pk2, blocked list: {blocked:?}");
+                    },
+                    _ = context.sleep(Duration::from_millis(1)) => {}
+                }
             }
-            assert!(
-                blocked.contains(&(pk2.clone(), pk1.clone())),
-                "expected pk1 to be blocked by pk2, blocked list: {:?}",
-                blocked
-            );
 
             // Then send a valid message from a different peer to confirm
             // the receiver is still running.

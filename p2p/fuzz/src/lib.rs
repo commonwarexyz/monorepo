@@ -379,7 +379,7 @@ impl NetworkScheme for Lookup {
             })
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.track(index, peer_list);
+        oracle.track(index, peer_list);
     }
 }
 

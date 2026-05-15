@@ -51,7 +51,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
         (

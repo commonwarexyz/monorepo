@@ -285,13 +285,6 @@ where
                         continue;
                     }
                 };
-                if checked.recipients().is_empty() {
-                    self.requests_sent.inc(Status::Dropped);
-                    debug!(?peer, "peer unavailable");
-                    self.update_performance(&peer, self.timeout);
-                    continue;
-                }
-
                 // Attempt send
                 let id = self.next_id();
                 let message = wire::Message {

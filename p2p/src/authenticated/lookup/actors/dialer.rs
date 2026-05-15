@@ -257,7 +257,7 @@ mod tests {
 
             // Create a supervisor that just drops spawn messages
             let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -324,7 +324,7 @@ mod tests {
             let (tracker_mailbox, mut tracker_rx) =
                 mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -388,7 +388,7 @@ mod tests {
                 .collect();
 
             let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -451,7 +451,7 @@ mod tests {
             let (tracker_mailbox, mut tracker_rx) =
                 mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
             let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(NZUsize!(100));
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });

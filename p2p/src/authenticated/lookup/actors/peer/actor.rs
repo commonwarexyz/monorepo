@@ -40,7 +40,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
         (
@@ -339,7 +339,7 @@ mod tests {
         Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};
+    use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
         sync::{
@@ -567,7 +567,7 @@ mod tests {
                 send_batch_size: NZUsize!(2),
                 ..default_peer_config(&context)
             };
-            let (peer_actor, peer_mailbox, relay) =
+            let (peer_actor, mut peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
             let mut channels = create_channels(&context);
@@ -611,7 +611,7 @@ mod tests {
             assert_eq!(second.message, IoBuf::from(b"second"));
             assert_eq!(sends.load(Ordering::Relaxed), 1);
 
-            peer_mailbox.0.send_lossy(Message::Kill).await;
+            peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");
             assert!(
                 matches!(result, Err(Error::PeerKilled(_))),

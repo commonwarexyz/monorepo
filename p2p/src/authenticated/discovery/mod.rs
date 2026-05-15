@@ -749,9 +749,7 @@ mod tests {
             let msg = vec![0u8; 1024]; // 1KB
             loop {
                 // Confirm message is sent to peer
-                let checked = sender0
-                    .check(Recipients::One(addresses[1].clone()))
-                    .unwrap();
+                let checked = sender0.check(Recipients::All).unwrap();
                 if !checked.recipients().is_empty() {
                     checked.send(msg.clone(), true).unwrap();
                     break;
@@ -1249,7 +1247,7 @@ mod tests {
             context.sleep(Duration::from_secs(2)).await;
 
             // Verify peer 0 cannot send to peer 1 yet
-            let checked = sender0.check(Recipients::One(peer1.public_key())).unwrap();
+            let checked = sender0.check(Recipients::All).unwrap();
             assert!(
                 checked.recipients().is_empty(),
                 "should not be connected yet"
@@ -1289,29 +1287,25 @@ mod tests {
                     done1.send(()).await.unwrap();
                 });
 
-            // Send messages until both peers connected
-            context.child("sender").spawn({
-                let pk0 = pk0.clone();
-                let pk1 = pk1.clone();
-                move |context| async move {
-                    loop {
-                        let sent0 = sender0
-                            .send(Recipients::One(pk1.clone()), pk0.as_ref().to_vec(), true)
-                            .unwrap();
-                        let sent1 = sender1
-                            .send(Recipients::One(pk0.clone()), pk1.as_ref().to_vec(), true)
-                            .unwrap();
-                        if !sent0.is_empty() && !sent1.is_empty() {
-                            break;
-                        }
-                        context.sleep(Duration::from_millis(100)).await;
-                    }
-                }
-            });
+            let mut received = 0;
+            while received < 2 {
+                let sent0 = sender0
+                    .send(Recipients::One(pk1.clone()), pk0.as_ref().to_vec(), true)
+                    .unwrap();
+                let sent1 = sender1
+                    .send(Recipients::One(pk0.clone()), pk1.as_ref().to_vec(), true)
+                    .unwrap();
+                assert!(!sent0.is_empty());
+                assert!(!sent1.is_empty());
 
-            // Wait for both receivers to get messages
-            done_receiver.recv().await.unwrap();
-            done_receiver.recv().await.unwrap();
+                select! {
+                    done = done_receiver.recv() => {
+                        done.expect("receiver task stopped");
+                        received += 1;
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {}
+                }
+            }
         });
     }
 
@@ -1570,23 +1564,25 @@ mod tests {
                     network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network1.start();
 
-                // Wait for peers to connect (may take multiple attempts due to random IP selection)
-                let pk0 = peer0.public_key();
+                // Send until peers connect (may take multiple attempts due to random IP selection).
                 loop {
-                    let checked = sender1.check(Recipients::One(pk0.clone())).unwrap();
+                    let checked = sender1.check(Recipients::All).unwrap();
                     if !checked.recipients().is_empty() {
                         checked
                             .send(peer1.public_key().as_ref().to_vec(), true)
                             .unwrap();
-                        break;
                     }
-                    context.sleep(Duration::from_millis(100)).await;
-                }
 
-                // Verify peer 0 received the message
-                let (sender, msg) = receiver0.recv().await.unwrap();
-                assert_eq!(sender, peer1.public_key());
-                assert_eq!(msg, peer1.public_key().as_ref());
+                    select! {
+                        result = receiver0.recv() => {
+                            let (sender, msg) = result.unwrap();
+                            assert_eq!(sender, peer1.public_key());
+                            assert_eq!(msg, peer1.public_key().as_ref());
+                            break;
+                        },
+                        _ = context.sleep(Duration::from_millis(100)) => {}
+                    }
+                }
             });
         }
     }
@@ -2427,7 +2423,7 @@ mod tests {
         executor.start(|context| async move {
             // Create router
             let cfg = RouterConfig {
-                mailbox_size: NZUsize!(11),
+                mailbox_size: NZUsize!(1),
             };
             let (router, mailbox, messenger) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
@@ -2464,22 +2460,17 @@ mod tests {
             let message = IoBuf::from(vec![0u8; 100]);
             let mut messenger = messenger;
 
-            // Send 10 messages to fill slow_peer's buffer
-            for i in 0..10 {
+            // Send enough messages to fill slow_peer's buffer and then force
+            // one slow-peer drop. The fast peer should still receive every
+            // broadcast.
+            for i in 0..11 {
                 let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
                 assert_ne!(
                     sent,
                     commonware_actor::Feedback::Closed,
                     "Broadcast {i} should be accepted"
                 );
-            }
 
-            // 11th broadcast: slow_peer's buffer is full, so its message is dropped
-            let sent = messenger.content(Recipients::All, 0, message.into(), false);
-            assert_ne!(sent, commonware_actor::Feedback::Closed);
-
-            // Verify fast_peer received all 11 messages
-            for _ in 0..11 {
                 select! {
                     message = fast_receiver.recv() => {
                         assert!(message.is_some());

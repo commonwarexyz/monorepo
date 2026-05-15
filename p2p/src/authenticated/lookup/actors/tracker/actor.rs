@@ -116,21 +116,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 if self.directory.unblock_expired() {
                     self.listener
                         .0
-                        .send_lossy(self.directory.listenable())
-                        .await;
+                        .try_send_lossy(self.directory.listenable());
                 }
             },
             Some(msg) = self.receiver.recv() else {
                 debug!("mailbox closed, stopping tracker");
                 break;
             } => {
-                self.handle_msg(msg).await;
+                self.handle_msg(msg);
             },
         }
     }
 
     /// Handle a [`Message`].
-    async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
+    fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
                 // Identify peers whose existing connection state should be reset.
@@ -142,15 +141,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // or whose addresses changed.
                 for peer in reset_peers {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
-                        mailbox.kill().await;
+                        mailbox.kill();
                     }
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener
-                    .0
-                    .send_lossy(self.directory.listenable())
-                    .await;
+                self.listener.0.try_send_lossy(self.directory.listenable());
 
                 // Notify all subscribers about the new peer set
                 let update = self
@@ -171,16 +167,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                     // Kill the existing connection since it was established to the old address.
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
-                        peer.kill().await;
+                        peer.kill();
                     }
                 }
 
                 // Send the updated listenable IPs to the listener (if any changes occurred).
                 if any_changed {
-                    self.listener
-                        .0
-                        .send_lossy(self.directory.listenable())
-                        .await;
+                    self.listener.0.try_send_lossy(self.directory.listenable());
                 }
             }
             Message::PeerSet { index, responder } => {
@@ -205,7 +198,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 // Kill if peer is not eligible (not in a peer set)
                 if !self.directory.eligible(&public_key) {
-                    peer.kill().await;
+                    peer.kill();
                     return;
                 }
 
@@ -241,14 +234,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Kill the peer if we're connected to it.
                 if let Some(mut peer) = self.mailboxes.remove(&public_key) {
-                    peer.kill().await;
+                    peer.kill();
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener
-                    .0
-                    .send_lossy(self.directory.listenable())
-                    .await;
+                self.listener.0.try_send_lossy(self.directory.listenable());
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -291,7 +281,7 @@ mod tests {
         crypto: C,
         bypass_ip_check: bool,
     ) -> (Config<C>, mpsc::Receiver<HashSet<IpAddr>>) {
-        let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(1);
+        let (registered_ips_sender, registered_ips_receiver) = Mailbox::new(NZUsize!(1));
         (
             Config {
                 crypto,
@@ -340,7 +330,7 @@ mod tests {
             let TestHarness { mailbox, .. } = setup_actor(context.child("actor"), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_receiver) = Mailbox::new(NZUsize!(1));
 
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox);
@@ -753,7 +743,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(NZUsize!(1));
             mailbox.connect(peer_pk.clone(), peer_mailbox);
 
             // 3) Block it → should see exactly one Kill
@@ -817,7 +807,7 @@ mod tests {
             let reservation = mailbox.listen(pk_1.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(NZUsize!(1));
             mailbox.connect(my_pk.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
@@ -1019,7 +1009,7 @@ mod tests {
             let reservation = mailbox.listen(pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(NZUsize!(1));
             mailbox.connect(pk.clone(), peer_mailbox);
 
             // Update address - should kill the connection
@@ -1057,7 +1047,7 @@ mod tests {
             let reservation = mailbox.listen(pk.clone()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(NZUsize!(1));
             mailbox.connect(pk.clone(), peer_mailbox);
 
             // Register new peer set with same peer at address B
@@ -1109,13 +1099,13 @@ mod tests {
             // Establish connection to pk_tracked
             let reservation = mailbox.listen(pk_tracked.clone()).await;
             assert!(reservation.is_some());
-            let (tracked_mailbox, mut tracked_rx) = Mailbox::new(1);
+            let (tracked_mailbox, mut tracked_rx) = Mailbox::new(NZUsize!(1));
             mailbox.connect(pk_tracked.clone(), tracked_mailbox);
 
             // Establish connection to pk_unchanged
             let reservation = mailbox.listen(pk_unchanged.clone()).await;
             assert!(reservation.is_some());
-            let (unchanged_mailbox, mut unchanged_rx) = Mailbox::new(1);
+            let (unchanged_mailbox, mut unchanged_rx) = Mailbox::new(NZUsize!(1));
             mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);
 
             // Call overwrite with mix of tracked+changed, tracked+unchanged, and unknown peers

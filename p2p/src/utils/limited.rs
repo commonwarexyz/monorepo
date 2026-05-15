@@ -8,12 +8,17 @@ use commonware_utils::{channel::ring, sync::Mutex};
 use futures::{FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
-/// Provides peer subscriptions for resolving [`Recipients::All`] and filtering explicit recipients.
+/// Provides peer subscriptions for resolving [`Recipients::All`].
 ///
 /// Implementations must return immediately. Updates are consumed opportunistically by
 /// [`LimitedSender::check`].
 pub trait Connected: Clone + Send + Sync + 'static {
     type PublicKey: PublicKey;
+
+    /// Return the current peer snapshot.
+    fn peers(&self) -> Vec<Self::PublicKey> {
+        Vec::new()
+    }
 
     /// Subscribe to peer updates.
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>>;
@@ -75,27 +80,7 @@ where
             quota, clock,
         )));
         let peer_subscription = Some(peers.subscribe());
-        Self {
-            sender,
-            rate_limit,
-            peers,
-            peer_subscription,
-            known_peers: Vec::new(),
-        }
-    }
-
-    /// Create a new [`LimitedSender`] with an initial peer snapshot.
-    pub(crate) fn new_with_peers(
-        sender: S,
-        quota: Quota,
-        clock: E,
-        peers: P,
-        known_peers: Vec<S::PublicKey>,
-    ) -> Self {
-        let rate_limit = Arc::new(Mutex::new(KeyedRateLimiter::hashmap_with_clock(
-            quota, clock,
-        )));
-        let peer_subscription = Some(peers.subscribe());
+        let known_peers = peers.peers();
         Self {
             sender,
             rate_limit,
@@ -135,22 +120,12 @@ where
         }
 
         let recipients = match recipients {
-            Recipients::One(peer) => {
-                if !self.known_peers.contains(&peer) {
-                    Recipients::Some(Vec::new())
-                } else {
-                    match rate_limit.check_key(&peer) {
-                        Ok(()) => Recipients::One(peer),
-                        Err(not_until) => return Err(not_until.earliest_possible()),
-                    }
-                }
-            }
+            Recipients::One(peer) => match rate_limit.check_key(&peer) {
+                Ok(()) => Recipients::One(peer),
+                Err(not_until) => return Err(not_until.earliest_possible()),
+            },
             Recipients::Some(peers) => {
-                let connected = peers
-                    .into_iter()
-                    .filter(|peer| self.known_peers.contains(peer))
-                    .collect::<Vec<_>>();
-                let (allowed, max_retry) = filter_rate_limited(connected.iter(), &rate_limit);
+                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &rate_limit);
                 if allowed.is_empty() {
                     match max_retry {
                         Some(retry) => return Err(retry),
@@ -334,9 +309,7 @@ mod tests {
             let (peers, _peer_sender) = MockPeers::new();
             let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
-            let peer = key(1);
-            limited.known_peers = vec![peer.clone()];
-            let checked = limited.check(Recipients::One(peer)).unwrap();
+            let checked = limited.check(Recipients::One(key(1))).unwrap();
             assert_eq!(
                 checked.send(IoBuf::from(b"hello"), false).unwrap(),
                 Feedback::Ok
@@ -352,7 +325,6 @@ mod tests {
             let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
 
             let peer = key(1);
-            limited.known_peers = vec![peer.clone()];
 
             // First check should succeed and consume the quota
             let checked = limited.check(Recipients::One(peer.clone())).unwrap();
@@ -373,7 +345,6 @@ mod tests {
                 LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
 
             let peers_list = vec![key(1), key(2), key(3)];
-            limited.known_peers = peers_list.clone();
             let checked = limited.check(Recipients::Some(peers_list)).unwrap();
             assert_eq!(
                 checked.send(IoBuf::from(b"hello"), false).unwrap(),
@@ -397,7 +368,6 @@ mod tests {
             let peer1 = key(1);
             let peer2 = key(2);
             let peer3 = key(3);
-            limited.known_peers = vec![peer1.clone(), peer2.clone(), peer3.clone()];
 
             // Rate limit peer1 by sending to it first
             let checked = limited.check(Recipients::One(peer1.clone())).unwrap();
@@ -435,7 +405,6 @@ mod tests {
 
             let peer1 = key(1);
             let peer2 = key(2);
-            limited.known_peers = vec![peer1.clone(), peer2.clone()];
 
             // Rate limit both peers
             limited
@@ -590,7 +559,6 @@ mod tests {
                 LimitedSender::new(sender.clone(), quota_per_second(10), context, peers);
 
             let peer = key(1);
-            limited.known_peers = vec![peer.clone()];
             limited
                 .check(Recipients::One(peer))
                 .unwrap()
@@ -612,8 +580,6 @@ mod tests {
             let mut limited2 = limited1.clone();
 
             let peer = key(1);
-            limited1.known_peers = vec![peer.clone()];
-            limited2.known_peers = vec![peer.clone()];
 
             // Rate limit peer via first instance
             limited1

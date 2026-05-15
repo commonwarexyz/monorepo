@@ -19,8 +19,8 @@ use commonware_runtime::{
     BufferPooler, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::channel::ring;
-use futures::SinkExt;
-use std::collections::BTreeMap;
+use futures::Sink;
+use std::{collections::BTreeMap, pin::Pin};
 use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
@@ -128,12 +128,12 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                         debug!(?peer, "peer ready");
                         self.connections.insert(peer, relay);
                         let _ = channels.send(routing.clone());
-                        self.notify_subscribers().await;
+                        self.notify_subscribers();
                     }
                     Message::Release { peer } => {
                         debug!(?peer, "peer released");
                         self.connections.remove(&peer);
-                        self.notify_subscribers().await;
+                        self.notify_subscribers();
                     }
                     Message::Content {
                         recipients,
@@ -144,7 +144,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                     }
                     Message::SubscribePeers { mut sender } => {
                         let peers = self.connections.keys().cloned().collect();
-                        if sender.send(peers).await.is_ok() {
+                        if Pin::new(&mut sender).start_send(peers).is_ok() {
                             self.open_subscriptions.push(sender);
                         }
                     }
@@ -154,12 +154,12 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     }
 
     /// Notifies all open peer subscriptions with the current list of connected peers.
-    async fn notify_subscribers(&mut self) {
+    fn notify_subscribers(&mut self) {
         let peers: Vec<P> = self.connections.keys().cloned().collect();
         let mut keep = Vec::with_capacity(self.open_subscriptions.len());
 
         for mut subscriber in self.open_subscriptions.drain(..) {
-            if subscriber.send(peers.clone()).await.is_ok() {
+            if Pin::new(&mut subscriber).start_send(peers.clone()).is_ok() {
                 keep.push(subscriber);
             }
         }

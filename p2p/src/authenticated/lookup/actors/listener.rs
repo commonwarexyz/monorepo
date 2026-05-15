@@ -339,7 +339,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -499,7 +499,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -580,7 +580,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -669,7 +669,7 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });

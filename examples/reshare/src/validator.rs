@@ -30,6 +30,7 @@ const BROADCASTER_CHANNEL: u64 = 3;
 const MARSHAL_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
 
+const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(10);
 const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
@@ -79,7 +80,7 @@ pub async fn run<S, L>(
             .collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
-    p2p_cfg.mailbox_size = NZUsize!(10);
+    p2p_cfg.mailbox_size = MAILBOX_SIZE;
 
     let (mut network, oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 

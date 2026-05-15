@@ -185,8 +185,8 @@ pub use network::{
 mod tests {
     use super::*;
     use crate::{
-        Address, AddressableManager, AddressableTrackedPeers, Ingress, Manager, Provider, Receiver,
-        Recipients, Sender, TrackedPeers,
+        Address, AddressableManager, AddressableTrackedPeers, CheckedSender as _, Ingress,
+        LimitedSender as _, Manager, Provider, Receiver, Recipients, Sender, TrackedPeers,
     };
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
@@ -2762,50 +2762,33 @@ mod tests {
                 }
             }
 
-            // Send message from pk1 to pk2 (both in the peer set) - should succeed
-            let sent = sender1
-                .send(Recipients::One(pk2.clone()), IoBuf::from(b"msg1"), false)
-                .unwrap();
-            assert_eq!(sent.len(), 1);
-
-            // Try to send from pk1 to pk3 (pk3 not in any peer set) - should fail
-            let sent = sender1
-                .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg2"), false)
-                .unwrap();
-            assert_eq!(sent.len(), 0);
+            // pk1 can broadcast to pk2, but not pk3 while pk3 is untracked.
+            let recipients = sender1.check(Recipients::All).unwrap().recipients();
+            assert_eq!(recipients, vec![pk2.clone()]);
+            assert!(!recipients.contains(&pk3));
 
             // Register second peer set with pk2 and pk3
             manager.track(2, Set::try_from(vec![pk2.clone(), pk3.clone()]).unwrap());
             assert!(manager.peer_set(2).await.is_some());
 
-            // Now pk3 is in a peer set, message should succeed
-            let sent = sender1
-                .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg3"), false)
-                .unwrap();
-            assert_eq!(sent.len(), 1);
+            // Now pk3 is in a peer set and pk1 can broadcast to it.
+            let recipients = sender1.check(Recipients::All).unwrap().recipients();
+            assert!(recipients.contains(&pk3));
 
             // Register third peer set with pk3 and pk4 (this will evict peer set 1)
             manager.track(3, Set::try_from(vec![pk3.clone(), pk4.clone()]).unwrap());
             assert!(manager.peer_set(3).await.is_some());
 
-            // pk1 should now be removed from all peer sets
-            // Try to send from pk2 to pk1 - should fail since pk1 is no longer tracked
-            let sent = sender2
-                .send(Recipients::One(pk1.clone()), IoBuf::from(b"msg4"), false)
-                .unwrap();
-            assert_eq!(sent.len(), 0);
+            // pk1 should now be removed from all peer sets.
+            let recipients = sender2.check(Recipients::All).unwrap().recipients();
+            assert!(!recipients.contains(&pk1));
 
-            // pk3 should still be reachable (in sets 2 and 3)
-            let sent = sender2
-                .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg5"), false)
-                .unwrap();
-            assert_eq!(sent.len(), 1);
+            // pk3 should still be reachable (in sets 2 and 3).
+            assert!(recipients.contains(&pk3));
 
-            // pk4 should be reachable (in set 3)
-            let sent = sender3
-                .send(Recipients::One(pk4.clone()), IoBuf::from(b"msg6"), false)
-                .unwrap();
-            assert_eq!(sent.len(), 1);
+            // pk4 should be reachable (in set 3).
+            let recipients = sender3.check(Recipients::All).unwrap().recipients();
+            assert!(recipients.contains(&pk4));
 
             // Verify peer set contents
             let peer_set_2 = manager.peer_set(2).await.unwrap();
@@ -2897,7 +2880,8 @@ mod tests {
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 2);
 
-            // Send message from a peer no longer in any peer set
+            // Explicit sends are accepted locally, but the network drops
+            // messages from peers no longer in any peer set.
             let sent = sender
                 .send(
                     Recipients::One(recipient_pk.clone()),
@@ -2905,7 +2889,7 @@ mod tests {
                     false,
                 )
                 .unwrap();
-            assert!(sent.is_empty());
+            assert_eq!(sent, vec![recipient_pk.clone()]);
 
             // Confirm message was not delivered
             select! {
