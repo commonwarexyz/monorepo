@@ -123,7 +123,7 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn subscribe_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> impl Future<Output = oneshot::Receiver<V::Block>> + Send;
+    ) -> oneshot::Receiver<V::Block>;
 
     /// Subscribe to a block's availability by its commitment.
     ///
@@ -134,21 +134,13 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     /// depending on the variant implementation.
     ///
     /// The returned receiver can be dropped to cancel the subscription.
-    fn subscribe_by_commitment(
-        &self,
-        commitment: V::Commitment,
-    ) -> impl Future<Output = oneshot::Receiver<V::Block>> + Send;
+    fn subscribe_by_commitment(&self, commitment: V::Commitment) -> oneshot::Receiver<V::Block>;
 
     /// Notify the buffer that a block has been finalized.
     ///
     /// This allows the buffer to perform variant-specific cleanup operations.
-    fn finalized(&self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
+    fn finalized(&self, commitment: V::Commitment);
 
     /// Send a block to peers.
-    fn send(
-        &self,
-        round: Round,
-        block: V::Block,
-        recipients: Recipients<Self::PublicKey>,
-    ) -> impl Future<Output = ()> + Send;
+    fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
 }

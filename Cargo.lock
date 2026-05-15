@@ -208,9 +208,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.15.3"
+version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e84ce723ab67259cfeb9877c6a639ee9eb7a27b28123abd71db7f0d5d0cc9d86"
+checksum = "0ec6fb3fe69024a75fa7e1bfb48aa6cf59706a101658ea01bfd33b2b248a038f"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -219,9 +219,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.36.0"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43a442ece363113bd4bd4c8b18977a7798dd4d3c3383f34fb61936960e8f4ad8"
+checksum = "f50037ee5e1e41e7b8f9d161680a725bd1626cb6f8c7e901f91f942850852fe7"
 dependencies = [
  "cc",
  "cmake",
@@ -1024,6 +1024,7 @@ name = "commonware-bridge"
 version = "2026.4.0"
 dependencies = [
  "clap",
+ "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -1046,6 +1047,7 @@ dependencies = [
 name = "commonware-broadcast"
 version = "2026.4.0"
 dependencies = [
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
@@ -1225,6 +1227,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-coding",
@@ -1437,6 +1440,7 @@ version = "2026.4.0"
 dependencies = [
  "chrono",
  "clap",
+ "commonware-actor",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-formatting",
@@ -1564,6 +1568,7 @@ version = "2026.4.0"
 dependencies = [
  "anyhow",
  "clap",
+ "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-consensus",
@@ -1593,6 +1598,7 @@ version = "2026.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-actor",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",

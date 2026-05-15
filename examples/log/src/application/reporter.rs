@@ -1,4 +1,5 @@
 use super::Scheme;
+use commonware_actor::Feedback;
 use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::Digest;
 use std::marker::PhantomData;
@@ -11,7 +12,7 @@ pub struct Reporter<D: Digest> {
 }
 
 impl<D: Digest> Reporter<D> {
-    pub const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             _phantom: PhantomData,
         }
@@ -21,7 +22,7 @@ impl<D: Digest> Reporter<D> {
 impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
     type Activity = Activity<Scheme, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {
@@ -35,5 +36,6 @@ impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
             }
             _ => {}
         }
+        Feedback::Ok
     }
 }

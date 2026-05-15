@@ -1,12 +1,16 @@
-//! Aligned backing storage for [`IoBuf`] and [`super::IoBufMut`].
+//! Backing storage for [`IoBuf`] and [`super::IoBufMut`].
 //!
-//! This module contains the low-level aligned allocation primitive and the
-//! immutable/mutable view types built on top of it:
-//! - untracked aligned buffers that deallocate directly on drop
-//! - pooled aligned buffers that return to a [`SizeClass`] on drop
+//! This module contains the low-level allocation handles and the immutable and
+//! mutable view types built on top of them:
+//! - [`AlignedBuffer`] is self-contained: it carries its own [`Layout`] and
+//!   deallocates directly on drop.
+//! - [`PooledBuffer`] is the raw pooled allocation handle: it carries only a
+//!   pointer and relies on pool-owned metadata to release it.
+//! - Pooled views pair that handle with its originating [`SizeClass`] so the
+//!   buffer is returned to the pool on drop.
 //!
 //! The allocator-facing pool logic lives in `pool.rs`. This module only deals
-//! with aligned storage ownership and view semantics.
+//! with backing ownership and view semantics.
 
 use super::IoBuf;
 use crate::iobuf::pool::{BufferPoolThreadCache, SizeClass};
@@ -21,15 +25,22 @@ use std::{
 
 /// A heap allocation with explicit alignment.
 ///
-/// Owns an aligned region of memory allocated via the global allocator.
-/// Deallocates the region on drop.
+/// Owns an aligned region of memory allocated via the global allocator. This
+/// handle is self-contained: it stores the [`Layout`] needed to deallocate the
+/// region and releases the memory directly on drop.
 ///
-/// This is the raw storage primitive used by both untracked aligned buffers
-/// and pooled buffers.
+/// This is the raw storage primitive used by untracked aligned buffers.
 pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
 }
+
+// SAFETY: `AlignedBuffer` represents a uniquely-owned heap allocation with no
+// aliasing safe references. Sharing only exposes raw pointers or immutable
+// slices through higher-level view types.
+unsafe impl Send for AlignedBuffer {}
+// SAFETY: see above.
+unsafe impl Sync for AlignedBuffer {}
 
 impl std::fmt::Debug for AlignedBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,11 +63,8 @@ impl AlignedBuffer {
     #[inline]
     pub fn new(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
-        let layout = Layout::from_size_align(capacity, alignment).expect("valid layout");
+        let layout =
+            Layout::from_size_align(capacity, alignment).expect("alignment is a power of two");
         // SAFETY: layout is valid and non-zero sized.
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
@@ -73,23 +81,20 @@ impl AlignedBuffer {
     #[inline]
     pub(crate) fn new_zeroed(capacity: usize, alignment: usize) -> Self {
         assert!(capacity > 0, "capacity must be greater than zero");
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
-        let layout = Layout::from_size_align(capacity, alignment).expect("valid layout");
+        let layout =
+            Layout::from_size_align(capacity, alignment).expect("alignment is a power of two");
         // SAFETY: layout is valid and non-zero sized.
         let ptr = unsafe { alloc_zeroed(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
         Self { ptr, layout }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn capacity(&self) -> usize {
         self.layout.size()
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn as_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
@@ -103,66 +108,168 @@ impl Drop for AlignedBuffer {
     }
 }
 
-/// Release strategy for an aligned allocation when its final owner is dropped.
+/// A raw pooled allocation handle whose layout is stored by its size class.
 ///
-/// Untracked owners deallocate directly, while tracked owners return the
-/// allocation to a pool size class.
-pub(crate) trait Owner: Send + Sync + 'static {
-    fn release(self, buffer: AlignedBuffer);
+/// Unlike [`AlignedBuffer`], this handle intentionally carries only the
+/// allocation pointer. The size-class freelist stores the allocation layout, so
+/// moving pooled buffers through checked-out values and thread-local caches
+/// does not need to move a per-buffer [`Layout`].
+///
+/// `PooledBuffer` does not implement [`Drop`] and has no reference to its
+/// originating [`SizeClass`]. It must be paired with pool metadata that returns
+/// it to the size class, or explicitly deallocated with the exact layout used
+/// to create it.
+pub struct PooledBuffer {
+    ptr: NonNull<u8>,
 }
 
-/// Owner that deallocates the buffer directly on drop.
-#[derive(Clone, Copy)]
-pub(crate) struct UntrackedOwner;
+// SAFETY: `PooledBuffer` represents a uniquely-owned heap allocation with no
+// aliasing safe references. Sharing only exposes raw pointers or immutable
+// slices through higher-level view types.
+unsafe impl Send for PooledBuffer {}
+// SAFETY: see above.
+unsafe impl Sync for PooledBuffer {}
 
-impl Owner for UntrackedOwner {
-    #[inline(always)]
-    fn release(self, buffer: AlignedBuffer) {
-        drop(buffer);
+impl std::fmt::Debug for PooledBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledBuffer")
+            .field("ptr", &self.ptr)
+            .finish()
     }
 }
 
-/// Owner that returns the buffer to its originating pool size class on drop.
+impl PooledBuffer {
+    /// Creates a new uninitialized pooled buffer for `layout`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `layout` has zero size.
+    #[inline]
+    pub fn new(layout: Layout) -> Self {
+        assert!(layout.size() > 0, "layout size must be non-zero");
+        // SAFETY: layout is valid and non-zero sized.
+        let ptr = unsafe { alloc(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        Self { ptr }
+    }
+
+    /// Creates a new zero-initialized pooled buffer for `layout`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `layout` has zero size.
+    #[inline]
+    pub fn new_zeroed(layout: Layout) -> Self {
+        assert!(layout.size() > 0, "layout size must be non-zero");
+        // SAFETY: layout is valid and non-zero sized.
+        let ptr = unsafe { alloc_zeroed(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        Self { ptr }
+    }
+
+    /// Returns the allocation pointer.
+    #[inline(always)]
+    pub const fn as_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    /// Deallocates this pooled buffer.
+    ///
+    /// # Safety
+    ///
+    /// `layout` must exactly match the layout used to allocate this buffer.
+    #[inline(always)]
+    pub unsafe fn deallocate(self, layout: Layout) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { dealloc(self.ptr.as_ptr(), layout) };
+    }
+}
+
+/// Owning allocation handle used by buffer views.
+///
+/// [`Buf`] and [`BufMut`] are generic over this trait so their view logic can
+/// stay shared while each backing decides how the allocation is described and
+/// released. Implementations must own exactly one allocation, report its full
+/// capacity, expose its base pointer, and consume themselves in
+/// [`Self::release`].
+///
+/// [`AlignedBuffer`] is self-contained and releases directly. [`PooledBacking`]
+/// pairs a layoutless [`PooledBuffer`] with its [`SizeClass`] and slot id, so
+/// release returns the allocation to the pool.
+pub(crate) trait BufferBacking: Send + Sync + 'static {
+    /// Returns the full allocation capacity, ignoring any view cursor/offset.
+    fn capacity(&self) -> usize;
+
+    /// Returns the base allocation pointer.
+    fn as_ptr(&self) -> *mut u8;
+
+    /// Consumes the backing and releases the allocation.
+    fn release(self);
+}
+
+impl BufferBacking for AlignedBuffer {
+    #[inline(always)]
+    fn capacity(&self) -> usize {
+        self.capacity()
+    }
+
+    #[inline(always)]
+    fn as_ptr(&self) -> *mut u8 {
+        self.as_ptr()
+    }
+
+    #[inline(always)]
+    fn release(self) {
+        drop(self);
+    }
+}
+
+/// Pooled backing storage.
+///
+/// This pairs a layoutless [`PooledBuffer`] with the metadata needed to return
+/// it to the pool. The [`Arc<SizeClass>`] keeps the originating size class, and
+/// therefore its freelist layout, alive while the buffer is checked out or
+/// shared through immutable views.
 ///
 /// The `Arc<SizeClass>` is *moved* (not cloned) through the TLS cache on the
 /// steady-state alloc/free path, avoiding refcount traffic.
-#[derive(Clone)]
-pub(crate) struct TrackedOwner {
+pub(crate) struct PooledBacking {
+    buffer: PooledBuffer,
     class: Arc<SizeClass>,
     slot: u32,
 }
 
-impl Owner for TrackedOwner {
+impl BufferBacking for PooledBacking {
     #[inline(always)]
-    fn release(self, buffer: AlignedBuffer) {
-        BufferPoolThreadCache::push(self.class, self.slot, buffer);
+    fn capacity(&self) -> usize {
+        self.class.size()
+    }
+
+    #[inline(always)]
+    fn as_ptr(&self) -> *mut u8 {
+        self.buffer.as_ptr()
+    }
+
+    #[inline(always)]
+    fn release(self) {
+        BufferPoolThreadCache::push(self.class, self.slot, self.buffer);
     }
 }
 
-/// Shared aligned allocation with owner-specific release behavior.
+/// Shared allocation with backing-specific release behavior.
 ///
-/// This is the single ownership point for the underlying [`AlignedBuffer`].
+/// This is the single ownership point for the underlying backing allocation.
 /// Immutable views hold it behind an [`Arc`], while mutable views own it
 /// directly and may later freeze it into an immutable shared view.
-struct BufInner<O: Owner> {
-    buffer: ManuallyDrop<AlignedBuffer>,
-    owner: ManuallyDrop<O>,
+struct BufInner<B: BufferBacking> {
+    buffer: ManuallyDrop<B>,
 }
 
-// SAFETY: `AlignedBuffer` is `!Send`/`!Sync` due to `NonNull<u8>`, but it
-// represents a uniquely-owned heap allocation with no aliasing pointers, so it
-// is safe to transfer across threads. `O: Send + Sync + 'static` is enforced
-// by the `Owner` trait bound.
-unsafe impl<O: Owner> Send for BufInner<O> {}
-// SAFETY: see above.
-unsafe impl<O: Owner> Sync for BufInner<O> {}
-
-impl<O: Owner> BufInner<O> {
+impl<B: BufferBacking> BufInner<B> {
     #[inline]
-    const fn new(buffer: AlignedBuffer, owner: O) -> Self {
+    const fn new(buffer: B) -> Self {
         Self {
             buffer: ManuallyDrop::new(buffer),
-            owner: ManuallyDrop::new(owner),
         }
     }
 
@@ -172,24 +279,22 @@ impl<O: Owner> BufInner<O> {
     }
 }
 
-impl<O: Owner> Drop for BufInner<O> {
+impl<B: BufferBacking> Drop for BufInner<B> {
     #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: Drop is called at most once for this value.
         let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        // SAFETY: Drop is called at most once for this value.
-        let owner = unsafe { ManuallyDrop::take(&mut self.owner) };
-        owner.release(buffer);
+        buffer.release();
     }
 }
 
-/// Immutable, reference-counted view over aligned storage.
+/// Immutable, reference-counted view over fixed-capacity backing storage.
 ///
 /// Cloning is cheap and shares the same underlying aligned allocation.
 ///
-/// The owner type decides what happens when the final reference is dropped:
-/// untracked buffers deallocate directly, while pooled buffers return the
-/// allocation to their originating size class.
+/// The backing type decides what happens when the final reference is dropped:
+/// untracked aligned buffers deallocate directly, while pooled buffers return
+/// the allocation to their originating size class.
 ///
 /// # View Layout
 ///
@@ -213,13 +318,13 @@ impl<O: Owner> Drop for BufInner<O> {
 ///
 /// This representation allows sliced views to preserve their current readable
 /// window while still supporting `try_into_mut` when uniquely owned.
-pub(crate) struct Buf<O: Owner> {
-    inner: Arc<BufInner<O>>,
+pub(crate) struct Buf<B: BufferBacking> {
+    inner: Arc<BufInner<B>>,
     offset: usize,
     len: usize,
 }
 
-impl<O: Owner> Buf<O> {
+impl<B: BufferBacking> Buf<B> {
     /// Returns a pointer to the first readable byte.
     #[inline]
     pub(crate) fn as_ptr(&self) -> *const u8 {
@@ -300,7 +405,7 @@ impl<O: Owner> Buf<O> {
     /// as mutable buffers while keeping the same readable window.
     ///
     /// On failure, returns `self` unchanged.
-    pub(crate) fn try_into_mut(self) -> Result<BufMut<O>, Self> {
+    pub(crate) fn try_into_mut(self) -> Result<BufMut<B>, Self> {
         let Self { inner, offset, len } = self;
         match Arc::try_unwrap(inner) {
             Ok(inner) => Ok(BufMut {
@@ -324,7 +429,7 @@ impl<O: Owner> Buf<O> {
     }
 }
 
-impl<O: Owner> AsRef<[u8]> for Buf<O> {
+impl<B: BufferBacking> AsRef<[u8]> for Buf<B> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         // SAFETY: offset/len are always bounded within the underlying allocation.
@@ -332,7 +437,7 @@ impl<O: Owner> AsRef<[u8]> for Buf<O> {
     }
 }
 
-impl<O: Owner> Clone for Buf<O> {
+impl<B: BufferBacking> Clone for Buf<B> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -342,7 +447,7 @@ impl<O: Owner> Clone for Buf<O> {
     }
 }
 
-impl<O: Owner> bytes::Buf for Buf<O> {
+impl<B: BufferBacking> bytes::Buf for Buf<B> {
     #[inline]
     fn remaining(&self) -> usize {
         self.len
@@ -376,10 +481,11 @@ impl<O: Owner> bytes::Buf for Buf<O> {
     }
 }
 
-/// Mutable aligned buffer view.
+/// Mutable fixed-capacity buffer view.
 ///
-/// When dropped, the underlying buffer is released according to `O`: untracked
-/// buffers deallocate directly, while tracked buffers return to the pool.
+/// When dropped, the underlying buffer is released according to `B`: untracked
+/// aligned buffers deallocate directly, while pooled buffers return to the
+/// pool.
 ///
 /// # Buffer Layout
 ///
@@ -416,15 +522,15 @@ impl<O: Owner> bytes::Buf for Buf<O> {
 /// grow automatically. Calling [`bytes::BufMut::put_slice`] or other
 /// [`bytes::BufMut`] methods that would exceed capacity will panic (per the
 /// [`bytes::BufMut`] trait contract).
-pub(crate) struct BufMut<O: Owner> {
-    inner: ManuallyDrop<BufInner<O>>,
+pub(crate) struct BufMut<B: BufferBacking> {
+    inner: ManuallyDrop<BufInner<B>>,
     /// Read cursor position (for `Buf` trait).
     cursor: usize,
     /// Number of bytes written (initialized).
     len: usize,
 }
 
-impl<O: Owner> BufMut<O> {
+impl<B: BufferBacking> BufMut<B> {
     /// Capacity of the underlying allocation (ignoring cursor).
     #[inline]
     fn raw_capacity(&self) -> usize {
@@ -436,7 +542,7 @@ impl<O: Owner> BufMut<O> {
     /// Wraps `self` in [`ManuallyDrop`] to suppress its `Drop` impl, then
     /// moves the inner state into an `Arc`-backed [`Buf`]. The resulting
     /// view covers only the current readable window (`cursor..len`).
-    fn into_shared(self) -> Buf<O> {
+    fn into_shared(self) -> Buf<B> {
         let mut me = ManuallyDrop::new(self);
         // SAFETY: `me` is wrapped in `ManuallyDrop`, so its `Drop` impl will not run.
         let inner = unsafe { ManuallyDrop::take(&mut me.inner) };
@@ -523,7 +629,7 @@ impl<O: Owner> BufMut<O> {
     }
 }
 
-impl<O: Owner> AsRef<[u8]> for BufMut<O> {
+impl<B: BufferBacking> AsRef<[u8]> for BufMut<B> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         // SAFETY: bytes from cursor..len have been initialized.
@@ -533,7 +639,7 @@ impl<O: Owner> AsRef<[u8]> for BufMut<O> {
     }
 }
 
-impl<O: Owner> AsMut<[u8]> for BufMut<O> {
+impl<B: BufferBacking> AsMut<[u8]> for BufMut<B> {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
         let len = self.len();
@@ -542,7 +648,7 @@ impl<O: Owner> AsMut<[u8]> for BufMut<O> {
     }
 }
 
-impl<O: Owner> Drop for BufMut<O> {
+impl<B: BufferBacking> Drop for BufMut<B> {
     #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: Drop is only called once. freeze() wraps self in ManuallyDrop
@@ -551,7 +657,7 @@ impl<O: Owner> Drop for BufMut<O> {
     }
 }
 
-impl<O: Owner> bytes::Buf for BufMut<O> {
+impl<B: BufferBacking> bytes::Buf for BufMut<B> {
     #[inline]
     fn remaining(&self) -> usize {
         self.len - self.cursor
@@ -572,7 +678,7 @@ impl<O: Owner> bytes::Buf for BufMut<O> {
 
 // SAFETY: `BufMut` exposes the uninitialized tail `[len..raw_capacity)` and
 // only advances within the underlying allocation bounds.
-unsafe impl<O: Owner> bytes::BufMut for BufMut<O> {
+unsafe impl<B: BufferBacking> bytes::BufMut for BufMut<B> {
     #[inline]
     fn remaining_mut(&self) -> usize {
         self.raw_capacity() - self.len
@@ -602,29 +708,28 @@ unsafe impl<O: Owner> bytes::BufMut for BufMut<O> {
 /// Immutable, reference-counted view over an untracked aligned allocation.
 ///
 /// The final reference deallocates the underlying aligned buffer directly.
-pub(crate) type AlignedBuf = Buf<UntrackedOwner>;
+pub(crate) type AlignedBuf = Buf<AlignedBuffer>;
 
 /// Immutable, reference-counted view over a pooled allocation.
 ///
-/// The final reference returns the underlying aligned buffer to its originating
+/// The final reference returns the underlying allocation to its originating
 /// [`SizeClass`]. See [`Buf`] for the shared immutable view layout and
 /// invariants.
-pub(crate) type PooledBuf = Buf<TrackedOwner>;
+pub(crate) type PooledBuf = Buf<PooledBacking>;
 
 /// Mutable view over an untracked aligned allocation.
 ///
 /// When dropped, the underlying aligned allocation is deallocated directly.
 /// See [`BufMut`] for the shared mutable layout and invariants.
-pub(crate) type AlignedBufMut = BufMut<UntrackedOwner>;
+pub(crate) type AlignedBufMut = BufMut<AlignedBuffer>;
 
 /// Mutable view over a pooled allocation.
 ///
-/// When dropped, the underlying aligned allocation is returned to its
-/// originating [`SizeClass`]. See [`BufMut`] for the shared mutable layout and
-/// invariants.
-pub(crate) type PooledBufMut = BufMut<TrackedOwner>;
+/// When dropped, the underlying allocation is returned to its originating
+/// [`SizeClass`]. See [`BufMut`] for the shared mutable layout and invariants.
+pub(crate) type PooledBufMut = BufMut<PooledBacking>;
 
-impl std::fmt::Debug for Buf<UntrackedOwner> {
+impl std::fmt::Debug for Buf<AlignedBuffer> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AlignedBuf")
             .field("offset", &self.offset)
@@ -634,7 +739,7 @@ impl std::fmt::Debug for Buf<UntrackedOwner> {
     }
 }
 
-impl std::fmt::Debug for Buf<TrackedOwner> {
+impl std::fmt::Debug for Buf<PooledBacking> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PooledBuf")
             .field("offset", &self.offset)
@@ -644,7 +749,7 @@ impl std::fmt::Debug for Buf<TrackedOwner> {
     }
 }
 
-impl std::fmt::Debug for BufMut<UntrackedOwner> {
+impl std::fmt::Debug for BufMut<AlignedBuffer> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AlignedBufMut")
             .field("cursor", &self.cursor)
@@ -654,11 +759,11 @@ impl std::fmt::Debug for BufMut<UntrackedOwner> {
     }
 }
 
-impl BufMut<UntrackedOwner> {
+impl BufMut<AlignedBuffer> {
     #[inline]
     pub(crate) const fn new(buffer: AlignedBuffer) -> Self {
         Self {
-            inner: ManuallyDrop::new(BufInner::new(buffer, UntrackedOwner)),
+            inner: ManuallyDrop::new(BufInner::new(buffer)),
             cursor: 0,
             len: 0,
         }
@@ -673,7 +778,7 @@ impl BufMut<UntrackedOwner> {
     }
 }
 
-impl std::fmt::Debug for BufMut<TrackedOwner> {
+impl std::fmt::Debug for BufMut<PooledBacking> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PooledBufMut")
             .field("cursor", &self.cursor)
@@ -683,11 +788,15 @@ impl std::fmt::Debug for BufMut<TrackedOwner> {
     }
 }
 
-impl BufMut<TrackedOwner> {
+impl BufMut<PooledBacking> {
     #[inline]
-    pub(crate) const fn new(buffer: AlignedBuffer, class: Arc<SizeClass>, slot: u32) -> Self {
+    pub(crate) const fn new(buffer: PooledBuffer, class: Arc<SizeClass>, slot: u32) -> Self {
         Self {
-            inner: ManuallyDrop::new(BufInner::new(buffer, TrackedOwner { class, slot })),
+            inner: ManuallyDrop::new(BufInner::new(PooledBacking {
+                buffer,
+                class,
+                slot,
+            })),
             cursor: 0,
             len: 0,
         }

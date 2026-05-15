@@ -17,7 +17,7 @@
 //!   data becomes available.
 
 mod mailbox;
-pub use mailbox::{Mailbox, Message};
+pub use mailbox::Mailbox;
 
 mod metrics;
 

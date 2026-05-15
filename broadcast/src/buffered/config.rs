@@ -1,5 +1,6 @@
 use commonware_cryptography::PublicKey;
 use commonware_p2p::Provider;
+use std::num::NonZeroUsize;
 
 /// Configuration for the [super::Engine].
 pub struct Config<P: PublicKey, MCfg, D: Provider<PublicKey = P>> {
@@ -7,7 +8,7 @@ pub struct Config<P: PublicKey, MCfg, D: Provider<PublicKey = P>> {
     pub public_key: P,
 
     /// The maximum size of the mailbox backlog.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// The maximum number of cached items per sender.
     pub deque_size: usize,

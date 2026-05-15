@@ -7,6 +7,7 @@ use super::{
 };
 use crate::Consumer;
 use bytes::Bytes;
+use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -18,11 +19,7 @@ use commonware_runtime::{
     telemetry::metrics::{histogram, status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    futures::Pool as FuturesPool,
-    Span,
-};
+use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
 use futures::future::{self, Either};
 use rand::Rng;
 use std::marker::PhantomData;
@@ -64,7 +61,7 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mpsc::Receiver<Message<Key, P>>,
+    mailbox: mailbox::Receiver<Message<Key, P>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -104,7 +101,7 @@ impl<
     ///
     /// Returns the actor and a mailbox to send messages to it.
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
         let fetcher = Fetcher::new(
@@ -381,8 +378,8 @@ impl<
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
         let timer = self.metrics.serve_duration.timer(self.context.as_ref());
+        let receiver = producer.produce(key);
         self.serves.push(async move {
-            let receiver = producer.produce(key).await;
             let result = receiver.await;
             Serve {
                 timer,

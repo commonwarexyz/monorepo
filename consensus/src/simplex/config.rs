@@ -97,7 +97,7 @@ where
 
     /// Maximum number of messages to buffer on channels inside the consensus
     /// engine before blocking.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
@@ -138,7 +138,7 @@ where
     pub fetch_timeout: Duration,
 
     /// Number of concurrent requests to make at once.
-    pub fetch_concurrent: usize,
+    pub fetch_concurrent: NonZeroUsize,
 
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
@@ -193,10 +193,6 @@ impl<
         assert!(
             self.fetch_timeout > Duration::default(),
             "fetch timeout must be greater than zero"
-        );
-        assert!(
-            self.fetch_concurrent > 0,
-            "it must be possible to fetch from at least one peer at a time"
         );
     }
 }

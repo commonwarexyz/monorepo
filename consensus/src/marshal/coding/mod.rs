@@ -440,9 +440,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent)
-                .await;
+            shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
             // Block A at view 5 (height 2) - create with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -454,7 +452,7 @@ mod tests {
             let block_a = make_coding_block(context_a.clone(), parent_digest, Height::new(2), 200);
             let coded_block_a = CodedBlock::new(block_a.clone(), coding_config, &Sequential);
             let commitment_a = coded_block_a.commitment();
-            shards.proposed(round_a, coded_block_a).await;
+            shards.proposed(round_a, coded_block_a);
 
             // Block B at view 10 (height 2, different block same height - could happen with
             // different proposers or re-proposals)
@@ -467,7 +465,7 @@ mod tests {
             let block_b = make_coding_block(context_b.clone(), parent_digest, Height::new(2), 300);
             let coded_block_b = CodedBlock::new(block_b.clone(), coding_config, &Sequential);
             let commitment_b = coded_block_b.commitment();
-            shards.proposed(round_b, coded_block_b).await;
+            shards.proposed(round_b, coded_block_b);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -569,7 +567,7 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
                 last_commitment = coded_block.commitment();
-                shards.proposed(round, coded_block).await;
+                shards.proposed(round, coded_block);
                 parent = block.digest();
                 last_view = View::new(i);
             }
@@ -591,7 +589,7 @@ mod tests {
             let coded_boundary =
                 CodedBlock::new(boundary_block.clone(), coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            shards.proposed(boundary_round, coded_boundary).await;
+            shards.proposed(boundary_round, coded_boundary);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -652,9 +650,7 @@ mod tests {
             let non_boundary_commitment = coded_non_boundary.commitment();
 
             // Make the non-boundary block available
-            shards
-                .proposed(non_boundary_round, coded_non_boundary)
-                .await;
+            shards.proposed(non_boundary_round, coded_non_boundary);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -782,9 +778,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent)
-                .await;
+            shards.proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
 
             // Build a block with context A (commitment hash uses this context).
             let round_a = Round::new(Epoch::zero(), View::new(2));
@@ -960,7 +954,7 @@ mod tests {
             // Ensure the verification task has registered its subscription, then
             // force cancellation by pruning the missing commitment.
             context.sleep(Duration::from_millis(100)).await;
-            shards.prune(missing_payload).await;
+            shards.prune(missing_payload);
 
             select! {
                 result = verify_rx => {
@@ -1027,16 +1021,14 @@ mod tests {
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
-            let block_rx = marshal
-                .subscribe_by_commitment(Some(round), missing_commitment)
-                .await;
+            let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
 
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
 
             // Prune the missing commitment in the shard engine, which should cancel
             // the underlying buffer subscription.
-            shards.prune(missing_commitment).await;
+            shards.prune(missing_commitment);
 
             // The core actor must surface cancellation by closing the subscription,
             // not by panicking or leaving the waiter parked indefinitely.
@@ -1148,9 +1140,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent)
-                .await;
+            shards.proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let block_ctx = CodingCtx {
@@ -1161,9 +1151,7 @@ mod tests {
             let block = make_coding_block(block_ctx, parent_digest, Height::new(20), 2000);
             let coded_block = CodedBlock::new(block.clone(), coding_config, &Sequential);
             let block_commitment = coded_block.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(1), View::new(20)), coded_block)
-                .await;
+            shards.proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1263,9 +1251,7 @@ mod tests {
             let parent_digest = honest_parent.digest();
             let coded_parent = CodedBlock::new(honest_parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards
-                .proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent)
-                .await;
+            shards.proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
 
             // Byzantine proposer broadcasts malicious block at height 35
             // The block has the correct context (matching what consensus will provide)
@@ -1285,7 +1271,7 @@ mod tests {
             let coded_malicious =
                 CodedBlock::new(malicious_block.clone(), coding_config, &Sequential);
             let malicious_commitment = coded_malicious.commitment();
-            shards.proposed(byzantine_round, coded_malicious).await;
+            shards.proposed(byzantine_round, coded_malicious);
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -1330,7 +1316,7 @@ mod tests {
             let coded_malicious2 =
                 CodedBlock::new(malicious_block2.clone(), coding_config, &Sequential);
             let malicious_commitment2 = coded_malicious2.commitment();
-            shards.proposed(byzantine_round2, coded_malicious2).await;
+            shards.proposed(byzantine_round2, coded_malicious2);
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
@@ -1422,7 +1408,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent).await;
+            shards.proposed(parent_round, coded_parent);
 
             // Create child at height 2.
             let child_round = Round::new(Epoch::zero(), View::new(2));
@@ -1434,7 +1420,7 @@ mod tests {
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child = CodedBlock::new(child, coding_config, &Sequential);
             let child_commitment = coded_child.commitment();
-            shards.proposed(child_round, coded_child).await;
+            shards.proposed(child_round, coded_child);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1546,7 +1532,7 @@ mod tests {
             let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent).await;
+            shards.proposed(parent_round, coded_parent);
 
             // 3) Publish a valid child so optimistic verify can succeed.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1559,7 +1545,7 @@ mod tests {
                 make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
             let coded_block = CodedBlock::new(block, coding_config, &Sequential);
             let commitment = coded_block.commitment();
-            shards.proposed(round, coded_block).await;
+            shards.proposed(round, coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1820,7 +1806,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent).await;
+            shards.proposed(parent_round, coded_parent);
 
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = CodingCtx {
@@ -1832,7 +1818,7 @@ mod tests {
             let coded_child = CodedBlock::new(child.clone(), coding_config, &Sequential);
             let child_commitment = coded_child.commitment();
             let child_digest = coded_child.digest();
-            shards.proposed(child_round, coded_child).await;
+            shards.proposed(child_round, coded_child);
 
             context.sleep(Duration::from_millis(10)).await;
 
