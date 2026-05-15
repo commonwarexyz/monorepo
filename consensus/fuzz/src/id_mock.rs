@@ -1,4 +1,4 @@
-use crate::utils::fnv1a_hash;
+use crate::utils::fnv1a_hash_slices;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     types::lazy::Lazy, EncodeSize, Error, FixedSize, Read, ReadExt, ReadRangeExt, Write,
@@ -264,10 +264,7 @@ impl Scheme {
     fn message_hash<D: Digest>(&self, subject: &Subject<'_, D>) -> u64 {
         let ns = subject.namespace(&self.namespace);
         let msg = subject.message();
-        let mut buf = Vec::with_capacity(ns.len() + msg.len());
-        buf.extend_from_slice(ns);
-        buf.extend_from_slice(&msg);
-        fnv1a_hash(&buf)
+        fnv1a_hash_slices(&[ns, msg.as_ref()])
     }
 }
 

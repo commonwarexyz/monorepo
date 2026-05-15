@@ -9,13 +9,20 @@ use std::{collections::HashMap, num::NonZeroU32};
 /// Uses FNV-1a instead of `DefaultHasher` because `DefaultHasher` is not
 /// guaranteed to be stable across Rust versions.
 pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    fnv1a_hash_slices(&[bytes])
+}
+
+/// FNV-1a hash for a logical concatenation of byte slices.
+pub fn fnv1a_hash_slices(slices: &[&[u8]]) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
     let mut hash = FNV_OFFSET;
-    for &byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
+    for slice in slices {
+        for &byte in *slice {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
     }
     hash
 }
