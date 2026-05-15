@@ -1020,15 +1020,15 @@ where
     type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
     type Plan = Plan<Self::PublicKey>;
 
-    async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
+    fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
         // Coding variant does not support targeted forwarding;
         // peers reconstruct blocks from erasure-coded shards.
         //
         // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
-            return;
+            return Feedback::Ok;
         };
-        self.marshal.forward(round, commitment, Recipients::All);
+        self.marshal.forward(round, commitment, Recipients::All)
     }
 }
 

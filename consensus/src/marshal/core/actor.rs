@@ -38,7 +38,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,
@@ -369,7 +369,7 @@ where
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
-        resolver: (mpsc::Receiver<handler::Message<V::Commitment>>, R),
+        resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
         R: Resolver<
@@ -386,7 +386,7 @@ where
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
-        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Commitment>>, R),
+        (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: Resolver<
             Key = handler::Request<V::Commitment>,
@@ -605,8 +605,7 @@ where
                         } else {
                             debug!(?round, "notarized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Notarized { round })
-                                .await;
+                                .fetch(Request::<V::Commitment>::Notarized { round });
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -644,8 +643,7 @@ where
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Block(commitment))
-                                .await;
+                                .fetch(Request::<V::Commitment>::Block(commitment));
                         }
                     }
                     Message::GetBlock {
@@ -687,7 +685,7 @@ where
 
                         // Trigger a targeted fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
-                        resolver.fetch_targeted(request, targets).await;
+                        resolver.fetch_targeted(request, targets);
                     }
                     Message::SubscribeByDigest {
                         round,
@@ -730,7 +728,7 @@ where
                         }
 
                         // Update the processed height
-                        self.update_processed_height(height, &mut resolver).await;
+                        self.update_processed_height(height, &mut resolver);
                         if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
                             return;
@@ -927,9 +925,7 @@ where
             // If this is a valid view, this request should be fine to keep open
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
-            resolver
-                .fetch(Request::<V::Commitment>::Notarized { round })
-                .await;
+            resolver.fetch(Request::<V::Commitment>::Notarized { round });
         }
 
         // Register subscriber.
@@ -1338,12 +1334,10 @@ where
         resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
     ) {
         // Update the processed height (buffered, not synced)
-        self.update_processed_height(height, resolver).await;
+        self.update_processed_height(height, resolver);
 
         // Cancel any useless requests
-        resolver
-            .cancel(Request::<V::Commitment>::Block(commitment))
-            .await;
+        resolver.cancel(Request::<V::Commitment>::Block(commitment));
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -1361,9 +1355,7 @@ where
             self.last_processed_round = round;
 
             // Cancel useless requests
-            resolver
-                .retain(Request::<V::Commitment>::Notarized { round }.predicate())
-                .await;
+            resolver.retain(Request::<V::Commitment>::Notarized { round }.predicate());
         }
     }
 
@@ -1647,9 +1639,7 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    resolver
-                        .fetch(Request::<V::Commitment>::Block(commitment))
-                        .await;
+                    resolver.fetch(Request::<V::Commitment>::Block(commitment));
                 }
             }
         }
@@ -1698,9 +1688,7 @@ where
                     // SAFETY: We can rely on this derived parent commitment because
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
-                    resolver
-                        .fetch(Request::<V::Commitment>::Block(parent_commitment))
-                        .await;
+                    resolver.fetch(Request::<V::Commitment>::Block(parent_commitment));
                     break 'cache_repair;
                 }
             }
@@ -1719,14 +1707,14 @@ where
             .map(|height| Request::<V::Commitment>::Finalized { height })
             .collect();
         if !requests.is_empty() {
-            resolver.fetch_all(requests).await
+            resolver.fetch_all(requests);
         }
         wrote
     }
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync
     /// to durable storage. Sync metadata after buffered updates to make them durable.
-    async fn update_processed_height(
+    fn update_processed_height(
         &mut self,
         height: Height,
         resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
@@ -1738,9 +1726,7 @@ where
             .try_set(self.last_processed_height.get());
 
         // Cancel any existing requests below the new floor.
-        resolver
-            .retain(Request::<V::Commitment>::Finalized { height }.predicate())
-            .await;
+        resolver.retain(Request::<V::Commitment>::Finalized { height }.predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.

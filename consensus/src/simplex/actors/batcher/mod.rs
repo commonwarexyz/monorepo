@@ -60,7 +60,7 @@ mod tests {
         types::{Participant, Round, View},
         Viewable,
     };
-    use commonware_actor::mailbox;
+    use commonware_actor::{mailbox, Feedback};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -100,7 +100,7 @@ mod tests {
         type PublicKey = PublicKey;
         type Plan = Plan<PublicKey>;
 
-        async fn broadcast(&mut self, payload: Sha256Digest, plan: Self::Plan) {
+        fn broadcast(&mut self, payload: Sha256Digest, plan: Self::Plan) -> Feedback {
             if let Plan::Forward {
                 round,
                 recipients: Recipients::Some(peers),
@@ -108,6 +108,7 @@ mod tests {
             {
                 self.broadcasts.lock().push((payload, round, peers));
             }
+            Feedback::Ok
         }
     }
 

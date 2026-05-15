@@ -1,13 +1,13 @@
 //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
 use crate::marshal::resolver::handler;
+use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use commonware_utils::channel::mpsc;
 use rand::Rng;
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
 pub struct Config<P, C, B>
@@ -28,7 +28,7 @@ where
     pub blocker: B,
 
     /// The size of the request mailbox backlog.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Initial expected performance for new participants.
     pub initial: Duration,
@@ -51,10 +51,7 @@ pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
-) -> (
-    mpsc::Receiver<handler::Message<D>>,
-    p2p::Mailbox<handler::Request<D>, P>,
-)
+) -> (handler::Receiver<D>, p2p::Mailbox<handler::Request<D>, P>)
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
@@ -64,7 +61,7 @@ where
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (sender, receiver) = mpsc::channel(config.mailbox_size);
+    let (sender, receiver) = mailbox::new(config.mailbox_size);
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         context,
@@ -83,5 +80,5 @@ where
         },
     );
     resolver_engine.start(backfill);
-    (receiver, resolver)
+    (handler::Receiver::new(receiver), resolver)
 }

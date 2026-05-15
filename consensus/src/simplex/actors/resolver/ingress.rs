@@ -3,10 +3,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
-    sequence::U64,
-};
+use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 
 /// Messages sent to the resolver actor from the voter.
@@ -145,7 +142,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 }
 
 #[derive(Debug)]
-pub enum HandlerMessage {
+pub(crate) enum HandlerMessage {
     Deliver {
         view: View,
         data: Bytes,
@@ -157,13 +154,60 @@ pub enum HandlerMessage {
     },
 }
 
+impl HandlerMessage {
+    /// Returns true if the requester stopped waiting for this response.
+    pub(crate) fn response_closed(&self) -> bool {
+        match self {
+            Self::Deliver { response, .. } => response.is_closed(),
+            Self::Produce { response, .. } => response.is_closed(),
+        }
+    }
+}
+
+/// Pending resolver handler messages retained after the mailbox fills.
+#[derive(Default)]
+pub(crate) struct HandlerPending(VecDeque<HandlerMessage>);
+
+impl Overflow<HandlerMessage> for HandlerPending {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(HandlerMessage) -> Option<HandlerMessage>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.response_closed() {
+                continue;
+            }
+
+            if let Some(message) = push(message) {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
+impl Policy for HandlerMessage {
+    type Overflow = HandlerPending;
+
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
+        if message.response_closed() {
+            return;
+        }
+        overflow.0.push_back(message);
+    }
+}
+
 #[derive(Clone)]
-pub struct Handler {
-    sender: mpsc::Sender<HandlerMessage>,
+pub(crate) struct Handler {
+    sender: Sender<HandlerMessage>,
 }
 
 impl Handler {
-    pub const fn new(sender: mpsc::Sender<HandlerMessage>) -> Self {
+    pub(crate) const fn new(sender: Sender<HandlerMessage>) -> Self {
         Self { sender }
     }
 }
@@ -172,31 +216,26 @@ impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
 
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
-        self.sender
-            .request_or(
-                |response| HandlerMessage::Deliver {
-                    view: View::new(key.into()),
-                    data: value,
-                    response,
-                },
-                false,
-            )
-            .await
+    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(HandlerMessage::Deliver {
+            view: View::new(key.into()),
+            data: value,
+            response,
+        });
+        receiver
     }
 }
 
 impl Producer for Handler {
     type Key = U64;
 
-    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(HandlerMessage::Produce {
-                view: View::new(key.into()),
-                response,
-            })
-            .await;
+        let _ = self.sender.enqueue(HandlerMessage::Produce {
+            view: View::new(key.into()),
+            response,
+        });
         receiver
     }
 }
@@ -269,6 +308,42 @@ mod tests {
             None
         });
         messages
+    }
+
+    #[test]
+    fn handler_drain_skips_closed_responses() {
+        let mut overflow = HandlerPending::default();
+
+        let (closed_response, closed_receiver) = oneshot::channel();
+        HandlerMessage::handle(
+            &mut overflow,
+            HandlerMessage::Produce {
+                view: View::new(1),
+                response: closed_response,
+            },
+        );
+        drop(closed_receiver);
+
+        let (open_response, _open_receiver) = oneshot::channel();
+        HandlerMessage::handle(
+            &mut overflow,
+            HandlerMessage::Produce {
+                view: View::new(2),
+                response: open_response,
+            },
+        );
+
+        let mut messages = Vec::new();
+        Overflow::drain(&mut overflow, |message| {
+            messages.push(message);
+            None
+        });
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages.pop(),
+            Some(HandlerMessage::Produce { view, .. }) if view == View::new(2)
+        ));
     }
 
     #[test]

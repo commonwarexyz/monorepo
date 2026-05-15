@@ -67,7 +67,7 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Reporter,
     };
     use bytes::Bytes;
-    use commonware_actor::Feedback;
+    use commonware_actor::{mailbox, Feedback};
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
@@ -92,7 +92,7 @@ mod tests {
     };
     use commonware_utils::{
         acknowledgement::Exact,
-        channel::{fallible::OneshotExt, mpsc, oneshot},
+        channel::{fallible::OneshotExt, oneshot},
         sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
@@ -1681,15 +1681,19 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingResolver {
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
-        _keepalive: Option<mpsc::Sender<handler::Message<D>>>,
+        _keepalive: Option<mailbox::Sender<handler::Message<D>>>,
     }
 
     impl RecordingResolver {
-        fn holding(sender: mpsc::Sender<handler::Message<D>>) -> Self {
-            Self {
-                targeted: Arc::new(Mutex::new(Vec::new())),
-                _keepalive: Some(sender),
-            }
+        fn holding() -> (handler::Receiver<D>, Self) {
+            let (sender, receiver) = mailbox::new(NZUsize!(100));
+            (
+                handler::Receiver::new(receiver),
+                Self {
+                    targeted: Arc::new(Mutex::new(Vec::new())),
+                    _keepalive: Some(sender),
+                },
+            )
         }
 
         fn targeted(&self) -> Vec<TargetedFetch> {
@@ -1705,20 +1709,42 @@ mod tests {
         type Key = handler::Request<D>;
         type PublicKey = PublicKey;
 
-        async fn fetch(&mut self, _key: Self::Key) {}
-        async fn fetch_all(&mut self, _keys: Vec<Self::Key>) {}
-        async fn fetch_targeted(&mut self, key: Self::Key, targets: NonEmptyVec<Self::PublicKey>) {
-            self.targeted.lock().push((key, targets));
+        fn fetch(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
         }
-        async fn fetch_all_targeted(
+
+        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn fetch_targeted(
+            &mut self,
+            key: Self::Key,
+            targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            self.targeted.lock().push((key, targets));
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted(
             &mut self,
             requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) {
+        ) -> Feedback {
             self.targeted.lock().extend(requests);
+            Feedback::Ok
         }
-        async fn cancel(&mut self, _key: Self::Key) {}
-        async fn clear(&mut self) {}
-        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+
+        fn cancel(&mut self, _key: Self::Key) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn clear(&mut self) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
+            Feedback::Ok
+        }
     }
 
     /// Poll `cond` on a 10ms tick until it returns true, panicking on timeout.
@@ -1872,8 +1898,7 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_tx, resolver_rx) = mpsc::channel(100);
-        let resolver = RecordingResolver::holding(resolver_tx);
+        let (resolver_rx, resolver) = RecordingResolver::holding();
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
@@ -1969,7 +1994,7 @@ mod tests {
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            let (resolver_tx, resolver_rx) = mpsc::channel::<handler::Message<D>>(100);
+            let (resolver_tx, resolver_rx) = mailbox::new(NZUsize!(100));
 
             let (actor, _mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -1981,37 +2006,38 @@ mod tests {
             actor.start(
                 Application::<B>::default(),
                 buffer,
-                (resolver_rx, RecordingResolver::default()),
+                (
+                    handler::Receiver::new(resolver_rx),
+                    RecordingResolver::default(),
+                ),
             );
 
             // Inject a Finalized delivery with garbage payload. The
             // provider has no verifier, so the marshal cannot decode it and
             // must ack (true) rather than blame the peer (false).
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(resolver_tx
+                .enqueue(handler::Message::Deliver {
                     key: handler::Request::Finalized {
                         height: Height::new(5),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .await
-                .unwrap();
+                .accepted());
             assert!(response_rx.await.unwrap());
 
             // Same for a Notarized delivery.
             let (response, response_rx) = oneshot::channel();
-            resolver_tx
-                .send(handler::Message::Deliver {
+            assert!(resolver_tx
+                .enqueue(handler::Message::Deliver {
                     key: handler::Request::Notarized {
                         round: Round::new(Epoch::zero(), View::new(1)),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
                 })
-                .await
-                .unwrap();
+                .accepted());
             assert!(response_rx.await.unwrap());
         });
     }

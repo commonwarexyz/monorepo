@@ -846,7 +846,7 @@ impl<
         let validators = scheme.participants();
 
         // Tell the relay to broadcast the full data
-        self.relay.broadcast(node.chunk.payload, ()).await;
+        let _ = self.relay.broadcast(node.chunk.payload, ());
 
         // Send the node to all validators
         node_sender

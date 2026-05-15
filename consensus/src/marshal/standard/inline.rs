@@ -538,12 +538,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+    fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients);
+        self.marshal.forward(round, digest, recipients)
     }
 }
 

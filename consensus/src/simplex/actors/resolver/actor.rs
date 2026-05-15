@@ -20,13 +20,9 @@ use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc},
-    ordered::Quorum,
-    sequence::U64,
-};
+use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
@@ -43,7 +39,7 @@ pub struct Actor<
     strategy: T,
 
     epoch: Epoch,
-    mailbox_size: usize,
+    mailbox_size: NonZeroUsize,
     fetch_timeout: Duration,
 
     state: State<S, D>,
@@ -69,7 +65,7 @@ impl<
                 strategy: cfg.strategy,
 
                 epoch: cfg.epoch,
-                mailbox_size: cfg.mailbox_size.get(),
+                mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
                 state: State::new(cfg.fetch_concurrent),
@@ -102,7 +98,7 @@ impl<
             .and_then(|index| participants.key(index))
             .cloned();
 
-        let (handler_tx, mut handler_rx) = mpsc::channel(self.mailbox_size);
+        let (handler_tx, mut handler_rx) = mailbox::new(self.mailbox_size);
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
@@ -135,18 +131,19 @@ impl<
                 match message {
                     MailboxMessage::Certificate(certificate) => {
                         // Certificates from mailbox have no associated request view
-                        self.state.handle(certificate, None, &mut resolver).await;
+                        self.state.handle(certificate, None, &mut resolver);
                     }
                     MailboxMessage::Certified { view, success } => {
                         self.state
                             .handle_certified(view, success, &mut resolver)
-                            .await;
                     }
                 }
             },
             Some(message) = handler_rx.recv() else break => {
-                self.handle_resolver(message, &mut voter, &mut resolver)
-                    .await;
+                if message.response_closed() {
+                    continue;
+                }
+                self.handle_resolver(message, &mut voter, &mut resolver);
             },
         }
     }
@@ -235,7 +232,7 @@ impl<
     }
 
     /// Handles a message from the [p2p::Engine].
-    async fn handle_resolver(
+    fn handle_resolver(
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
@@ -260,7 +257,7 @@ impl<
                 voter.resolved(parsed.clone());
 
                 // Process message with the request view for tracking
-                self.state.handle(parsed, Some(view), resolver).await;
+                self.state.handle(parsed, Some(view), resolver);
             }
             HandlerMessage::Produce { view, response } => {
                 // Produce message for view

@@ -215,20 +215,18 @@ where
     }
 
     /// Forwards a proposal to the requested peers.
-    async fn forward_proposal(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
+    fn forward_proposal(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
         let peers = self.forward_recipients(&missing);
         if peers.is_empty() {
             return;
         }
-        self.relay
-            .broadcast(
-                proposal.payload,
-                Plan::Forward {
-                    round: proposal.round,
-                    recipients: Recipients::Some(peers),
-                },
-            )
-            .await;
+        let _ = self.relay.broadcast(
+            proposal.payload,
+            Plan::Forward {
+                round: proposal.round,
+                recipients: Recipients::Some(peers),
+            },
+        );
     }
 
     /// Returns true if the leader has nullified the current view
@@ -333,7 +331,7 @@ where
                         })
                     {
                         let participants = self.forward_targets(round, &proposal, leader);
-                        self.forward_proposal(proposal, participants).await;
+                        self.forward_proposal(proposal, participants);
                     }
 
                     // Setting leader may enable batch verification

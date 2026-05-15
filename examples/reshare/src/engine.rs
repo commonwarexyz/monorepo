@@ -33,7 +33,7 @@ use commonware_runtime::{
     Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
+use commonware_utils::{union, NZUsize, NZU16, NZU32, NZU64};
 use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
@@ -346,7 +346,7 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<H::Digest>>,
+            handler::Receiver<H::Digest>,
             commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
@@ -389,7 +389,7 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<H::Digest>>,
+            handler::Receiver<H::Digest>,
             commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
