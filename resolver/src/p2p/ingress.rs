@@ -476,6 +476,10 @@ mod tests {
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Message::Clear));
-        assert!(matches!(messages[1], Message::Retain { .. }));
+        let Message::Retain { predicate } = &messages[1] else {
+            panic!("expected retain");
+        };
+        assert!(predicate(&1));
+        assert!(!predicate(&2));
     }
 }
