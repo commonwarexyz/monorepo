@@ -112,7 +112,7 @@ impl<P: PublicKey> Messenger<P> {
     /// Encodes the message once and shares the encoded bytes across all recipients.
     /// Returns feedback from enqueueing the router message.
     pub fn content(
-        &mut self,
+        &self,
         recipients: Recipients<P>,
         channel: Channel,
         message: IoBufs,

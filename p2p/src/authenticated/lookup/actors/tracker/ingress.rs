@@ -157,7 +157,7 @@ where
 }
 
 /// Convenience methods for the tracker mailbox sender.
-pub trait SenderExt<C: PublicKey> {
+pub(crate) trait SenderExt<C: PublicKey> {
     /// Send a `Connect` message to the tracker.
     fn connect(&self, public_key: C, peer: PeerMailbox<peer::Message>) -> Feedback;
 

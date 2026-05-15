@@ -112,7 +112,7 @@ impl<P: PublicKey> Messenger<P> {
     /// Encodes the message once and shares the encoded bytes across all recipients.
     /// Returns feedback from enqueueing the router message.
     pub fn content(
-        &mut self,
+        &self,
         recipients: Recipients<P>,
         channel: Channel,
         message: IoBufs,
@@ -154,7 +154,7 @@ mod tests {
         executor.start(|context| async move {
             let (control_sender, mut receiver) = mailbox::new::<Message<PublicKey>>(NZUsize!(1));
             let mailbox = Mailbox::new(control_sender.clone());
-            let mut messenger = Messenger::new(
+            let messenger = Messenger::new(
                 context.network_buffer_pool().clone(),
                 Mailbox::new(control_sender),
             );

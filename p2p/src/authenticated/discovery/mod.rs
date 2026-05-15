@@ -2458,7 +2458,6 @@ mod tests {
             );
 
             let message = IoBuf::from(vec![0u8; 100]);
-            let mut messenger = messenger;
 
             // Send enough messages to fill slow_peer's buffer and then force
             // one slow-peer drop. The fast peer should still receive every

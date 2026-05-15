@@ -155,6 +155,10 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 
     /// Notifies all open peer subscriptions with the current list of connected peers.
     fn notify_subscribers(&mut self) {
+        if self.open_subscriptions.is_empty() {
+            return;
+        }
+
         let peers: Vec<P> = self.connections.keys().cloned().collect();
         let mut keep = Vec::with_capacity(self.open_subscriptions.len());
 

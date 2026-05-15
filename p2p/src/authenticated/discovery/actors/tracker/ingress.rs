@@ -183,7 +183,7 @@ where
 }
 
 /// Convenience methods for the tracker mailbox sender.
-pub trait SenderExt<C: PublicKey> {
+pub(crate) trait SenderExt<C: PublicKey> {
     /// Send a `Connect` message to the tracker and receive the greeting info.
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was

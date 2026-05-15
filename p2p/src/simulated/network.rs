@@ -617,6 +617,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
     fn broadcast_peer_list(&mut self) {
+        if self.peer_subscribers.is_empty() {
+            return;
+        }
+
         let peers = self.all_connected_peers();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for (exclude, mut subscriber) in self.peer_subscribers.drain(..) {
