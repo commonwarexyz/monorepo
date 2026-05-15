@@ -17,7 +17,6 @@ use commonware_runtime::{
 use rand_core::CryptoRngCore;
 use std::num::NonZeroUsize;
 use tracing::debug;
-use tracker::ingress::SenderExt as _;
 
 pub struct Actor<
     E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
@@ -66,19 +65,11 @@ impl<
         )
     }
 
-    pub fn start(
-        mut self,
-        tracker: mailbox::Sender<tracker::Message<C>>,
-        router: router::Mailbox<C>,
-    ) -> Handle<()> {
+    pub fn start(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, router))
     }
 
-    async fn run(
-        mut self,
-        tracker: mailbox::Sender<tracker::Message<C>>,
-        router: router::Mailbox<C>,
-    ) {
+    async fn run(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) {
         select_loop! {
             self.context,
             on_stopped => {

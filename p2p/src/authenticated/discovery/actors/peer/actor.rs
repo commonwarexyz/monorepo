@@ -22,7 +22,6 @@ use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
-use tracker::ingress::SenderExt as _;
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
@@ -157,7 +156,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: C,
         greeting: types::Info<C>,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
-        tracker: mailbox::Sender<tracker::Message<C>>,
+        tracker: tracker::Mailbox<C>,
         channels: Channels<C>,
     ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
@@ -549,7 +548,7 @@ mod tests {
                     local_pk,
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;
@@ -652,7 +651,7 @@ mod tests {
                     local_pk,
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;
@@ -757,7 +756,7 @@ mod tests {
                     local_pk,
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;
@@ -883,7 +882,7 @@ mod tests {
                     local_pk_clone.clone(),
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;

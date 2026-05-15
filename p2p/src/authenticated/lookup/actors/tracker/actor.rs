@@ -1,6 +1,6 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Message, Oracle},
+    ingress::{Mailbox, Message, Oracle},
     Config,
 };
 use crate::{
@@ -47,14 +47,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
-    pub fn new(
-        context: E,
-        cfg: Config<C>,
-    ) -> (
-        Self,
-        mailbox::Sender<Message<C::PublicKey>>,
-        Oracle<C::PublicKey>,
-    ) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C::PublicKey>, Oracle<C::PublicKey>) {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -87,7 +80,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 mailboxes: HashMap::new(),
                 subscribers: Vec::new(),
             },
-            sender,
+            Mailbox::new(sender),
             oracle,
         )
     }
@@ -241,10 +234,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::{
-        authenticated::lookup::actors::{peer, tracker::ingress::SenderExt as _},
-        AddressableManager, AddressableTrackedPeers, Ingress, Provider,
+        authenticated::lookup::actors::peer, AddressableManager, AddressableTrackedPeers, Ingress,
+        Provider,
     };
-    use commonware_actor::mailbox::Sender;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -293,7 +285,7 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Sender<Message<PublicKey>>,
+        mailbox: Mailbox<PublicKey>,
         oracle: Oracle<PublicKey>,
     }
 

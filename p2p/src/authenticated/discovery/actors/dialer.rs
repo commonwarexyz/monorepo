@@ -10,7 +10,6 @@ use crate::authenticated::{
     },
     Mailbox,
 };
-use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -24,7 +23,6 @@ use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
-use tracker::ingress::SenderExt as _;
 
 // Mailbox for the spawner actor.
 type SupervisorMailbox<E, C> =
@@ -145,7 +143,7 @@ impl<
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
         supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -153,7 +151,7 @@ impl<
 
     async fn run(
         mut self,
-        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
@@ -204,6 +202,7 @@ mod tests {
         },
         Ingress,
     };
+    use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
@@ -262,7 +261,7 @@ mod tests {
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             // Start the dialer
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             // Handle messages until deadline, counting dial attempts
             let mut dial_count = 0;
@@ -327,7 +326,7 @@ mod tests {
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             // Tracker reports next_query_at=100ms, which is shorter than
             // dial_frequency=500ms. The dialer should clamp to dial_frequency,
@@ -391,7 +390,7 @@ mod tests {
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             let mut dial_count = 0;
             let deadline = context.current() + Duration::from_millis(250);
@@ -454,7 +453,7 @@ mod tests {
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             let mut refresh_count = 0;
             let deadline = context.current() + Duration::from_millis(350);

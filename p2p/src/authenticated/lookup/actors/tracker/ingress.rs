@@ -126,44 +126,33 @@ impl<C: PublicKey> Policy for Message<C> {
     }
 }
 
-/// Convenience methods for the tracker mailbox sender.
-pub(crate) trait SenderExt<C: PublicKey> {
+/// Mailbox for sending messages to the tracker actor.
+#[derive(Clone, Debug)]
+pub struct Mailbox<C: PublicKey>(mailbox::Sender<Message<C>>);
+
+impl<C: PublicKey> Mailbox<C> {
+    pub(crate) const fn new(sender: mailbox::Sender<Message<C>>) -> Self {
+        Self(sender)
+    }
+
     /// Send a `Connect` message to the tracker.
-    fn connect(&self, public_key: C, peer: peer::Mailbox) -> Feedback;
+    pub(crate) fn connect(&self, public_key: C, peer: peer::Mailbox) -> Feedback {
+        enqueue(&self.0, Message::Connect { public_key, peer })
+    }
 
     /// Request dialable peers from the tracker.
     ///
     /// Returns an empty response if the tracker is shut down.
-    fn dialable(&self) -> impl Future<Output = Dialable<C>> + Send;
+    pub(crate) fn dialable(&self) -> impl Future<Output = Dialable<C>> + Send {
+        let sender = self.0.clone();
+        async move { request_or_default(&sender, |responder| Message::Dialable { responder }).await }
+    }
 
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    fn dial(&self, public_key: C)
-        -> impl Future<Output = Option<(Reservation<C>, Ingress)>> + Send;
-
-    /// Send an `Acceptable` message to the tracker.
-    ///
-    /// Returns `false` if the tracker is shut down.
-    fn acceptable(&self, public_key: C, source_ip: IpAddr) -> impl Future<Output = bool> + Send;
-
-    /// Send a `Listen` message to the tracker.
-    ///
-    /// Returns `None` if the tracker is shut down.
-    fn listen(&self, public_key: C) -> impl Future<Output = Option<Reservation<C>>> + Send;
-}
-
-impl<C: PublicKey> SenderExt<C> for mailbox::Sender<Message<C>> {
-    fn connect(&self, public_key: C, peer: peer::Mailbox) -> Feedback {
-        enqueue(self, Message::Connect { public_key, peer })
-    }
-
-    fn dialable(&self) -> impl Future<Output = Dialable<C>> + Send {
-        request_or_default(self, |responder| Message::Dialable { responder })
-    }
-
-    async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
-        request(self, move |reservation| Message::Dial {
+    pub(crate) async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
+        request(&self.0, move |reservation| Message::Dial {
             public_key,
             reservation,
         })
@@ -171,20 +160,34 @@ impl<C: PublicKey> SenderExt<C> for mailbox::Sender<Message<C>> {
         .flatten()
     }
 
-    fn acceptable(&self, public_key: C, source_ip: IpAddr) -> impl Future<Output = bool> + Send {
-        request_or(
-            self,
-            move |responder| Message::Acceptable {
-                public_key,
-                source_ip,
-                responder,
-            },
-            false,
-        )
+    /// Send an `Acceptable` message to the tracker.
+    ///
+    /// Returns `false` if the tracker is shut down.
+    pub(crate) fn acceptable(
+        &self,
+        public_key: C,
+        source_ip: IpAddr,
+    ) -> impl Future<Output = bool> + Send {
+        let sender = self.0.clone();
+        async move {
+            request_or(
+                &sender,
+                move |responder| Message::Acceptable {
+                    public_key,
+                    source_ip,
+                    responder,
+                },
+                false,
+            )
+            .await
+        }
     }
 
-    async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
-        request(self, move |reservation| Message::Listen {
+    /// Send a `Listen` message to the tracker.
+    ///
+    /// Returns `None` if the tracker is shut down.
+    pub(crate) async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
+        request(&self.0, move |reservation| Message::Listen {
             public_key,
             reservation,
         })

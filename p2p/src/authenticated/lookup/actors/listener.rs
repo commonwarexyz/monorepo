@@ -22,7 +22,6 @@ use std::{
     num::NonZeroU32,
 };
 use tracing::debug;
-use tracker::ingress::SenderExt as _;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
 const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
@@ -138,7 +137,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
@@ -174,7 +173,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
         supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -183,7 +182,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        tracker: mailbox::Sender<tracker::Message<C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
         supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Setup the rate limiters
@@ -391,7 +390,8 @@ mod tests {
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener
             let (sink, mut stream) = loop {
@@ -551,7 +551,8 @@ mod tests {
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener
             let (sink, mut stream) = loop {
@@ -632,7 +633,8 @@ mod tests {
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener
             let (sink, mut stream) = loop {
@@ -718,7 +720,8 @@ mod tests {
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener from a private IP
             let (sink, mut stream) = loop {
