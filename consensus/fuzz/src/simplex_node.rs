@@ -9,7 +9,7 @@ use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector, RoundRobin, RoundRobinElector},
+        elector::{Config as ElectorConfig, Elector},
         scheme::Scheme as SimplexScheme,
         types::{
             Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
@@ -20,7 +20,7 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
     Monitor, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest, Sha256};
+use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor};
@@ -223,9 +223,10 @@ enum FinalizationCertificateBranch {
     InvalidFinalization,
 }
 
-struct NodeDriver<S>
+struct NodeDriver<S, E>
 where
     S: SimplexScheme<Sha256Digest>,
+    E: Elector<S>,
     S::PublicKey: Send,
 {
     context: deterministic::Context,
@@ -242,7 +243,7 @@ where
     certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     strategy: SmallScope,
-    elector: RoundRobinElector<S>,
+    elector: E,
 
     last_vote_view: u64,
     last_finalized_view: u64,
@@ -261,9 +262,10 @@ where
     leader_certificate_by_view: HashMap<u64, S::Certificate>,
 }
 
-impl<S> NodeDriver<S>
+impl<S, E> NodeDriver<S, E>
 where
     S: SimplexScheme<Sha256Digest>,
+    E: Elector<S>,
     S::PublicKey: Send,
 {
     #[allow(clippy::too_many_arguments)]
@@ -281,7 +283,7 @@ where
         vote_receivers: Vec<simulated::Receiver<S::PublicKey>>,
         certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
         resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
-        elector: RoundRobinElector<S>,
+        elector: E,
     ) -> Self {
         Self {
             context,
@@ -319,18 +321,21 @@ where
         usize::from(node_idx) % self.schemes.len()
     }
 
-    fn leader_for_view(&self, view: u64) -> usize {
+    fn leader_for_view(&self, view: u64) -> Option<usize> {
         let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
         let certificate = if view <= 1 {
             None
         } else {
-            self.leader_certificate_by_view.get(&view.saturating_sub(1))
+            Some(
+                self.leader_certificate_by_view
+                    .get(&view.saturating_sub(1))?,
+            )
         };
-        usize::from(self.elector.elect(round, certificate))
+        Some(usize::from(self.elector.elect(round, certificate)))
     }
 
     fn is_elected_leader(&self, participant_idx: usize, view: u64) -> bool {
-        self.leader_for_view(view) == participant_idx
+        self.leader_for_view(view) == Some(participant_idx)
     }
 
     fn is_elected_honest_leader(&self, view: u64) -> bool {
@@ -1555,9 +1560,9 @@ where
         base.certify,
     );
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-    let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
+    let elector = <P::Elector as Default>::default().build(fuzzer_schemes[0].participants());
 
-    let mut driver = NodeDriver::<P::Scheme>::new(
+    let mut driver = NodeDriver::<P::Scheme, _>::new(
         context.child("simplex_node_driver"),
         honest,
         relay,

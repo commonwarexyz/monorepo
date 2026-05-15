@@ -90,7 +90,11 @@ pub trait Strategy: Send + Sync {
     /// instead of set partitions.
     fn messaging_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Vec<(View, u8)>;
 
-    fn fault_bounds(&self) -> Option<(u64, u64)>;
+    /// Views where a `Disrupter` is allowed to inject or mutate messages.
+    ///
+    /// `None` means every observed view is faulty. `Some(views)` uses the same
+    /// distinct-view schedule shape as `network_faults` and `messaging_faults`.
+    fn disrupter_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Option<Vec<View>>;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,6 +116,13 @@ fn sample_faults(
     max_view: u64,
     rng: &mut impl Rng,
 ) -> Vec<(View, SetPartition)> {
+    sample_fault_views(count, min_view, max_view, rng)
+        .into_iter()
+        .map(|view| (view, sample_network_fault(rng)))
+        .collect()
+}
+
+fn sample_fault_views(count: u64, min_view: u64, max_view: u64, rng: &mut impl Rng) -> Vec<View> {
     if count == 0 {
         return Vec::new();
     }
@@ -123,7 +134,7 @@ fn sample_faults(
         let idx = rng.gen_range(i..views.len());
         views.swap(i, idx);
         let view = views[i];
-        entries.push((View::new(view), sample_network_fault(rng)));
+        entries.push(View::new(view));
     }
     entries
 }
@@ -345,8 +356,10 @@ impl Strategy for SmallScope {
         sample_messaging_faults(d, 1, bound, rng)
     }
 
-    fn fault_bounds(&self) -> Option<(u64, u64)> {
-        Some((self.fault_rounds, self.fault_rounds_bound))
+    fn disrupter_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Option<Vec<View>> {
+        let bound = self.fault_rounds_bound.min(required_containers).max(1);
+        let d = self.fault_rounds.max(1).min(bound);
+        Some(sample_fault_views(d, 1, bound, rng))
     }
 }
 
@@ -561,7 +574,11 @@ impl Strategy for AnyScope {
         sample_messaging_faults(d, 1, required_containers, rng)
     }
 
-    fn fault_bounds(&self) -> Option<(u64, u64)> {
+    fn disrupter_faults(
+        &self,
+        _required_containers: u64,
+        _rng: &mut impl Rng,
+    ) -> Option<Vec<View>> {
         None
     }
 }
@@ -737,8 +754,15 @@ impl Strategy for FutureScope {
         sample_messaging_faults(d, start, required_containers, rng)
     }
 
-    fn fault_bounds(&self) -> Option<(u64, u64)> {
-        Some((self.fault_rounds, self.fault_rounds_bound))
+    fn disrupter_faults(&self, required_containers: u64, rng: &mut impl Rng) -> Option<Vec<View>> {
+        let start = self
+            .fault_rounds_bound
+            .saturating_add(1)
+            .min(required_containers)
+            .max(1);
+        let window = required_containers - start + 1;
+        let d = self.fault_rounds.max(1).min(window);
+        Some(sample_fault_views(d, start, required_containers, rng))
     }
 }
 

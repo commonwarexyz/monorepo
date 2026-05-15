@@ -433,7 +433,11 @@ impl Strategy for ByzzFuzzMutator {
         unreachable!("ByzzFuzz samples process faults in byzzfuzz::sampling")
     }
 
-    fn fault_bounds(&self) -> Option<(u64, u64)> {
-        unreachable!("ByzzFuzz samples fault bounds in byzzfuzz::runner")
+    fn disrupter_faults(
+        &self,
+        _required_containers: u64,
+        _rng: &mut impl Rng,
+    ) -> Option<Vec<View>> {
+        unreachable!("ByzzFuzz does not use Disrupter")
     }
 }

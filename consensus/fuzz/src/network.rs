@@ -73,7 +73,7 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
 
     fn should_drop_honest_message(&self, rate: u8) -> bool {
         let mut context = self.context.lock();
-        let sample = context.gen::<u8>() % 100;
+        let sample = context.gen_range(0..100u8);
         sample < rate
     }
 }

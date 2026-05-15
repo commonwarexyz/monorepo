@@ -19,7 +19,7 @@ use crate::{
     utils::{apply_partition, link_peers, register, Action, Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt};
+use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     simplex::{
         config,
@@ -39,10 +39,16 @@ use commonware_p2p::{
     Recipients,
 };
 use commonware_parallel::Sequential;
+use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor as _,
 };
-use commonware_utils::{channel::mpsc::Receiver, sync::Once, FuzzRng, NZUsize, NZU16};
+use commonware_utils::{
+    channel::mpsc::{self, Receiver},
+    sequence::U64,
+    sync::Once,
+    FuzzRng, NZUsize, NZU16,
+};
 use futures::future::join_all;
 #[cfg(feature = "mocks")]
 pub use simplex::SimplexCertificateMock;
@@ -414,6 +420,7 @@ fn start_disrupter<P: simplex::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     strategy: &StrategyChoice,
+    required_containers: u64,
     vote_network: (
         impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
         impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
@@ -439,11 +446,12 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds,
                     fault_rounds_bound,
                 },
+                required_containers,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::AnyScope => {
-            let disrupter = Disrupter::new(context, scheme, AnyScope);
+            let disrupter = Disrupter::new(context, scheme, AnyScope, required_containers);
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::FutureScope {
@@ -457,6 +465,7 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds,
                     fault_rounds_bound,
                 },
+                required_containers,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
@@ -475,6 +484,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
         context.child("disrupter"),
         scheme,
         &input.strategy,
+        input.required_containers,
         vote_network,
         certificate_network,
         resolver_network,
@@ -648,6 +658,52 @@ fn default_link() -> Link {
     }
 }
 
+fn scheduled_partition(
+    schedule: &[(View, SetPartition)],
+    executing_view: u64,
+) -> Option<SetPartition> {
+    schedule
+        .iter()
+        .find_map(|(view, p)| (*view == View::new(executing_view)).then_some(*p))
+}
+
+/// Look up the partition scheduled for view 1, the initial executing view.
+/// The caller applies this synchronously before validators run so early view-1
+/// traffic observes the scheduled topology.
+fn initial_network_partition(partition: &Partition) -> Option<SetPartition> {
+    partition
+        .schedule()
+        .and_then(|schedule| scheduled_partition(schedule, 1))
+}
+
+async fn reporter_view_stream<P: simplex::Simplex>(
+    context: &deterministic::Context,
+    reporters: &mut [ReporterEntry<P>],
+) -> Option<(u64, mpsc::UnboundedReceiver<u64>)> {
+    if reporters.is_empty() {
+        return None;
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut max_finalized_view = 0;
+    for (idx, (_, reporter)) in reporters.iter_mut().enumerate() {
+        let (latest, mut monitor) = reporter.subscribe().await;
+        max_finalized_view = max_finalized_view.max(latest.get());
+        let tx = tx.clone();
+        context
+            .child("reporter_view_watcher")
+            .with_attribute("index", idx)
+            .spawn(move |_| async move {
+                while let Some(next) = monitor.recv().await {
+                    if tx.send(next.get()).is_err() {
+                        break;
+                    }
+                }
+            });
+    }
+    drop(tx);
+    Some((max_finalized_view, rx))
+}
+
 async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     context: &deterministic::Context,
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
@@ -655,6 +711,7 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     reporters: &mut [ReporterEntry<P>],
     partition: Partition,
     required_containers: u64,
+    initial_partition: Option<SetPartition>,
 ) {
     let Some(schedule) = partition.schedule() else {
         return;
@@ -662,33 +719,33 @@ async fn spawn_network_fault_scheduler<P: simplex::Simplex>(
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let (mut latest, mut monitor) = reporters[0].1.subscribe().await;
+    let Some((mut finalized_view, mut view_rx)) =
+        reporter_view_stream::<P>(context, reporters).await
+    else {
+        return;
+    };
     let oracle = oracle.clone();
     let participants: Vec<_> = participants.to_vec();
-    let base_partition: Option<SetPartition> = partition.set_partition().copied();
     let schedule = schedule.to_vec();
     context
         .child("network_fault_scheduler")
         .spawn(move |_| async move {
             let link = default_link();
-            let mut active: Option<SetPartition> = base_partition;
-            let mut current_view = latest.get();
+            let mut active = initial_partition;
             loop {
-                let target: Option<SetPartition> = schedule
-                    .iter()
-                    .find_map(|(view, p)| (*view == View::new(current_view)).then_some(*p));
+                let executing_view = finalized_view.saturating_add(1);
+                let target = scheduled_partition(&schedule, executing_view);
                 if target != active {
                     apply_partition(&oracle, &participants, target.as_ref(), &link).await;
                     active = target;
                 }
-                if current_view >= required_containers {
+                if executing_view > required_containers {
                     break;
                 }
-                let Some(next) = monitor.recv().await else {
+                let Some(next) = view_rx.recv().await else {
                     break;
                 };
-                latest = next;
-                current_view = latest.get();
+                finalized_view = finalized_view.max(next);
             }
         });
 }
@@ -731,12 +788,15 @@ async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
     if schedule.is_empty() || reporters.is_empty() {
         return;
     }
-    let (mut latest, mut monitor) = reporters[0].1.subscribe().await;
+    let Some((mut finalized_view, mut view_rx)) =
+        reporter_view_stream::<P>(context, reporters).await
+    else {
+        return;
+    };
     context
         .child("messaging_fault_scheduler")
         .spawn(move |_| async move {
             let mut active: u8 = initial_rate;
-            let mut finalized_view = latest.get();
             loop {
                 let executing_view = finalized_view.saturating_add(1);
                 let target: u8 = schedule
@@ -750,11 +810,10 @@ async fn spawn_messaging_fault_scheduler<P: simplex::Simplex>(
                 if executing_view > required_containers {
                     break;
                 }
-                let Some(next) = monitor.recv().await else {
+                let Some(next) = view_rx.recv().await else {
                     break;
                 };
-                latest = next;
-                finalized_view = latest.get();
+                finalized_view = finalized_view.max(next);
             }
         });
 }
@@ -827,6 +886,16 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
 
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
+        let initial_partition = initial_network_partition(&input.partition);
+        if initial_partition.is_some() {
+            apply_partition(
+                &oracle,
+                &participants,
+                initial_partition.as_ref(),
+                &default_link(),
+            )
+            .await;
+        }
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
@@ -875,6 +944,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
             &mut reporters,
             input.partition.clone(),
             input.required_containers,
+            initial_partition,
         )
         .await;
 
@@ -901,6 +971,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
 
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
+            invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
@@ -1023,6 +1094,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
         }
         if config.is_valid() {
             let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
+            invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
             invariants::check_vote_invariants(config.faults as usize, &reporter_only);
             let states = invariants::extract(reporter_only, config.n as usize);
             invariants::check::<P>(config.n, states);
@@ -1048,6 +1120,23 @@ fn run_with_twins_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
 fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput) {
     run_twins::<P>(input, TwinsRole::Campaign);
+}
+
+fn twins_resolver_view<P: simplex::Simplex>(
+    message: &IoBuf,
+    codec: &<<P::Scheme as Scheme>::Certificate as Read>::Cfg,
+) -> Option<View> {
+    let msg = ResolverMessage::<U64>::decode(message.clone()).ok()?;
+    match msg.payload {
+        ResolverPayload::Request(key) => Some(View::new(u64::from(key))),
+        ResolverPayload::Response(bytes) => {
+            let cert =
+                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut bytes.as_ref(), codec)
+                    .ok()?;
+            Some(cert.view())
+        }
+        ResolverPayload::Error => None,
+    }
 }
 
 /// Unified twins driver. The two existing modes (TwinsMutator / TwinsCampaign)
@@ -1133,9 +1222,9 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             let make_vote_forwarder = || {
                 let participants = participants.clone();
                 let scenario = scenario.clone();
-                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
-                        return Some(recipients.clone());
+                        return None;
                     };
                     let (primary, secondary) =
                         scenario.partitions(msg.view(), participants.as_ref());
@@ -1149,12 +1238,12 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
                 let scenario = scenario.clone();
-                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
                         &mut message.as_ref(),
                         &codec,
                     ) else {
-                        return Some(recipients.clone());
+                        return None;
                     };
                     let (primary, secondary) =
                         scenario.partitions(msg.view(), participants.as_ref());
@@ -1188,6 +1277,32 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                     scenario.route(msg.view(), sender, participants.as_ref())
                 }
             };
+            let make_resolver_forwarder = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
+                    let Some(view) = twins_resolver_view::<P>(message, &codec) else {
+                        return None;
+                    };
+                    let (primary, secondary) = scenario.partitions(view, participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_resolver_router = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants.clone();
+                let scenario = scenario.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Some(view) = twins_resolver_view::<P>(message, &codec) else {
+                        return SplitTarget::None;
+                    };
+                    scenario.route(view, sender, participants.as_ref())
+                }
+            };
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
@@ -1201,10 +1316,10 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
             let (certificate_receiver_primary, certificate_receiver_secondary) =
                 certificate_receiver
                     .split_with(context.child("recovered_split"), make_certificate_router());
-            let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
-                .split_with(|_origin, recipients, _message| Some(recipients.clone()));
+            let (resolver_sender_primary, resolver_sender_secondary) =
+                resolver_sender.split_with(make_resolver_forwarder());
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(context.child("resolver_split"), |_| SplitTarget::Both);
+                .split_with(context.child("resolver_split"), make_resolver_router());
 
             // Primary: legitimate engine driven by the twins-aware elector.
             let primary_context = context.child("primary");
@@ -1276,6 +1391,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         context.child("secondary"),
                         scheme.clone(),
                         &input.strategy,
+                        input.required_containers,
                         (vote_sender_secondary, vote_receiver_secondary),
                         (certificate_sender_secondary, certificate_receiver_secondary),
                         (resolver_sender_secondary, resolver_receiver_secondary),
