@@ -174,20 +174,6 @@ pub enum Error {
     UnknownDealer(String),
     /// The caller's key is not in the set of players.
     UnknownPlayer,
-    /// The sharing's participant count does not match the player set.
-    SharingPlayersMismatch {
-        /// Number of participants encoded in the public sharing.
-        sharing_total: u32,
-        /// Number of players exported alongside that sharing.
-        players: usize,
-    },
-    /// The output quorum exceeds the number of exported players.
-    InvalidQuorum {
-        /// Number of players needed to reconstruct the key.
-        quorum: u32,
-        /// Number of exported players.
-        players: usize,
-    },
     /// The configured number of players exceeds the maximum supported by the
     /// provided [`Setup`]. Build a larger [`Setup`] (see [`Setup::new`]) or
     /// pre-check via [`Setup::supports`].
@@ -211,44 +197,26 @@ pub struct Output<P> {
 }
 
 impl<P: Ord + Clone> Output<P> {
-    /// Construct a validated round output.
+    /// Construct a round output.
     ///
-    /// The exported quorum must not exceed the number of exported players, and
-    /// the public sharing must have the same participant count as the player set.
-    pub fn new(
+    /// Assumes the caller has already validated participant counts via
+    /// [`Info::new`], and that `public.total() == players.len()` and
+    /// `quorum <= players.len()` by construction.
+    fn new(
         summary: Summary,
         public: Sharing<MinPk>,
         quorum: NonZeroU32,
         dealers: Set<P>,
         players: Set<P>,
-    ) -> Result<Self, Error> {
-        let participant_range = 1..u32::MAX as usize;
-        if !participant_range.contains(&dealers.len()) {
-            return Err(Error::NumDealers(dealers.len()));
-        }
-        if !participant_range.contains(&players.len()) {
-            return Err(Error::NumPlayers(players.len()));
-        }
-        if public.total().get() as usize != players.len() {
-            return Err(Error::SharingPlayersMismatch {
-                sharing_total: public.total().get(),
-                players: players.len(),
-            });
-        }
-        if quorum.get() > players.len() as u32 {
-            return Err(Error::InvalidQuorum {
-                quorum: quorum.get(),
-                players: players.len(),
-            });
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             summary,
             public,
             quorum,
             dealers,
             players: players.clone(),
             revealed: players,
-        })
+        }
     }
 
     /// Return the authoritative quorum for this round, i.e. the number of
@@ -671,13 +639,13 @@ pub fn observe(
         .cloned()
         .try_collect()
         .expect("selected dealers are unique");
-    Output::new(
+    Ok(Output::new(
         *info.summary(),
         sharing,
         info.player_quorum,
         dealers,
         info.players.clone(),
-    )
+    ))
 }
 
 /// Compute the public output and recover this player's private share.
@@ -749,7 +717,7 @@ pub fn play(
         info.player_quorum,
         dealers,
         info.players.clone(),
-    )?;
+    );
     let share = Share::new(my_index, Private::new(private));
     Ok((output, share))
 }
@@ -2088,68 +2056,6 @@ mod tests {
     fn info_rejects_empty_participants() {
         let result = Info::new::<N3f1>(TEST_NAMESPACE, 0, None, Set::default(), Set::default());
         assert!(matches!(result, Err(Error::NumDealers(0))));
-    }
-
-    #[test]
-    fn output_rejects_public_total_mismatch() {
-        let mut rng = commonware_utils::test_rng();
-        let public = Sharing::new(
-            Mode::default(),
-            NonZeroU32::new(2).unwrap(),
-            Poly::commit(Poly::new(&mut rng, 0)),
-        );
-        let dealers: Set<PublicKey> = std::iter::once(PrivateKey::random(&mut rng).public())
-            .try_collect()
-            .unwrap();
-        let players: Set<PublicKey> = std::iter::once(PrivateKey::random(&mut rng).public())
-            .try_collect()
-            .unwrap();
-
-        let result = Output::new(
-            Summary::random(&mut rng),
-            public,
-            NonZeroU32::new(1).unwrap(),
-            dealers,
-            players,
-        );
-        assert!(matches!(
-            result,
-            Err(Error::SharingPlayersMismatch {
-                sharing_total: 2,
-                players: 1,
-            })
-        ));
-    }
-
-    #[test]
-    fn output_rejects_quorum_larger_than_player_set() {
-        let mut rng = commonware_utils::test_rng();
-        let public = Sharing::new(
-            Mode::default(),
-            NonZeroU32::new(1).unwrap(),
-            Poly::commit(Poly::new(&mut rng, 0)),
-        );
-        let dealers: Set<PublicKey> = std::iter::once(PrivateKey::random(&mut rng).public())
-            .try_collect()
-            .unwrap();
-        let players: Set<PublicKey> = std::iter::once(PrivateKey::random(&mut rng).public())
-            .try_collect()
-            .unwrap();
-
-        let result = Output::new(
-            Summary::random(&mut rng),
-            public,
-            NonZeroU32::new(2).unwrap(),
-            dealers,
-            players,
-        );
-        assert!(matches!(
-            result,
-            Err(Error::InvalidQuorum {
-                quorum: 2,
-                players: 1,
-            })
-        ));
     }
 
     #[test]
