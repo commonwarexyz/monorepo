@@ -940,24 +940,17 @@ impl TlsSizeClassCache {
         class.global.take_batch(take, |slot, buffer| {
             // Each claimed global entry becomes either the returned lease or a
             // local cache entry, so each needs one retained class reference.
-            //
-            // SAFETY: the borrowed `class` owns one strong reference for its
-            // token while the refill runs.
-            unsafe { class.token.retain() };
             let cache_entry = TlsSizeClassCacheEntry { buffer, slot };
+            let lease = SizeClassLease::retain(class);
             if entry.is_none() {
                 // Hand the first claimed buffer to the allocation that missed
                 // locally. Additional claimed buffers refill the local cache.
-                //
-                // SAFETY: `class.token.retain()` above retained the strong
-                // reference transferred to this returned lease.
-                let lease = unsafe { SizeClassLease::from_banked(class) };
                 entry = Some((cache_entry, lease));
             } else {
                 // The take count is derived from the target occupancy, so
                 // refill cannot overflow the local cache. Push directly to
                 // avoid the spill checks used by return-to-cache.
-                self.push_local(cache_entry);
+                self.push_local(cache_entry, lease);
             }
         });
 
@@ -975,10 +968,8 @@ impl TlsSizeClassCache {
         let entry = TlsSizeClassCacheEntry { buffer, slot };
 
         if self.len < self.capacity {
-            // The returned lease becomes one banked reference represented by
-            // the new local stack entry.
-            class.into_banked();
-            self.push_local(entry);
+            // Keep the returned entry local while there is room.
+            self.push_local(entry, class);
             return;
         }
 
@@ -988,10 +979,12 @@ impl TlsSizeClassCache {
 
     /// Pushes one entry onto this thread's local stack.
     ///
-    /// The caller must ensure the stack has room and must transfer one
-    /// size-class reference into banked local-cache ownership.
+    /// The caller must ensure the stack has room. `class` becomes the banked
+    /// size-class reference represented by `entry`.
     #[inline(always)]
-    fn push_local(&mut self, entry: TlsSizeClassCacheEntry) {
+    fn push_local(&mut self, entry: TlsSizeClassCacheEntry, class: SizeClassLease) {
+        class.into_banked();
+
         // SAFETY: the caller ensured `self.len < self.capacity`, so this slot
         // is in bounds and currently uninitialized.
         unsafe {
@@ -1042,10 +1035,8 @@ impl TlsSizeClassCache {
                 (entry.slot, entry.buffer)
             }));
 
-        // The incoming lease becomes one banked reference represented by the
-        // new local stack entry.
-        class.into_banked();
-        self.push_local(entry);
+        // Keep the incoming entry local after making room.
+        self.push_local(entry, class);
     }
 }
 
@@ -1338,7 +1329,7 @@ impl Drop for BufferPoolInner {
     fn drop(&mut self) {
         // The public pool is going away. Drain globally parked buffers while
         // the pool-owned class handles are still live. Pooled views and live
-        // TLS cache entries own their own size-class references; if they return
+        // TLS cache entries own their own size-class references, if they return
         // later, they will park their buffer and release the reference that kept
         // the class alive.
         for class in &self.classes {
@@ -1497,10 +1488,6 @@ impl BufferPool {
     }
 
     /// Returns the size class index for a given size, or `None` if `size > max_size`.
-    ///
-    /// Pool construction validates the size-class bounds. This helper is in the
-    /// allocation hot path, so it assumes those invariants and does not repeat
-    /// validation.
     #[inline(always)]
     fn class_index(&self, size: usize) -> Option<usize> {
         let min_size = self.inner.config.min_size.get();
@@ -1582,14 +1569,13 @@ impl BufferPool {
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
     /// exhausted), this returns a pooled buffer that will be returned to the
-    /// pool when dropped. Requests smaller than
-    /// [`BufferPoolConfig::pool_min_size`] bypass pooling and return an
-    /// untracked aligned allocation. Oversized or exhausted requests also fall
-    /// back to an untracked aligned heap allocation that is deallocated when
-    /// dropped.
+    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
+    /// bypass pooling and return an untracked aligned allocation. Oversized or
+    /// exhausted requests also fall back to an untracked aligned heap allocation
+    /// that is deallocated when dropped.
     ///
-    /// Use [`Self::try_alloc`] if eligible requests must fail instead of
-    /// falling back to direct allocation.
+    /// Use [`Self::try_alloc`] if eligible requests must fail instead of falling
+    /// back to direct allocation.
     ///
     /// # Initialization
     ///
@@ -1677,14 +1663,13 @@ impl BufferPool {
     ///
     /// If the pool can provide a buffer (len within limits and pool not
     /// exhausted), this returns a pooled buffer that will be returned to the
-    /// pool when dropped. Requests smaller than
-    /// [`BufferPoolConfig::pool_min_size`] bypass pooling and return an
-    /// untracked aligned allocation. Oversized or exhausted requests also fall
-    /// back to an untracked aligned heap allocation that is deallocated when
-    /// dropped.
+    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
+    /// bypass pooling and return an untracked aligned allocation. Oversized or
+    /// exhausted requests also fall back to an untracked aligned heap allocation
+    /// that is deallocated when dropped.
     ///
-    /// Use this for read APIs that require an initialized `&mut [u8]`.
-    /// This avoids `unsafe set_len` at callsites.
+    /// Use this for read APIs that require an initialized `&mut [u8]`. This
+    /// avoids `unsafe set_len` at callsites.
     ///
     /// Use [`Self::try_alloc_zeroed`] if eligible requests must fail instead of
     /// falling back to direct allocation.
@@ -2445,7 +2430,7 @@ mod tests {
         assert_eq!(size_class_strong_count(&class), 2);
 
         // Moving a pooled-buffer lease into the local cache banks the same strong
-        // reference; it should not clone the class.
+        // reference, it should not clone the class.
         cache.push(lease, slot, buffer);
         assert_eq!(size_class_strong_count(&class), 2);
 
