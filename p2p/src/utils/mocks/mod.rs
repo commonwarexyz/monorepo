@@ -1,6 +1,7 @@
 //! Mock implementations for testing.
 
 use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{IoBuf, IoBufs};
 use core::future;
@@ -34,7 +35,7 @@ impl<P: PublicKey> LimitedSender for InertSender<P> {
     where
         Self: 'a;
 
-    async fn check(
+    fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
@@ -52,12 +53,20 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
     type PublicKey = P;
     type Error = Infallible;
 
-    async fn send(
+    fn is_empty(&self) -> bool {
+        self.recipients.is_empty()
+    }
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        self.recipients.clone()
+    }
+
+    fn send(
         self,
         _: impl Into<IoBufs> + Send,
         _: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        Ok(self.recipients)
+    ) -> Result<Feedback, Self::Error> {
+        Ok(Feedback::Ok)
     }
 }
 
@@ -101,8 +110,7 @@ mod tests {
         ];
 
         let (mut sender, _) = inert_channel(peers.as_slice());
-        let sent = block_on(sender.send(Recipients::All, b"hello".to_vec(), false)).unwrap();
-
+        let sent = sender.send(Recipients::All, b"hello".to_vec(), false).unwrap();
         assert_eq!(sent, peers);
     }
 }

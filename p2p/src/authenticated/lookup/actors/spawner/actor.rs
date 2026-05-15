@@ -76,7 +76,7 @@ impl<
     pub fn start(
         mut self,
         tracker: mailbox::Sender<tracker::Message<C>>,
-        router: Mailbox<router::Message<C>>,
+        router: router::Mailbox<C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, router))
     }
@@ -84,7 +84,7 @@ impl<
     async fn run(
         mut self,
         tracker: mailbox::Sender<tracker::Message<C>>,
-        router: Mailbox<router::Message<C>>,
+        router: router::Mailbox<C>,
     ) {
         select_loop! {
             self.context,
@@ -107,7 +107,7 @@ impl<
                         let dropped_messages = self.dropped_messages.clone();
                         let rate_limited = self.rate_limited.clone();
                         let tracker = tracker.clone();
-                        let mut router = router.clone();
+                        let router = router.clone();
 
                         // Spawn peer
                         self.context.child("peer").spawn(move |context| async move {
@@ -143,7 +143,7 @@ impl<
                                 Ok(()) => debug!(?peer, "peer shutdown gracefully"),
                                 Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
                             }
-                            router.release(peer).await;
+                            let _ = router.release(peer);
                             // Release the reservation
                             drop(reservation)
                         });

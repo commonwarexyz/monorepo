@@ -345,7 +345,6 @@ mod tests {
                     Certificate::Notarization(notarization.clone()).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give network time to deliver
@@ -363,7 +362,6 @@ mod tests {
                         .encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give network time to deliver
@@ -380,7 +378,6 @@ mod tests {
                     Certificate::Finalization(finalization.clone()).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give network time to deliver
@@ -514,7 +511,6 @@ mod tests {
                     Certificate::<S, Sha256Digest>::Nullification(nullification).encode(),
                     true,
                 )
-                .await
                 .unwrap();
             context.sleep(Duration::from_millis(50)).await;
 
@@ -534,7 +530,6 @@ mod tests {
                     Certificate::Notarization(notarization).encode(),
                     true,
                 )
-                .await
                 .unwrap();
             context.sleep(Duration::from_millis(50)).await;
 
@@ -672,7 +667,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -825,7 +819,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -1006,7 +999,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -1261,7 +1253,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -1277,7 +1268,6 @@ mod tests {
                     Certificate::Notarization(notarization).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             let mut saw_notarization = false;
@@ -1468,7 +1458,6 @@ mod tests {
                     Certificate::Notarization(notarization).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Wait until the batcher has recovered the notarization from the
@@ -1640,7 +1629,6 @@ mod tests {
                         Vote::Notarize(leader_vote).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -1652,7 +1640,6 @@ mod tests {
                         Vote::<S, Sha256Digest>::Nullify(active_nullify).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -1666,7 +1653,6 @@ mod tests {
                         Vote::Notarize(conflicting_vote).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -1681,7 +1667,6 @@ mod tests {
                             Vote::Notarize(honest_vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -1868,7 +1853,6 @@ mod tests {
                         Vote::Finalize(finalize_vote).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -1885,7 +1869,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -2087,7 +2070,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -2110,7 +2092,6 @@ mod tests {
                     Certificate::Notarization(notarization.clone()).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give network time to deliver
@@ -2132,7 +2113,6 @@ mod tests {
                         Vote::Notarize(last_vote).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -2265,7 +2245,6 @@ mod tests {
                         Vote::Notarize(leader_vote).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -2290,7 +2269,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -2328,7 +2306,6 @@ mod tests {
                         Vote::Notarize(vote6).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -2465,7 +2442,6 @@ mod tests {
                     Vote::Notarize(leader_vote).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give network time to deliver and batcher time to process
@@ -2582,7 +2558,6 @@ mod tests {
                     Vote::Notarize(leader_vote).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give network time to deliver
@@ -2734,7 +2709,6 @@ mod tests {
                     Vote::Notarize(leader_vote).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give network time to deliver
@@ -2878,7 +2852,6 @@ mod tests {
                     Vote::<S, Sha256Digest>::Nullify(leader_vote).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;
@@ -3006,7 +2979,6 @@ mod tests {
                     Certificate::Finalization(finalization.clone()).encode(),
                     true,
                 )
-                .await
                 .unwrap();
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3143,7 +3115,6 @@ mod tests {
                     .encode(),
                     true,
                 )
-                .await
                 .unwrap();
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3268,7 +3239,6 @@ mod tests {
                     Vote::<S, Sha256Digest>::Nullify(leader_nullify).encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             expect_no_timeout(&mut context, &mut voter_receiver).await;
@@ -3397,7 +3367,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -3440,7 +3409,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -3595,7 +3563,6 @@ mod tests {
                         Vote::<S, Sha256Digest>::Nullify(warmup_vote).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
             context.sleep(Duration::from_millis(50)).await;
@@ -3618,7 +3585,6 @@ mod tests {
                             Vote::Notarize(vote).encode(),
                             true,
                         )
-                        .await
                         .unwrap();
                 }
             }
@@ -3667,7 +3633,6 @@ mod tests {
                         Vote::Notarize(late_vote).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -3697,7 +3662,6 @@ mod tests {
                         Vote::Notarize(vote_v3).encode(),
                         true,
                     )
-                    .await
                     .unwrap();
             }
 
@@ -3813,7 +3777,6 @@ mod tests {
             let vote1 = sign_vote(&schemes[1], proposal.clone());
             sender
                 .send(Recipients::One(me.clone()), vote1.encode(), true)
-                .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;
@@ -3828,7 +3791,6 @@ mod tests {
             // Send same vote again (exact duplicate) - should be ignored, not blocked
             sender
                 .send(Recipients::One(me.clone()), vote1.encode(), true)
-                .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;
@@ -3843,7 +3805,6 @@ mod tests {
             let vote2 = sign_vote(&schemes[2], proposal.clone());
             sender
                 .send(Recipients::One(me.clone()), vote2.encode(), true)
-                .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;
@@ -4023,7 +3984,6 @@ mod tests {
             let vote1 = sign_vote(&schemes[1], proposal1);
             sender
                 .send(Recipients::One(me.clone()), vote1.encode(), true)
-                .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;
@@ -4038,7 +3998,6 @@ mod tests {
             let vote2 = sign_vote(&schemes[1], proposal2);
             sender
                 .send(Recipients::One(me.clone()), vote2.encode(), true)
-                .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;

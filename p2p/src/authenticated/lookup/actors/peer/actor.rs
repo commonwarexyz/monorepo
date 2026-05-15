@@ -330,7 +330,6 @@ mod tests {
     use super::*;
     use crate::authenticated::{
         lookup::{actors::router, channels::Channels},
-        Mailbox,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -397,9 +396,12 @@ mod tests {
     }
 
     fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
-        let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger =
-            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+        let (router_sender, _router_receiver) =
+            commonware_actor::mailbox::new::<router::Message<PublicKey>>(NZUsize!(10));
+        let messenger = router::Messenger::new(
+            context.network_buffer_pool().clone(),
+            router::Mailbox::new(router_sender),
+        );
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 

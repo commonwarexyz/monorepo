@@ -735,7 +735,6 @@ impl<
                 TipAck { ack, tip: self.tip },
                 self.priority_acks,
             )
-            .await
             .map_err(|err| {
                 warn!(?err, "failed to send ack");
                 Error::UnableToSendMessage

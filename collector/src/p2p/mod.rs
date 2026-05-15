@@ -828,7 +828,6 @@ mod tests {
                     response_to_peer1.encode(),
                     true,
                 )
-                .await
                 .unwrap();
 
             // Give some time for messages to be processed

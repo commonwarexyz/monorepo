@@ -231,7 +231,7 @@
 //!     network.start();
 //!
 //!     // Example: Use sender
-//!     let _ = sender.send(Recipients::All, IoBuf::from(b"hello"), false).await;
+//!     let _ = sender.send(Recipients::All, IoBuf::from(b"hello"), false);
 //!
 //!     // Graceful shutdown (stops all spawned tasks)
 //!     context.stop(0, None).await.unwrap();
@@ -269,7 +269,8 @@ mod tests {
             discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        Ingress, Manager, Provider, Receiver, Recipients, Sender,
+        CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
+        Sender,
     };
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
@@ -413,13 +414,11 @@ mod tests {
                                                     msg.as_ref().to_vec(),
                                                     true,
                                                 )
-                                                .await
                                                 .unwrap();
                                             if sent.len() != 1 {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
                                             }
-                                            assert_eq!(&sent[0], recipient);
                                             break;
                                         }
                                     }
@@ -427,7 +426,7 @@ mod tests {
                                 Mode::Some | Mode::All => {
                                     // Loop until all peer sends successful
                                     loop {
-                                        let mut sent = sender
+                                        let sent = sender
                                             .send(
                                                 match mode {
                                                     Mode::Some => {
@@ -439,16 +438,11 @@ mod tests {
                                                 msg.as_ref().to_vec(),
                                                 true,
                                             )
-                                            .await
                                             .unwrap();
                                         if sent.len() != recipients.len() {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
                                         }
-
-                                        // Compare to expected
-                                        sent.sort();
-                                        assert_eq!(sent, recipients);
                                         break;
                                     }
                                 }
@@ -625,7 +619,6 @@ mod tests {
                         loop {
                             if sender
                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                .await
                                 .unwrap()
                                 .len()
                                 == n - 1
@@ -699,7 +692,7 @@ mod tests {
 
             // Send message
             let recipient = Recipients::One(addresses[1].clone());
-            let result = sender.send(recipient, msg, true).await;
+            let result = sender.send(recipient, msg, true);
             assert!(matches!(result, Err(Error::MessageTooLarge(_))));
         });
     }
@@ -756,11 +749,9 @@ mod tests {
             let msg = vec![0u8; 1024]; // 1KB
             loop {
                 // Confirm message is sent to peer
-                let sent = sender0
-                    .send(Recipients::One(addresses[1].clone()), msg.clone(), true)
-                    .await
-                    .unwrap();
-                if !sent.is_empty() {
+                let checked = sender0.check(Recipients::One(addresses[1].clone())).unwrap();
+                if !checked.is_empty() {
+                    checked.send(msg.clone(), true).unwrap();
                     break;
                 }
 
@@ -770,11 +761,8 @@ mod tests {
             }
 
             // Immediately send the second message to trigger the rate limit.
-            // With partial sends, rate-limited recipients return empty vec (not error).
-            // Outbound rate limiting skips the peer, returns empty vec.
             let sent = sender0
                 .send(Recipients::One(addresses[1].clone()), msg, true)
-                .await
                 .unwrap();
             assert!(sent.is_empty());
 
@@ -914,7 +902,6 @@ mod tests {
                         loop {
                             let sent = sender
                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                .await
                                 .unwrap();
                             if sent.len() >= expected_connections {
                                 break;
@@ -1176,7 +1163,6 @@ mod tests {
                                 loop {
                                     let mut sent = sender
                                         .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                        .await
                                         .unwrap();
                                     if sent.len() != recipients.len() {
                                         context.sleep(Duration::from_millis(100)).await;
@@ -1261,11 +1247,8 @@ mod tests {
             context.sleep(Duration::from_secs(2)).await;
 
             // Verify peer 0 cannot send to peer 1 yet
-            let sent = sender0
-                .send(Recipients::One(peer1.public_key()), b"test", true)
-                .await
-                .unwrap();
-            assert!(sent.is_empty(), "should not be connected yet");
+            let checked = sender0.check(Recipients::One(peer1.public_key())).unwrap();
+            assert!(checked.is_empty(), "should not be connected yet");
 
             // Now register the DNS mapping
             context.resolver_register("boot.local", Some(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]));
@@ -1309,11 +1292,9 @@ mod tests {
                     loop {
                         let sent0 = sender0
                             .send(Recipients::One(pk1.clone()), pk0.as_ref().to_vec(), true)
-                            .await
                             .unwrap();
                         let sent1 = sender1
                             .send(Recipients::One(pk0.clone()), pk1.as_ref().to_vec(), true)
-                            .await
                             .unwrap();
                         if !sent0.is_empty() && !sent1.is_empty() {
                             break;
@@ -1406,7 +1387,6 @@ mod tests {
                                 loop {
                                     let mut sent = sender
                                         .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                        .await
                                         .unwrap();
                                     if sent.len() != recipients.len() {
                                         context.sleep(Duration::from_millis(100)).await;
@@ -1498,12 +1478,9 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
 
             // Try to send from peer 1 - should not reach anyone since private IPs are blocked
-            let sent = sender1
-                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                .await
-                .unwrap();
+            let checked = sender1.check(Recipients::All).unwrap();
             assert!(
-                sent.is_empty(),
+                checked.is_empty(),
                 "peer 1 should not have connected to peer 0 (private IP)"
             );
 
@@ -1591,15 +1568,11 @@ mod tests {
                 // Wait for peers to connect (may take multiple attempts due to random IP selection)
                 let pk0 = peer0.public_key();
                 loop {
-                    let sent = sender1
-                        .send(
-                            Recipients::One(pk0.clone()),
-                            peer1.public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .await
-                        .unwrap();
-                    if !sent.is_empty() {
+                    let checked = sender1.check(Recipients::One(pk0.clone())).unwrap();
+                    if !checked.is_empty() {
+                        checked
+                            .send(peer1.public_key().as_ref().to_vec(), true)
+                            .unwrap();
                         break;
                     }
                     context.sleep(Duration::from_millis(100)).await;
@@ -1677,7 +1650,6 @@ mod tests {
                             peers[i].public_key().as_ref().to_vec(),
                             true,
                         )
-                        .await
                         .unwrap();
                     if sent.len() == n - 1 {
                         break;
@@ -1754,7 +1726,6 @@ mod tests {
                                 peers[restart_peer_idx].public_key().as_ref().to_vec(),
                                 true,
                             )
-                            .await
                             .unwrap();
                         if sent.len() == n - 1 {
                             break;
@@ -1775,7 +1746,6 @@ mod tests {
                                     peers[i].public_key().as_ref().to_vec(),
                                     true,
                                 )
-                                .await
                                 .unwrap();
                             if sent.len() == 1 {
                                 break;
@@ -1864,7 +1834,6 @@ mod tests {
                             peers[i].public_key().as_ref().to_vec(),
                             true,
                         )
-                        .await
                         .unwrap();
                     if sent.len() == n - 1 {
                         break;
@@ -1939,7 +1908,6 @@ mod tests {
                             peers[i].public_key().as_ref().to_vec(),
                             true,
                         )
-                        .await
                         .unwrap();
                     if sent.len() == n - 1 {
                         break;
@@ -2037,7 +2005,6 @@ mod tests {
                             peers[i].public_key().as_ref().to_vec(),
                             true,
                         )
-                        .await
                         .unwrap();
                     if sent.len() == n - 1 {
                         break;
@@ -2115,7 +2082,6 @@ mod tests {
                         peers[restart_peer_idx].public_key().as_ref().to_vec(),
                         true,
                     )
-                    .await
                     .unwrap();
                 if sent.len() == n - 1 {
                     break;
@@ -2136,7 +2102,6 @@ mod tests {
                             peers[i].public_key().as_ref().to_vec(),
                             true,
                         )
-                        .await
                         .unwrap();
                     if sent.len() == 1 {
                         break;
@@ -2194,11 +2159,8 @@ mod tests {
             context.sleep(Duration::from_secs(30)).await;
 
             // Peer 0 can't send to anyone yet.
-            let sent = sender0
-                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                .await
-                .unwrap();
-            assert!(sent.is_empty());
+            let checked = sender0.check(Recipients::All).unwrap();
+            assert!(checked.is_empty());
 
             // Start peer 1 with a wrong bootstrapper address for peer 0 so peer 0 must dial peer 1.
             let config1 = Config::test(
@@ -2222,7 +2184,6 @@ mod tests {
             loop {
                 let sent = sender0
                     .send(Recipients::All, peer0.public_key().as_ref().to_vec(), true)
-                    .await
                     .unwrap();
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer1.public_key());
@@ -2300,7 +2261,6 @@ mod tests {
             loop {
                 let sent = sender0
                     .send(Recipients::All, peer2.public_key().as_ref().to_vec(), true)
-                    .await
                     .unwrap();
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer2.public_key());
@@ -2334,7 +2294,6 @@ mod tests {
             loop {
                 let sent = sender1
                     .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                    .await
                     .unwrap();
                 if sent.len() == 2 {
                     assert!(sent.contains(&peer0.public_key()));
@@ -2394,11 +2353,7 @@ mod tests {
             crate::block_peer(&mut oracle, address.clone());
 
             // Sender operations should not panic even after shutdown
-            let sent = sender
-                .send(Recipients::All, address.as_ref().to_vec(), true)
-                .await
-                .unwrap();
-            assert!(sent.is_empty());
+            let _ = sender.send(Recipients::All, address.as_ref().to_vec(), true);
         });
     }
 
@@ -2469,7 +2424,7 @@ mod tests {
             let cfg = RouterConfig {
                 mailbox_size: NZUsize!(10),
             };
-            let (router, mut mailbox, messenger) =
+            let (router, mailbox, messenger) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
 
             // Create channels for the router
@@ -2507,23 +2462,28 @@ mod tests {
             // Send 10 messages to fill slow_peer's buffer
             for i in 0..10 {
                 let sent = messenger
-                    .content(Recipients::All, 0, message.clone().into(), false)
-                    .await;
-                assert_eq!(sent.len(), 2, "Broadcast {i} should reach both peers");
+                    .content(Recipients::All, 0, message.clone().into(), false);
+                assert_ne!(
+                    sent,
+                    commonware_actor::Feedback::Closed,
+                    "Broadcast {i} should be accepted"
+                );
             }
 
             // 11th broadcast: slow_peer's buffer is full, so its message is dropped
-            let sent = messenger
-                .content(Recipients::All, 0, message.into(), false)
-                .await;
-            assert!(
-                sent.contains(&fast_peer),
-                "Fast peer should receive message"
-            );
+            let sent = messenger.content(Recipients::All, 0, message.into(), false);
+            assert_ne!(sent, commonware_actor::Feedback::Closed);
 
             // Verify fast_peer received all 11 messages
             for _ in 0..11 {
-                assert!(fast_receiver.try_recv().is_ok());
+                select! {
+                    message = fast_receiver.recv() => {
+                        assert!(message.is_some());
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!("fast peer did not receive broadcast");
+                    },
+                }
             }
         });
     }

@@ -35,7 +35,7 @@ pub struct Network<
     tracker: tracker::Actor<E, C>,
     tracker_mailbox: mailbox::Sender<tracker::Message<C::PublicKey>>,
     router: router::Actor<E, C::PublicKey>,
-    router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    router_mailbox: router::Mailbox<C::PublicKey>,
     listener: mpsc::Receiver<HashSet<IpAddr>>,
 }
 

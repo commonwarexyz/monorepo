@@ -3406,7 +3406,6 @@ mod tests {
             ] {
                 injector_sender
                     .send(Recipients::One(me.clone()), certificate.encode(), true)
-                    .await
                     .unwrap();
             }
 
@@ -5159,12 +5158,10 @@ mod tests {
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
-                .await
                 .unwrap();
             let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
             injector_sender
                 .send(Recipients::All, msg, true)
-                .await
                 .unwrap();
             // View F+1:
             let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
@@ -5175,7 +5172,7 @@ mod tests {
                     ParticipantType::Group1 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).await.unwrap();
+                injector_sender.send(recipient, msg, true).unwrap();
             }
             // View F+2:
             let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
@@ -5186,7 +5183,7 @@ mod tests {
                     ParticipantType::Group2 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).await.unwrap();
+                injector_sender.send(recipient, msg, true).unwrap();
             }
 
             // ========== Create engines ==========

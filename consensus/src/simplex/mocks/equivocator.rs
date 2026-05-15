@@ -154,7 +154,6 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                     Vote::Notarize(notarize_a).encode(),
                     true,
                 )
-                .await
                 .expect("send failed");
 
             // Notarize proposal B and send it to everyone else
@@ -175,7 +174,6 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                     Vote::Notarize(notarize_b).encode(),
                     true,
                 )
-                .await
                 .expect("send failed");
         }
     }

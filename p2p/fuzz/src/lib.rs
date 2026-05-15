@@ -516,8 +516,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     let send_result = peers[from_idx]
                         .network
                         .sender
-                        .send(recipients, message.clone(), false)
-                        .await;
+                        .send(recipients, message.clone(), false);
 
                     // Track message as expected only if send was accepted
                     if let Ok(accepted_recipients) = send_result {

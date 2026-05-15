@@ -151,10 +151,7 @@ where
                         });
 
                         // Send the request to recipients
-                        match req_tx
-                            .send(recipients, request, self.priority_request)
-                            .await
-                        {
+                        match req_tx.send(recipients, request, self.priority_request) {
                             Ok(recipients) => {
                                 entry.0.extend(recipients.iter().cloned());
                                 responder.send_lossy(Ok(recipients));
@@ -180,8 +177,7 @@ where
 
                 // Send the response
                 let _ = res_tx
-                    .send(Recipients::One(peer), reply, self.priority_response)
-                    .await;
+                    .send(Recipients::One(peer), reply, self.priority_response);
             },
 
             // Request from an originator

@@ -469,7 +469,7 @@ where
 
                 match message {
                     Message::Proposed { block, round } => {
-                        self.broadcast_shards(&mut sender, round, block).await;
+                        self.broadcast_shards(&mut sender, round, block);
                     }
                     Message::Discovered {
                         commitment,
@@ -547,7 +547,7 @@ where
                         )
                         .await;
                     if progressed {
-                        self.try_advance(&mut sender, commitment).await;
+                        self.try_advance(&mut sender, commitment);
                     }
                 } else {
                     self.buffer_peer_shard(peer, shard);
@@ -684,7 +684,7 @@ where
         );
         let buffered_progress = self.ingest_buffered_shards(commitment).await;
         if buffered_progress {
-            self.try_advance(sender, commitment).await;
+            self.try_advance(sender, commitment);
         }
     }
 
@@ -757,7 +757,7 @@ where
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
-    async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
+    fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
@@ -808,9 +808,7 @@ where
                 );
                 return;
             };
-            let _ = sender
-                .send(Recipients::One(peer.clone()), shard, true)
-                .await;
+            let _ = sender.send(Recipients::One(peer.clone()), shard, true);
         }
 
         // Send the leader's shard to peers in aggregate membership who are not participants.
@@ -821,9 +819,7 @@ where
             .cloned()
             .collect();
         if !non_participants.is_empty() {
-            let _ = sender
-                .send(Recipients::Some(non_participants), leader_shard, true)
-                .await;
+            let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
         }
 
         // Cache the block so we don't have to reconstruct it again.
@@ -837,25 +833,21 @@ where
     }
 
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
-    async fn broadcast_shard<Sr: Sender<PublicKey = P>>(
+    fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         shard: Shard<C, H>,
     ) {
         let commitment = shard.commitment();
-        if let Ok(peers) = sender.send(Recipients::All, shard, true).await {
-            debug!(
-                ?commitment,
-                peers = peers.len(),
-                "broadcasted shard to all peers"
-            );
+        if let Ok(feedback) = sender.send(Recipients::All, shard, true) {
+            debug!(?commitment, ?feedback, "broadcasted shard to all peers");
         }
     }
 
     /// Broadcasts any pending validated shard for the given commitment and attempts
     /// reconstruction. If reconstruction succeeds or fails, the state is cleaned
     /// up and subscribers are notified.
-    async fn try_advance<Sr: Sender<PublicKey = P>>(
+    fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
@@ -863,7 +855,7 @@ where
         if let Some(state) = self.state.get_mut(&commitment) {
             match state.take_pending_action() {
                 Some(AssignedShardVerifiedAction::Broadcast(shard)) => {
-                    self.broadcast_shard(sender, shard).await;
+                    self.broadcast_shard(sender, shard);
                     self.notify_assigned_shard_verified_subscribers(commitment);
                 }
                 Some(AssignedShardVerifiedAction::NotifyOnly) => {
@@ -2114,7 +2106,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), invalid_bytes, true)
-                    .await
                     .expect("send failed");
 
                 context.sleep(config.link.latency * 2).await;
@@ -2130,7 +2121,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(receiver_pk), valid_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2241,7 +2231,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2249,7 +2238,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2305,7 +2293,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes1, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2313,7 +2300,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes2, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2354,7 +2340,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2387,7 +2372,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2455,7 +2439,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2471,7 +2454,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2524,7 +2506,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2605,7 +2586,6 @@ mod tests {
 
                 non_participant_sender
                     .send(Recipients::One(receiver_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2661,7 +2641,6 @@ mod tests {
 
                 non_participant_sender
                     .send(Recipients::One(receiver_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2724,7 +2703,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2737,7 +2715,6 @@ mod tests {
                         peer1_shard_bytes.clone(),
                         true,
                     )
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2746,7 +2723,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), peer1_shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2808,7 +2784,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2817,7 +2792,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2826,7 +2800,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), equivocating_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2878,7 +2851,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_a.clone(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2896,7 +2868,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_b, true)
-                    .await
                     .expect("send failed");
 
                 // Three shards for minimum threshold (4 total with leader's).
@@ -2908,7 +2879,6 @@ mod tests {
                     peers[i]
                         .sender
                         .send(Recipients::One(peer2_pk.clone()), shard, true)
-                        .await
                         .expect("send failed");
                 }
                 context.sleep(config.link.latency * 4).await;
@@ -2926,7 +2896,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_a, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -2983,7 +2952,6 @@ mod tests {
                     peers[sender_idx]
                         .sender
                         .send(Recipients::One(peer3_pk.clone()), shard_bytes, true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -3002,7 +2970,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk), leader_shard_bytes, true)
-                    .await
                     .expect("send failed");
 
                 context.sleep(config.link.latency * 2).await;
@@ -3065,7 +3032,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), leader_shard, true)
-                    .await
                     .expect("send failed");
 
                 for i in [1usize, 2usize, 4usize] {
@@ -3076,7 +3042,6 @@ mod tests {
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard, true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -3157,7 +3122,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), leader_shard, true)
-                    .await
                     .expect("send failed");
 
                 // Subscription should resolve from the leader's shard.
@@ -3177,7 +3141,6 @@ mod tests {
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard, true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -3215,7 +3178,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer0_pk.clone()), garbage, true)
-                    .await
                     .expect("send failed");
 
                 context.sleep(config.link.latency * 2).await;
@@ -3252,7 +3214,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3264,7 +3225,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3318,7 +3278,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), wrong_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3367,7 +3326,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk.clone()), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3375,7 +3333,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer3_pk), wrong_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3428,7 +3385,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk.clone()), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3436,7 +3392,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3450,7 +3405,6 @@ mod tests {
                     peers[idx]
                         .sender
                         .send(Recipients::One(peer3_pk.clone()), bytes, true)
-                        .await
                         .expect("send failed");
                 }
                 context.sleep(config.link.latency * 2).await;
@@ -3503,7 +3457,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), leader_shard, true)
-                    .await
                     .expect("send failed");
 
                 // Contribute exactly minimum_shards total:
@@ -3517,7 +3470,6 @@ mod tests {
                         invalid_shard.encode(),
                         true,
                     )
-                    .await
                     .expect("send failed");
                 for idx in [2usize, 4usize] {
                     let shard = coded_block1
@@ -3527,7 +3479,6 @@ mod tests {
                     peers[idx]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard, true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -3553,7 +3504,6 @@ mod tests {
                 peers[5]
                     .sender
                     .send(Recipients::One(receiver_pk), extra_shard, true)
-                    .await
                     .expect("send failed");
 
                 context.sleep(config.link.latency * 2).await;
@@ -3600,7 +3550,6 @@ mod tests {
                 peers[1]
                     .sender
                     .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3618,7 +3567,6 @@ mod tests {
                     peers[idx]
                         .sender
                         .send(Recipients::One(peer3_pk.clone()), bytes, true)
-                        .await
                         .expect("send failed");
                 }
                 context.sleep(config.link.latency * 2).await;
@@ -3640,7 +3588,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(peer3_pk), shard_bytes, true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -3755,7 +3702,6 @@ mod tests {
             // Send the shard BEFORE external_proposed (goes to pre-leader buffer).
             future_peer_sender
                 .send(Recipients::One(receiver_pk.clone()), shard_bytes, true)
-                .await
                 .expect("send failed");
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
@@ -3912,7 +3858,6 @@ mod tests {
                 .encode();
             leader_sender
                 .send(Recipients::One(broadcaster_pk), broadcaster_shard, true)
-                .await
                 .expect("send failed");
 
             let receiver_index = participants
@@ -3925,7 +3870,6 @@ mod tests {
                 .encode();
             leader_sender
                 .send(Recipients::One(receiver_pk.clone()), receiver_shard, true)
-                .await
                 .expect("send failed");
 
             context.sleep(DEFAULT_LINK.latency * 3).await;
@@ -4001,7 +3945,6 @@ mod tests {
                         leader_shard.encode(),
                         true,
                     )
-                    .await
                     .expect("send failed");
 
                 // Send enough shards to reach minimum_shards (4 for 10 peers).
@@ -4013,7 +3956,6 @@ mod tests {
                     peers[idx]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -4058,7 +4000,6 @@ mod tests {
                         leader_shard1.encode(),
                         true,
                     )
-                    .await
                     .expect("send failed");
 
                 for &idx in &[1usize, 2, 4] {
@@ -4067,7 +4008,6 @@ mod tests {
                     peers[idx]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -4134,7 +4074,6 @@ mod tests {
                         leader_shard.encode(),
                         true,
                     )
-                    .await
                     .expect("send failed");
 
                 for &idx in &[1usize, 2, 4] {
@@ -4144,7 +4083,6 @@ mod tests {
                     peers[idx]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -4179,7 +4117,6 @@ mod tests {
                         real_leader_shard.encode(),
                         true,
                     )
-                    .await
                     .expect("send failed");
 
                 for &idx in &[1usize, 2, 4] {
@@ -4188,7 +4125,6 @@ mod tests {
                     peers[idx]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -4258,7 +4194,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), shard_b, true)
-                    .await
                     .expect("send failed");
 
                 // Reconstruct conflicting commitment A first.
@@ -4269,7 +4204,6 @@ mod tests {
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk.clone()), shard_a, true)
-                    .await
                     .expect("send failed");
                 for i in [1usize, 2usize, 4usize] {
                     let shard_a = block_a
@@ -4279,7 +4213,6 @@ mod tests {
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard_a, true)
-                        .await
                         .expect("send failed");
                 }
                 context.sleep(config.link.latency * 4).await;
@@ -4299,7 +4232,6 @@ mod tests {
                     peers[i]
                         .sender
                         .send(Recipients::One(receiver_pk.clone()), shard_b, true)
-                        .await
                         .expect("send failed");
                 }
 
@@ -4369,7 +4301,6 @@ mod tests {
                 peers[leader_idx]
                     .sender
                     .send(Recipients::One(receiver_pk), unrelated_shard.encode(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -4722,7 +4653,6 @@ mod tests {
                     shard_bytes.clone(),
                     true,
                 )
-                .await
                 .expect("send failed");
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
@@ -4736,7 +4666,6 @@ mod tests {
             // but this fresh pre-leader shard must not be buffered again.
             leader_sender
                 .send(Recipients::One(receiver_pk.clone()), shard_bytes, true)
-                .await
                 .expect("send failed");
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
@@ -4963,7 +4892,6 @@ mod tests {
                     leader_shard.encode(),
                     true,
                 )
-                .await
                 .expect("send failed");
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
@@ -5121,7 +5049,6 @@ mod tests {
                     peer2_shard,
                     true,
                 )
-                .await
                 .expect("send failed");
             peer4_sender
                 .send(
@@ -5129,7 +5056,6 @@ mod tests {
                     peer4_shard,
                     true,
                 )
-                .await
                 .expect("send failed");
             peer5_sender
                 .send(
@@ -5137,7 +5063,6 @@ mod tests {
                     peer5_shard,
                     true,
                 )
-                .await
                 .expect("send failed");
             peer6_sender
                 .send(
@@ -5145,7 +5070,6 @@ mod tests {
                     peer6_shard,
                     true,
                 )
-                .await
                 .expect("send failed");
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
@@ -5273,7 +5197,6 @@ mod tests {
                 peers[leader_idx]
                     .sender
                     .send(Recipients::One(victim.clone()), leader_shard.encode(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
@@ -5302,7 +5225,6 @@ mod tests {
                 peers[extra_sender_idx]
                     .sender
                     .send(Recipients::One(victim.clone()), extra_shard.encode(), true)
-                    .await
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 

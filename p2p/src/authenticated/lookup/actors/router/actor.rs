@@ -1,5 +1,5 @@
 use super::{
-    ingress::{Message, Messenger},
+    ingress::{Mailbox, Message, Messenger},
     Config,
 };
 use crate::{
@@ -7,10 +7,10 @@ use crate::{
         data::EncodedData,
         lookup::{channels::Channels, metrics},
         relay::Relay,
-        Mailbox,
     },
     Recipients,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -18,10 +18,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::{mpsc, ring},
-    NZUsize,
-};
+use commonware_utils::channel::ring;
 use futures::SinkExt;
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -30,7 +27,7 @@ use tracing::debug;
 pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
-    control: mpsc::Receiver<Message<P>>,
+    control: mailbox::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
@@ -40,9 +37,9 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
 impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
     /// that can be used to send messages to the router.
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (control_sender, control_receiver) = mailbox::new::<Message<P>>(cfg.mailbox_size);
         let pool = context.network_buffer_pool().clone();
 
         // Create metrics
@@ -57,18 +54,16 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                 open_subscriptions: Vec::new(),
                 messages_dropped,
             },
-            control_sender.clone(),
-            Messenger::new(pool, control_sender),
+            Mailbox::new(control_sender.clone()),
+            Messenger::new(pool, Mailbox::new(control_sender)),
         )
     }
 
     /// Sends pre-encoded data to the given `recipient`.
-    fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool, sent: &mut Vec<P>) {
+    fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool) {
         let channel = encoded.channel;
         if let Some(relay) = self.connections.get_mut(&recipient) {
-            if relay.send(encoded, priority).is_ok() {
-                sent.push(recipient);
-            } else {
+            if relay.send(encoded, priority).is_err() {
                 self.messages_dropped
                     .get_or_create(&metrics::Message::new_data(&recipient, channel))
                     .inc();
@@ -120,25 +115,21 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                         recipients,
                         encoded,
                         priority,
-                        success,
                     } => {
-                        let mut sent = Vec::new();
                         let channel = encoded.channel;
                         match recipients {
                             Recipients::One(recipient) => {
-                                self.send(recipient, encoded, priority, &mut sent);
+                                self.send(recipient, encoded, priority);
                             }
                             Recipients::Some(recipients) => {
                                 for recipient in recipients {
-                                    self.send(recipient, encoded.clone(), priority, &mut sent);
+                                    self.send(recipient, encoded.clone(), priority);
                                 }
                             }
                             Recipients::All => {
                                 // Send to all connected peers
                                 for (recipient, relay) in self.connections.iter_mut() {
-                                    if relay.send(encoded.clone(), priority).is_ok() {
-                                        sent.push(recipient.clone());
-                                    } else {
+                                    if relay.send(encoded.clone(), priority).is_err() {
                                         self.messages_dropped
                                             .get_or_create(&metrics::Message::new_data(
                                                 recipient, channel,
@@ -148,19 +139,12 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                                 }
                             }
                         }
-
-                        // Communicate success back to sender (if still alive)
-                        let _ = success.send(sent);
                     }
-                    Message::SubscribePeers { response } => {
-                        let (mut sender, receiver) = ring::channel::<Vec<P>>(NZUsize!(1));
-
-                        // Send existing peers immediately
+                    Message::SubscribePeers { mut sender } => {
                         let peers = self.connections.keys().cloned().collect();
-                        let _ = sender.send(peers).await;
-
-                        self.open_subscriptions.push(sender);
-                        let _ = response.send(receiver);
+                        if sender.send(peers).await.is_ok() {
+                            self.open_subscriptions.push(sender);
+                        }
                     }
                 }
             },

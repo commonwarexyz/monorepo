@@ -423,7 +423,6 @@ mod tests {
             actors::{router, tracker},
             channels::Channels,
         },
-        Mailbox,
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -477,9 +476,12 @@ mod tests {
     }
 
     fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
-        let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger =
-            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+        let (router_sender, _router_receiver) =
+            commonware_actor::mailbox::new::<router::Message<PublicKey>>(NZUsize!(10));
+        let messenger = router::Messenger::new(
+            context.network_buffer_pool().clone(),
+            router::Mailbox::new(router_sender),
+        );
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 
@@ -884,9 +886,12 @@ mod tests {
                 mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
 
             // Create channels with a very small backlog (1) to force drops
-            let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-            let messenger =
-                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+            let (router_sender, _router_receiver) =
+                commonware_actor::mailbox::new::<router::Message<PublicKey>>(NZUsize!(10));
+            let messenger = router::Messenger::new(
+                context.network_buffer_pool().clone(),
+                router::Mailbox::new(router_sender),
+            );
             let mut channels = Channels::new(messenger, MAX_MESSAGE_SIZE);
             let channel_id = 0u64;
             let (_sender, _receiver) = channels.register(

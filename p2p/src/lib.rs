@@ -64,7 +64,7 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// A vector of recipients that the message was sent to, or an error if the
+        /// Feedback from submitting the message for delivery, or an error if the
         /// message could not be sent due to a validation failure (e.g., too large).
         ///
         /// Note: a successful send does not guarantee that the recipient will
@@ -72,17 +72,14 @@ stability_scope!(BETA {
         ///
         /// # Graceful Shutdown
         ///
-        /// Implementations must handle internal channel closures gracefully during
-        /// shutdown. If the underlying network is shutting down, this method should
-        /// return `Ok` (possibly with an empty or partial recipient list) rather
-        /// than an error. Errors should only be returned for validation failures
-        /// that the caller can act upon.
+        /// Errors should only be returned for validation failures that the caller
+        /// can act upon.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
+        ) -> Result<Feedback, Self::Error>;
     }
 
     /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
@@ -109,10 +106,10 @@ stability_scope!(BETA {
         /// A [`CheckedSender`] containing only the recipients that are not
         /// currently rate-limited, or an error with the earliest instant at which
         /// all recipients will be available if all are rate-limited.
-        fn check<'a>(
-            &'a mut self,
+        fn check(
+            &mut self,
             recipients: Recipients<Self::PublicKey>,
-        ) -> impl Future<Output = Result<Self::Checked<'a>, SystemTime>> + Send;
+        ) -> Result<Self::Checked<'_>, SystemTime>;
     }
 
     /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
@@ -122,6 +119,12 @@ stability_scope!(BETA {
 
         /// Error that can occur when sending a message.
         type Error: Debug + StdError + Send + Sync + 'static;
+
+        /// Returns whether the checked sender has no recipients.
+        fn is_empty(&self) -> bool;
+
+        /// Returns the recipients retained by the check.
+        fn recipients(&self) -> Vec<Self::PublicKey>;
 
         /// Sends a message to the pre-checked recipients.
         ///
@@ -133,7 +136,7 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// A vector of recipients that the message was sent to, or an error if the
+        /// Feedback from submitting the message for delivery, or an error if the
         /// message could not be sent due to a validation failure (e.g., too large).
         ///
         /// Note: a successful send does not guarantee that the recipient will
@@ -141,16 +144,13 @@ stability_scope!(BETA {
         ///
         /// # Graceful Shutdown
         ///
-        /// Implementations must handle internal channel closures gracefully during
-        /// shutdown. If the underlying network is shutting down, this method should
-        /// return `Ok` (possibly with an empty or partial recipient list) rather
-        /// than an error. Errors should only be returned for validation failures
-        /// that the caller can act upon.
+        /// Errors should only be returned for validation failures that the caller
+        /// can act upon.
         fn send(
             self,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
+        ) -> Result<Feedback, Self::Error>;
     }
 
     /// Interface for sending messages to a set of recipients.
@@ -166,37 +166,41 @@ stability_scope!(BETA {
         /// # Rate Limiting
         ///
         /// Recipients that exceed their rate limit will be skipped. The message is
-        /// still sent to non-limited recipients. Check the returned vector to see
-        /// which peers were sent the message.
+        /// still sent to non-limited recipients.
         ///
         /// # Returns
         ///
-        /// A vector of recipients that the message was sent to, or an error if the
+        /// The recipients retained by the synchronous check, or an error if the
         /// message could not be sent due to a validation failure (e.g., too large).
+        /// Returns an empty list if all recipients are rate-limited or the sender
+        /// has closed.
         ///
         /// Note: a successful send does not guarantee that the recipient will
         /// receive the message.
         ///
         /// # Graceful Shutdown
         ///
-        /// Implementations must handle internal channel closures gracefully during
-        /// shutdown. If the underlying network is shutting down, this method should
-        /// return `Ok` (possibly with an empty or partial recipient list) rather
-        /// than an error. Errors should only be returned for validation failures
-        /// that the caller can act upon.
+        /// Errors should only be returned for validation failures that the caller
+        /// can act upon.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> impl Future<
-            Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,
-        > + Send {
-            async move {
-                match self.check(recipients).await {
-                    Ok(checked_sender) => checked_sender.send(message, priority).await,
-                    Err(_) => Ok(Vec::new()),
+        ) -> Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error> {
+            match self.check(recipients) {
+                Ok(checked_sender) => {
+                    let recipients = if checked_sender.is_empty() {
+                        Vec::new()
+                    } else {
+                        checked_sender.recipients()
+                    };
+                    match checked_sender.send(message, priority)? {
+                        Feedback::Ok | Feedback::Backoff => Ok(recipients),
+                        Feedback::Closed => Ok(Vec::new()),
+                    }
                 }
+                Err(_) => Ok(Vec::new()),
             }
         }
     }

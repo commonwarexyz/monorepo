@@ -220,6 +220,7 @@ mod tests {
     {
         let mut manager = oracle.manager();
         manager.track(0, Set::from_iter_dedup(peers));
+        assert!(manager.peer_set(0).await.is_some());
     }
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
@@ -304,7 +305,6 @@ mod tests {
                         let mut message_sender = agents.get(sender).unwrap().clone();
                         let sent = message_sender
                             .send(Recipients::All, msg.clone(), false)
-                            .await
                             .unwrap();
                         if sender == &only_inbound {
                             assert_eq!(sent.len(), 0);
@@ -381,7 +381,6 @@ mod tests {
             context.fill(&mut msg[..]);
             let result = message_sender
                 .send(Recipients::All, msg, false)
-                .await
                 .unwrap_err();
 
             // Confirm error is correct
@@ -492,17 +491,17 @@ mod tests {
 
             // Send messages
             let msg = IoBuf::from(b"hello");
-            my_sender
+            let sent = my_sender
                 .send(Recipients::One(other_pk.clone()), msg.clone(), false)
-                .await
                 .unwrap();
+            assert_eq!(sent.len(), 1);
             let (from, message) = other_receiver.recv().await.unwrap();
             assert_eq!(from, my_pk);
             assert_eq!(message, msg.clone());
-            other_sender
+            let sent = other_sender
                 .send(Recipients::One(my_pk.clone()), msg.clone(), false)
-                .await
                 .unwrap();
+            assert_eq!(sent.len(), 1);
             let (from, message) = my_receiver.recv().await.unwrap();
             assert_eq!(from, other_pk);
             assert_eq!(message, msg);
@@ -516,17 +515,17 @@ mod tests {
 
             // Send message
             let msg = IoBuf::from(b"hello again");
-            my_sender_2
+            let sent = my_sender_2
                 .send(Recipients::One(other_pk.clone()), msg.clone(), false)
-                .await
                 .unwrap();
+            assert_eq!(sent.len(), 1);
             let (from, message) = other_receiver.recv().await.unwrap();
             assert_eq!(from, my_pk);
             assert_eq!(message, msg.clone());
-            other_sender
+            let sent = other_sender
                 .send(Recipients::One(my_pk.clone()), msg.clone(), false)
-                .await
                 .unwrap();
+            assert_eq!(sent.len(), 1);
             let (from, message) = my_receiver_2.recv().await.unwrap();
             assert_eq!(from, other_pk);
             assert_eq!(message, msg.clone());
@@ -540,7 +539,6 @@ mod tests {
             // Send on original (gracefully handles closed channel)
             assert!(my_sender
                 .send(Recipients::One(other_pk.clone()), msg, false)
-                .await
                 .is_ok());
         });
     }
@@ -645,7 +643,6 @@ mod tests {
             let msg1 = IoBuf::from(b"link-before-register-1");
             sender1
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             let (from, received) = receiver2.recv().await.unwrap();
             assert_eq!(from, pk1);
@@ -728,11 +725,9 @@ mod tests {
             let msg2 = IoBuf::from(b"hello from pk2");
             sender1
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             sender2
                 .send(Recipients::One(pk1.clone()), msg2.clone(), false)
-                .await
                 .unwrap();
 
             // Confirm message delivery
@@ -795,7 +790,6 @@ mod tests {
             let msg = IoBuf::from(b"hello from pk1");
             sender1
                 .send(Recipients::One(pk2), msg, false)
-                .await
                 .unwrap();
 
             // Confirm no message delivery
@@ -871,11 +865,9 @@ mod tests {
             let msg2 = IoBuf::from(b"attempt 1: hello from pk2");
             sender1
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             sender2
                 .send(Recipients::One(pk1.clone()), msg2.clone(), false)
-                .await
                 .unwrap();
 
             // Confirm message delivery
@@ -925,11 +917,9 @@ mod tests {
             let msg2 = IoBuf::from(b"attempt 1: hello from pk2");
             sender1
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             sender2
                 .send(Recipients::One(pk1.clone()), msg2.clone(), false)
-                .await
                 .unwrap();
 
             // Confirm no message delivery
@@ -974,11 +964,9 @@ mod tests {
             let msg2 = IoBuf::from(b"attempt 2: hello from pk2");
             sender1
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             sender2
                 .send(Recipients::One(pk1.clone()), msg2.clone(), false)
-                .await
                 .unwrap();
 
             // Confirm message delivery
@@ -998,11 +986,9 @@ mod tests {
             let msg2 = IoBuf::from(b"attempt 3: hello from pk2");
             sender1
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             sender2
                 .send(Recipients::One(pk1.clone()), msg2.clone(), false)
-                .await
                 .unwrap();
 
             // Confirm no message delivery
@@ -1075,10 +1061,7 @@ mod tests {
         // Send a message from agent 1 to 2
         let msg = IoBuf::from(vec![42u8; message_size]);
         let start = context.current();
-        sender
-            .send(Recipients::One(pk2.clone()), msg.clone(), true)
-            .await
-            .unwrap();
+        sender.send(Recipients::One(pk2.clone()), msg.clone(), true).unwrap();
 
         // Measure how long it takes for agent 2 to receive the message
         let (origin, received) = receiver.recv().await.unwrap();
@@ -1279,7 +1262,6 @@ mod tests {
             for peer in peers.iter().skip(1) {
                 senders[0]
                     .send(Recipients::One(peer.clone()), msg.clone(), true)
-                    .await
                     .unwrap();
             }
 
@@ -1313,7 +1295,6 @@ mod tests {
             for mut sender in senders.into_iter().skip(1) {
                 sender
                     .send(Recipients::One(peers[0].clone()), msg.clone(), true)
-                    .await
                     .unwrap();
             }
 
@@ -1406,7 +1387,6 @@ mod tests {
             for msg in messages.clone() {
                 sender
                     .send(Recipients::One(pk2.clone()), msg, true)
-                    .await
                     .unwrap();
             }
 
@@ -1463,11 +1443,13 @@ mod tests {
                 .await
                 .unwrap();
 
+            let egress_time = Duration::from_secs(1);
+            let start = context.current();
             let slow = IoBuf::from(vec![0u8; 1_000]);
             sender
                 .send(Recipients::One(pk2.clone()), slow.clone(), true)
-                .await
                 .unwrap();
+            context.sleep(egress_time + Duration::from_millis(1)).await;
 
             // Update link
             oracle.remove_link(pk1.clone(), pk2.clone()).await.unwrap();
@@ -1488,10 +1470,8 @@ mod tests {
             let fast = IoBuf::from(vec![1u8; 1_000]);
             sender
                 .send(Recipients::One(pk2.clone()), fast.clone(), true)
-                .await
                 .unwrap();
 
-            let start = context.current();
             let (origin1, message1) = receiver.recv().await.unwrap();
             assert_eq!(origin1, pk1);
             assert_eq!(message1, slow);
@@ -1502,7 +1482,6 @@ mod tests {
             assert_eq!(origin2, pk1);
             assert_eq!(message2, fast);
 
-            let egress_time = Duration::from_secs(1);
             let slow_latency = Duration::from_millis(5_000);
             let expected_first = egress_time + slow_latency;
             let tolerance = Duration::from_millis(10);
@@ -1597,9 +1576,7 @@ mod tests {
             for (i, mut tx) in sender_txs.into_iter().enumerate() {
                 let receiver_clone = receiver.clone();
                 let msg = IoBuf::from(vec![i as u8; 10_000]);
-                tx.send(Recipients::One(receiver_clone), msg, true)
-                    .await
-                    .unwrap();
+                tx.send(Recipients::One(receiver_clone), msg, true).unwrap();
             }
 
             // All 10 messages should be received at ~1s
@@ -1636,7 +1613,7 @@ mod tests {
 
             // Create fast sender
             let sender = ed25519::PrivateKey::from_seed(0).public_key();
-            let (sender_tx, _) = oracle
+            let (mut sender_tx, _) = oracle
                 .control(sender.clone())
                 .register(0, TEST_QUOTA)
                 .await
@@ -1691,12 +1668,9 @@ mod tests {
 
             // Send 10KB to each receiver (100KB total)
             for (i, receiver) in receivers.iter().enumerate() {
-                let mut sender_tx = sender_tx.clone();
-                let receiver_clone = receiver.clone();
                 let msg = IoBuf::from(vec![i as u8; 10_000]);
                 sender_tx
-                    .send(Recipients::One(receiver_clone), msg, true)
-                    .await
+                    .send(Recipients::One(receiver.clone()), msg, true)
                     .unwrap();
             }
 
@@ -1789,9 +1763,7 @@ mod tests {
             for (i, mut tx) in sender_txs.into_iter().enumerate() {
                 let receiver_clone = receiver.clone();
                 let msg = IoBuf::from(vec![i as u8; 1_000]);
-                tx.send(Recipients::One(receiver_clone), msg, true)
-                    .await
-                    .unwrap();
+                tx.send(Recipients::One(receiver_clone), msg, true).unwrap();
             }
 
             // Each sender takes 1s to transmit 1KB at 1KB/s
@@ -1882,41 +1854,39 @@ mod tests {
             }
 
             let start = context.current();
+            let mut sender_txs = sender_txs.into_iter();
 
             // Sender 0: sends 30KB at t=0
             // Gets full 30KB/s for the first 0.5s, then shares with sender 1
             // at 15KB/s until completion at t=1.5s
-            let mut tx0 = sender_txs[0].clone();
+            let mut tx0 = sender_txs.next().expect("missing sender 0");
             let rx_clone = receiver.clone();
             context.child("task").spawn(move |_| async move {
                 let msg = IoBuf::from(vec![0u8; 30_000]);
                 tx0.send(Recipients::One(rx_clone), msg, true)
-                    .await
                     .unwrap();
             });
 
             // Sender 1: sends 30KB at t=0.5s
             // Shares bandwidth with sender 0 (15KB/s each) until t=1.5s,
             // then gets the full 30KB/s
-            let mut tx1 = sender_txs[1].clone();
+            let mut tx1 = sender_txs.next().expect("missing sender 1");
             let rx_clone = receiver.clone();
             context.child("task").spawn(move |context| async move {
                 context.sleep(Duration::from_millis(500)).await;
                 let msg = IoBuf::from(vec![1u8; 30_000]);
                 tx1.send(Recipients::One(rx_clone), msg, true)
-                    .await
                     .unwrap();
             });
 
             // Sender 2: sends 15KB at t=1.5s and shares the receiver with
             // sender 1, completing at roughly t=2.5s
-            let mut tx2 = sender_txs[2].clone();
+            let mut tx2 = sender_txs.next().expect("missing sender 2");
             let rx_clone = receiver.clone();
             context.child("task").spawn(move |context| async move {
                 context.sleep(Duration::from_millis(1500)).await;
                 let msg = IoBuf::from(vec![2u8; 15_000]);
                 tx2.send(Recipients::One(rx_clone), msg, true)
-                    .await
                     .unwrap();
             });
 
@@ -2043,7 +2013,7 @@ mod tests {
                 let rx_clone = receiver.clone();
                 let msg_size = *size;
                 let msg = IoBuf::from(vec![i as u8; msg_size]);
-                tx.send(Recipients::One(rx_clone), msg, true).await.unwrap();
+                tx.send(Recipients::One(rx_clone), msg, true).unwrap();
             }
 
             // Receive messages. They arrive in the order they were scheduled,
@@ -2091,7 +2061,7 @@ mod tests {
             let sender = PrivateKey::from_seed(1).public_key();
             let receiver = PrivateKey::from_seed(2).public_key();
 
-            let (sender_tx, _) = oracle
+            let (mut sender_tx, _) = oracle
                 .control(sender.clone())
                 .register(0, TEST_QUOTA)
                 .await
@@ -2141,12 +2111,9 @@ mod tests {
 
             // Send all messages in quick succession
             for i in 0..3 {
-                let mut sender_tx = sender_tx.clone();
-                let receiver = receiver.clone();
                 let msg = IoBuf::from(vec![i; 500]);
                 sender_tx
-                    .send(Recipients::One(receiver), msg, false)
-                    .await
+                    .send(Recipients::One(receiver.clone()), msg, false)
                     .unwrap();
             }
 
@@ -2237,7 +2204,6 @@ mod tests {
             let start_time = context.current();
             sender_tx
                 .send(Recipients::One(pk_receiver.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
 
             // Receive first message (should take ~2s at 10KB/s)
@@ -2261,7 +2227,6 @@ mod tests {
             let msg2_start = context.current();
             sender_tx
                 .send(Recipients::One(pk_receiver.clone()), msg2.clone(), false)
-                .await
                 .unwrap();
 
             // Receive second message (should take ~5s at 2KB/s)
@@ -2328,7 +2293,6 @@ mod tests {
             let msg1 = IoBuf::from(vec![1u8; 20_000]); // 20 KB
             let sent = sender_tx
                 .send(Recipients::One(pk_receiver.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], pk_receiver);
@@ -2409,7 +2373,6 @@ mod tests {
             let msg1 = IoBuf::from(vec![1u8; 20_000]); // 20 KB
             let sent = sender_tx
                 .send(Recipients::One(pk_receiver.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], pk_receiver);
@@ -2805,49 +2768,45 @@ mod tests {
             // Send message from pk1 to pk2 (both in the peer set) - should succeed
             let sent = sender1
                 .send(Recipients::One(pk2.clone()), IoBuf::from(b"msg1"), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
 
             // Try to send from pk1 to pk3 (pk3 not in any peer set) - should fail
             let sent = sender1
                 .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg2"), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 0);
 
             // Register second peer set with pk2 and pk3
             manager.track(2, Set::try_from(vec![pk2.clone(), pk3.clone()]).unwrap());
+            assert!(manager.peer_set(2).await.is_some());
 
             // Now pk3 is in a peer set, message should succeed
             let sent = sender1
                 .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg3"), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
 
             // Register third peer set with pk3 and pk4 (this will evict peer set 1)
             manager.track(3, Set::try_from(vec![pk3.clone(), pk4.clone()]).unwrap());
+            assert!(manager.peer_set(3).await.is_some());
 
             // pk1 should now be removed from all peer sets
             // Try to send from pk2 to pk1 - should fail since pk1 is no longer tracked
             let sent = sender2
                 .send(Recipients::One(pk1.clone()), IoBuf::from(b"msg4"), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 0);
 
             // pk3 should still be reachable (in sets 2 and 3)
             let sent = sender2
                 .send(Recipients::One(pk3.clone()), IoBuf::from(b"msg5"), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
 
             // pk4 should be reachable (in set 3)
             let sent = sender3
                 .send(Recipients::One(pk4.clone()), IoBuf::from(b"msg6"), false)
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
 
@@ -2926,7 +2885,6 @@ mod tests {
                     initial_msg.clone(),
                     false,
                 )
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], recipient_pk);
@@ -2949,7 +2907,6 @@ mod tests {
                     IoBuf::from(b"untracked"),
                     false,
                 )
-                .await
                 .unwrap();
             assert!(sent.is_empty());
 
@@ -2976,7 +2933,6 @@ mod tests {
                     initial_msg.clone(),
                     false,
                 )
-                .await
                 .unwrap();
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], recipient_pk);
@@ -3269,7 +3225,6 @@ mod tests {
             let msg1 = IoBuf::from(b"message1");
             let result1 = sender
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
                 .unwrap();
             assert_eq!(result1.len(), 1, "first message should be sent");
 
@@ -3281,7 +3236,6 @@ mod tests {
             let msg2 = IoBuf::from(b"message2");
             let result2 = sender
                 .send(Recipients::One(pk2.clone()), msg2.clone(), false)
-                .await
                 .unwrap();
             assert_eq!(
                 result2.len(),
@@ -3296,7 +3250,6 @@ mod tests {
             let msg3 = IoBuf::from(b"message3");
             let result3 = sender
                 .send(Recipients::One(pk2.clone()), msg3.clone(), false)
-                .await
                 .unwrap();
             assert_eq!(result3.len(), 1, "third message should be sent after wait");
 
@@ -3348,9 +3301,9 @@ mod tests {
 
             // Sending messages should not panic (returns empty or error)
             let msg = IoBuf::from(b"test");
-            let result = sender.send(Recipients::One(pk2.clone()), msg, false).await;
+            let result = sender.send(Recipients::One(pk2.clone()), msg, false);
             assert!(
-                result.is_err() || result.unwrap().is_empty(),
+                result.is_err() || result.as_ref().is_ok_and(Vec::is_empty),
                 "send after shutdown should fail or return empty"
             );
 
@@ -3426,7 +3379,6 @@ mod tests {
             let msg = IoBuf::from(b"test_message");
             let result = sender
                 .send(Recipients::One(pk2.clone()), msg.clone(), false)
-                .await
                 .unwrap();
             assert_eq!(result.len(), 1, "message should be sent");
 

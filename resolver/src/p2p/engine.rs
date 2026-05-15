@@ -360,9 +360,7 @@ impl<
         let msg = wire::Message { id, payload };
 
         // Send message to peer
-        let result = sender
-            .send(Recipients::One(peer.clone()), msg, priority)
-            .await;
+        let result = sender.send(Recipients::One(peer.clone()), msg, priority);
 
         // Log result, but do not handle errors
         match result {

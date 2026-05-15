@@ -388,7 +388,6 @@ where
                                                     payload,
                                                     true,
                                                 )
-                                                .await
                                             {
                                                 warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
                                             }
@@ -625,10 +624,7 @@ where
 
             // Send to remote player
             let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
-            match sender
-                .send(Recipients::One(player.clone()), payload, true)
-                .await
-            {
+            match sender.send(Recipients::One(player.clone()), payload, true) {
                 Ok(success) => {
                     if success.is_empty() {
                         debug!(?epoch, ?player, "failed to send share");

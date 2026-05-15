@@ -217,7 +217,7 @@ impl LimitedSender for MockSender {
     type PublicKey = PublicKey;
     type Checked<'a> = MockCheckedSender;
 
-    async fn check(
+    fn check(
         &mut self,
         _recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
@@ -231,12 +231,20 @@ impl CheckedSender for MockCheckedSender {
     type Error = MockSendError;
     type PublicKey = PublicKey;
 
-    async fn send(
+    fn is_empty(&self) -> bool {
+        false
+    }
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        Vec::new()
+    }
+
+    fn send(
         self,
         _message: impl Into<IoBufs> + Send,
         _priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        Ok(vec![])
+    ) -> Result<Feedback, Self::Error> {
+        Ok(Feedback::Ok)
     }
 }
 

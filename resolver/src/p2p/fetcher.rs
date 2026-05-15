@@ -1,4 +1,5 @@
 use crate::p2p::wire;
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
@@ -275,7 +276,7 @@ where
             // Try each peer until one succeeds
             for peer in peers {
                 // Check rate limit (consumes a token if not rate-limited)
-                let checked = match sender.check(Recipients::One(peer.clone())).await {
+                let checked = match sender.check(Recipients::One(peer.clone())) {
                     Ok(checked) => checked,
                     Err(not_until) => {
                         // Peer is rate-limited, track earliest retry time
@@ -284,6 +285,12 @@ where
                         continue;
                     }
                 };
+                if checked.is_empty() {
+                    self.requests_sent.inc(Status::Dropped);
+                    debug!(?peer, "peer unavailable");
+                    self.update_performance(&peer, self.timeout);
+                    continue;
+                }
 
                 // Attempt send
                 let id = self.next_id();
@@ -291,8 +298,8 @@ where
                     id,
                     payload: wire::Payload::Request(key.clone()),
                 };
-                match checked.send(message, self.priority_requests).await {
-                    Ok(sent) if !sent.is_empty() => {
+                match checked.send(message, self.priority_requests) {
+                    Ok(Feedback::Ok | Feedback::Backoff) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -310,10 +317,10 @@ where
                         self.key_to_id.insert(key, id);
                         return;
                     }
-                    Ok(_) => {
+                    Ok(Feedback::Closed) => {
                         // Peer dropped message, try next peer
                         self.requests_sent.inc(Status::Dropped);
-                        debug!(?peer, "send returned empty");
+                        debug!(?peer, "send closed");
                         self.update_performance(&peer, self.timeout);
                     }
                     Err(err) => {
@@ -599,12 +606,28 @@ mod tests {
         type PublicKey = S::PublicKey;
         type Error = S::Error;
 
-        async fn send(
+        fn is_empty(&self) -> bool {
+            match &self.recipients {
+                Recipients::All => false,
+                Recipients::Some(peers) => peers.is_empty(),
+                Recipients::One(_) => false,
+            }
+        }
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            match &self.recipients {
+                Recipients::All => Vec::new(),
+                Recipients::Some(peers) => peers.clone(),
+                Recipients::One(peer) => vec![peer.clone()],
+            }
+        }
+
+        fn send(
             self,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-            self.sender.send(self.recipients, message, priority).await
+        ) -> Result<Feedback, Self::Error> {
+            self.sender.send(self.recipients, message, priority)
         }
     }
 
@@ -615,13 +638,13 @@ mod tests {
         type PublicKey = PublicKey;
         type Error = MockError;
 
-        async fn send(
+        fn send(
             &mut self,
             _recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-            Ok(vec![])
+        ) -> Result<Feedback, Self::Error> {
+            Ok(Feedback::Closed)
         }
     }
 
@@ -633,10 +656,10 @@ mod tests {
         type PublicKey = PublicKey;
         type Checked<'a> = CheckedSender<'a, FailMockSenderInner>;
 
-        async fn check<'a>(
-            &'a mut self,
+        fn check(
+            &mut self,
             recipients: Recipients<Self::PublicKey>,
-        ) -> Result<Self::Checked<'a>, SystemTime> {
+        ) -> Result<Self::Checked<'_>, SystemTime> {
             Ok(CheckedSender {
                 sender: &mut self.0,
                 recipients,
@@ -652,14 +675,14 @@ mod tests {
         type PublicKey = PublicKey;
         type Error = MockError;
 
-        async fn send(
+        fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        ) -> Result<Feedback, Self::Error> {
             match recipients {
-                Recipients::One(peer) => Ok(vec![peer]),
+                Recipients::One(_) => Ok(Feedback::Ok),
                 _ => unimplemented!(),
             }
         }
@@ -673,10 +696,10 @@ mod tests {
         type PublicKey = PublicKey;
         type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
 
-        async fn check<'a>(
-            &'a mut self,
+        fn check(
+            &mut self,
             recipients: Recipients<Self::PublicKey>,
-        ) -> Result<Self::Checked<'a>, SystemTime> {
+        ) -> Result<Self::Checked<'_>, SystemTime> {
             Ok(CheckedSender {
                 sender: &mut self.0,
                 recipients,
@@ -714,10 +737,10 @@ mod tests {
         type PublicKey = PublicKey;
         type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
 
-        async fn check<'a>(
-            &'a mut self,
+        fn check(
+            &mut self,
             recipients: Recipients<Self::PublicKey>,
-        ) -> Result<Self::Checked<'a>, SystemTime> {
+        ) -> Result<Self::Checked<'_>, SystemTime> {
             let peer = match &recipients {
                 Recipients::One(p) => p,
                 _ => unimplemented!(),

@@ -570,7 +570,6 @@ impl<
         // Send the ack to the network
         ack_sender
             .send(Recipients::Some(recipients), ack, self.priority_acks)
-            .await
             .map_err(|_| Error::UnableToSendMessage)?;
 
         Ok(())
@@ -855,7 +854,6 @@ impl<
                 node.encode(),
                 self.priority_proposals,
             )
-            .await
             .map_err(|_| Error::BroadcastFailed)?;
 
         // Set the rebroadcast deadline

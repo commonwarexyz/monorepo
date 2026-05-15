@@ -206,7 +206,6 @@ fn fuzz(input: FuzzInput) {
                             message.clone(),
                             true,
                         )
-                        .await
                         .is_ok();
 
                     // Track message as expected only if send was accepted

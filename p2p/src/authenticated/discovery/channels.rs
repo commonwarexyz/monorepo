@@ -3,6 +3,7 @@ use crate::{
     utils::limited::{CheckedSender, LimitedSender},
     Channel, Message, Recipients,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Quota};
 use commonware_utils::channel::mpsc;
@@ -22,12 +23,12 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     type PublicKey = P;
     type Error = Error;
 
-    async fn send(
+    fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+    ) -> Result<Feedback, Self::Error> {
         let message = message.into();
         if message.len() > self.max_size as usize {
             return Err(Error::MessageTooLarge(message.len()));
@@ -35,8 +36,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 
         Ok(self
             .messenger
-            .content(recipients, self.channel, message, priority)
-            .await)
+            .content(recipients, self.channel, message, priority))
     }
 }
 
@@ -82,11 +82,11 @@ where
     where
         Self: 'a;
 
-    async fn check(
+    fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
-        self.limited_sender.check(recipients).await
+        self.limited_sender.check(recipients)
     }
 }
 
