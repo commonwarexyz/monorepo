@@ -22,7 +22,7 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl Feedback {
-        /// Returns `true` when the work was accepted.
+        /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             matches!(self, Self::Ok | Self::Backoff)
         }
