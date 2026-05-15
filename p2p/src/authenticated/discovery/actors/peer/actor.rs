@@ -7,7 +7,7 @@ use crate::authenticated::{
         metrics,
         types::{self, InfoVerifier},
     },
-    relay::{recv_prioritized, try_recv_data, Message as RelayMessage, Prioritized, Relay},
+    relay::{recv_prioritized, try_recv, Message as RelayMessage, Prioritized, Relay},
 };
 use commonware_actor::{mailbox, Feedback};
 use commonware_codec::Decode;
@@ -137,12 +137,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
-            if let Some(msg) = try_recv_data(high) {
+            if let Some(msg) = try_recv(high) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
-            if let Some(msg) = try_recv_data(low) {
+            if let Some(msg) = try_recv(low) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;

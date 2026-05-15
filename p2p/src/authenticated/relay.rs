@@ -76,7 +76,7 @@ pub async fn recv_prioritized<C: Policy, D>(
 }
 
 /// Attempts to receive one data message from a relay receiver.
-pub(crate) fn try_recv_data<T>(receiver: &mut mailbox::Receiver<Message<T>>) -> Option<T> {
+pub(crate) fn try_recv<T>(receiver: &mut mailbox::Receiver<Message<T>>) -> Option<T> {
     receiver.try_recv().ok().map(Message::into_inner)
 }
 
