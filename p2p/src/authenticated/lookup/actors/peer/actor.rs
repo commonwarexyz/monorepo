@@ -7,7 +7,7 @@ use crate::authenticated::{
     },
     relay::{recv_prioritized, try_recv, Message as RelayMessage, Prioritized, Relay},
 };
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -279,18 +279,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         match msg {
                             types::Message::Data(data) => {
                                 let sender = senders.get_mut(&data.channel).unwrap();
-                                // Forward inbound data to the application mailbox. Backoff means the
-                                // mailbox processed the submission through its overflow policy; it
-                                // does not tell us whether the message was retained or dropped.
-                                let feedback =
+                                let _ =
                                     sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                                if feedback != Feedback::Ok {
-                                    debug!(
-                                        ?feedback,
-                                        channel = data.channel,
-                                        "failed to send message to client"
-                                    );
-                                }
                             }
                             types::Message::Ping => {
                                 // We ignore ping messages, they are only used to keep
