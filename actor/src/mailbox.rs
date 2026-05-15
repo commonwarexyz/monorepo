@@ -44,11 +44,6 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Metrics,
 };
-#[cfg(test)]
-use commonware_runtime::{
-    telemetry::metrics::{Metric, Registered, Registration},
-    Name, Supervisor,
-};
 use std::{
     collections::VecDeque,
     fmt,
@@ -563,45 +558,51 @@ pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Default)]
-struct TestMetrics;
+mod mocks {
+    use commonware_runtime::{
+        telemetry::metrics::{Metric, Registered, Registration},
+        Metrics as RuntimeMetrics, Name, Supervisor,
+    };
+    use std::fmt;
 
-#[cfg(test)]
-impl Supervisor for TestMetrics {
-    fn name(&self) -> Name {
-        Name::default()
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct Metrics;
+
+    impl Supervisor for Metrics {
+        fn name(&self) -> Name {
+            Name::default()
+        }
+
+        fn child(&self, _label: &'static str) -> Self {
+            Self
+        }
+
+        fn with_attribute(self, _key: &'static str, _value: impl fmt::Display) -> Self {
+            self
+        }
     }
 
-    fn child(&self, _label: &'static str) -> Self {
-        Self
-    }
+    impl RuntimeMetrics for Metrics {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            _name: N,
+            _help: H,
+            metric: M,
+        ) -> Registered<M> {
+            Registered::with_registration(metric, Registration::from(()))
+        }
 
-    fn with_attribute(self, _key: &'static str, _value: impl fmt::Display) -> Self {
-        self
-    }
-}
-
-#[cfg(test)]
-impl Metrics for TestMetrics {
-    fn register<N: Into<String>, H: Into<String>, M: Metric>(
-        &self,
-        _name: N,
-        _help: H,
-        metric: M,
-    ) -> Registered<M> {
-        Registered::with_registration(metric, Registration::from(()))
-    }
-
-    fn encode(&self) -> String {
-        String::new()
+        fn encode(&self) -> String {
+            String::new()
+        }
     }
 }
 
 #[cfg(all(test, not(feature = "loom")))]
 mod tests {
-    use super::*;
+    use super::{mocks, *};
     use commonware_macros::test_async;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor};
     use commonware_utils::{channel::oneshot, NZUsize};
     use futures::{
         pin_mut,
@@ -615,7 +616,7 @@ mod tests {
     };
 
     fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-        super::new(TestMetrics, capacity)
+        super::new(mocks::Metrics, capacity)
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -1063,7 +1064,7 @@ mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::*;
+    use super::{mocks, *};
     use commonware_utils::NZUsize;
     use futures::pin_mut;
     use loom::{
@@ -1079,7 +1080,7 @@ mod loom_tests {
     };
 
     fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-        super::new(TestMetrics, capacity)
+        super::new(mocks::Metrics, capacity)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
