@@ -2146,9 +2146,15 @@ mod tests {
                 .unwrap();
 
             let big_msg = vec![7u8; 10_000];
-            let start =
-                send_when_ready(&context, &mut sender, Recipients::All, 2, big_msg.clone(), false)
-                    .await;
+            let start = send_when_ready(
+                &context,
+                &mut sender,
+                Recipients::All,
+                2,
+                big_msg.clone(),
+                false,
+            )
+            .await;
 
             let (_pk, received_a) = recv_a.recv().await.unwrap();
             assert_eq!(received_a, big_msg.as_slice());

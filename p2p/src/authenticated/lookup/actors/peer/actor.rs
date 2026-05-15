@@ -1,7 +1,10 @@
 use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
     data::EncodedData,
-    lookup::{channels::{self, Channels}, metrics, types},
+    lookup::{
+        channels::{self, Channels},
+        metrics, types,
+    },
     relay::{recv_prioritized, Message as RelayMessage, Prioritized, Relay},
 };
 use commonware_actor::{mailbox, Feedback};
@@ -229,75 +232,82 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 Ok(())
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self
-            .context
-            .child("receiver")
-            .spawn(move |context| async move {
-                loop {
-                    // Receive a message from the peer
-                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
+        let mut receive_handler: Handle<Result<(), Error>> =
+            self.context
+                .child("receiver")
+                .spawn(move |context| async move {
+                    loop {
+                        // Receive a message from the peer
+                        let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
-                    // Parse the message
-                    let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
-                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            debug!(?err, ?peer, "failed to decode message");
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_invalid(&peer))
-                                .inc();
-                            return Err(Error::DecodeFailed(err));
-                        }
-                    };
-
-                    // Validate channel and resolve rate limiter before emitting
-                    // any channel-labeled metrics (to avoid unbounded cardinality
-                    // from attacker-controlled channel values).
-                    let (metric, rate_limiter) = match &msg {
-                        types::Message::Data(data) => match rate_limits.get(&data.channel) {
-                            Some(rate_limit) => {
-                                (metrics::Message::new_data(&peer, data.channel), rate_limit)
-                            }
-                            None => {
-                                debug!(?peer, channel = data.channel, "invalid channel");
+                        // Parse the message
+                        let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
+                        let msg = match types::Message::decode_cfg(msg, &max_data_length) {
+                            Ok(msg) => msg,
+                            Err(err) => {
+                                debug!(?err, ?peer, "failed to decode message");
                                 self.received_messages
                                     .get_or_create(&metrics::Message::new_invalid(&peer))
                                     .inc();
-                                return Err(Error::InvalidChannel);
+                                return Err(Error::DecodeFailed(err));
                             }
-                        },
-                        types::Message::Ping => {
-                            (metrics::Message::new_ping(&peer), &ping_rate_limiter)
-                        }
-                    };
-                    self.received_messages.get_or_create(&metric).inc();
-                    if let Err(wait_until) = rate_limiter.check() {
-                        self.rate_limited.get_or_create(&metric).inc();
-                        let wait_duration = wait_until.wait_time_from(context.now());
-                        context.sleep(wait_duration).await;
-                    }
+                        };
 
-                    match msg {
-                        types::Message::Data(data) => {
-                            let sender = senders.get_mut(&data.channel).unwrap();
-                            let feedback =
-                                sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                            if feedback == Feedback::Backoff {
-                                self.dropped_messages
-                                    .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                    .inc();
+                        // Validate channel and resolve rate limiter before emitting
+                        // any channel-labeled metrics (to avoid unbounded cardinality
+                        // from attacker-controlled channel values).
+                        let (metric, rate_limiter) = match &msg {
+                            types::Message::Data(data) => match rate_limits.get(&data.channel) {
+                                Some(rate_limit) => {
+                                    (metrics::Message::new_data(&peer, data.channel), rate_limit)
+                                }
+                                None => {
+                                    debug!(?peer, channel = data.channel, "invalid channel");
+                                    self.received_messages
+                                        .get_or_create(&metrics::Message::new_invalid(&peer))
+                                        .inc();
+                                    return Err(Error::InvalidChannel);
+                                }
+                            },
+                            types::Message::Ping => {
+                                (metrics::Message::new_ping(&peer), &ping_rate_limiter)
                             }
-                            if feedback != Feedback::Ok {
-                                debug!(?feedback, channel=data.channel, "failed to send message to client");
-                            }
+                        };
+                        self.received_messages.get_or_create(&metric).inc();
+                        if let Err(wait_until) = rate_limiter.check() {
+                            self.rate_limited.get_or_create(&metric).inc();
+                            let wait_duration = wait_until.wait_time_from(context.now());
+                            context.sleep(wait_duration).await;
                         }
-                        types::Message::Ping => {
-                            // We ignore ping messages, they are only used to keep
-                            // the connection alive
+
+                        match msg {
+                            types::Message::Data(data) => {
+                                let sender = senders.get_mut(&data.channel).unwrap();
+                                let feedback =
+                                    sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                                if feedback == Feedback::Backoff {
+                                    self.dropped_messages
+                                        .get_or_create(&metrics::Message::new_data(
+                                            &peer,
+                                            data.channel,
+                                        ))
+                                        .inc();
+                                }
+                                if feedback != Feedback::Ok {
+                                    debug!(
+                                        ?feedback,
+                                        channel = data.channel,
+                                        "failed to send message to client"
+                                    );
+                                }
+                            }
+                            types::Message::Ping => {
+                                // We ignore ping messages, they are only used to keep
+                                // the connection alive
+                            }
                         }
                     }
-                }
-            });
+                });
 
         // Wait for one of the handlers to finish or shutdown
         let mut shutdown = self.context.stopped();
@@ -572,11 +582,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(
-                            &pool,
-                            0,
-                            IoBufs::from(IoBuf::from(b"first"))
-                        ),
+                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
                         false,
                     )
                     .accepted(),
@@ -585,11 +591,7 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(
-                            &pool,
-                            0,
-                            IoBufs::from(IoBuf::from(b"second"))
-                        ),
+                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
                         false,
                     )
                     .accepted(),

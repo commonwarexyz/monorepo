@@ -1,6 +1,4 @@
-use commonware_actor::{
-    mailbox::{self, Policy},
-};
+use commonware_actor::mailbox::{self, Policy};
 use std::{collections::VecDeque, fmt, num::NonZeroUsize};
 
 /// Messages that can be sent to the peer [super::Actor].

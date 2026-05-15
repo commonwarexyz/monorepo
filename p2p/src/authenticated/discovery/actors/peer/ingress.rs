@@ -1,7 +1,5 @@
 use crate::authenticated::discovery::types;
-use commonware_actor::{
-    mailbox::{self, Policy},
-};
+use commonware_actor::mailbox::{self, Policy};
 use commonware_cryptography::PublicKey;
 use std::{collections::VecDeque, fmt, num::NonZeroUsize};
 

@@ -227,14 +227,14 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock,
-        IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
+        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock, IoBuf,
+        Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
         channel::mpsc,
         hostname,
         ordered::{Map, Set},
-        Hostname, TryCollect, NZU32, NZUsize,
+        Hostname, NZUsize, TryCollect, NZU32,
     };
     use rand_core::{CryptoRngCore, RngCore};
     use std::{
@@ -2174,11 +2174,7 @@ mod tests {
             let message = IoBuf::from(vec![0u8; 100]);
             for i in 0..11 {
                 let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
-                assert_ne!(
-                    sent,
-                    Feedback::Closed,
-                    "Broadcast {i} should be accepted"
-                );
+                assert_ne!(sent, Feedback::Closed, "Broadcast {i} should be accepted");
 
                 assert!(fast_receivers.low.recv().await.is_some());
             }

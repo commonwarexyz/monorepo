@@ -36,11 +36,10 @@ impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
         connection: (Sender<O>, Receiver<I>),
         reservation: Reservation<P>,
     ) -> Feedback {
-        self.0
-            .enqueue(Message::Spawn {
-                peer: reservation.metadata().public_key().clone(),
-                connection,
-                reservation,
-            })
+        self.0.enqueue(Message::Spawn {
+            peer: reservation.metadata().public_key().clone(),
+            connection,
+            reservation,
+        })
     }
 }

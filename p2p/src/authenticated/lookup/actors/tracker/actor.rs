@@ -4,9 +4,7 @@ use super::{
     Config,
 };
 use crate::{
-    authenticated::{
-        lookup::actors::{listener, peer, tracker::ingress::Releaser},
-    },
+    authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
     PeerSetUpdate,
 };
 use commonware_actor::mailbox;
@@ -183,10 +181,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Return the receiver to the caller
                 let _ = responder.send(receiver);
             }
-            Message::Connect {
-                public_key,
-                peer,
-            } => {
+            Message::Connect { public_key, peer } => {
                 // Kill if peer is not eligible (not in a peer set)
                 if !self.directory.eligible(&public_key) {
                     peer.kill();

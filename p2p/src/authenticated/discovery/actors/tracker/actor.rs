@@ -206,10 +206,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let info = self.directory.info(&self.crypto.public_key()).unwrap();
                 let _ = responder.send(info);
             }
-            Message::Construct {
-                public_key,
-                peer,
-            } => {
+            Message::Construct { public_key, peer } => {
                 // Kill if peer is not authorized
                 if !self.directory.eligible(&public_key) {
                     peer.kill();
@@ -283,12 +280,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::{
-        authenticated::{
-            discovery::{
-                actors::{peer, tracker, tracker::ingress::SenderExt as _},
-                config::Bootstrapper,
-                types,
-            },
+        authenticated::discovery::{
+            actors::{peer, tracker, tracker::ingress::SenderExt as _},
+            config::Bootstrapper,
+            types,
         },
         Ingress, Manager, Provider, TrackedPeers,
     };

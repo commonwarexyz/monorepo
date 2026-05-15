@@ -1210,7 +1210,10 @@ mod tests {
             let result = optimistic_rx
                 .await
                 .expect("optimistic verify should resolve");
-            assert!(result, "optimistic verify should accept the available block");
+            assert!(
+                result,
+                "optimistic verify should accept the available block"
+            );
 
             let certify_rx = marshaled.certify(child_round, child_digest).await;
             verify_started

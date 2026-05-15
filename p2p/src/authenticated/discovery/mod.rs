@@ -2436,10 +2436,7 @@ mod tests {
             let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();
             let (slow_relay, _slow_receivers) = Relay::new(NZUsize!(10));
             assert!(
-                mailbox
-                    .ready(slow_peer.clone(), slow_relay)
-                    .await
-                    .is_some(),
+                mailbox.ready(slow_peer.clone(), slow_relay).await.is_some(),
                 "Failed to register slow peer"
             );
 
@@ -2447,10 +2444,7 @@ mod tests {
             let fast_peer = ed25519::PrivateKey::from_seed(1).public_key();
             let (fast_relay, mut fast_receivers) = Relay::new(NZUsize!(100));
             assert!(
-                mailbox
-                    .ready(fast_peer.clone(), fast_relay)
-                    .await
-                    .is_some(),
+                mailbox.ready(fast_peer.clone(), fast_relay).await.is_some(),
                 "Failed to register fast peer"
             );
 
@@ -2461,11 +2455,7 @@ mod tests {
             // broadcast.
             for i in 0..11 {
                 let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
-                assert_ne!(
-                    sent,
-                    Feedback::Closed,
-                    "Broadcast {i} should be accepted"
-                );
+                assert_ne!(sent, Feedback::Closed, "Broadcast {i} should be accepted");
 
                 assert!(fast_receivers.low.recv().await.is_some());
             }
