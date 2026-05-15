@@ -198,6 +198,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_set_floor_without_pruning_preserves_archives() {
+        harness::set_floor_without_pruning_preserves_archives::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_rejects_block_delivery_below_floor() {
         harness::reject_stale_block_delivery_after_floor_update::<CodingHarness>();
     }
