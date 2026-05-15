@@ -35,23 +35,23 @@ pub enum Message<K, P> {
     Retain { predicate: Predicate<K> },
 }
 
-enum Prune<K> {
-    Clear,
+enum Modification<K> {
+    Cancel { key: K },
     Retain { predicate: Predicate<K> },
 }
 
 /// Pending resolver messages retained after the mailbox fills.
 pub struct Pending<K, P> {
-    prunes: VecDeque<Prune<K>>,
-    cancels: VecDeque<K>,
+    clear: bool,
+    modifications: VecDeque<Modification<K>>,
     fetches: Vec<FetchRequest<K, P>>,
 }
 
 impl<K, P> Default for Pending<K, P> {
     fn default() -> Self {
         Self {
-            prunes: VecDeque::new(),
-            cancels: VecDeque::new(),
+            clear: false,
+            modifications: VecDeque::new(),
             fetches: Vec::new(),
         }
     }
@@ -59,26 +59,27 @@ impl<K, P> Default for Pending<K, P> {
 
 impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
     fn is_empty(&self) -> bool {
-        self.prunes.is_empty() && self.cancels.is_empty() && self.fetches.is_empty()
+        !self.clear && self.modifications.is_empty() && self.fetches.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
         F: FnMut(Message<K, P>) -> Option<Message<K, P>>,
     {
-        while let Some(prune) = self.prunes.pop_front() {
-            let message = match prune {
-                Prune::Clear => Message::Clear,
-                Prune::Retain { predicate } => Message::Retain { predicate },
-            };
-            if let Some(message) = push(message) {
+        if self.clear {
+            self.clear = false;
+            if let Some(message) = push(Message::Clear) {
                 self.push_front(message);
                 return;
             }
         }
 
-        while let Some(key) = self.cancels.pop_front() {
-            if let Some(message) = push(Message::Cancel { key }) {
+        while let Some(modification) = self.modifications.pop_front() {
+            let message = match modification {
+                Modification::Cancel { key } => Message::Cancel { key },
+                Modification::Retain { predicate } => Message::Retain { predicate },
+            };
+            if let Some(message) = push(message) {
                 self.push_front(message);
                 return;
             }
@@ -96,11 +97,14 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
 impl<K, P> Pending<K, P> {
     fn push_front(&mut self, message: Message<K, P>) {
         match message {
-            Message::Clear => self.prunes.push_front(Prune::Clear),
+            Message::Clear => self.clear = true,
             Message::Retain { predicate } => {
-                self.prunes.push_front(Prune::Retain { predicate });
+                self.modifications
+                    .push_front(Modification::Retain { predicate });
             }
-            Message::Cancel { key } => self.cancels.push_front(key),
+            Message::Cancel { key } => {
+                self.modifications.push_front(Modification::Cancel { key });
+            }
             Message::Fetch(fetches) => {
                 self.fetches.splice(0..0, fetches);
             }
@@ -134,18 +138,19 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
     type Overflow = Pending<K, P>;
 
     fn handle(overflow: &mut Pending<K, P>, message: Self) {
+        if overflow.clear {
+            return;
+        }
+
         match message {
             Self::Fetch(requests) => {
                 for request in requests {
                     let FetchRequest { key, targets } = request;
 
                     // Drop fetches already canceled or pruned in overflow
-                    if overflow.cancels.iter().any(|old| old == &key) {
-                        continue;
-                    }
-                    if overflow.prunes.iter().any(|prune| match prune {
-                        Prune::Clear => true,
-                        Prune::Retain { predicate } => !predicate(&key),
+                    if overflow.modifications.iter().any(|modification| {
+                        matches!(modification, Modification::Cancel { key: cancel } if cancel == &key)
+                            || matches!(modification, Modification::Retain { predicate } if !predicate(&key))
                     }) {
                         continue;
                     }
@@ -167,20 +172,28 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
                 overflow.fetches.retain(|request| request.key != key);
 
                 // Retain only the first queued cancel for a key
-                if overflow.cancels.iter().all(|old| old != &key) {
-                    overflow.cancels.push_back(key);
+                if overflow
+                    .modifications
+                    .iter()
+                    .all(|modification| {
+                        !matches!(modification, Modification::Cancel { key: cancel } if cancel == &key)
+                    })
+                {
+                    overflow.modifications.push_back(Modification::Cancel { key });
                 }
             }
             Self::Clear => {
-                // Clear supersedes pending cancels and fetches, but preserves prune order
-                overflow.cancels.clear();
+                // Clear supersedes pending modifications and fetches
+                overflow.clear = true;
+                overflow.modifications.clear();
                 overflow.fetches.clear();
-                overflow.prunes.push_back(Prune::Clear);
             }
             Self::Retain { predicate } => {
                 // Retain prunes pending fetches before queued fetches drain
                 overflow.fetches.retain(|request| predicate(&request.key));
-                overflow.prunes.push_back(Prune::Retain { predicate });
+                overflow
+                    .modifications
+                    .push_back(Modification::Retain { predicate });
             }
         }
     }
@@ -437,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_and_retain_are_drained_in_received_order() {
+    fn clear_supersedes_modifications() {
         let mut pending = Pending::default();
 
         Policy::handle(
@@ -455,9 +468,7 @@ mod tests {
         );
 
         let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 3);
-        assert!(matches!(messages[0], Message::Retain { .. }));
-        assert!(matches!(messages[1], Message::Clear));
-        assert!(matches!(messages[2], Message::Retain { .. }));
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0], Message::Clear));
     }
 }
