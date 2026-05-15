@@ -21,11 +21,13 @@ const COMMIT_FREQUENCY: u32 = 10_000;
 
 cfg_if::cfg_if! {
     if #[cfg(not(full_bench))] {
-        const ELEMENTS: [u64; 1] = [NUM_ELEMENTS];
-        const OPERATIONS: [u64; 1] = [NUM_OPERATIONS];
+        const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
     } else {
-        const ELEMENTS: [u64; 2] = [NUM_ELEMENTS, NUM_ELEMENTS * 10];
-        const OPERATIONS: [u64; 2] = [NUM_OPERATIONS, NUM_OPERATIONS * 10];
+        const CASES: [(u64, u64); 3] = [
+            (NUM_ELEMENTS, NUM_OPERATIONS),
+            (NUM_ELEMENTS * 10, NUM_OPERATIONS),
+            (NUM_ELEMENTS * 3, NUM_OPERATIONS * 3),
+        ];
     }
 }
 
@@ -52,54 +54,52 @@ define_fixed_variants! {
 
 fn bench_fixed_value_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for elements in ELEMENTS {
-        for operations in OPERATIONS {
-            for &variant in FIXED_VARIANTS {
-                let mut initialized = false;
-                let runner = tokio::Runner::new(cfg.clone());
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} elements={elements} operations={operations}",
-                        module_path!(),
-                        variant.name(),
-                    ),
-                    |b| {
-                        // Setup: populate database (once, on first sample).
-                        if !initialized {
-                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
-                                |ctx| async move {
-                                    dispatch_fixed!(ctx, variant, |db| {
-                                        populate_and_sync(
-                                            &mut db,
-                                            elements,
-                                            operations,
-                                            make_fixed_value,
-                                        )
-                                        .await;
-                                    });
-                                },
-                            );
-                            initialized = true;
-                        }
+    for (elements, operations) in CASES {
+        for &variant in FIXED_VARIANTS {
+            let mut initialized = false;
+            let runner = tokio::Runner::new(cfg.clone());
+            c.bench_function(
+                &format!(
+                    "{}/variant={} elements={elements} operations={operations}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    // Setup: populate database (once, on first sample).
+                    if !initialized {
+                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                            |ctx| async move {
+                                dispatch_fixed!(ctx, variant, |db| {
+                                    populate_and_sync(
+                                        &mut db,
+                                        elements,
+                                        operations,
+                                        make_fixed_value,
+                                    )
+                                    .await;
+                                });
+                            },
+                        );
+                        initialized = true;
+                    }
 
-                        // Benchmark: measure init time.
-                        b.to_async(&runner).iter_custom(|iters| async move {
-                            let ctx = context::get::<Context>();
-                            dispatch_fixed_timed_init!(ctx, variant, iters, |db| {
-                                assert_ne!(db.bounds().await.end, 0);
-                            })
-                        });
-                    },
-                );
-
-                // Cleanup: destroy database.
-                if initialized {
-                    commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                        dispatch_fixed!(ctx, variant, |db| {
-                            db.destroy().await.unwrap();
-                        });
+                    // Benchmark: measure init time.
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        dispatch_fixed_timed_init!(ctx, variant, iters, |db| {
+                            assert_ne!(db.bounds().await.end, 0);
+                        })
                     });
-                }
+                },
+            );
+
+            // Cleanup: destroy database.
+            if initialized {
+                commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
+                    dispatch_fixed!(ctx, variant, |db| {
+                        db.destroy().await.unwrap();
+                    });
+                });
             }
         }
     }
@@ -116,54 +116,52 @@ define_vec_variants! {
 
 fn bench_var_value_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for elements in ELEMENTS {
-        for operations in OPERATIONS {
-            for &variant in VEC_VARIANTS {
-                let mut initialized = false;
-                let runner = tokio::Runner::new(cfg.clone());
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} elements={elements} operations={operations}",
-                        module_path!(),
-                        variant.name(),
-                    ),
-                    |b| {
-                        // Setup: populate database (once, on first sample).
-                        if !initialized {
-                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
-                                |ctx| async move {
-                                    dispatch_var!(ctx, variant, |db| {
-                                        populate_and_sync(
-                                            &mut db,
-                                            elements,
-                                            operations,
-                                            make_var_value,
-                                        )
-                                        .await;
-                                    });
-                                },
-                            );
-                            initialized = true;
-                        }
+    for (elements, operations) in CASES {
+        for &variant in VEC_VARIANTS {
+            let mut initialized = false;
+            let runner = tokio::Runner::new(cfg.clone());
+            c.bench_function(
+                &format!(
+                    "{}/variant={} elements={elements} operations={operations}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    // Setup: populate database (once, on first sample).
+                    if !initialized {
+                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                            |ctx| async move {
+                                dispatch_var!(ctx, variant, |db| {
+                                    populate_and_sync(
+                                        &mut db,
+                                        elements,
+                                        operations,
+                                        make_var_value,
+                                    )
+                                    .await;
+                                });
+                            },
+                        );
+                        initialized = true;
+                    }
 
-                        // Benchmark: measure init time.
-                        b.to_async(&runner).iter_custom(|iters| async move {
-                            let ctx = context::get::<Context>();
-                            dispatch_var_timed_init!(ctx, variant, iters, |db| {
-                                assert_ne!(db.bounds().await.end, 0);
-                            })
-                        });
-                    },
-                );
-
-                // Cleanup: destroy database.
-                if initialized {
-                    commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                        dispatch_var!(ctx, variant, |db| {
-                            db.destroy().await.unwrap();
-                        });
+                    // Benchmark: measure init time.
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        dispatch_var_timed_init!(ctx, variant, iters, |db| {
+                            assert_ne!(db.bounds().await.end, 0);
+                        })
                     });
-                }
+                },
+            );
+
+            // Cleanup: destroy database.
+            if initialized {
+                commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
+                    dispatch_var!(ctx, variant, |db| {
+                        db.destroy().await.unwrap();
+                    });
+                });
             }
         }
     }
