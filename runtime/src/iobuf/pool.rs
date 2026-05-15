@@ -968,8 +968,9 @@ impl TlsSizeClassCache {
     /// Takes from the class-global freelist after the local stack misses.
     ///
     /// Every claimed global entry gets one retained class reference. The first
-    /// claimed entry is returned to the caller as a banked entry; additional
-    /// claimed entries are parked in this cache and counted by `len`.
+    /// claimed entry is returned with that reference materialized as a
+    /// [`SizeClassLease`]; additional claimed entries are parked in this cache
+    /// and counted by `len`.
     ///
     /// This is separate from [`Self::pop`] so the steady-state allocation hot path
     /// can inline only the local cache hit. We annotate with `inline(never)` to keep
@@ -995,8 +996,8 @@ impl TlsSizeClassCache {
         let mut entry = None;
         let take = self.capacity / 2;
         class.global.take_batch(take, |slot, buffer| {
-            // Each claimed global entry becomes either the returned banked
-            // entry or a local cache entry, so each needs one retained class
+            // Each claimed global entry becomes either the returned lease or a
+            // local cache entry, so each needs one retained class
             // reference.
             // SAFETY: the borrowed `class` owns one strong reference for its
             // token while the refill runs.
@@ -1154,9 +1155,10 @@ impl Drop for TlsSizeClassCache {
 /// mean this thread has not used that size class yet. Holes can remain for the
 /// lifetime of the thread because class ids are monotonic and never reused.
 /// Empty initialized caches can also remain after their pool has been dropped;
-/// their class token is inert while the cache is empty. It becomes usable again
-/// only if another pooled buffer or allocation for that same live class
-/// reaches the cache and provides a live reference.
+/// their class token is inert while the cache is empty. If the class is still
+/// live because a pooled buffer is outstanding, a later return of that buffer
+/// to this same thread can bank a fresh reference and make the cache usable
+/// again.
 ///
 /// We intentionally use `Vec<Option<...>>` because class ids are dense enough
 /// for direct indexing to be cheaper than hashing, but a thread may initialize

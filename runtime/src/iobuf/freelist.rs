@@ -14,9 +14,10 @@
 //! that is never returned will leak**.
 //!
 //! The buffer pool keeps this requirement by pairing every pooled backing
-//! outside the freelist with a size-class lease, and by banking one lease for
-//! every buffer held in a thread-local cache. Those leases keep the owning size
-//! class, and therefore this freelist, alive until the buffer returns here.
+//! outside the freelist with a size-class lease, and by banking one strong
+//! size-class reference for every buffer held in a thread-local cache. Those
+//! leases and banked references keep the owning size class, and therefore this
+//! freelist, alive until the buffer returns here.
 //!
 //! This is intentionally narrower than a general multi-producer, multi-consumer
 //! queue:
@@ -150,9 +151,9 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 /// class. Pooled backing values and thread-local caches may temporarily hold
 /// [`PooledBuffer`] handles, but those handles must eventually return here so
 /// they can be released with the correct layout. The buffer pool keeps the
-/// freelist alive for those outstanding handles with pooled-backing or banked
-/// size-class leases. Draining or dropping the freelist only deallocates buffers
-/// currently parked in it.
+/// freelist alive for those outstanding handles with pooled-backing leases
+/// or TLS-banked size-class references. Draining or dropping the freelist
+/// only deallocates buffers currently parked in it.
 ///
 /// The bitmap is intentionally striped over a power-of-two number of words.
 /// That makes the slot-to-word mapping cheap and keeps small freelists from
