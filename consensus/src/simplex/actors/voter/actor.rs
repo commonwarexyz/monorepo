@@ -148,7 +148,8 @@ impl<
             context.histogram("finalization_latency", "finalization latency", LATENCY);
 
         // Initialize store
-        let (mailbox_sender, mailbox_receiver) = mailbox::new(cfg.mailbox_size);
+        let (mailbox_sender, mailbox_receiver) =
+            mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(

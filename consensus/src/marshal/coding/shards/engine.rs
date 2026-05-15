@@ -369,7 +369,7 @@ where
     /// Create a new [`Engine`] with the given configuration.
     pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
-        let (sender, mailbox) = mailbox::new(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),

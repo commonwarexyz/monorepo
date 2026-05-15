@@ -101,7 +101,7 @@ impl<
     ///
     /// Returns the actor and a mailbox to send messages to it.
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
-        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
         let fetcher = Fetcher::new(
