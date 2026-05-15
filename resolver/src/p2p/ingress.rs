@@ -116,7 +116,7 @@ impl<K, P> Pending<K, P> {
 }
 
 // Merge target metadata for duplicate pending fetches
-fn merge_targets<P: Clone + Eq>(
+fn merge_targets<P: Eq>(
     existing: &mut Option<NonEmptyVec<P>>,
     incoming: Option<NonEmptyVec<P>>,
 ) {
@@ -132,17 +132,14 @@ fn merge_targets<P: Clone + Eq>(
     };
 
     // Merge target sets without duplicating peers
-    let incoming = std::mem::replace(existing, incoming);
-    let mut targets = incoming.into_vec();
-    for target in existing.iter() {
-        if !targets.contains(target) {
-            targets.push(target.clone());
+    for target in incoming {
+        if !existing.contains(&target) {
+            existing.push(target);
         }
     }
-    *existing = NonEmptyVec::from_unchecked(targets);
 }
 
-impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
+impl<K: Eq, P: Eq> Policy for Message<K, P> {
     type Overflow = Pending<K, P>;
 
     fn handle(overflow: &mut Pending<K, P>, message: Self) {
@@ -197,12 +194,12 @@ impl<K: Eq, P: Clone + Eq> Policy for Message<K, P> {
 
 /// A way to send messages to the peer actor.
 #[derive(Clone)]
-pub struct Mailbox<K: Eq, P: Clone + Eq> {
+pub struct Mailbox<K: Eq, P: Eq> {
     /// The channel that delivers messages to the peer actor.
     sender: Sender<Message<K, P>>,
 }
 
-impl<K: Eq, P: Clone + Eq> Mailbox<K, P> {
+impl<K: Eq, P: Eq> Mailbox<K, P> {
     /// Create a new mailbox.
     pub(super) const fn new(sender: Sender<Message<K, P>>) -> Self {
         Self { sender }
