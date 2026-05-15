@@ -274,9 +274,9 @@ mod tests {
         let (voter, mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
         let (resolver_sender, resolver_receiver) =
-            mailbox::new(context.child("mailbox"), NZUsize!(8));
+            mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
         let (batcher_sender, batcher_receiver) =
-            mailbox::new(context.child("mailbox"), NZUsize!(16));
+            mailbox::new(context.child("batcher_mailbox"), NZUsize!(16));
 
         let (vote_sender, _) = oracle
             .control(me.clone())
@@ -417,12 +417,12 @@ mod tests {
 
             // Create a dummy resolver mailbox
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(10));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(1024));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
@@ -640,12 +640,12 @@ mod tests {
 
             // Create a dummy resolver mailbox
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(10));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(10));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(10));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(10));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
@@ -1264,10 +1264,10 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let me = participants[0].clone();
@@ -1449,10 +1449,10 @@ mod tests {
 
             // Resolver and batcher mailboxes
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels
@@ -1641,10 +1641,10 @@ mod tests {
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
@@ -1730,10 +1730,10 @@ mod tests {
 
             // Resolver and batcher mailboxes
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
@@ -1871,8 +1871,8 @@ mod tests {
             let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.child("voter_initial"), cfg);
 
-            let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(32));
+            let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(32));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -1911,8 +1911,8 @@ mod tests {
             let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.child("voter_restarted"), cfg);
 
-            let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(32));
+            let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(32));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -2260,10 +2260,10 @@ mod tests {
 
             // Resolver and batcher mailboxes
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(2));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(2));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(16));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(16));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels for the validator
@@ -2470,10 +2470,10 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(32));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(32));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -2662,10 +2662,10 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(32));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(32));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -2826,10 +2826,10 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(32));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(32));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -3167,10 +3167,10 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(64));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(64));
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -3445,9 +3445,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -3570,9 +3570,9 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -3707,8 +3707,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -3866,8 +3866,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -3967,8 +3967,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4135,9 +4135,9 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4246,9 +4246,9 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4412,8 +4412,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4526,8 +4526,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -4691,8 +4691,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4863,8 +4863,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -4963,8 +4963,8 @@ mod tests {
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -5139,9 +5139,9 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, _) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -5323,11 +5323,11 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(10));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(1024));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -5506,11 +5506,11 @@ mod tests {
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(10));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(1024));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
@@ -6318,8 +6318,8 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter_cancel"), voter_cfg);
 
-            let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -6430,8 +6430,8 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
-            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -7633,8 +7633,8 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -7758,8 +7758,8 @@ mod tests {
             };
             let (voter, _mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let (resolver_sender, mut resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+            let (batcher_sender, mut batcher_receiver) = mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -7903,9 +7903,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -8013,9 +8013,9 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8153,9 +8153,9 @@ mod tests {
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(0, TEST_QUOTA)
@@ -8269,9 +8269,9 @@ mod tests {
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(8));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
             let (vote_sender, _) = oracle
                 .control(me.clone())
                 .register(2, TEST_QUOTA)
@@ -8406,11 +8406,11 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
             let (resolver_sender, _resolver_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(10));
+                mailbox::new(context.child("resolver_mailbox"), NZUsize!(10));
             let resolver = resolver::Mailbox::new(resolver_sender);
 
             let (batcher_sender, mut batcher_receiver) =
-                mailbox::new(context.child("mailbox"), NZUsize!(1024));
+                mailbox::new(context.child("batcher_mailbox"), NZUsize!(1024));
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             let (vote_sender, _vote_receiver) = oracle
