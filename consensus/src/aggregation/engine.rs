@@ -481,7 +481,7 @@ impl<
         let _ = self.handle_ack(&ack).await;
 
         // Send ack over the network.
-        self.broadcast(ack, sender).await?;
+        self.broadcast(ack, sender)?;
 
         Ok(())
     }
@@ -598,7 +598,7 @@ impl<
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
-        self.broadcast(ack, sender).await
+        self.broadcast(ack, sender)
     }
 
     // ---------- Validation ----------
@@ -721,7 +721,7 @@ impl<
     /// Broadcasts an ack to all peers with the appropriate priority.
     ///
     /// Returns an error if the sender returns an error.
-    async fn broadcast(
+    fn broadcast(
         &mut self,
         ack: Ack<P::Scheme, D>,
         sender: &mut WrappedSender<

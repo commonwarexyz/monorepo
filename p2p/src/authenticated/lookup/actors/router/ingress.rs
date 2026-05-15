@@ -36,9 +36,7 @@ pub enum Message<P: PublicKey> {
         priority: bool,
     },
     /// Register a subscription to peers known by the router.
-    SubscribePeers {
-        sender: ring::Sender<Vec<P>>,
-    },
+    SubscribePeers { sender: ring::Sender<Vec<P>> },
 }
 
 impl<P: PublicKey> Policy for Message<P> {

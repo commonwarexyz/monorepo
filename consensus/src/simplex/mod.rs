@@ -5156,13 +5156,9 @@ mod tests {
 
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
-            injector_sender
-                .send(Recipients::All, msg, true)
-                .unwrap();
+            injector_sender.send(Recipients::All, msg, true).unwrap();
             let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
-            injector_sender
-                .send(Recipients::All, msg, true)
-                .unwrap();
+            injector_sender.send(Recipients::All, msg, true).unwrap();
             // View F+1:
             let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
             let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());

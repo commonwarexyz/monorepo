@@ -788,9 +788,7 @@ mod tests {
 
             // Send message
             let msg = IoBuf::from(b"hello from pk1");
-            sender1
-                .send(Recipients::One(pk2), msg, false)
-                .unwrap();
+            sender1.send(Recipients::One(pk2), msg, false).unwrap();
 
             // Confirm no message delivery
             select! {
@@ -1061,7 +1059,9 @@ mod tests {
         // Send a message from agent 1 to 2
         let msg = IoBuf::from(vec![42u8; message_size]);
         let start = context.current();
-        sender.send(Recipients::One(pk2.clone()), msg.clone(), true).unwrap();
+        sender
+            .send(Recipients::One(pk2.clone()), msg.clone(), true)
+            .unwrap();
 
         // Measure how long it takes for agent 2 to receive the message
         let (origin, received) = receiver.recv().await.unwrap();
@@ -1863,8 +1863,7 @@ mod tests {
             let rx_clone = receiver.clone();
             context.child("task").spawn(move |_| async move {
                 let msg = IoBuf::from(vec![0u8; 30_000]);
-                tx0.send(Recipients::One(rx_clone), msg, true)
-                    .unwrap();
+                tx0.send(Recipients::One(rx_clone), msg, true).unwrap();
             });
 
             // Sender 1: sends 30KB at t=0.5s
@@ -1875,8 +1874,7 @@ mod tests {
             context.child("task").spawn(move |context| async move {
                 context.sleep(Duration::from_millis(500)).await;
                 let msg = IoBuf::from(vec![1u8; 30_000]);
-                tx1.send(Recipients::One(rx_clone), msg, true)
-                    .unwrap();
+                tx1.send(Recipients::One(rx_clone), msg, true).unwrap();
             });
 
             // Sender 2: sends 15KB at t=1.5s and shares the receiver with
@@ -1886,8 +1884,7 @@ mod tests {
             context.child("task").spawn(move |context| async move {
                 context.sleep(Duration::from_millis(1500)).await;
                 let msg = IoBuf::from(vec![2u8; 15_000]);
-                tx2.send(Recipients::One(rx_clone), msg, true)
-                    .unwrap();
+                tx2.send(Recipients::One(rx_clone), msg, true).unwrap();
             });
 
             // Receive and verify timing
@@ -3441,16 +3438,13 @@ mod tests {
                         pk1.clone(),
                         "127.0.0.1:8001".parse::<SocketAddr>().unwrap().into(),
                     ),
-                    (
-                        pk2.clone(),
-                        "127.0.0.1:8002".parse::<SocketAddr>().unwrap().into(),
-                    ),
+                    (pk2, "127.0.0.1:8002".parse::<SocketAddr>().unwrap().into()),
                 ])
                 .unwrap(),
             );
 
             // overwrite is a no-op for simulated network (addresses not used)
-            socket_manager.overwrite([(pk1.clone(), addr.clone())].try_into().unwrap());
+            socket_manager.overwrite([(pk1, addr)].try_into().unwrap());
         });
     }
 

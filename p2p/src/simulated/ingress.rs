@@ -149,7 +149,7 @@ impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
 
 impl<P: PublicKey, E: Clock> Oracle<P, E> {
     /// Create a new instance of the oracle.
-    pub(crate) fn new(sender: mailbox::Sender<Message<P, E>>) -> Self {
+    pub(crate) const fn new(sender: mailbox::Sender<Message<P, E>>) -> Self {
         Self { sender }
     }
 

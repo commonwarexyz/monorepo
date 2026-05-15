@@ -304,10 +304,10 @@ impl<S: Sender> GlobalSender<S> {
         payload: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Feedback, <S::Checked<'_> as CheckedSender>::Error> {
-        match self.check(recipients) {
-            Ok(checked) => checked.with_subchannel(subchannel).send(payload, priority),
-            Err(_) => Ok(Feedback::Backoff),
-        }
+        self.check(recipients).map_or_else(
+            |_| Ok(Feedback::Backoff),
+            |checked| checked.with_subchannel(subchannel).send(payload, priority),
+        )
     }
 }
 
@@ -319,7 +319,9 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
-        self.inner.check(recipients).map(|checked| CheckedGlobalSender {
+        self.inner
+            .check(recipients)
+            .map(|checked| CheckedGlobalSender {
                 subchannel: None,
                 inner: checked,
             })
@@ -609,7 +611,7 @@ mod tests {
     }
 
     /// Send a burst of messages to a list of senders.
-    async fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
+    fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
         for i in 0..count {
             let payload = IoBuf::from(vec![i as u8]);
             for tx in txs.iter_mut() {
@@ -749,7 +751,7 @@ mod tests {
 
             // Send 10 messages to each subchannel from pk1 to pk2.
             // With buffer size of CAPACITY=5, messages beyond that are dropped.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+            send_burst(&mut [tx1, tx2], CAPACITY * 2);
 
             // Each subchannel should receive up to CAPACITY messages (the rest are dropped).
             expect_n_messages(&mut rx1, CAPACITY).await;
@@ -780,7 +782,7 @@ mod tests {
 
             // Send messages to both subchannels. Messages to subchannel 99 will be dropped
             // since its receiver was dropped.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // rx2 should receive all CAPACITY messages sent to subchannel 100.
             expect_n_messages(&mut rx2, CAPACITY).await;
@@ -808,7 +810,7 @@ mod tests {
             // Send CAPACITY messages to each subchannel.
             // Messages to subchannel 1 are dropped (unregistered).
             // Messages to subchannel 2 fill the buffer.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // Receive messages from subchannel 2.
             expect_n_messages(&mut rx2, CAPACITY).await;
@@ -836,7 +838,7 @@ mod tests {
 
             // Send CAPACITY messages to each subchannel.
             // Subchannel 1 messages go to backup, subchannel 2 messages go to rx2.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // Both channels should receive CAPACITY messages each.
             expect_n_messages_with_backup(&mut rx2, &mut backup2, CAPACITY, CAPACITY).await;
@@ -946,7 +948,7 @@ mod tests {
             // Send CAPACITY messages to each subchannel.
             // Subchannel 1 messages are dropped (backup is closed).
             // Subchannel 2 messages go to rx2.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // rx2 should receive all CAPACITY messages.
             expect_n_messages(&mut rx2, CAPACITY).await;

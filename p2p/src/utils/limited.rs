@@ -144,7 +144,7 @@ where
                         Err(not_until) => return Err(not_until.earliest_possible()),
                     }
                 }
-            },
+            }
             Recipients::Some(peers) => {
                 let connected = peers
                     .into_iter()
@@ -349,7 +349,7 @@ mod tests {
 
             let peer = key(1);
             limited.known_peers = vec![peer.clone()];
-            let checked = limited.check(Recipients::One(peer.clone())).unwrap();
+            let checked = limited.check(Recipients::One(peer)).unwrap();
             assert_eq!(
                 checked.send(IoBuf::from(b"hello"), false).unwrap(),
                 Feedback::Ok
@@ -362,8 +362,7 @@ mod tests {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
             let (peers, _peer_sender) = MockPeers::new();
-            let mut limited =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
 
             let peer = key(1);
             limited.known_peers = vec![peer.clone()];
@@ -383,11 +382,12 @@ mod tests {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
             let (peers, _peer_sender) = MockPeers::new();
-            let mut limited = LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let mut limited =
+                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
 
             let peers_list = vec![key(1), key(2), key(3)];
             limited.known_peers = peers_list.clone();
-            let checked = limited.check(Recipients::Some(peers_list.clone())).unwrap();
+            let checked = limited.check(Recipients::Some(peers_list)).unwrap();
             assert_eq!(
                 checked.send(IoBuf::from(b"hello"), false).unwrap(),
                 Feedback::Ok
@@ -444,8 +444,7 @@ mod tests {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
             let (peers, _peer_sender) = MockPeers::new();
-            let mut limited =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
 
             let peer1 = key(1);
             let peer2 = key(2);
@@ -548,8 +547,7 @@ mod tests {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
             let (peers, _) = MockPeers::new();
-            let mut limited =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
 
             let peer1 = key(1);
             let peer2 = key(2);
@@ -562,13 +560,13 @@ mod tests {
 
             // Rate limit both peers
             limited
-                .check(Recipients::One(peer1.clone()))
+                .check(Recipients::One(peer1))
                 .unwrap()
                 .send(IoBuf::from(b"limit1"), false)
                 .unwrap();
 
             limited
-                .check(Recipients::One(peer2.clone()))
+                .check(Recipients::One(peer2))
                 .unwrap()
                 .send(IoBuf::from(b"limit2"), false)
                 .unwrap();
@@ -623,8 +621,7 @@ mod tests {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
             let (peers, _) = MockPeers::new();
-            let mut limited1 =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let mut limited1 = LimitedSender::new(sender, quota_per_second(1), context, peers);
             let mut limited2 = limited1.clone();
 
             let peer = key(1);

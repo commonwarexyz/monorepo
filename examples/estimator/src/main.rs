@@ -586,7 +586,6 @@ async fn process_command<C: Clock>(
                 let message = create_message(*id, *size);
                 sender
                     .send(commonware_p2p::Recipients::All, message, true)
-                    .await
                     .unwrap();
                 received
                     .entry(*id)
@@ -600,7 +599,6 @@ async fn process_command<C: Clock>(
             let message = create_message(*id, *size);
             sender
                 .send(commonware_p2p::Recipients::All, message, true)
-                .await
                 .unwrap();
             received
                 .entry(*id)
@@ -623,7 +621,6 @@ async fn process_command<C: Clock>(
                         message,
                         true,
                     )
-                    .await
                     .unwrap();
             }
             *current_index += 1;

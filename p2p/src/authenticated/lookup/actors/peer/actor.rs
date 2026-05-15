@@ -328,9 +328,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{
-        lookup::{actors::router, channels::Channels},
-    };
+    use crate::authenticated::lookup::{actors::router, channels::Channels};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},

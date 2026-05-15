@@ -64,7 +64,9 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         &mut self,
         recipients: Recipients<S::PublicKey>,
     ) -> Result<CheckedWrappedSender<'_, S, V>, SystemTime> {
-        self.sender.check(recipients).map(|checked| CheckedWrappedSender {
+        self.sender
+            .check(recipients)
+            .map(|checked| CheckedWrappedSender {
                 pool: &self.pool,
                 sender: checked,
                 _phantom_v: std::marker::PhantomData,
@@ -307,11 +309,8 @@ mod tests {
         PrivateKey::from_seed(seed).public_key()
     }
 
-    async fn track_peers<I>(
-        oracle: &Oracle<PublicKey, deterministic::Context>,
-        index: u64,
-        peers: I,
-    ) where
+    fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, index: u64, peers: I)
+    where
         I: IntoIterator<Item = PublicKey>,
     {
         oracle.manager().track(index, Set::from_iter_dedup(peers));
@@ -405,7 +404,7 @@ mod tests {
             let pk2 = pk(1);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -440,7 +439,7 @@ mod tests {
             let pk2 = pk(1);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -478,7 +477,7 @@ mod tests {
             // the receiver is still running.
             let pk3 = pk(2);
             let control3 = oracle.control(pk3.clone());
-            track_peers(&oracle, 1, [pk2.clone(), pk3.clone()]).await;
+            track_peers(&oracle, 1, [pk2.clone(), pk3.clone()]);
             link_bidirectional(&mut oracle, pk3.clone(), pk2.clone()).await;
             let (mut sender3, _) = control3.register(0, TEST_QUOTA).await.unwrap();
 
@@ -501,7 +500,7 @@ mod tests {
             let pk2 = pk(1);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -544,7 +543,7 @@ mod tests {
             let pk2 = pk(1);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -591,7 +590,7 @@ mod tests {
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
             let control3 = oracle.control(pk3.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
             link_bidirectional(&mut oracle, pk3.clone(), pk2.clone()).await;
 

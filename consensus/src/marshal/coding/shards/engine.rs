@@ -476,8 +476,7 @@ where
                         leader,
                         round,
                     } => {
-                        self.handle_external_proposal(&mut sender, commitment, leader, round)
-                            .await;
+                        self.handle_external_proposal(&mut sender, commitment, leader, round);
                     }
                     Message::GetByCommitment {
                         commitment,
@@ -538,14 +537,12 @@ where
                         warn!(%commitment, "no scheme for epoch, ignoring shard");
                         continue;
                     };
-                    let progressed = state
-                        .on_network_shard(
-                            peer,
-                            shard,
-                            InsertCtx::new(scheme.as_ref(), &self.strategy),
-                            &mut self.blocker,
-                        )
-                        .await;
+                    let progressed = state.on_network_shard(
+                        peer,
+                        shard,
+                        InsertCtx::new(scheme.as_ref(), &self.strategy),
+                        &mut self.blocker,
+                    );
                     if progressed {
                         self.try_advance(&mut sender, commitment);
                     }
@@ -645,7 +642,7 @@ where
     }
 
     /// Handles leader announcements for a commitment and advances reconstruction.
-    async fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
+    fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
@@ -682,7 +679,7 @@ where
             commitment,
             ReconstructionState::new(leader, round, participants_len),
         );
-        let buffered_progress = self.ingest_buffered_shards(commitment).await;
+        let buffered_progress = self.ingest_buffered_shards(commitment);
         if buffered_progress {
             self.try_advance(sender, commitment);
         }
@@ -711,7 +708,7 @@ where
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
-    async fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
+    fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let mut buffered = Vec::new();
         for (peer, queue) in self.peer_buffers.iter_mut() {
             let mut i = 0;
@@ -739,9 +736,7 @@ where
         let mut progressed = false;
         let ctx = InsertCtx::new(scheme.as_ref(), &self.strategy);
         for (peer, shard) in buffered {
-            progressed |= state
-                .on_network_shard(peer, shard, ctx, &mut self.blocker)
-                .await;
+            progressed |= state.on_network_shard(peer, shard, ctx, &mut self.blocker);
         }
         progressed
     }
@@ -1165,7 +1160,7 @@ where
     ///
     /// Returns `false` if verification fails (sender is blocked), `true` on
     /// success.
-    async fn verify_assigned_shard(
+    fn verify_assigned_shard(
         &mut self,
         sender: P,
         commitment: Commitment,
@@ -1209,7 +1204,7 @@ where
 {
     /// Check whether quorum is met and, if so, batch-validate all pending
     /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
-    async fn try_transition(
+    fn try_transition(
         &mut self,
         commitment: Commitment,
         participants_len: u64,
@@ -1391,7 +1386,7 @@ where
     ///   engine level in bounded per-peer queues until
     ///   [`Mailbox::discovered`] creates a
     ///   reconstruction state for this commitment.
-    async fn on_network_shard<Sch, S, X>(
+    fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,
         shard: Shard<C, H>,
@@ -1452,23 +1447,22 @@ where
         // even after transitioning to Ready. This ensures we broadcast
         // our own shard to help slower peers reach quorum.
         if is_from_leader && !self.common().assigned_shard_verified {
-            let progressed = self
-                .common_mut()
-                .verify_assigned_shard(
-                    sender,
-                    commitment,
-                    indexed,
-                    ctx.scheme.me().is_some(),
-                    blocker,
-                )
-                .await;
+            let progressed = self.common_mut().verify_assigned_shard(
+                sender,
+                commitment,
+                indexed,
+                ctx.scheme.me().is_some(),
+                blocker,
+            );
 
             if progressed {
                 if let Self::AwaitingQuorum(state) = self {
-                    if let Some(ready) = state
-                        .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-                        .await
-                    {
+                    if let Some(ready) = state.try_transition(
+                        commitment,
+                        ctx.participants_len,
+                        ctx.strategy,
+                        blocker,
+                    ) {
                         *self = Self::Ready(ready);
                     }
                 }
@@ -1488,9 +1482,8 @@ where
             .insert(indexed.index, indexed.data.clone());
         state.common.contributed.set(u64::from(indexed.index), true);
         state.pending_shards.insert(sender, indexed);
-        if let Some(ready) = state
-            .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-            .await
+        if let Some(ready) =
+            state.try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
         {
             *self = Self::Ready(ready);
         }
@@ -4712,9 +4705,9 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
             let receiver_pk = peer_keys[0].clone();
             let sender_pk = peer_keys[1].clone();
-            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys);
 
-            let receiver_control = oracle.control(receiver_pk.clone());
+            let receiver_control = oracle.control(receiver_pk);
             let scheme = Scheme::signer(
                 SCHEME_NAMESPACE,
                 participants.clone(),
@@ -4763,7 +4756,7 @@ mod tests {
             // No reconstruction state yet: `ingest_buffered_shards` drains matching shards from the
             // per-peer queues then returns without applying them, leaving an empty deque under the
             // same map key while the sender stays in `latest.primary`.
-            let progressed = engine.ingest_buffered_shards(commitment).await;
+            let progressed = engine.ingest_buffered_shards(commitment);
             assert!(
                 !progressed,
                 "ingest should not progress without reconstruction state"

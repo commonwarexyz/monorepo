@@ -490,7 +490,6 @@ where
                     .entry(view)
                     .or_insert_with(|| self.new_round())
                     .add_network(sender.clone(), message)
-                    .await
                 {
                     self.added.inc();
 

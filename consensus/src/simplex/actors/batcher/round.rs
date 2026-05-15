@@ -110,7 +110,7 @@ impl<
     }
 
     /// Adds a vote from the network to this round's verifier.
-    pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
+    pub fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             commonware_p2p::block!(self.blocker, sender, "unknown participant");

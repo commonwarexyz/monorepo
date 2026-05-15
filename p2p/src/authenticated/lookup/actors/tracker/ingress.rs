@@ -192,18 +192,13 @@ impl<C: PublicKey> SenderExt<C> for mailbox::Sender<Message<C>> {
         request_or_default(self, |responder| Message::Dialable { responder })
     }
 
-    fn dial(
-        &self,
-        public_key: C,
-    ) -> impl Future<Output = Option<(Reservation<C>, Ingress)>> + Send {
-        async move {
-            request(self, move |reservation| Message::Dial {
-                public_key,
-                reservation,
-            })
-            .await
-            .flatten()
-        }
+    async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
+        request(self, move |reservation| Message::Dial {
+            public_key,
+            reservation,
+        })
+        .await
+        .flatten()
     }
 
     fn acceptable(&self, public_key: C, source_ip: IpAddr) -> impl Future<Output = bool> + Send {
@@ -218,15 +213,13 @@ impl<C: PublicKey> SenderExt<C> for mailbox::Sender<Message<C>> {
         )
     }
 
-    fn listen(&self, public_key: C) -> impl Future<Output = Option<Reservation<C>>> + Send {
-        async move {
-            request(self, move |reservation| Message::Listen {
-                public_key,
-                reservation,
-            })
-            .await
-            .flatten()
-        }
+    async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
+        request(self, move |reservation| Message::Listen {
+            public_key,
+            reservation,
+        })
+        .await
+        .flatten()
     }
 }
 
@@ -238,7 +231,7 @@ pub struct Releaser<C: PublicKey> {
 
 impl<C: PublicKey> Releaser<C> {
     /// Create a new releaser.
-    pub(crate) fn new(sender: mailbox::Sender<Message<C>>) -> Self {
+    pub(crate) const fn new(sender: mailbox::Sender<Message<C>>) -> Self {
         Self { sender }
     }
 
@@ -258,7 +251,7 @@ pub struct Oracle<C: PublicKey> {
 }
 
 impl<C: PublicKey> Oracle<C> {
-    pub(super) fn new(sender: mailbox::Sender<Message<C>>) -> Self {
+    pub(super) const fn new(sender: mailbox::Sender<Message<C>>) -> Self {
         Self { sender }
     }
 }

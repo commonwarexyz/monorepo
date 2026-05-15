@@ -594,11 +594,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 mut sender,
             } => {
                 let peers = self.connected_peers_except(&exclude);
-                if peers.is_empty() {
-                    self.peer_subscribers.push((exclude, sender));
-                } else if sender.send(peers).await.is_ok() {
-                    self.peer_subscribers.push((exclude, sender));
+                if !peers.is_empty() && sender.send(peers).await.is_err() {
+                    return;
                 }
+                self.peer_subscribers.push((exclude, sender));
             }
         }
     }
@@ -811,7 +810,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 should_deliver,
             );
             self.process_completions(completions);
-
         }
     }
 
@@ -872,7 +870,7 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
-    fn new(me: P, mailbox: mailbox::Sender<ConnectedMessage<P>>) -> Self {
+    const fn new(me: P, mailbox: mailbox::Sender<ConnectedMessage<P>>) -> Self {
         Self {
             me,
             mailbox,
@@ -1006,9 +1004,14 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
             high,
             low,
         };
-        let peer_source = ConnectedPeerProvider::new(me.clone(), connected_mailbox);
-        let limited_sender =
-            LimitedSender::new_with_peers(unlimited_sender, quota, clock, peer_source, connected_peers);
+        let peer_source = ConnectedPeerProvider::new(me, connected_mailbox);
+        let limited_sender = LimitedSender::new_with_peers(
+            unlimited_sender,
+            quota,
+            clock,
+            peer_source,
+            connected_peers,
+        );
 
         (Self { limited_sender }, processor)
     }
@@ -2423,9 +2426,10 @@ mod tests {
             let msg_2 = vec![2u8; 8];
             loop {
                 let checked = sender_2
-                    .check(
-                        Recipients::Some(vec![secondary_0.clone(), secondary_1.clone()]),
-                    )
+                    .check(Recipients::Some(vec![
+                        secondary_0.clone(),
+                        secondary_1.clone(),
+                    ]))
                     .unwrap();
                 if checked.is_empty() {
                     context.sleep(Duration::from_millis(1)).await;

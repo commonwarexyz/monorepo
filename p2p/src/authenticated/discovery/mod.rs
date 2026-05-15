@@ -669,7 +669,7 @@ mod tests {
             // Create network
             let signer = peers[0].clone();
             let config = Config::test(
-                signer.clone(),
+                signer,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
                 1_024 * 1_024, // 1MB
@@ -749,7 +749,9 @@ mod tests {
             let msg = vec![0u8; 1024]; // 1KB
             loop {
                 // Confirm message is sent to peer
-                let checked = sender0.check(Recipients::One(addresses[1].clone())).unwrap();
+                let checked = sender0
+                    .check(Recipients::One(addresses[1].clone()))
+                    .unwrap();
                 if !checked.is_empty() {
                     checked.send(msg.clone(), true).unwrap();
                     break;
@@ -2461,8 +2463,7 @@ mod tests {
 
             // Send 10 messages to fill slow_peer's buffer
             for i in 0..10 {
-                let sent = messenger
-                    .content(Recipients::All, 0, message.clone().into(), false);
+                let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
                 assert_ne!(
                     sent,
                     commonware_actor::Feedback::Closed,

@@ -61,11 +61,7 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
         self.recipients.clone()
     }
 
-    fn send(
-        self,
-        _: impl Into<IoBufs> + Send,
-        _: bool,
-    ) -> Result<Feedback, Self::Error> {
+    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Result<Feedback, Self::Error> {
         Ok(Feedback::Ok)
     }
 }
@@ -98,7 +94,6 @@ mod tests {
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
-    use futures::executor::block_on;
 
     #[test]
     fn inert_sender_expands_all_recipients() {
@@ -110,7 +105,9 @@ mod tests {
         ];
 
         let (mut sender, _) = inert_channel(peers.as_slice());
-        let sent = sender.send(Recipients::All, b"hello".to_vec(), false).unwrap();
+        let sent = sender
+            .send(Recipients::All, b"hello".to_vec(), false)
+            .unwrap();
         assert_eq!(sent, peers);
     }
 }
