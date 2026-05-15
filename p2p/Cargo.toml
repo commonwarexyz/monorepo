@@ -15,8 +15,8 @@ workspace = true
 
 [dependencies]
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
-commonware-codec.workspace = true
 commonware-actor.workspace = true
+commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
