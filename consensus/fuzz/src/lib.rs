@@ -1282,9 +1282,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 let participants = participants.clone();
                 let scenario = scenario.clone();
                 move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
-                    let Some(view) = twins_resolver_view::<P>(message, &codec) else {
-                        return None;
-                    };
+                    let view = twins_resolver_view::<P>(message, &codec)?;
                     let (primary, secondary) = scenario.partitions(view, participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
