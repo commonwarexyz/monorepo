@@ -34,8 +34,11 @@ where
 }
 
 struct State<P: PublicKey, E: Clock> {
+    // Per-peer rate limiter shared by all clones
     rate_limit: KeyedRateLimiter<P, E>,
+    // Latest peer updates from the source used for Recipients::All
     peer_subscription: ring::Receiver<Vec<P>>,
+    // Snapshot used until the subscription yields a newer peer list
     known_peers: Vec<P>,
 }
 
@@ -454,7 +457,7 @@ mod tests {
             let mut limited =
                 LimitedSender::new(sender.clone(), quota_per_second(10), context, peers);
 
-            // No known peers yet.
+            // No known peers yet
             let checked = limited.check(Recipients::All).unwrap();
             assert!(crate::CheckedSender::recipients(&checked).is_empty());
             checked.send(IoBuf::from(b"empty"), false).unwrap();

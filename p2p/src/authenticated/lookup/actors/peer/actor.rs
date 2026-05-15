@@ -5,9 +5,9 @@ use crate::authenticated::{
         channels::{self, Channels},
         metrics, types,
     },
-    relay::{recv_prioritized, Message as RelayMessage, Prioritized, Relay},
+    relay::{recv_prioritized, try_recv, Message as RelayMessage, Prioritized, Relay},
 };
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -33,7 +33,6 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
-    dropped_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
     _phantom: std::marker::PhantomData<C>,
 }
@@ -52,7 +51,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 low: receivers.low,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
-                dropped_messages: cfg.dropped_messages,
                 rate_limited: cfg.rate_limited,
                 _phantom: std::marker::PhantomData,
             },
@@ -107,14 +105,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                 }
             }
-            if let Ok(msg) = high.try_recv() {
-                let msg = msg.0;
+            if let Some(msg) = try_recv(high) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
-            if let Ok(msg) = low.try_recv() {
-                let msg = msg.0;
+            if let Some(msg) = try_recv(low) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
@@ -283,23 +279,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         match msg {
                             types::Message::Data(data) => {
                                 let sender = senders.get_mut(&data.channel).unwrap();
-                                let feedback =
+                                let _ =
                                     sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                                if feedback == Feedback::Backoff {
-                                    self.dropped_messages
-                                        .get_or_create(&metrics::Message::new_data(
-                                            &peer,
-                                            data.channel,
-                                        ))
-                                        .inc();
-                                }
-                                if feedback != Feedback::Ok {
-                                    debug!(
-                                        ?feedback,
-                                        channel = data.channel,
-                                        "failed to send message to client"
-                                    );
-                                }
                             }
                             types::Message::Ping => {
                                 // We ignore ping messages, they are only used to keep
@@ -381,7 +362,6 @@ mod tests {
             ping_frequency: Duration::from_secs(30),
             sent_messages: context.family("sent_messages", "test sent messages"),
             received_messages: context.family("received_messages", "test received messages"),
-            dropped_messages: context.family("dropped_messages", "test dropped messages"),
             rate_limited: context.family("rate_limited", "test rate limited messages"),
         }
     }

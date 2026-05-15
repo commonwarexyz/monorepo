@@ -10,7 +10,7 @@ use crate::{
     },
     Recipients,
 };
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -63,11 +63,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool) {
         let channel = encoded.channel;
         if let Some(relay) = self.connections.get_mut(&recipient) {
-            if relay.send(encoded, priority) != Feedback::Ok {
-                self.messages_dropped
-                    .get_or_create(&metrics::Message::new_data(&recipient, channel))
-                    .inc();
-            }
+            let _ = relay.send(encoded, priority);
         } else {
             self.messages_dropped
                 .get_or_create(&metrics::Message::new_data(&recipient, channel))
@@ -77,7 +73,6 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 
     /// Routes content to the configured recipients.
     fn route(&mut self, recipients: Recipients<P>, encoded: EncodedData, priority: bool) {
-        let channel = encoded.channel;
         match recipients {
             Recipients::One(recipient) => {
                 self.send(recipient, encoded, priority);
@@ -89,12 +84,8 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             }
             Recipients::All => {
                 // Send to all connected peers
-                for (recipient, relay) in self.connections.iter_mut() {
-                    if relay.send(encoded.clone(), priority) != Feedback::Ok {
-                        self.messages_dropped
-                            .get_or_create(&metrics::Message::new_data(recipient, channel))
-                            .inc();
-                    }
+                for relay in self.connections.values_mut() {
+                    let _ = relay.send(encoded.clone(), priority);
                 }
             }
         }
@@ -142,13 +133,18 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                     } => {
                         self.route(recipients, encoded, priority);
                     }
-                    Message::SubscribePeers { mut sender } => {
-                        let peers = self.connections.keys().cloned().collect();
-                        let _ = Pin::new(&mut sender).start_send(peers);
-                        self.open_subscriptions.push(sender);
+                    Message::SubscribePeers { sender } => {
+                        self.subscribe_peers(sender);
                     }
                 }
             },
+        }
+    }
+
+    fn subscribe_peers(&mut self, mut sender: ring::Sender<Vec<P>>) {
+        let peers = self.connections.keys().cloned().collect();
+        if Pin::new(&mut sender).start_send(peers).is_ok() {
+            self.open_subscriptions.push(sender);
         }
     }
 
@@ -163,5 +159,34 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             }
         }
         self.open_subscriptions = keep;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::ed25519::PublicKey;
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::NZUsize;
+
+    #[test]
+    fn subscribe_retains_only_open_initial_sender() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _, _) = Actor::<deterministic::Context, PublicKey>::new(
+                context,
+                Config {
+                    mailbox_size: NZUsize!(1),
+                },
+            );
+            let (sender, receiver) = ring::channel(NZUsize!(1));
+            drop(receiver);
+
+            actor.subscribe_peers(sender);
+            assert!(actor.open_subscriptions.is_empty());
+
+            let (sender, _receiver) = ring::channel(NZUsize!(1));
+            actor.subscribe_peers(sender);
+            assert_eq!(actor.open_subscriptions.len(), 1);
+        });
     }
 }

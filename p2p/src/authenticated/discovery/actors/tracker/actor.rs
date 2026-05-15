@@ -1,6 +1,6 @@
 use super::{
     directory::{self, Directory},
-    ingress::{Message, Oracle},
+    ingress::{Mailbox, Message, Oracle},
     Config,
 };
 use crate::{
@@ -63,7 +63,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         cfg: Config<C>,
     ) -> (
         Self,
-        mailbox::Sender<Message<C::PublicKey>>,
+        Mailbox<C::PublicKey>,
         Oracle<C::PublicKey>,
         InfoVerifier<C::PublicKey>,
     ) {
@@ -115,7 +115,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 directory,
                 subscribers: Vec::new(),
             },
-            sender,
+            Mailbox::new(sender),
             oracle,
             info_verifier,
         )
@@ -281,13 +281,12 @@ mod tests {
     use super::*;
     use crate::{
         authenticated::discovery::{
-            actors::{peer, tracker, tracker::ingress::SenderExt as _},
+            actors::{peer, tracker},
             config::Bootstrapper,
             types,
         },
         Ingress, Manager, Provider, TrackedPeers,
     };
-    use commonware_actor::mailbox::Sender;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey, Signature},
@@ -363,7 +362,7 @@ mod tests {
     // Mock a connection to a peer by reserving it as if it had dialed us and the `peer` actor had
     // sent an initialization.
     async fn connect_to_peer(
-        mailbox: &Sender<Message<PublicKey>>,
+        mailbox: &Mailbox<PublicKey>,
         peer: &PublicKey,
     ) -> tracker::Reservation<PublicKey> {
         let res = mailbox
@@ -381,7 +380,7 @@ mod tests {
 
     // Test Harness
     struct TestHarness {
-        mailbox: Sender<Message<PublicKey>>,
+        mailbox: Mailbox<PublicKey>,
         oracle: Oracle<PublicKey>,
         ip_namespace: Vec<u8>,
         tracker_pk: PublicKey,

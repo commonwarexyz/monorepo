@@ -7,9 +7,9 @@ use crate::authenticated::{
         metrics,
         types::{self, InfoVerifier},
     },
-    relay::{recv_prioritized, Message as RelayMessage, Prioritized, Relay},
+    relay::{recv_prioritized, try_recv, Message as RelayMessage, Prioritized, Relay},
 };
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -22,7 +22,6 @@ use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
-use tracker::ingress::SenderExt as _;
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
@@ -41,7 +40,6 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
-    dropped_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
@@ -63,7 +61,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 low: receivers.low,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
-                dropped_messages: cfg.dropped_messages,
                 rate_limited: cfg.rate_limited,
             },
             relay,
@@ -139,14 +136,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
-            if let Ok(msg) = high.try_recv() {
-                let msg = msg.0;
+            if let Some(msg) = try_recv(high) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
-            if let Ok(msg) = low.try_recv() {
-                let msg = msg.0;
+            if let Some(msg) = try_recv(low) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
@@ -161,7 +156,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: C,
         greeting: types::Info<C>,
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
-        tracker: mailbox::Sender<tracker::Message<C>>,
+        tracker: tracker::Mailbox<C>,
         channels: Channels<C>,
     ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
@@ -361,16 +356,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     match msg {
                         types::Payload::Data(data) => {
                             let sender = senders.get_mut(&data.channel).unwrap();
-                            let feedback =
-                                sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                            if feedback == Feedback::Backoff {
-                                self.dropped_messages
-                                    .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                    .inc();
-                            }
-                            if feedback != Feedback::Ok {
-                                debug!(?feedback, channel=data.channel, "failed to send message to client");
-                            }
+                            let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
                         }
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
@@ -450,7 +436,6 @@ mod tests {
             ),
             sent_messages: context.family("sent_messages", "test sent messages"),
             received_messages: context.family("received_messages", "test received messages"),
-            dropped_messages: context.family("dropped_messages", "test dropped messages"),
             rate_limited: context.family("rate_limited", "test rate limited messages"),
         }
     }
@@ -563,7 +548,7 @@ mod tests {
                     local_pk,
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;
@@ -666,7 +651,7 @@ mod tests {
                     local_pk,
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;
@@ -771,7 +756,7 @@ mod tests {
                     local_pk,
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;
@@ -779,162 +764,6 @@ mod tests {
             assert!(
                 matches!(result, Err(Error::GreetingMismatch)),
                 "Expected GreetingMismatch error, got: {result:?}"
-            );
-        });
-    }
-
-    #[test]
-    fn test_dropped_messages_metric_on_full_buffer() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
-
-            // Set up mock channels for the connection
-            let (local_sink, remote_stream) = mocks::Channel::init();
-            let (remote_sink, local_stream) = mocks::Channel::init();
-
-            // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
-
-            let local_pk_clone = local_pk.clone();
-            let listener_handle = context.child("listener").spawn({
-                move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
-                }
-            });
-
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
-
-            let (remote_sender, remote_receiver) = listener_handle
-                .await
-                .expect("listen failed")
-                .expect("listen result failed");
-
-            // Create dropped_messages metric to track drops
-            let dropped_messages =
-                context.family("dropped_messages_override", "test dropped messages");
-
-            // Create peer config with our metric
-            let config = Config {
-                mailbox_size: NZUsize!(10),
-                send_batch_size: NZUsize!(8),
-                gossip_bit_vec_frequency: Duration::from_secs(30),
-                max_peer_set_size: 128,
-                peer_gossip_max_count: 10,
-                info_verifier: types::Info::verifier(
-                    remote_pk.clone(),
-                    10,
-                    Duration::from_secs(60),
-                    IP_NAMESPACE.to_vec(),
-                ),
-                sent_messages: context.family("sent_messages_override", "test sent messages"),
-                received_messages: context.family(
-                    "received_messages_override",
-                    "test received messages",
-                ),
-                dropped_messages: dropped_messages.clone(),
-                rate_limited: context.family(
-                    "rate_limited_override",
-                    "test rate limited messages",
-                ),
-            };
-
-            let (peer_actor, _messenger) =
-                Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), config);
-
-            // Create greeting info for the peer actor to send
-            let greeting = types::Info::sign(
-                &local_key,
-                IP_NAMESPACE,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-                context.current().epoch().as_millis() as u64,
-            );
-
-            // Create tracker mailbox
-            let (tracker_mailbox, _tracker_receiver) =
-                mailbox::new::<tracker::Message<PublicKey>>(NZUsize!(1024));
-
-            // Create channels with a very small backlog (1) to force drops
-            let (router_sender, _router_receiver) =
-                commonware_actor::mailbox::new::<router::Message<PublicKey>>(NZUsize!(10));
-            let messenger = router::Messenger::new(
-                context.network_buffer_pool().clone(),
-                router::Mailbox::new(router_sender),
-            );
-            let mut channels = Channels::new(messenger, MAX_MESSAGE_SIZE);
-            let channel_id = 0u64;
-            let (_sender, _receiver) = channels.register(
-                channel_id,
-                Quota::per_second(std::num::NonZeroU32::new(100).unwrap()),
-                1, // Very small backlog to force drops
-                context.child("context"),
-            );
-
-            // Spawn task to send messages
-            let local_pk_clone = local_pk.clone();
-            context.child("task").spawn(move |_| async move {
-                // Send valid greeting first
-                let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
-                    &local_key,
-                    IP_NAMESPACE,
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
-                    0,
-                ));
-                local_sender
-                    .send(greeting_payload.encode())
-                    .await
-                    .expect("send greeting failed");
-
-                // Send multiple data messages to overflow the buffer
-                for i in 0..5 {
-                    let data =
-                        types::Payload::<PublicKey>::Data(crate::authenticated::data::Data {
-                            channel: channel_id,
-                            message: IoBuf::from(vec![i as u8; 100]),
-                        });
-                    let _ = local_sender.send(data.encode()).await;
-                }
-            });
-
-            // Run peer actor (will process messages and drop some)
-            let _ = peer_actor
-                .run(
-                    local_pk_clone.clone(),
-                    greeting,
-                    (remote_sender, remote_receiver),
-                    tracker_mailbox,
-                    channels,
-                )
-                .await;
-
-            // Check that dropped_messages was incremented
-            let metric_label = metrics::Message::new_data(&local_pk_clone, channel_id);
-            let dropped_count = dropped_messages.get_or_create(&metric_label).get();
-            assert!(
-                dropped_count > 0,
-                "Expected dropped_messages to be incremented when buffer is full, got {dropped_count}"
             );
         });
     }
@@ -1053,7 +882,7 @@ mod tests {
                     local_pk_clone.clone(),
                     greeting,
                     (remote_sender, remote_receiver),
-                    tracker_mailbox,
+                    tracker::Mailbox::new(tracker_mailbox),
                     channels,
                 )
                 .await;

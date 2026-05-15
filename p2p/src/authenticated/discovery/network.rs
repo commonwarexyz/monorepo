@@ -7,7 +7,6 @@ use super::{
     types,
 };
 use crate::{authenticated::discovery::types::InfoVerifier, Channel};
-use commonware_actor::mailbox;
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -35,7 +34,7 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: mailbox::Sender<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: tracker::Mailbox<C::PublicKey>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
     info_verifier: InfoVerifier<C::PublicKey>,
