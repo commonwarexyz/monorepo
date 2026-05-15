@@ -29,7 +29,7 @@ pub struct Disrupter<
     context: ContextCell<E>,
     scheme: S,
     strategy: St,
-    fault_offset: u64,
+    faulty_views: Option<Vec<View>>,
     last_vote_view: u64,
     last_finalized_view: u64,
     last_nullified_view: u64,
@@ -42,8 +42,8 @@ impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>, St: Strategy +
 where
     <S::Certificate as Read>::Cfg: Default,
 {
-    pub fn new(mut context: E, scheme: S, strategy: St) -> Self {
-        let fault_offset = context.next_u64();
+    pub fn new(mut context: E, scheme: S, strategy: St, required_containers: u64) -> Self {
+        let faulty_views = strategy.disrupter_faults(required_containers, &mut context);
         Self {
             last_vote_view: 0,
             last_finalized_view: 0,
@@ -53,7 +53,7 @@ where
             context: ContextCell::new(context),
             scheme,
             strategy,
-            fault_offset,
+            faulty_views,
         }
     }
 
@@ -89,18 +89,9 @@ where
     }
 
     fn is_faulty_view(&self, view: u64) -> bool {
-        let Some((faults, bound)) = self.strategy.fault_bounds() else {
-            return true;
-        };
-        if bound == 0 {
-            return false;
-        }
-        let faults = faults.min(bound);
-        if faults == 0 {
-            return false;
-        }
-        let round_fault = self.fault_offset.wrapping_add(view) % bound;
-        round_fault < faults
+        self.faulty_views
+            .as_ref()
+            .is_none_or(|views| views.iter().any(|faulty| faulty.get() == view))
     }
 
     fn get_proposal(&mut self) -> Proposal<Sha256Digest> {

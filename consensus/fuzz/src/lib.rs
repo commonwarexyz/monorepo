@@ -414,6 +414,7 @@ fn start_disrupter<P: simplex::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     strategy: &StrategyChoice,
+    required_containers: u64,
     vote_network: (
         impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
         impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
@@ -439,11 +440,12 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds,
                     fault_rounds_bound,
                 },
+                required_containers,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::AnyScope => {
-            let disrupter = Disrupter::new(context, scheme, AnyScope);
+            let disrupter = Disrupter::new(context, scheme, AnyScope, required_containers);
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::FutureScope {
@@ -457,6 +459,7 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds,
                     fault_rounds_bound,
                 },
+                required_containers,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
@@ -475,6 +478,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
         context.child("disrupter"),
         scheme,
         &input.strategy,
+        input.required_containers,
         vote_network,
         certificate_network,
         resolver_network,
@@ -1276,6 +1280,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         context.child("secondary"),
                         scheme.clone(),
                         &input.strategy,
+                        input.required_containers,
                         (vote_sender_secondary, vote_receiver_secondary),
                         (certificate_sender_secondary, certificate_receiver_secondary),
                         (resolver_sender_secondary, resolver_receiver_secondary),
