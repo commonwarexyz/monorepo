@@ -11,6 +11,7 @@ members = [
     "cryptography",
     "deployer",
     "formatting",
+    "glue",
     "macros",
     "macros/impl",
     "math",
@@ -108,6 +109,7 @@ commonware-consensus = { version = "2026.4.0", path = "consensus" }
 commonware-cryptography = { version = "2026.4.0", path = "cryptography", default-features = false }
 commonware-deployer = { version = "2026.4.0", path = "deployer", default-features = false }
 commonware-formatting = { version = "2026.4.0", path = "formatting", default-features = false }
+commonware-glue = { version = "2026.4.0", path = "glue" }
 commonware-invariants = { version = "2026.4.0", path = "invariants" }
 commonware-macros = { version = "2026.4.0", path = "macros", default-features = false }
 commonware-macros-impl = { version = "2026.4.0", path = "macros/impl" }
