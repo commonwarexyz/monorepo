@@ -3,16 +3,18 @@
 //! trivial single-block partitions are excluded, network views are
 //! sampled without replacement, and process receiver subsets are
 //! non-empty. Each *process* fault carries a
-//! [`super::scope::FaultScope`] for per-(channel, kind) targeting;
-//! network faults are total at their view. Vote process faults are
-//! semantically mutated + re-signed (see
+//! [`super::scope::MessageScope`] for per-(channel, kind) targeting and a
+//! [`super::fault::ProcessAction`] for omit vs vote mutation; network faults
+//! are total at their view. Vote process faults are semantically mutated +
+//! re-signed (see
 //! [`super::injector::ByzzFuzzInjector`]); cert and resolver process
 //! faults are omit-only.
 
 use crate::{
     byzzfuzz::{
-        fault::{NetworkFault, ProcessFault},
-        scope,
+        fault::{NetworkFault, ProcessAction, ProcessFault},
+        scope::{self, MessageScope},
+        BYZANTINE_IDX,
     },
     utils::SetPartition,
 };
@@ -21,7 +23,12 @@ use commonware_cryptography::PublicKey;
 use rand::{seq::SliceRandom, Rng};
 
 fn receiver_candidates<P: PublicKey>(participants: &[P]) -> Vec<P> {
-    participants.iter().skip(1).cloned().collect()
+    participants
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != BYZANTINE_IDX)
+        .map(|(_, p)| p.clone())
+        .collect()
 }
 
 fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rng) -> Vec<P> {
@@ -31,6 +38,14 @@ fn sample_receivers<P: PublicKey>(candidates: &[P], rng: &mut impl Rng) -> Vec<P
         .filter(|i| (mask >> i) & 1 == 1)
         .map(|i| candidates[i].clone())
         .collect()
+}
+
+fn sample_action(scope: MessageScope, rng: &mut impl Rng) -> ProcessAction {
+    match scope {
+        MessageScope::Certificate(_) => ProcessAction::Omit,
+        _ if rng.gen_bool(0.25) => ProcessAction::Omit,
+        _ => ProcessAction::MutateVote,
+    }
 }
 
 /// `(c, d, r)`: process-fault rounds (`c`), network-fault
@@ -75,13 +90,13 @@ impl ByzzFuzz {
             .collect()
     }
 
-    /// `c` independent draws of `(view, receivers, omit, scope)`. Views
+    /// `c` independent draws of `(view, receivers, action, scope)`. Views
     /// sampled with replacement from `[1, r]`; receivers are a uniform
-    /// *non-empty* subset of `participants[1..]` (sampled as a non-zero
-    /// bitmask). The byzantine identity (`participants[0]`, see
-    /// [`crate::byzzfuzz::BYZANTINE_IDX`]) is excluded from the candidate
-    /// set. `omit` fires with probability `1/4`. No per-fault mutation
-    /// seed: the injector pulls mutation entropy directly from the
+    /// *non-empty* subset of all participants except
+    /// [`crate::byzzfuzz::BYZANTINE_IDX`] (sampled as a non-zero bitmask).
+    /// `Omit` fires with probability `1/4`; certificate-scoped faults are
+    /// always omit-only. No per-fault mutation seed: the injector pulls
+    /// mutation entropy directly from the
     /// runtime RNG (fed by the libfuzzer input) so byte-level guidance
     /// applies to the mutation choices themselves.
     pub fn process_faults<P: PublicKey>(
@@ -99,12 +114,12 @@ impl ByzzFuzz {
         (0..self.c)
             .map(|_| {
                 let view = rng.gen_range(1..=self.r);
-                let omit = rng.gen_bool(0.25);
+                let scope = scope::sample(rng);
                 ProcessFault {
                     view,
                     receivers: sample_receivers(&candidates, rng),
-                    omit,
-                    scope: scope::sample(rng),
+                    action: sample_action(scope, rng),
+                    scope,
                 }
             })
             .collect()
@@ -129,8 +144,8 @@ impl ByzzFuzz {
             .map(|view| ProcessFault {
                 view,
                 receivers: sample_receivers(&candidates, rng),
-                omit: rng.gen_bool(0.25),
-                scope: scope::FaultScope::Any,
+                action: sample_action(MessageScope::Any, rng),
+                scope: MessageScope::Any,
             })
             .collect()
     }

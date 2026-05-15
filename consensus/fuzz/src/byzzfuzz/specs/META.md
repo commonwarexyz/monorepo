@@ -47,8 +47,7 @@ consensus/fuzz/src/byzzfuzz/specs/
 │
 └── decisions/
     ├── _template.md
-    ├── 001-single-byzantine-index.md
-    ├── 002-semantically-mutate-votes-only.md
+    ├── 001-process-fault-model.md
     ├── 003-post-gst-liveness-check.md
     ├── 004-byzzfuzz-local-small-scope-strategy.md
     └── 005-post-gst-required-container-catch-up.md
@@ -252,7 +251,7 @@ How to use the invariant catalog.
 3. Update cross-references if file paths changed.
 4. Check the affected invariant group in `invariants/invariants.md` and keep every applicable invariant true.
 5. After adding or removing a spec file, update `INDEX.md`.
-6. ADRs with `Status: Accepted` are immutable. Create a new ADR to supersede.
+6. ADRs should be short and decision-focused. Supersede or consolidate them when the decision set changes.
 
 ### Validation checklist
 

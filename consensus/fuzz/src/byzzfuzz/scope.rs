@@ -1,16 +1,15 @@
-//! `FaultScope`: an optional message-kind filter applied to *process* faults
-//! to narrow which intercepted byzantine messages a fault matches.
-//! Network faults are total at their view and do not use this type.
+//! Message-kind filters applied to *process* faults. Network faults are total
+//! at their view and do not use this type.
 
 use commonware_consensus::simplex::types::{Certificate, Vote};
 use commonware_cryptography::{sha256::Digest as Sha256Digest, PublicKey};
 use rand::Rng;
 
-/// `FaultScope::Any` weight in [`sample`].
+/// `MessageScope::Any` weight in [`sample`].
 const ANY_SCOPE_WEIGHT: u32 = 50;
-/// `FaultScope::Vote(_)` weight in [`sample`] (uniform over [`VOTE_KINDS`]).
+/// `MessageScope::Vote(_)` weight in [`sample`] (uniform over [`VOTE_KINDS`]).
 const VOTE_SCOPE_WEIGHT: u32 = 45;
-/// `FaultScope::Certificate(_)` weight in [`sample`] (uniform over
+/// `MessageScope::Certificate(_)` weight in [`sample`] (uniform over
 /// [`CERTIFICATE_KINDS`]).
 const CERTIFICATE_SCOPE_WEIGHT: u32 = 5;
 const TOTAL_SCOPE_WEIGHT: u32 = ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT + CERTIFICATE_SCOPE_WEIGHT;
@@ -42,39 +41,38 @@ pub enum CertificateKind {
     Finalization,
 }
 
-/// Process-fault message-kind filter. `Any` matches every byzantine
-/// outgoing message when the sender's `rnd(m)` equals the fault's view;
-/// the typed variants additionally narrow the match to a single
-/// channel + message kind. Resolver kinds are intentionally not yet
-/// sampled.
+/// Process-fault message-kind filter. `Any` adds no channel/kind restriction;
+/// typed variants narrow the match to a single channel + message kind.
+/// `ProcessAction` still limits which channels can execute the matched fault.
+/// Resolver kinds are intentionally not yet sampled.
 #[derive(Clone, Copy, Debug, Default)]
-pub enum FaultScope {
+pub enum MessageScope {
     #[default]
     Any,
     Vote(VoteKind),
     Certificate(CertificateKind),
 }
 
-impl FaultScope {
+impl MessageScope {
     pub fn matches_vote(self, kind: VoteKind) -> bool {
         match self {
-            FaultScope::Any => true,
-            FaultScope::Vote(k) => k == kind,
+            MessageScope::Any => true,
+            MessageScope::Vote(k) => k == kind,
             _ => false,
         }
     }
 
     pub fn matches_certificate(self, kind: CertificateKind) -> bool {
         match self {
-            FaultScope::Any => true,
-            FaultScope::Certificate(k) => k == kind,
+            MessageScope::Any => true,
+            MessageScope::Certificate(k) => k == kind,
             _ => false,
         }
     }
 
     /// Resolver currently only respects `Any` scopes.
     pub fn matches_resolver(self) -> bool {
-        matches!(self, FaultScope::Any)
+        matches!(self, MessageScope::Any)
     }
 }
 
@@ -83,16 +81,16 @@ impl FaultScope {
 /// `Vote(_)` and `Certificate(_)` buckets the kind is drawn uniformly from
 /// [`VOTE_KINDS`] / [`CERTIFICATE_KINDS`] so a new variant added to either
 /// list is automatically covered.
-pub fn sample(rng: &mut impl Rng) -> FaultScope {
+pub fn sample(rng: &mut impl Rng) -> MessageScope {
     let bucket = rng.gen_range(0..TOTAL_SCOPE_WEIGHT);
     if bucket < ANY_SCOPE_WEIGHT {
-        FaultScope::Any
+        MessageScope::Any
     } else if bucket < ANY_SCOPE_WEIGHT + VOTE_SCOPE_WEIGHT {
         let k = VOTE_KINDS[rng.gen_range(0..VOTE_KINDS.len())];
-        FaultScope::Vote(k)
+        MessageScope::Vote(k)
     } else {
         let k = CERTIFICATE_KINDS[rng.gen_range(0..CERTIFICATE_KINDS.len())];
-        FaultScope::Certificate(k)
+        MessageScope::Certificate(k)
     }
 }
 

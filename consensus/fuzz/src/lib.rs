@@ -1573,30 +1573,30 @@ impl FuzzMode for FaultyNet {
 ///   scheduled views the topology is fully connected.
 /// - **Process faults**: a fixed byzantine identity (always at index 0),
 ///   whose outgoing protocol messages are intercepted per a schedule of
-///   `(view, receivers, omit, scope)` entries. `scope` optionally narrows
-///   a fault to a specific channel + message kind (e.g. only Notarize
-///   votes); `Any` matches every byzantine outgoing message at the view.
-///   Vote process faults semantically mutate the intercepted vote and
-///   re-sign it under the byzantine identity. Certificate and resolver
-///   process faults are **omit-only**: the forwarder drops the original
-///   to the targeted recipients and the injector emits nothing.
+///   `(view, receivers, action, message_scope)` entries. `message_scope`
+///   optionally narrows a fault to a specific channel + message kind (e.g.
+///   only Notarize votes); `Any` does not narrow the channel/kind. `action`
+///   either omits targeted delivery or semantically mutates a vote and
+///   re-signs it under the byzantine identity. Certificate and resolver
+///   process faults are omit-only.
 ///
 /// Round attribution uses each message sender's current protocol round
-/// (the maximum view that sender has sent or received): network faults
-/// apply per-message-sender, process faults apply per-byzantine-sender.
-/// Retransmissions of an old view at a later round therefore inherit the
-/// later round's fault window.
+/// (the maximum view that sender has sent or received) for network faults.
+/// Process faults use the decoded view carried by the byzantine message
+/// itself. Retransmissions of an old view at a later sender round can be
+/// filtered by that later round's network partition, but they do not inherit
+/// process faults scheduled for the later round.
 ///
-/// Network faults apply during a bounded fault phase. After the phase
-/// elapses (or all non-byzantine reporters reach `required_containers`,
-/// whichever comes first), the shared fault gate reaches GST: partitions
-/// pass through, but the byzantine sender keeps mutating/omitting its own
-/// messages under the same `(view, receivers, scope)` schedule (extended
-/// at GST with a fresh post-GST view budget so byzantine activity does not
-/// silently disappear). Each non-byzantine reporter must then finalize at
-/// least one new view within a fixed post-GST window; failure to advance
-/// panics with a liveness violation. Safety invariants run after the
-/// post-GST check on every successful path. See [`byzzfuzz::run`].
+/// Network faults apply during a bounded fault phase. If all non-byzantine
+/// reporters reach `required_containers` during that phase, the run skips GST
+/// and proceeds to safety checks. Otherwise, the shared fault gate reaches GST:
+/// partitions pass through, but the byzantine sender keeps mutating/omitting
+/// its own messages under the same `(view, receivers, action, scope)` schedule
+/// extended with a fresh post-GST view budget. Each non-byzantine reporter
+/// below `required_containers` at GST must reach `required_containers`; each
+/// reporter already at or above it must finalize above its baseline. Failure to
+/// reach the post-GST target panics with a liveness violation. See
+/// [`byzzfuzz::run`].
 pub struct Byzzfuzz;
 impl FuzzMode for Byzzfuzz {
     const MODE: Mode = Mode::Byzzfuzz;

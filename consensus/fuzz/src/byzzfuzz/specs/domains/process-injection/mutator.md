@@ -26,7 +26,7 @@ Per vote variant:
 
 Output is guaranteed to differ from the input. Vote *variant* is preserved (the injector re-signs the same kind of vote). Cryptographic content (signatures, public keys) is produced by the injector under the byzantine identity and is not the mutator's concern.
 
-`Strategy` methods that do not correspond to vote mutation are unreachable in ByzzFuzz: certificate and resolver process faults are omit-only per [ADR-002](../../decisions/002-semantically-mutate-votes-only.md), and fault scheduling lives in [Fault Scheduling](../fault-scheduling.md).
+`Strategy` methods that do not correspond to vote mutation are unreachable in ByzzFuzz: certificate and resolver process faults are omit-only per [ADR-001](../../decisions/001-process-fault-model.md), and fault scheduling lives in [Fault Scheduling](../fault-scheduling.md).
 
 ## Error Handling
 
@@ -40,4 +40,4 @@ The mutator is pure logic over its inputs and the observed-value pool; it has no
 
 - [Process Injection](README.md) - consumer of the mutator.
 - [ADR-004](../../decisions/004-byzzfuzz-local-small-scope-strategy.md) - rationale for a ByzzFuzz-local strategy distinct from the generic `SmallScope`.
-- [ADR-002](../../decisions/002-semantically-mutate-votes-only.md) - rationale for vote-only mutation.
+- [ADR-001](../../decisions/001-process-fault-model.md) - rationale for vote-only mutation.

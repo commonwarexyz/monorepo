@@ -7,12 +7,11 @@
 //! - [`Intercept`] -- one captured byzantine outgoing message paired with one
 //!   matching `procFault` (the unit of work the injector handles);
 //! - [`InterceptChannel`] -- which p2p channel the message came from;
-//! - [`SenderViewCell`] -- per-sender atomic implementing the paper's
-//!   `rnd(m)` ("max round in which the sender has sent or received a
-//!   message"). Outgoing forwarders fold each transmitted view in; the
-//!   [`RoundTrackingReceiver`] wrapper folds in each *received* view, so
-//!   the cell reflects the sender's true current round and old-view
-//!   retransmissions are not tagged with old-round faults;
+//! - [`SenderViewCell`] -- per-sender atomic implementing `rnd(m)`, the max
+//!   round in which the sender has sent or received a message. Outgoing
+//!   forwarders fold each transmitted view in; the [`RoundTrackingReceiver`]
+//!   wrapper folds in each *received* view, so the cell reflects the sender's
+//!   true current round for network attribution;
 //! - [`RoundTrackingReceiver`] -- decode-and-update wrapper installed on
 //!   each validator's incoming vote / cert / resolver receivers. Resolver
 //!   inbound also carries round-relevant data: [`commonware_resolver`]'s
@@ -24,6 +23,7 @@
 //!   tracks the upstream codec, and reuse the [`Certificate`] codec for
 //!   the response payload.
 
+use crate::byzzfuzz::fault::ProcessAction;
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     simplex::{
@@ -47,9 +47,8 @@ use std::{
     },
 };
 
-/// Channel an intercepted message came from. The injector decode-mutates
-/// then re-signs `Vote` content; `Cert` and `Resolver` intercepts are
-/// omit-only (the forwarder's drop is the entire fault).
+/// Channel an intercepted message came from. The injector can decode-mutate
+/// and re-sign `Vote` content; `Cert` and `Resolver` intercepts are omit-only.
 #[derive(Clone, Copy, Debug)]
 pub enum InterceptChannel {
     Vote,
@@ -68,7 +67,7 @@ pub struct Intercept<P: PublicKey> {
     pub channel: InterceptChannel,
     pub view: u64,
     pub bytes: Vec<u8>,
-    pub omit: bool,
+    pub action: ProcessAction,
     pub targets: Vec<P>,
 }
 
@@ -100,7 +99,7 @@ impl FaultGate {
 /// Per-sender cell holding the current `rnd(m)` view.
 /// Updated monotonically by outgoing forwarders when a message carries a
 /// decodable view, and by inbound `RoundTrackingReceiver`s. Read by every
-/// forwarder before applying network/process fault decisions.
+/// forwarder before applying network partition decisions.
 ///
 /// Cheap to clone (Arc).
 #[derive(Clone, Default)]
@@ -143,8 +142,7 @@ pub fn channel<P: PublicKey>() -> (
 /// Receiver wrapper that, for every incoming message, decodes the protocol
 /// view and folds it into a shared [`SenderViewCell`]. Used on each
 /// validator's vote, certificate, and resolver inbound channels so the
-/// cell tracks the "received" half of the paper's
-/// `rnd(m) = max round sent or received`.
+/// cell tracks the received half of `rnd(m) = max round sent or received`.
 ///
 /// `extract` returns `Some(view)` when the bytes decode to the channel's
 /// expected type and `None` otherwise (undecodable bytes leave the cell

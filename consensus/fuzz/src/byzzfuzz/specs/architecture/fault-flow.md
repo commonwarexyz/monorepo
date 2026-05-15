@@ -19,7 +19,7 @@ setup
 phase 1: fault phase, 30s virtual time
   |
   | network faults active by sender rnd(m)
-  | byzantine process faults active by byzantine sender rnd(m)
+  | byzantine process faults active by decoded byzantine message view
   |
   +--> if every non-byzantine reporter reaches required_containers:
   |        skip GST and post-GST check
@@ -64,10 +64,10 @@ read rnd(m) = SenderViewCell(i).get()
     +-- after GST: skip network partition filtering
     |
     v
-if i == BYZANTINE_IDX and process fault matches rnd(m), receiver, and scope:
+if i == BYZANTINE_IDX and process fault matches decoded view, receiver, action, and scope:
     |
-    +-- remove targets from original delivery
     +-- enqueue Intercept for injector
+    +-- on success, remove targets from original delivery
     |
     v
 deliver residual original recipients, or drop if none

@@ -4,9 +4,9 @@
 
 | Task | Read First | Then Read |
 | ---- | ---------- | --------- |
-| Change `(c, d, r)` sampling, receiver sampling, or fault scopes | [Fault Scheduling](domains/fault-scheduling.md) | [Fault Flow](architecture/fault-flow.md), [Single Byzantine Index ADR](decisions/001-single-byzantine-index.md) |
-| Change outbound drop or intercept behavior | [Network Interception](domains/network-interception/README.md) | [Round Tracking](domains/network-interception/round-tracking.md), [Forwarder/Injector Contract](contracts/forwarder-injector.md) |
-| Change vote mutation semantics | [Process Injection](domains/process-injection/README.md) | [Mutator](domains/process-injection/mutator.md), [Vote-Only Mutation ADR](decisions/002-semantically-mutate-votes-only.md), [Small-Scope Strategy ADR](decisions/004-byzzfuzz-local-small-scope-strategy.md) |
+| Change `(c, d, r)` sampling, receiver sampling, or fault scopes | [Fault Scheduling](domains/fault-scheduling.md) | [Fault Flow](architecture/fault-flow.md), [Process Fault Model ADR](decisions/001-process-fault-model.md) |
+| Change outbound drop or intercept behavior | [Network Interception](domains/network-interception/README.md) | [Round Tracking](domains/network-interception/round-tracking.md), [Forwarder/Injector Contract](contracts/forwarder-injector.md), [Process Fault Model ADR](decisions/001-process-fault-model.md) |
+| Change vote mutation semantics | [Process Injection](domains/process-injection/README.md) | [Mutator](domains/process-injection/mutator.md), [Process Fault Model ADR](decisions/001-process-fault-model.md), [Small-Scope Strategy ADR](decisions/004-byzzfuzz-local-small-scope-strategy.md) |
 | Change post-GST liveness behavior | [Runner Liveness](domains/runner-liveness.md) | [Fault Flow](architecture/fault-flow.md), [Post-GST Catch-Up ADR](decisions/005-post-gst-required-container-catch-up.md), [Superseded Post-GST Liveness ADR](decisions/003-post-gst-liveness-check.md) |
 | Change panic logging or decision trace output | [Observability](domains/observability.md) | [ByzzFuzz/Harness Contract](contracts/byzzfuzz-harness.md) |
 | Wire a new fuzz target into ByzzFuzz mode | [ByzzFuzz/Harness Contract](contracts/byzzfuzz-harness.md) | [Layers](architecture/layers.md) |
@@ -71,8 +71,7 @@ byzzfuzz::runner
 ### Decisions
 
 - [ADR Template](decisions/_template.md) - template for new decision records.
-- [ADR-001: Single Byzantine Index](decisions/001-single-byzantine-index.md) - fixed `participants[0]` byzantine identity.
-- [ADR-002: Semantically Mutate Votes Only](decisions/002-semantically-mutate-votes-only.md) - vote replacement vs cert/resolver omission.
+- [ADR-001: Process Fault Model](decisions/001-process-fault-model.md) - fixed byzantine identity, process actions, message scopes, and forwarder/injector handoff.
 - [ADR-003: Post-GST Liveness Check](decisions/003-post-gst-liveness-check.md) - superseded liveness check after fault phase.
 - [ADR-004: ByzzFuzz-Local Small-Scope Strategy](decisions/004-byzzfuzz-local-small-scope-strategy.md) - observed-value replay with local nearby edits for vote mutation.
 - [ADR-005: Post-GST Required-Container Catch-Up](decisions/005-post-gst-required-container-catch-up.md) - current liveness targets after GST.

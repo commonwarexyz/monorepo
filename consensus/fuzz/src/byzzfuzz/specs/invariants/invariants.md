@@ -24,6 +24,8 @@ This is the central catalog of ByzzFuzz invariants. Before changing code or spec
 - Network faults always apply to every p2p channel at the matching view before GST.
 - Process faults always apply only to the fixed byzantine sender.
 - Process fault receiver sets always exclude the byzantine identity.
+- Network faults are matched against the sender's current `rnd(m)`.
+- Process faults are matched against the decoded view carried by the byzantine message itself.
 - After GST, network partition drops are disabled and byzantine process faults remain enabled.
 - Phase 2 liveness is checked only for non-byzantine reporters.
 - Safety invariants run after successful phase completion.
@@ -38,13 +40,13 @@ This is the central catalog of ByzzFuzz invariants. Before changing code or spec
 - The algorithm caps the number of fault rounds (`c` for process faults, `d` for network faults, `r` the number of target views)
   at small values.
 - `BYZANTINE_IDX` is always `0`.
-- Process-fault receiver candidates are always `participants[1..]`.
+- Process-fault receiver candidates are all participants except `BYZANTINE_IDX`.
 - Process-fault receiver sets are always non-empty when participants include any correct receiver.
 - Network-fault views are sampled without replacement.
 - Network-fault partitions always use non-trivial `SetPartition::N4` entries at indexes `1..=14`.
 - `process_faults` and `network_faults` return empty schedules when their count or round budget is zero.
 - Runner setup always forces at least one of `c` or `d` to be non-zero.
-- Post-GST process faults always use `FaultScope::Any`.
+- Post-GST process faults always use `MessageScope::Any`.
 
 ## Network Interception
 
@@ -53,7 +55,8 @@ This is the central catalog of ByzzFuzz invariants. Before changing code or spec
 - Undecodable vote and certificate bytes never match process-fault scopes because the message kind is unknown.
 - Resolver messages consult network partitions even when no resolver view can be decoded.
 - Network partitions are total at their active view and apply to vote, certificate, resolver, and undecodable traffic.
-- Process interception removes targeted recipients from the original delivery path before the injector can replace or omit.
+- Process interception removes targeted recipients from the original delivery path only after the intercept work item is enqueued.
+- Undecodable messages never match process faults, even if the sender's current round matches a process-fault view.
 - Honest senders always receive an empty process-fault schedule and no intercept sender.
 - After GST, partition filtering is skipped and process interception still runs for the byzantine sender.
 
@@ -63,6 +66,7 @@ This is the central catalog of ByzzFuzz invariants. Before changing code or spec
   Instead of "all messages get corrupted," the model is "one specific Byzantine process sends a tampered message
   to a specifically chosen subset of recipients in a specifically chosen round.
 - Certificate and resolver process faults always omit targeted delivery.
+- `ProcessAction::MutateVote` is supported only on the vote channel.
 - Vote process faults always preserve the intercepted vote variant when they replace.
 - Mutated votes are always signed with the byzantine scheme.
 - Mutated votes are sent only to the already partition-filtered `Intercept.targets`.
