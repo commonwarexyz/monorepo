@@ -445,6 +445,7 @@ impl<T: Policy> Sender<T> {
             self.state.closed.load(Ordering::Acquire)
         });
 
+        // Record any backoff.
         if feedback == Feedback::Backoff {
             self.state.backoff.inc();
         }
