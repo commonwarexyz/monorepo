@@ -116,13 +116,13 @@ impl Drop for AlignedBuffer {
 /// moving pooled buffers through pooled backing values and thread-local caches
 /// does not need to move a per-buffer [`Layout`].
 ///
-/// `PooledBuffer` does not implement [`Drop`] and has no reference to its
-/// originating [`SizeClass`](super::pool::SizeClass). In normal pool use it is
-/// owned by [`PooledBacking`] while outside the global freelist and by the
-/// size-class [`super::freelist::Freelist`] while globally free. Only the
-/// freelist knows the layout needed to deallocate it.
+/// `PooledBuffer` does not implement [`Drop`] and does not retain its
+/// originating [`SizeClass`](super::pool::SizeClass). In normal pool use,
+/// [`PooledBacking`] owns it while it is outside the global freelist, and the
+/// size-class [`super::freelist::Freelist`] owns it while it is globally free.
+/// Only the freelist knows the layout needed to deallocate it.
 ///
-/// Code that takes a `PooledBuffer` out of pool state must either return it to
+/// Callers that take a `PooledBuffer` out of pool state must either return it to
 /// the same originating size class or explicitly deallocate it with the exact
 /// layout used to create it.
 pub struct PooledBuffer {
