@@ -61,7 +61,7 @@ where
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (sender, receiver) = mailbox::new(config.mailbox_size);
+    let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         context,
