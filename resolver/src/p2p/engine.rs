@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::Consumer;
+use crate::{Consumer, Delivery, Interest};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -22,7 +22,10 @@ use commonware_runtime::{
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
 use futures::future::{self, Either};
 use rand::Rng;
-use std::marker::PhantomData;
+use std::{
+    collections::{BTreeSet, HashMap},
+    marker::PhantomData,
+};
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
@@ -61,13 +64,16 @@ pub struct Engine<
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and cancels fetch requests
-    mailbox: mailbox::Receiver<Message<Key, P>>,
+    mailbox: mailbox::Receiver<Message<Key, P, Con::Subscriber>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Tracks all in-flight fetch state
     inflight: Inflight<E, Con, P, Key>,
+
+    /// Local interests that keep each fetch key alive.
+    interests: HashMap<Key, Interests<Con::Subscriber>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -85,6 +91,26 @@ pub struct Engine<
     _r: PhantomData<NetR>,
 }
 
+struct Interests<S> {
+    requested: bool,
+    subscribers: BTreeSet<S>,
+}
+
+impl<S> Default for Interests<S> {
+    fn default() -> Self {
+        Self {
+            requested: false,
+            subscribers: BTreeSet::new(),
+        }
+    }
+}
+
+impl<S> Interests<S> {
+    fn is_empty(&self) -> bool {
+        !self.requested && self.subscribers.is_empty()
+    }
+}
+
 impl<
         E: BufferPooler + Clock + Spawner + Rng + Metrics,
         P: PublicKey,
@@ -96,11 +122,16 @@ impl<
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
+where
+    Con::Subscriber: Clone + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
+    pub fn new(
+        context: E,
+        cfg: Config<P, D, B, Key, Con, Pro>,
+    ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
         let (sender, receiver) = mailbox::new(cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
@@ -124,6 +155,7 @@ impl<
                 mailbox: receiver,
                 fetcher,
                 inflight: Inflight::new(cfg.consumer),
+                interests: HashMap::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -183,6 +215,7 @@ impl<
             on_stopped => {
                 debug!("shutdown");
                 self.inflight.drain();
+                self.interests.clear();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -214,11 +247,27 @@ impl<
             } => {
                 match msg {
                     Message::Fetch(requests) => {
-                        for FetchRequest { key, targets } in requests {
+                        for FetchRequest {
+                            key,
+                            requested,
+                            subscribers,
+                            targets,
+                        } in requests
+                        {
                             trace!(?key, "mailbox: fetch");
+                            if !requested && subscribers.is_empty() {
+                                trace!(?key, "fetch has no retained interests");
+                                continue;
+                            }
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
+                            let interests = self
+                                .interests
+                                .entry(key.clone())
+                                .or_default();
+                            interests.requested |= requested;
+                            interests.subscribers.extend(subscribers);
 
                             // Update targets
                             match targets {
@@ -248,6 +297,7 @@ impl<
                     Message::Cancel { key } => {
                         trace!(?key, "mailbox: cancel");
                         let mut guard = self.metrics.cancel.guard(Status::Dropped);
+                        self.interests.remove(&key);
                         self.fetcher.cancel(&key);
                         if self.inflight.cancel(&key) {
                             guard.set(Status::Success);
@@ -256,13 +306,25 @@ impl<
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.fetcher.retain(&predicate);
-                        let count = self.inflight.retain(predicate) as u64;
+                        self.interests.retain(|key, interests| {
+                            if interests.requested && !predicate(Interest::Request(key)) {
+                                interests.requested = false;
+                            }
+                            interests
+                                .subscribers
+                                .retain(|subscriber| predicate(Interest::Subscriber(subscriber)));
+                            !interests.is_empty()
+                        });
+                        let interests = &self.interests;
+                        self.fetcher.retain(|key| interests.contains_key(key));
+                        let count =
+                            self.inflight.retain(|key| interests.contains_key(key)) as u64;
                         self.record_cancellations(count);
                     }
                     Message::Clear => {
                         trace!("mailbox: clear");
 
+                        self.interests.clear();
                         self.fetcher.clear();
                         let count = self.inflight.drain() as u64;
                         self.record_cancellations(count);
@@ -273,11 +335,11 @@ impl<
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Cancel, Retain, Clear, or shutdown) before the consumer finished validating.
-                let (peer, key, valid) = match delivery {
+                let (peer, key, result) = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
                 };
-                self.handle_delivery(peer, key, valid).await;
+                self.handle_delivery(peer, key, result).await;
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
@@ -400,8 +462,24 @@ impl<
             return;
         };
 
+        let Some(interests) = self.interests.get(&key) else {
+            warn!(?key, "response for fetch with no interests");
+            self.inflight.cancel(&key);
+            return;
+        };
+        if interests.is_empty() {
+            warn!(?key, "response for fetch with no interests");
+            self.inflight.cancel(&key);
+            return;
+        }
+        let delivery = Delivery {
+            request: key.clone(),
+            requested: interests.requested,
+            subscribers: interests.subscribers.iter().cloned().collect(),
+        };
+
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(key, peer, response);
+        self.inflight.deliver(key, delivery, peer, response);
     }
 
     /// Handle completed delivery to the consumer.
@@ -409,12 +487,13 @@ impl<
         if valid {
             self.metrics.fetch.inc(Status::Success);
             self.inflight.complete(&key, self.context.as_ref());
+            self.interests.remove(&key);
             self.fetcher.clear_targets(&key);
             return;
         }
 
-        // If the data is invalid, we need to block the peer and try again
-        // (blocking the peer also removes any targets associated with it)
+        // If the data is invalid, block the peer and try again. Blocking the
+        // peer also removes any targets associated with it.
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);

@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{p2p::Producer, Consumer, Delivery, Interest};
 use commonware_utils::{channel::oneshot, Span};
 use std::{
     collections::VecDeque,
@@ -127,12 +127,17 @@ impl<D: Digest> Receiver<D> {
 
 impl<D: Digest> Consumer for Handler<D> {
     type Key = Request<D>;
+    type Subscriber = Request<D>;
     type Value = Bytes;
 
-    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+    fn deliver(
+        &mut self,
+        delivery: Delivery<Self::Key, Self::Subscriber>,
+        value: Self::Value,
+    ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Deliver {
-            key,
+            key: delivery.request,
             value,
             response,
         });
@@ -172,16 +177,23 @@ impl<D: Digest> Request<D> {
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
     /// subjects will be pruned if they are "less than or equal to" this subject.
-    pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl for<'a> Fn(Interest<'a, Self, Self>) -> bool + Send + 'static {
         let cloned = self.clone();
-        move |s| match (&cloned, &s) {
-            (Self::Block(_), _) => unreachable!("we should never retain by block"),
-            (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
-                *theirs > *mine
+        move |interest| {
+            let s = match interest {
+                Interest::Request(s) | Interest::Subscriber(s) => s,
+            };
+            match (&cloned, s) {
+                (Self::Block(_), _) => unreachable!("we should never retain by block"),
+                (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
+                    *theirs > *mine
+                }
+                (Self::Finalized { .. }, _) => true,
+                (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => {
+                    *theirs > *mine
+                }
+                (Self::Notarized { .. }, _) => true,
             }
-            (Self::Finalized { .. }, _) => true,
-            (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => *theirs > *mine,
-            (Self::Notarized { .. }, _) => true,
         }
     }
 }
@@ -478,13 +490,13 @@ mod tests {
         };
 
         let predicate = r1.predicate();
-        assert!(predicate(&r2)); // r2.height > r1.height
-        assert!(predicate(&r3)); // Different variant (notarized)
+        assert!(predicate(Interest::Request(&r2))); // r2.height > r1.height
+        assert!(predicate(Interest::Request(&r3))); // Different variant (notarized)
 
         let r1_same = Request::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(&r1_same)); // Same height, should not pass
+        assert!(!predicate(Interest::Request(&r1_same))); // Same height, should not pass
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::Resolver;
+use crate::{Fetch, Interest, Resolver};
 use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
     Feedback,
@@ -7,12 +7,16 @@ use commonware_cryptography::PublicKey;
 use commonware_utils::{vec::NonEmptyVec, Span};
 use std::collections::VecDeque;
 
-type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
+type Predicate<K, R> = Box<dyn for<'a> Fn(Interest<'a, K, R>) -> bool + Send>;
 
 /// A request to fetch data for a key, optionally with target peers.
-pub struct FetchRequest<K, P> {
+pub struct FetchRequest<K, P, R = K> {
     /// The key to fetch.
     pub key: K,
+    /// Whether the bare request key is a retained interest.
+    pub requested: bool,
+    /// The subscribers used to decide whether the fetch should be retained.
+    pub subscribers: Vec<R>,
     /// Target peers to restrict the fetch to.
     ///
     /// - `None`: No targeting (or clear existing targeting), try any available peer
@@ -21,9 +25,9 @@ pub struct FetchRequest<K, P> {
 }
 
 /// Messages that can be sent to the peer actor.
-pub enum Message<K, P> {
+pub enum Message<K, P, R = K> {
     /// Initiate fetch requests.
-    Fetch(Vec<FetchRequest<K, P>>),
+    Fetch(Vec<FetchRequest<K, P, R>>),
 
     /// Cancel a fetch request by key.
     Cancel { key: K },
@@ -31,23 +35,23 @@ pub enum Message<K, P> {
     /// Cancel all fetch requests.
     Clear,
 
-    /// Cancel all fetch requests that do not satisfy the predicate.
-    Retain { predicate: Predicate<K> },
+    /// Cancel all fetch requests without a subscriber that satisfies the predicate.
+    Retain { predicate: Predicate<K, R> },
 }
 
-enum Modification<K> {
+enum Modification<K, R> {
     Cancel { key: K },
-    Retain { predicate: Predicate<K> },
+    Retain { predicate: Predicate<K, R> },
 }
 
 /// Pending resolver messages retained after the mailbox fills.
-pub struct Pending<K, P> {
+pub struct Pending<K, P, R = K> {
     clear: bool,
-    modifications: VecDeque<Modification<K>>,
-    fetches: Vec<FetchRequest<K, P>>,
+    modifications: VecDeque<Modification<K, R>>,
+    fetches: Vec<FetchRequest<K, P, R>>,
 }
 
-impl<K, P> Default for Pending<K, P> {
+impl<K, P, R> Default for Pending<K, P, R> {
     fn default() -> Self {
         Self {
             clear: false,
@@ -57,16 +61,16 @@ impl<K, P> Default for Pending<K, P> {
     }
 }
 
-impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
+impl<K, P, R> Overflow<Message<K, P, R>> for Pending<K, P, R> {
     fn is_empty(&self) -> bool {
         !self.clear && self.modifications.is_empty() && self.fetches.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(Message<K, P>) -> Option<Message<K, P>>,
+        F: FnMut(Message<K, P, R>) -> Option<Message<K, P, R>>,
     {
-        // Clear drains before later modifications and fetches
+        // Clear drains before later modifications and fetches.
         if self.clear {
             self.clear = false;
             if let Some(message) = push(Message::Clear) {
@@ -75,7 +79,7 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
             }
         }
 
-        // Drain cancels and retains in the order they were received
+        // Drain cancels and retains in the order they were received.
         while let Some(modification) = self.modifications.pop_front() {
             let message = match modification {
                 Modification::Cancel { key } => Message::Cancel { key },
@@ -87,7 +91,7 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
             }
         }
 
-        // Fetches are deduplicated and drained as one batch
+        // Fetches are deduplicated and drained as one batch.
         if !self.fetches.is_empty() {
             let fetches = std::mem::take(&mut self.fetches);
             if let Some(message) = push(Message::Fetch(fetches)) {
@@ -97,8 +101,8 @@ impl<K, P> Overflow<Message<K, P>> for Pending<K, P> {
     }
 }
 
-impl<K, P> Pending<K, P> {
-    fn push_front(&mut self, message: Message<K, P>) {
+impl<K, P, R> Pending<K, P, R> {
+    fn push_front(&mut self, message: Message<K, P, R>) {
         match message {
             Message::Clear => self.clear = true,
             Message::Retain { predicate } => {
@@ -115,20 +119,34 @@ impl<K, P> Pending<K, P> {
     }
 }
 
-// Merge target metadata for duplicate pending fetches
+fn retain_fetch<K, R>(
+    key: &K,
+    requested: &mut bool,
+    subscribers: &mut Vec<R>,
+    predicate: &(dyn for<'a> Fn(Interest<'a, K, R>) -> bool + Send),
+) -> bool {
+    if *requested && !predicate(Interest::Request(key)) {
+        *requested = false;
+    }
+
+    subscribers.retain(|subscriber| predicate(Interest::Subscriber(subscriber)));
+    *requested || !subscribers.is_empty()
+}
+
+// Merge target metadata for duplicate pending fetches.
 fn merge_targets<P: Eq>(existing: &mut Option<NonEmptyVec<P>>, incoming: Option<NonEmptyVec<P>>) {
-    // An unrestricted fetch clears existing targets
+    // An unrestricted fetch clears existing targets.
     let Some(incoming) = incoming else {
         *existing = None;
         return;
     };
 
-    // Existing unrestricted fetch already covers all targets
+    // Existing unrestricted fetch already covers all targets.
     let Some(existing) = existing else {
         return;
     };
 
-    // Merge target sets without duplicating peers
+    // Merge target sets without duplicating peers.
     for target in incoming {
         if !existing.contains(&target) {
             existing.push(target);
@@ -136,32 +154,51 @@ fn merge_targets<P: Eq>(existing: &mut Option<NonEmptyVec<P>>, incoming: Option<
     }
 }
 
-impl<K: Eq, P: Eq> Policy for Message<K, P> {
-    type Overflow = Pending<K, P>;
+impl<K, P, R> Policy for Message<K, P, R>
+where
+    K: Clone + Eq,
+    P: Eq,
+{
+    type Overflow = Pending<K, P, R>;
 
-    fn handle(overflow: &mut Pending<K, P>, message: Self) {
+    fn handle(overflow: &mut Pending<K, P, R>, message: Self) {
         match message {
             Self::Fetch(requests) => {
                 for request in requests {
-                    let FetchRequest { key, targets } = request;
+                    let FetchRequest {
+                        key,
+                        requested,
+                        subscribers,
+                        targets,
+                    } = request;
+                    if !requested && subscribers.is_empty() {
+                        continue;
+                    }
 
-                    // Merge duplicate fetches for the same key
+                    // Merge duplicate fetches for the same key.
                     if let Some(existing) = overflow
                         .fetches
                         .iter_mut()
                         .find(|existing| existing.key == key)
                     {
+                        existing.requested |= requested;
+                        existing.subscribers.extend(subscribers);
                         merge_targets(&mut existing.targets, targets);
                     } else {
-                        overflow.fetches.push(FetchRequest { key, targets });
+                        overflow.fetches.push(FetchRequest {
+                            key,
+                            requested,
+                            subscribers,
+                            targets,
+                        });
                     }
                 }
             }
             Self::Cancel { key } => {
-                // Cancel supersedes pending fetches for the key
+                // Cancel supersedes pending fetches for the key.
                 overflow.fetches.retain(|request| request.key != key);
 
-                // Retain only the first queued cancel for a key
+                // Retain only the first queued cancel for a key.
                 if overflow
                     .modifications
                     .iter()
@@ -173,14 +210,21 @@ impl<K: Eq, P: Eq> Policy for Message<K, P> {
                 }
             }
             Self::Clear => {
-                // Clear supersedes pending modifications and fetches
+                // Clear supersedes pending modifications and fetches.
                 overflow.clear = true;
                 overflow.modifications.clear();
                 overflow.fetches.clear();
             }
             Self::Retain { predicate } => {
-                // Retain prunes pending fetches before queued fetches drain
-                overflow.fetches.retain(|request| predicate(&request.key));
+                // Retain prunes pending fetch subscribers before queued fetches drain.
+                overflow.fetches.retain_mut(|request| {
+                    retain_fetch(
+                        &request.key,
+                        &mut request.requested,
+                        &mut request.subscribers,
+                        predicate.as_ref(),
+                    )
+                });
                 overflow
                     .modifications
                     .push_back(Modification::Retain { predicate });
@@ -191,20 +235,26 @@ impl<K: Eq, P: Eq> Policy for Message<K, P> {
 
 /// A way to send messages to the peer actor.
 #[derive(Clone)]
-pub struct Mailbox<K: Eq, P: Eq> {
+pub struct Mailbox<K: Span, P: Eq, R = K> {
     /// The channel that delivers messages to the peer actor.
-    sender: Sender<Message<K, P>>,
+    sender: Sender<Message<K, P, R>>,
 }
 
-impl<K: Eq, P: Eq> Mailbox<K, P> {
+impl<K: Span, P: Eq, R> Mailbox<K, P, R> {
     /// Create a new mailbox.
-    pub(super) const fn new(sender: Sender<Message<K, P>>) -> Self {
+    pub(super) const fn new(sender: Sender<Message<K, P, R>>) -> Self {
         Self { sender }
     }
 }
 
-impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
+impl<K, P, R> Resolver for Mailbox<K, P, R>
+where
+    K: Span,
+    P: PublicKey,
+    R: Clone + Send + 'static,
+{
     type Key = K;
+    type Subscriber = R;
     type PublicKey = P;
 
     /// Send a fetch request to the peer actor.
@@ -213,21 +263,42 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch(&mut self, key: Self::Key) -> Feedback {
-        self.sender
-            .enqueue(Message::Fetch(vec![FetchRequest { key, targets: None }]))
+    fn fetch<D>(&mut self, request: D) -> Feedback
+    where
+        D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+    {
+        let request = request.into();
+        let (key, requested, subscribers) = request.into_parts();
+        self.sender.enqueue(Message::Fetch(vec![FetchRequest {
+            key,
+            requested,
+            subscribers,
+            targets: None,
+        }]))
     }
 
-    /// Send a fetch request to the peer actor for a batch of keys.
+    /// Send a fetch request to the peer actor for a batch of requests.
     ///
     /// If a fetch is already in progress for any key, this clears any existing
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Feedback {
+    fn fetch_all<D>(&mut self, requests: Vec<D>) -> Feedback
+    where
+        D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+    {
         self.sender.enqueue(Message::Fetch(
-            keys.into_iter()
-                .map(|key| FetchRequest { key, targets: None })
+            requests
+                .into_iter()
+                .map(|request| {
+                    let (key, requested, subscribers) = request.into().into_parts();
+                    FetchRequest {
+                        key,
+                        requested,
+                        subscribers,
+                        targets: None,
+                    }
+                })
                 .collect(),
         ))
     }
@@ -237,11 +308,15 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(
         &mut self,
-        key: Self::Key,
+        request: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
+        let request = request.into();
+        let (key, requested, subscribers) = request.into_parts();
         self.sender.enqueue(Message::Fetch(vec![FetchRequest {
             key,
+            requested,
+            subscribers,
             targets: Some(targets),
         }]))
     }
@@ -249,16 +324,24 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send targeted fetch requests to the peer actor for a batch of keys.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all_targeted(
+    fn fetch_all_targeted<D>(
         &mut self,
-        requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-    ) -> Feedback {
+        requests: Vec<(D, NonEmptyVec<Self::PublicKey>)>,
+    ) -> Feedback
+    where
+        D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+    {
         self.sender.enqueue(Message::Fetch(
             requests
                 .into_iter()
-                .map(|(key, targets)| FetchRequest {
-                    key,
-                    targets: Some(targets),
+                .map(|(request, targets)| {
+                    let (key, requested, subscribers) = request.into().into_parts();
+                    FetchRequest {
+                        key,
+                        requested,
+                        subscribers,
+                        targets: Some(targets),
+                    }
                 })
                 .collect(),
         ))
@@ -274,7 +357,10 @@ impl<K: Span, P: PublicKey> Resolver for Mailbox<K, P> {
     /// Send a retain request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
+    fn retain(
+        &mut self,
+        predicate: impl for<'a> Fn(Interest<'a, Self::Key, Self::Subscriber>) -> bool + Send + 'static,
+    ) -> Feedback {
         self.sender.enqueue(Message::Retain {
             predicate: Box::new(predicate),
         })
@@ -293,7 +379,33 @@ mod tests {
     use super::*;
 
     fn fetch(key: u8, targets: Option<NonEmptyVec<u8>>) -> Message<u8, u8> {
-        Message::Fetch(vec![FetchRequest { key, targets }])
+        Message::Fetch(vec![FetchRequest {
+            key,
+            requested: true,
+            subscribers: Vec::new(),
+            targets,
+        }])
+    }
+
+    fn fetch_with_subscribers(
+        key: u8,
+        subscribers: Vec<u8>,
+        targets: Option<NonEmptyVec<u8>>,
+    ) -> Message<u8, u8> {
+        Message::Fetch(vec![FetchRequest {
+            key,
+            requested: false,
+            subscribers,
+            targets,
+        }])
+    }
+
+    fn request_is(value: u8) -> impl for<'a> Fn(Interest<'a, u8, u8>) -> bool + Send {
+        move |interest| matches!(interest, Interest::Request(key) if *key == value)
+    }
+
+    fn subscriber_is(value: u8) -> impl for<'a> Fn(Interest<'a, u8, u8>) -> bool + Send {
+        move |interest| matches!(interest, Interest::Subscriber(subscriber) if *subscriber == value)
     }
 
     fn targets(values: &[u8]) -> NonEmptyVec<u8> {
@@ -330,6 +442,19 @@ mod tests {
         assert_eq!(keys, expected);
     }
 
+    fn assert_fetch_subscribers(
+        message: &Message<u8, u8>,
+        expected_key: u8,
+        expected_subscribers: &[u8],
+    ) {
+        let Message::Fetch(requests) = message else {
+            panic!("expected fetch");
+        };
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].key, expected_key);
+        assert_eq!(requests[0].subscribers, expected_subscribers);
+    }
+
     #[test]
     fn targeted_fetches_for_same_key_are_merged() {
         let mut pending = Pending::default();
@@ -340,6 +465,18 @@ mod tests {
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 1);
         assert_fetch(&messages[0], 1, Some(&[2, 3, 4]));
+    }
+
+    #[test]
+    fn duplicate_fetches_for_same_key_merge_subscribers() {
+        let mut pending = Pending::default();
+
+        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10], None));
+        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![11], None));
+
+        let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 1);
+        assert_fetch_subscribers(&messages[0], 1, &[10, 11]);
     }
 
     #[test]
@@ -405,7 +542,7 @@ mod tests {
         Policy::handle(
             &mut pending,
             Message::Retain {
-                predicate: Box::new(|key| *key == 2),
+                predicate: Box::new(request_is(2)),
             },
         );
 
@@ -413,6 +550,41 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(messages[0], Message::Retain { .. }));
         assert_fetch(&messages[1], 2, None);
+    }
+
+    #[test]
+    fn retain_prunes_pending_fetch_subscribers() {
+        let mut pending = Pending::default();
+
+        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(subscriber_is(11)),
+            },
+        );
+
+        let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0], Message::Retain { .. }));
+        assert_fetch_subscribers(&messages[1], 1, &[11]);
+    }
+
+    #[test]
+    fn retain_drops_pending_fetch_when_all_subscribers_are_dropped() {
+        let mut pending = Pending::default();
+
+        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(subscriber_is(12)),
+            },
+        );
+
+        let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0], Message::Retain { .. }));
     }
 
     #[test]
@@ -437,7 +609,9 @@ mod tests {
         Policy::handle(
             &mut pending,
             Message::Retain {
-                predicate: Box::new(|key| *key != 1),
+                predicate: Box::new(
+                    |interest| !matches!(interest, Interest::Request(key) if *key == 1),
+                ),
             },
         );
         Policy::handle(&mut pending, fetch(1, None));
@@ -456,14 +630,18 @@ mod tests {
         Policy::handle(
             &mut pending,
             Message::Retain {
-                predicate: Box::new(|key| *key != 1),
+                predicate: Box::new(
+                    |interest| !matches!(interest, Interest::Request(key) if *key == 1),
+                ),
             },
         );
         Policy::handle(&mut pending, Message::Clear);
         Policy::handle(
             &mut pending,
             Message::Retain {
-                predicate: Box::new(|key| *key != 2),
+                predicate: Box::new(
+                    |interest| !matches!(interest, Interest::Request(key) if *key == 2),
+                ),
             },
         );
 
@@ -473,7 +651,7 @@ mod tests {
         let Message::Retain { predicate } = &messages[1] else {
             panic!("expected retain");
         };
-        assert!(predicate(&1));
-        assert!(!predicate(&2));
+        assert!(predicate(Interest::Request(&1)));
+        assert!(!predicate(Interest::Request(&2)));
     }
 }

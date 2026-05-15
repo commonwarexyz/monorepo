@@ -81,7 +81,7 @@ mod tests {
         Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::Resolver;
+    use commonware_resolver::{Fetch, Interest, Resolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
@@ -1707,30 +1707,44 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Key = handler::Request<D>;
+        type Subscriber = handler::Request<D>;
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, _key: Self::Key) -> Feedback {
+        fn fetch<R>(&mut self, _request: R) -> Feedback
+        where
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
             Feedback::Ok
         }
 
-        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
+        fn fetch_all<R>(&mut self, _requests: Vec<R>) -> Feedback
+        where
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            key: Self::Key,
+            request: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((key, targets));
+            self.targeted.lock().push((request.into().request, targets));
             Feedback::Ok
         }
 
-        fn fetch_all_targeted(
+        fn fetch_all_targeted<R>(
             &mut self,
-            requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback {
-            self.targeted.lock().extend(requests);
+            requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.targeted.lock().extend(
+                requests
+                    .into_iter()
+                    .map(|(request, targets)| (request.into().request, targets)),
+            );
             Feedback::Ok
         }
 
@@ -1742,7 +1756,12 @@ mod tests {
             Feedback::Ok
         }
 
-        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
+        fn retain(
+            &mut self,
+            _predicate: impl for<'a> Fn(Interest<'a, Self::Key, Self::Subscriber>) -> bool
+                + Send
+                + 'static,
+        ) -> Feedback {
             Feedback::Ok
         }
     }

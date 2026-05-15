@@ -374,6 +374,7 @@ where
     where
         R: Resolver<
             Key = handler::Request<V::Commitment>,
+            Subscriber = handler::Request<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -390,6 +391,7 @@ where
     ) where
         R: Resolver<
             Key = handler::Request<V::Commitment>,
+            Subscriber = handler::Request<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -887,7 +889,7 @@ where
         round: Option<Round>,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -1331,7 +1333,7 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver);
@@ -1605,7 +1607,7 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
@@ -1717,7 +1719,7 @@ where
     fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;

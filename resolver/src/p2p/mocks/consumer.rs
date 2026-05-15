@@ -1,4 +1,4 @@
-use crate::Span;
+use crate::{Delivery, Span};
 use commonware_utils::channel::{fallible::FallibleExt, mpsc, oneshot};
 use std::collections::HashMap;
 
@@ -51,12 +51,18 @@ impl<K: Span, V: Clone + PartialEq> Consumer<K, V> {
 
 impl<K: Span, V: Clone + PartialEq + Send + 'static> crate::Consumer for Consumer<K, V> {
     type Key = K;
+    type Subscriber = K;
     type Value = V;
 
     /// Deliver data to the consumer.
     ///
     /// Returns `true` if the value is expected for the key or if there is no expected value.
-    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+    fn deliver(
+        &mut self,
+        delivery: Delivery<Self::Key, Self::Subscriber>,
+        value: Self::Value,
+    ) -> oneshot::Receiver<bool> {
+        let key = delivery.request;
         let (sender, receiver) = oneshot::channel();
         let valid = self.expected.get(&key).is_none_or(|v| v == &value);
         if valid {
