@@ -32,10 +32,14 @@ where
     P: Connected<PublicKey = S::PublicKey>,
 {
     sender: S,
-    rate_limit: Arc<Mutex<KeyedRateLimiter<S::PublicKey, E>>>,
+    state: Arc<Mutex<State<S::PublicKey, E>>>,
     peers: P,
-    peer_subscription: ring::Receiver<Vec<S::PublicKey>>,
-    known_peers: Vec<S::PublicKey>,
+}
+
+struct State<P: PublicKey, E: Clock> {
+    rate_limit: KeyedRateLimiter<P, E>,
+    peer_subscription: ring::Receiver<Vec<P>>,
+    known_peers: Vec<P>,
 }
 
 impl<E, S, P> Clone for LimitedSender<E, S, P>
@@ -47,10 +51,8 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            rate_limit: self.rate_limit.clone(),
+            state: self.state.clone(),
             peers: self.peers.clone(),
-            peer_subscription: self.peers.subscribe(),
-            known_peers: self.known_peers.clone(),
         }
     }
 }
@@ -62,8 +64,9 @@ where
     P: Connected<PublicKey = S::PublicKey>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let known_peers = self.state.lock().known_peers.len();
         f.debug_struct("LimitedSender")
-            .field("known_peers", &self.known_peers.len())
+            .field("known_peers", &known_peers)
             .finish_non_exhaustive()
     }
 }
@@ -76,17 +79,15 @@ where
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
-        let rate_limit = Arc::new(Mutex::new(KeyedRateLimiter::hashmap_with_clock(
-            quota, clock,
-        )));
-        let peer_subscription = peers.subscribe();
-        let known_peers = peers.peers();
+        let state = Arc::new(Mutex::new(State {
+            rate_limit: KeyedRateLimiter::hashmap_with_clock(quota, clock),
+            peer_subscription: peers.subscribe(),
+            known_peers: peers.peers(),
+        }));
         Self {
             sender,
-            rate_limit,
+            state,
             peers,
-            peer_subscription,
-            known_peers,
         }
     }
 
@@ -99,27 +100,21 @@ where
         &mut self,
         recipients: Recipients<S::PublicKey>,
     ) -> Result<CheckedSender<'_, S>, SystemTime> {
-        let mut updated_peers = false;
-        let mut latest = None;
-        while let Some(peers) = self.peer_subscription.next().now_or_never().flatten() {
-            latest = Some(peers);
-        }
-        if let Some(peers) = latest {
-            self.known_peers = peers;
-            updated_peers = true;
-        }
-        let rate_limit = self.rate_limit.lock();
-        if updated_peers {
-            rate_limit.retain_recent();
+        let mut state = self.state.lock();
+        if matches!(&recipients, Recipients::All) {
+            if let Some(peers) = state.peer_subscription.next().now_or_never().flatten() {
+                state.known_peers = peers;
+                state.rate_limit.retain_recent();
+            }
         }
 
         let recipients = match recipients {
-            Recipients::One(peer) => match rate_limit.check_key(&peer) {
+            Recipients::One(peer) => match state.rate_limit.check_key(&peer) {
                 Ok(()) => Recipients::One(peer),
                 Err(not_until) => return Err(not_until.earliest_possible()),
             },
             Recipients::Some(peers) => {
-                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &rate_limit);
+                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &state.rate_limit);
                 if allowed.is_empty() {
                     match max_retry {
                         Some(retry) => return Err(retry),
@@ -131,7 +126,7 @@ where
             }
             Recipients::All => {
                 let (allowed, max_retry) =
-                    filter_rate_limited(self.known_peers.iter(), &rate_limit);
+                    filter_rate_limited(state.known_peers.iter(), &state.rate_limit);
                 if allowed.is_empty() {
                     match max_retry {
                         Some(retry) => return Err(retry),
@@ -142,6 +137,7 @@ where
                 }
             }
         };
+        drop(state);
 
         Ok(CheckedSender {
             recipients,
@@ -227,6 +223,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic::Runner, IoBuf, Quota, Runner as _};
     use commonware_utils::{channel::ring, NZUsize, NZU32};
+    use futures::SinkExt;
     use thiserror::Error;
 
     type PublicKey = ed25519::PublicKey;
@@ -274,6 +271,12 @@ mod tests {
         peers: Vec<PublicKey>,
     }
 
+    #[derive(Clone)]
+    struct UpdatingPeers {
+        peers: Vec<PublicKey>,
+        receiver: Arc<Mutex<Option<ring::Receiver<Vec<PublicKey>>>>>,
+    }
+
     impl MockPeers {
         fn new() -> Self {
             Self { peers: Vec::new() }
@@ -294,6 +297,21 @@ mod tests {
         fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
             let (_sender, receiver) = ring::channel(NZUsize!(16));
             receiver
+        }
+    }
+
+    impl Connected for UpdatingPeers {
+        type PublicKey = PublicKey;
+
+        fn peers(&self) -> Vec<Self::PublicKey> {
+            self.peers.clone()
+        }
+
+        fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
+            self.receiver
+                .lock()
+                .take()
+                .expect("subscription should only be created once")
         }
     }
 
@@ -522,17 +540,27 @@ mod tests {
     }
 
     #[test]
-    fn clone_creates_independent_subscription() {
+    fn clone_shares_peer_updates() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let peers = MockPeers::with_peers(vec![key(1)]);
+            let initial = key(1);
+            let updated = key(2);
+            let (updates, receiver) = ring::channel(NZUsize!(1));
+            let peers = UpdatingPeers {
+                peers: vec![initial],
+                receiver: Arc::new(Mutex::new(Some(receiver))),
+            };
             let mut limited1 = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
-            // Clone gets its own subscription and starts from the same cached snapshot.
-            let limited2 = limited1.clone();
-            limited1.known_peers.clear();
-            assert!(limited1.known_peers.is_empty());
-            assert_eq!(limited2.known_peers, vec![key(1)]);
+            let mut limited2 = limited1.clone();
+            let mut updates = updates;
+            updates.send(vec![updated.clone()]).await.unwrap();
+
+            let checked = limited2.check(Recipients::All).unwrap();
+            assert_eq!(crate::CheckedSender::recipients(&checked), vec![updated]);
+
+            let checked = limited1.check(Recipients::All).unwrap();
+            assert_eq!(crate::CheckedSender::recipients(&checked), vec![key(2)]);
         });
     }
 

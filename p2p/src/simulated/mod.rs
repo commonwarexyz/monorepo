@@ -194,8 +194,8 @@ mod tests {
     };
     use commonware_macros::{select, test_group};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, IoBuf, Quota, Runner,
-        Spawner, Supervisor as _,
+        deterministic, reschedule, telemetry::metrics::count_running_tasks, Clock, IoBuf, Quota,
+        Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
         channel::mpsc,
@@ -289,28 +289,22 @@ mod tests {
                 }
             }
 
-            // Send messages
             context
                 .child("agent_sender")
                 .spawn(|mut context| async move {
                     // Sort agents for deterministic output
-                    let keys = agents.keys().collect::<Vec<_>>();
+                    let keys = agents.keys().cloned().collect::<Vec<_>>();
 
                     // Send messages
                     loop {
                         let index = context.gen_range(0..keys.len());
-                        let sender = keys[index];
+                        let sender = &keys[index];
                         let msg = format!("hello from {sender:?}");
                         let msg = IoBuf::copy_from_slice(msg.as_bytes());
-                        let mut message_sender = agents.get(sender).unwrap().clone();
-                        let sent = message_sender
-                            .send(Recipients::All, msg.clone(), false)
-                            .unwrap();
-                        if sender == &only_inbound {
-                            assert_eq!(sent.len(), 0);
-                        } else {
-                            assert_eq!(sent.len(), keys.len() - 1);
-                        }
+                        let message_sender = agents.get_mut(sender).unwrap();
+                        let sent = message_sender.send(Recipients::All, msg, false).unwrap();
+                        assert_eq!(sent.len(), keys.len() - 1);
+                        reschedule().await;
                     }
                 });
 
