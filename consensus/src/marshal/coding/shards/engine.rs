@@ -835,7 +835,11 @@ where
     ) {
         let commitment = shard.commitment();
         if let Ok(peers) = sender.send(Recipients::All, shard, true) {
-            debug!(?commitment, peers = peers.len(), "broadcasted shard to all peers");
+            debug!(
+                ?commitment,
+                peers = peers.len(),
+                "broadcasted shard to all peers"
+            );
         }
     }
 

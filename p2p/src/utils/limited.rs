@@ -18,6 +18,10 @@ pub trait Connected: Clone + Send + Sync + 'static {
     }
 
     /// Subscribe to peer updates.
+    ///
+    /// The receiver yields the current set of known peers whenever it changes.
+    /// New subscriptions should publish the current set promptly so callers do
+    /// not have to wait for the next membership change.
     fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>>;
 }
 
