@@ -734,7 +734,10 @@ mod tests {
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                !matches!(peer_rx.next().now_or_never(), Some(Some(peer::Message::Kill))),
+                !matches!(
+                    peer_rx.next().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
                 "no kill after handle has been cleared"
             );
         });

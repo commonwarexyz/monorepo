@@ -47,7 +47,10 @@ mod tests {
         mailbox.kill();
         mailbox.kill();
 
-        assert!(matches!(receiver.next().now_or_never(), Some(Some(Message::Kill))));
+        assert!(matches!(
+            receiver.next().now_or_never(),
+            Some(Some(Message::Kill))
+        ));
         assert!(receiver.next().now_or_never().is_none());
     }
 }

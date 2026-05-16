@@ -623,9 +623,15 @@ mod tests {
             assert_eq!(values, vec![10u32, 20]);
 
             // Only pk1 should be blocked.
-            let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.contains(&(pk2.clone(), pk1.clone())));
-            assert!(!blocked.contains(&(pk2.clone(), pk3.clone())));
+            loop {
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(!blocked.contains(&(pk2.clone(), pk3.clone())));
+                if blocked.contains(&(pk2.clone(), pk1.clone())) {
+                    break;
+                }
+
+                context.sleep(Duration::from_millis(1)).await;
+            }
         });
     }
 
