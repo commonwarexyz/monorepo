@@ -23,6 +23,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     collections::HashMap,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 
@@ -415,6 +416,8 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
                     let mailbox_size = mailbox_size.max(MIN_BUFFER_SIZE);
+                    let mailbox_size =
+                        NonZeroUsize::new(mailbox_size as usize).expect("mailbox size is non-zero");
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
                         FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
                     });
@@ -423,7 +426,7 @@ fn fuzz(input: FuzzInput) {
                         blocker: FuzzBlocker,
                         monitor,
                         handler,
-                        mailbox_size: (mailbox_size as usize),
+                        mailbox_size,
                         priority_request,
                         request_codec: RangeCfg::from(..=MAX_LEN),
                         priority_response,

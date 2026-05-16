@@ -1,4 +1,5 @@
 use clap::{value_parser, Arg, Command};
+use commonware_actor::mailbox::{self, Policy};
 use commonware_bridge::{
     types::{
         block::BlockFormat,
@@ -26,13 +27,9 @@ use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Listener, Network, Runner, Spawner, Supervisor as _};
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    ordered::Set,
-    union, TryCollect,
-};
+use commonware_utils::{channel::oneshot, ordered::Set, union, NZUsize, TryCollect};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -58,6 +55,14 @@ enum Message<D: Digest> {
         incoming: inbound::GetFinalization,
         response: oneshot::Sender<Option<Finalization<Scheme, D>>>,
     },
+}
+
+impl<D: Digest> Policy for Message<D> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        overflow.push_back(message);
+    }
 }
 
 fn main() {
@@ -152,7 +157,8 @@ fn main() {
         }
 
         // Create message handler
-        let (handler, mut receiver) = mpsc::unbounded_channel();
+        let (handler, mut receiver) =
+            mailbox::new(context.child("handler_mailbox"), NZUsize!(1024));
 
         // Start handler
         let mut hasher = Sha256::new();
@@ -292,12 +298,15 @@ fn main() {
                         match msg {
                             Inbound::PutBlock(msg) => {
                                 let (response, receiver) = oneshot::channel();
-                                handler
-                                    .send(Message::PutBlock {
-                                        incoming: msg,
-                                        response,
-                                    })
-                                    .expect("failed to send message");
+                                assert!(
+                                    handler
+                                        .enqueue(Message::PutBlock {
+                                            incoming: msg,
+                                            response,
+                                        })
+                                        .accepted(),
+                                    "failed to send message"
+                                );
                                 let success = receiver.await.expect("failed to receive response");
                                 let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(msg).await.is_err() {
@@ -307,12 +316,15 @@ fn main() {
                             }
                             Inbound::GetBlock(msg) => {
                                 let (response, receiver) = oneshot::channel();
-                                handler
-                                    .send(Message::GetBlock {
-                                        incoming: msg,
-                                        response,
-                                    })
-                                    .expect("failed to send message");
+                                assert!(
+                                    handler
+                                        .enqueue(Message::GetBlock {
+                                            incoming: msg,
+                                            response,
+                                        })
+                                        .accepted(),
+                                    "failed to send message"
+                                );
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
                                     Some(block) => {
@@ -333,12 +345,15 @@ fn main() {
                             }
                             Inbound::PutFinalization(msg) => {
                                 let (response, receiver) = oneshot::channel();
-                                handler
-                                    .send(Message::PutFinalization {
-                                        incoming: msg,
-                                        response,
-                                    })
-                                    .expect("failed to send message");
+                                assert!(
+                                    handler
+                                        .enqueue(Message::PutFinalization {
+                                            incoming: msg,
+                                            response,
+                                        })
+                                        .accepted(),
+                                    "failed to send message"
+                                );
                                 let success = receiver.await.expect("failed to receive response");
                                 let msg = Outbound::<Sha256Digest>::Success(success).encode();
                                 if sender.send(msg).await.is_err() {
@@ -348,12 +363,15 @@ fn main() {
                             }
                             Inbound::GetFinalization(msg) => {
                                 let (response, receiver) = oneshot::channel();
-                                handler
-                                    .send(Message::GetFinalization {
-                                        incoming: msg,
-                                        response,
-                                    })
-                                    .expect("failed to send message");
+                                assert!(
+                                    handler
+                                        .enqueue(Message::GetFinalization {
+                                            incoming: msg,
+                                            response,
+                                        })
+                                        .accepted(),
+                                    "failed to send message"
+                                );
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
                                     Some(data) => {

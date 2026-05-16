@@ -20,7 +20,6 @@ pub struct Config<H: Hasher> {
     /// Signing scheme for this network.
     pub scheme: Scheme,
 
-    /// Number of messages from consensus to hold in our backlog
-    /// before blocking.
+    /// Number of messages from consensus to hold in the ready backlog before requesting backoff.
     pub mailbox_size: NonZeroUsize,
 }

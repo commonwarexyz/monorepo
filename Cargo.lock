@@ -1167,6 +1167,7 @@ name = "commonware-collector"
 version = "2026.4.0"
 dependencies = [
  "anyhow",
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",

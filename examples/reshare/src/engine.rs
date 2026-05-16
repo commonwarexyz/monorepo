@@ -303,7 +303,7 @@ where
                 marshal: marshal_mailbox,
                 strategy: config.strategy.clone(),
                 muxer_size: MAILBOX_SIZE.get(),
-                mailbox_size: MAILBOX_SIZE.get(),
+                mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 _phantom: PhantomData,
             },

@@ -5,6 +5,7 @@ use crate::{
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
+use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
     simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
@@ -26,9 +27,9 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
+use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
@@ -51,7 +52,7 @@ where
     pub strategy: T,
 
     pub muxer_size: usize,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -74,7 +75,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
+    mailbox: ActorReceiver<Message<V, C::PublicKey>>,
     application: A,
 
     oracle: B,
@@ -109,7 +110,7 @@ where
         context: E,
         config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration

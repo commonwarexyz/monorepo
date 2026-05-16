@@ -4,6 +4,7 @@ use crate::{Handler, Monitor};
 
 mod engine;
 use commonware_p2p::Blocker;
+use std::num::NonZeroUsize;
 pub use engine::Engine;
 mod ingress;
 pub use ingress::{Mailbox, Message};
@@ -24,7 +25,7 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     pub handler: H,
 
     /// The size of the mailbox for sending and receiving messages.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Whether or not to send requests with priority over other network messages.
     pub priority_request: bool,
@@ -70,7 +71,7 @@ mod tests {
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
-    const MAILBOX_SIZE: usize = 1024;
+    const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(1024);
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),

@@ -6,6 +6,7 @@ use crate::{
     p2p::{Handler, Monitor},
     Error,
 };
+use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
@@ -15,10 +16,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc, oneshot},
-    futures::Pool,
-};
+use commonware_utils::{channel::{fallible::OneshotExt, oneshot}, futures::Pool};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
@@ -44,7 +42,7 @@ where
     // Message passing
     monitor: M,
     handler: H,
-    mailbox: mpsc::Receiver<Message<P, Rq>>,
+    mailbox: ActorReceiver<Message<P, Rq>>,
 
     // State
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
@@ -70,7 +68,7 @@ where
     /// Returns a tuple of the engine and the mailbox for sending messages.
     pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
-        let (tx, rx) = mpsc::channel(cfg.mailbox_size);
+        let (tx, rx) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
 
         // Create metrics

@@ -25,7 +25,6 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     /// Certificate verifier for the other network.
     pub other_network: Scheme,
 
-    /// Number of messages from consensus to hold in our backlog
-    /// before blocking.
+    /// Number of messages from consensus to hold in the ready backlog before requesting backoff.
     pub mailbox_size: NonZeroUsize,
 }
