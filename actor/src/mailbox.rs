@@ -40,6 +40,10 @@
 //! however, are not globally ordered and may be observed in any interleaving.
 
 use crate::Feedback;
+use commonware_runtime::{
+    telemetry::metrics::{Counter, MetricsExt as _},
+    Metrics,
+};
 use std::{
     collections::VecDeque,
     fmt,
@@ -368,6 +372,7 @@ impl Drop for Mutation<'_> {
 struct State<T: Policy> {
     ready: Ready<T>,
     overflow: OverflowState<T>,
+    backoff: Counter,
     closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
@@ -434,6 +439,11 @@ impl<T: Policy> Sender<T> {
         let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
             self.state.closed.load(Ordering::Acquire)
         });
+
+        // Record any backoff.
+        if feedback == Feedback::Backoff {
+            self.state.backoff.inc();
+        }
 
         // Wake on any handled enqueue because a receiver may have skipped
         // refill while this overflow mutation was active. By the time we wake,
@@ -530,10 +540,11 @@ impl<T: Policy> Drop for Receiver<T> {
 }
 
 /// Create a new bounded mailbox.
-pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let state = Arc::new(State {
         ready: Ready::new(capacity.get()),
         overflow: OverflowState::new(),
+        backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
         closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),
@@ -546,10 +557,52 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
+#[cfg(test)]
+mod mocks {
+    use commonware_runtime::{
+        telemetry::metrics::{Metric, Registered, Registration},
+        Metrics as RuntimeMetrics, Name, Supervisor,
+    };
+    use std::fmt;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct Metrics;
+
+    impl Supervisor for Metrics {
+        fn name(&self) -> Name {
+            Name::default()
+        }
+
+        fn child(&self, _label: &'static str) -> Self {
+            Self
+        }
+
+        fn with_attribute(self, _key: &'static str, _value: impl fmt::Display) -> Self {
+            self
+        }
+    }
+
+    impl RuntimeMetrics for Metrics {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            _name: N,
+            _help: H,
+            metric: M,
+        ) -> Registered<M> {
+            Registered::with_registration(metric, Registration::from(()))
+        }
+
+        fn encode(&self) -> String {
+            String::new()
+        }
+    }
+}
+
 #[cfg(all(test, not(feature = "loom")))]
 mod tests {
-    use super::*;
+    use super::{mocks, *};
     use commonware_macros::test_async;
+    use commonware_runtime::{deterministic, Runner as _, Supervisor};
     use commonware_utils::{channel::oneshot, NZUsize};
     use futures::{
         pin_mut,
@@ -561,6 +614,10 @@ mod tests {
         mpsc::TryRecvError,
         Arc,
     };
+
+    fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+        super::new(mocks::Metrics, capacity)
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Message {
@@ -704,6 +761,23 @@ mod tests {
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
+    }
+
+    #[test]
+    fn backoff_metric_counts_backoff_feedback() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
+            assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+            assert_eq!(sender.enqueue(Message::Buffered(3)), Feedback::Backoff);
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("mailbox_backoff_total 2"),
+                "missing backoff count in metrics: {buffer}"
+            );
+        });
     }
 
     #[test]
@@ -990,7 +1064,7 @@ mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::*;
+    use super::{mocks, *};
     use commonware_utils::NZUsize;
     use futures::pin_mut;
     use loom::{
@@ -1004,6 +1078,10 @@ mod loom_tests {
         future::Future,
         task::{RawWaker, RawWakerVTable, Waker},
     };
+
+    fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+        super::new(mocks::Metrics, capacity)
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Message {

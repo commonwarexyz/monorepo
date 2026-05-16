@@ -13,17 +13,17 @@
 //!
 //! # Pool Lifecycle
 //!
-//! Each tracked buffer keeps a strong reference to the originating size class.
-//! Buffers can outlive the public [`BufferPool`] handle and still return to
-//! their original size class.
+//! Tracked buffers held by pooled views or cached in thread-local bins keep a
+//! strong reference to the originating size class. Buffers can outlive the
+//! public [`BufferPool`] handle and still return to their original size class.
 //! - Untracked fallback allocations store no class reference and deallocate
 //!   directly when dropped.
 //! - Requests smaller than [`BufferPoolConfig::pool_min_size`] bypass pooling
 //!   entirely and return untracked aligned allocations from both
 //!   [`BufferPool::try_alloc`] and [`BufferPool::alloc`].
-//! - Dropping [`BufferPool`] drains only the shared global freelists,
-//!   checked-out buffers and buffers cached in a live thread's local cache can
-//!   keep their size class alive until they are dropped or the thread exits.
+//! - Dropping [`BufferPool`] drains only the shared global freelists, pooled
+//!   views and buffers cached in a live thread's local cache can keep their
+//!   size class alive until they are dropped or the thread exits.
 //!
 //! # Size Classes
 //!
@@ -59,7 +59,7 @@ use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
-    mem::align_of,
+    mem::{align_of, MaybeUninit},
     num::{NonZeroU32, NonZeroUsize},
     ptr,
     sync::{
@@ -159,10 +159,14 @@ pub struct BufferPoolConfig {
     /// Size-class slots are identified by `u32`, so the per-class capacity is
     /// capped by this type.
     pub max_per_class: NonZeroU32,
-    /// Whether to pre-allocate all buffers on pool creation.
+    /// Whether to create every tracked buffer during pool construction.
+    ///
+    /// When enabled, each size class creates `max_per_class` buffers and parks
+    /// them in the class-global freelist before the pool is returned. This
+    /// moves allocation cost to startup and makes the first reuse path avoid
+    /// heap allocation.
     pub prefill: bool,
     /// Buffer alignment. Must be a power of two.
-    /// Use `page_size()` for storage I/O and `cache_line_size()` for network I/O.
     pub alignment: NonZeroUsize,
     /// Expected number of threads concurrently accessing the pool.
     ///
@@ -458,9 +462,22 @@ impl PoolMetrics {
 /// - a shared global freelist for tracked buffers visible to all threads
 /// - a per-thread local cache for same-thread reuse
 ///
-/// The global freelist owns the allocation layout and slot reservation counter
-/// for the class. Checked-out buffers and TLS entries carry an [`Arc`] back to
-/// this size class so the freelist remains alive until those buffers return.
+/// The global freelist owns the allocation layout, slot reservation counter,
+/// and parking cells for this class. A tracked buffer can be globally parked,
+/// owned by a pooled backing, or parked in one thread's local cache, but the
+/// slot always belongs to this `SizeClass`.
+///
+/// Liveness follows the buffer ownership state. Global freelist entries rely on
+/// the pool's [`SizeClassHandle`] while the pool is alive and are drained when
+/// the pool is dropped. Pooled backing values carry a [`SizeClassLease`].
+/// Thread-local cache entries use banked strong references owned by the cache.
+/// Those non-global states are what allow a buffer to outlive the public
+/// [`BufferPool`] handle and still return to the correct freelist.
+///
+/// The freelist is the only place that deallocates tracked buffers. Returning a
+/// buffer to the freelist transfers buffer ownership back to that freelist and
+/// releases the pooled-backing lease or banked strong reference that kept the
+/// class alive while the buffer was outside the global freelist.
 ///
 /// Allocation prefers the local cache, then refills from the global freelist,
 /// and only creates a new tracked buffer when no free buffer is available and
@@ -483,8 +500,141 @@ unsafe impl Send for SizeClass {}
 // SAFETY: see above.
 unsafe impl Sync for SizeClass {}
 
-impl SizeClass {
-    /// Creates a new size class with the given parameters.
+/// Non-owning raw identity for a size class.
+///
+/// # Size-class lifetime model
+///
+/// A [`SizeClass`] owns the [`Freelist`] for one buffer size class. The
+/// freelist creates tracked [`PooledBuffer`]s, owns the allocation layout
+/// needed to deallocate them, and is the only place that releases their memory.
+/// A `PooledBuffer` outside the freelist does not carry enough information to
+/// deallocate itself, so it must keep its originating `SizeClass` alive until
+/// it can return to that freelist.
+///
+/// The pool has three buffer states, and those states determine where the
+/// strong size-class references live.
+///
+/// - Global freelist: the buffer is parked in [`SizeClass::global`] and carries
+///   no per-buffer strong reference. While the public pool exists, the
+///   [`SizeClassHandle`] in [`BufferPoolInner::classes`] keeps the class alive.
+/// - Pooled view: the buffer is owned by mutable or immutable I/O view state
+///   and carries one [`SizeClassLease`], which is one strong reference to the
+///   class.
+/// - Thread-local cache: the [`TlsSizeClassCache`] stores the
+///   [`SizeClassToken`] once, and owns one banked strong reference for each
+///   initialized [`TlsSizeClassCacheEntry`]. A banked reference is an owned
+///   `Arc<SizeClass>` reference counted by TLS cache state instead of
+///   represented by a `SizeClassLease` value in each entry. Increasing `len`
+///   banks one reference, decreasing `len` transfers one reference back into a
+///   `SizeClassLease` or releases it to the global freelist.
+///
+/// Moving a buffer from the global freelist to pooled view or TLS state retains
+/// one class reference. Moving it back to the global freelist releases that
+/// reference. Moving between pooled view and TLS state transfers the same
+/// reference without touching the refcount.
+///
+/// Dropping the public [`BufferPool`] drains globally parked buffers, then
+/// drops its `SizeClassHandle`s. Pooled views and non-empty TLS caches may keep
+/// the `SizeClass` alive after that point. Empty TLS caches may still remember
+/// a token value, but with no banked references that token is only an inert
+/// identity value and must not be dereferenced.
+///
+/// This is the one raw pointer shape used by all pool-owned, pooled view, and
+/// thread-local references to a [`SizeClass`]. The pointer is always derived
+/// from [`Arc::into_raw`].
+///
+/// `SizeClassToken` itself owns nothing. It is only an identity token and raw
+/// pointer accepted by the `Arc` refcount APIs:
+/// - [`SizeClassHandle`] pairs a token with ownership of one strong reference.
+/// - [`SizeClassLease`] pairs a token with ownership of one strong reference.
+/// - [`TlsSizeClassCache`] stores a token plus `len` banked strong references.
+///
+/// Because the token is non-owning, it may be stale when held by an empty TLS
+/// cache. Code may dereference it or adjust the strong count only when another
+/// invariant proves the allocation is still live. For example,
+/// [`SizeClassHandle`] and [`SizeClassLease`] prove liveness through owned
+/// strong references, and a non-empty [`TlsSizeClassCache`] proves liveness
+/// through its banked entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SizeClassToken {
+    ptr: ptr::NonNull<SizeClass>,
+}
+
+impl SizeClassToken {
+    /// Creates a token and owns the initial strong reference for `class`.
+    ///
+    /// The returned token is non-owning in the type system, but the raw pointer
+    /// still represents one strong reference. The caller must wrap it in an
+    /// owning type, such as [`SizeClassHandle`], or otherwise arrange for that
+    /// strong reference to be released.
+    fn new(class: SizeClass) -> Self {
+        let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
+        // SAFETY: `Arc::into_raw` never returns null.
+        let ptr = unsafe { ptr::NonNull::new_unchecked(ptr) };
+        Self { ptr }
+    }
+
+    /// Returns the referenced size class.
+    ///
+    /// # Safety
+    ///
+    /// Some owner must currently hold a strong reference for this token.
+    #[inline(always)]
+    const unsafe fn as_ref(&self) -> &SizeClass {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.ptr.as_ref() }
+    }
+
+    /// Retains one strong reference for this token.
+    ///
+    /// # Safety
+    ///
+    /// Some owner must currently hold a strong reference for this token.
+    #[inline(always)]
+    unsafe fn retain(self) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { Arc::increment_strong_count(self.ptr.as_ptr()) };
+    }
+
+    /// Releases one owned strong reference for this token.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own one strong reference represented by this token.
+    #[inline(always)]
+    unsafe fn release(self) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { Arc::decrement_strong_count(self.ptr.as_ptr()) };
+    }
+}
+
+/// Owning pool reference to a size class.
+///
+/// This is the pool's strong `Arc<SizeClass>` reference represented by a
+/// [`SizeClassToken`]. `SizeClassHandle` is the long-lived owner for a class
+/// while the [`BufferPoolInner`] exists. Dropping the handle releases that
+/// pool-owned strong reference. A class may still outlive the handle if pooled
+/// backing values or thread-local cache entries own additional references
+/// through [`SizeClassLease`] or banked TLS refs.
+///
+/// Functionally this is an `Arc<SizeClass>` stored in raw-token form. It exists
+/// to keep the pool-owned reference alive and to provide a live token for
+/// allocation paths that need to retain pooled-backing or TLS-banked
+/// references. The raw form keeps the already-loaded class pointer usable for
+/// explicit refcount operations without calling [`Arc::as_ptr`] or storing a
+/// second token alongside an `Arc`.
+struct SizeClassHandle {
+    token: SizeClassToken,
+}
+
+// SAFETY: `SizeClassHandle` owns a strong reference to a `SizeClass`, which is
+// `Send`.
+unsafe impl Send for SizeClassHandle {}
+// SAFETY: same argument as `Send`, shared access to `SizeClass` is synchronized.
+unsafe impl Sync for SizeClassHandle {}
+
+impl SizeClassHandle {
+    /// Creates a new size class and takes ownership of its initial strong ref.
     ///
     /// If `prefill` is true, the global freelist creates `max` buffers upfront
     /// and makes them immediately available for reuse.
@@ -499,35 +649,172 @@ impl SizeClass {
     ) -> Self {
         let layout = Layout::from_size_align(size, alignment).expect("alignment is a power of two");
         let freelist = Freelist::new(max, parallelism, layout, prefill);
-        Self {
+        let class = SizeClass {
             class_id,
             size,
             global: freelist,
             thread_cache_capacity,
+        };
+        Self {
+            token: SizeClassToken::new(class),
         }
     }
 
-    /// Returns the buffer size for this class.
-    #[inline]
-    pub(super) const fn size(&self) -> usize {
-        self.size
+    /// Creates a new tracked buffer and retains this size class for its slot.
+    #[inline(always)]
+    fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer, SizeClassLease)> {
+        let (slot, buffer) = self.global.try_create(zeroed)?;
+        let class = SizeClassLease::retain(self);
+        Some((slot, buffer, class))
+    }
+}
+
+impl Drop for SizeClassHandle {
+    fn drop(&mut self) {
+        // SAFETY: this handle owns one strong reference for `self.token`.
+        unsafe { self.token.release() };
+    }
+}
+
+impl std::ops::Deref for SizeClassHandle {
+    type Target = SizeClass;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: this handle owns one strong reference for `self.token`.
+        unsafe { self.token.as_ref() }
+    }
+}
+
+/// Owned size-class reference for a pooled buffer outside the global freelist.
+///
+/// A pooled buffer outside the global freelist must keep its originating
+/// [`SizeClass`] alive so it can be returned after the [`BufferPool`] handle is
+/// dropped. This is one strong `Arc<SizeClass>` reference represented by a
+/// [`SizeClassToken`], with retain and release performed explicitly at the
+/// boundaries where a buffer enters or leaves global pool state.
+///
+/// Lifetime-wise this is the same kind of reference as [`SizeClassHandle`]:
+/// both own exactly one strong reference for a token. The types are separate
+/// because they live in different state machines. `SizeClassHandle` is ordinary
+/// RAII ownership for the pool's class vector. `SizeClassLease` is hot-path
+/// pooled view ownership that must be explicitly transferred into TLS cache
+/// state or returned to the global freelist.
+///
+/// The raw representation matters because the hot path mostly transfers
+/// ownership between pooled view state and this thread's local cache. A real
+/// `Arc<SizeClass>` field is pointer-sized too, but it is a non-`Copy` value
+/// with drop glue. Even when the strong count would not change, moving it
+/// through pooled buffer and cache-entry structs makes the compiler preserve
+/// destructor paths for those structs. `SizeClassLease` has no automatic drop:
+/// moving between pooled view and local-cache state is a plain pointer
+/// transfer, and only explicit calls such as [`Self::return_global`] adjust the
+/// strong count.
+///
+/// A lease must be consumed by one of those explicit transitions, such as
+/// [`Self::into_banked`] or [`Self::return_global`]. Because this type
+/// intentionally has no `Drop` implementation, simply dropping a lease value
+/// would leak the strong reference. This keeps hot transfers free of drop glue,
+/// but means every owner must complete one of the explicit transitions.
+///
+/// Thread-local cache entries do not store a lease per entry. The cache stores
+/// the class token once and owns one banked strong reference for each
+/// initialized entry. Popping from the local cache materializes a lease from
+/// one of those banked references without touching the strong count.
+///
+/// Globally parked buffers do not carry a class reference: taking from the
+/// global freelist retains the class, and returning to the global freelist
+/// releases it.
+#[must_use]
+pub(crate) struct SizeClassLease {
+    token: SizeClassToken,
+}
+
+// SAFETY: `SizeClassLease` owns one strong reference to a `SizeClass`, which is
+// `Send`.
+unsafe impl Send for SizeClassLease {}
+// SAFETY: same argument as `Send`, shared access to `SizeClass` is synchronized.
+unsafe impl Sync for SizeClassLease {}
+
+impl SizeClassLease {
+    /// Converts one banked class reference into a lease.
+    ///
+    /// This does not retain the class. It only changes how an already-owned
+    /// strong reference is represented: from TLS cache state into a
+    /// `SizeClassLease` value.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own one banked strong reference for `class.token`, and
+    /// that retained reference must be transferred to the returned lease. This
+    /// must not consume the pool-owned reference held by `class` itself.
+    #[inline(always)]
+    const unsafe fn from_banked(class: &SizeClassHandle) -> Self {
+        Self { token: class.token }
+    }
+
+    /// Retains `class` for a buffer leaving the global freelist.
+    #[inline(always)]
+    fn retain(class: &SizeClassHandle) -> Self {
+        let token = class.token;
+        // SAFETY: the borrowed `class` owns one strong reference for `token`.
+        unsafe { token.retain() };
+        Self { token }
+    }
+
+    /// Transfers this lease into a TLS cache entry.
+    ///
+    /// This does not release the class. It consumes the lease and relies on the
+    /// caller to record one additional banked reference in TLS cache state,
+    /// normally by storing an entry and increasing the cache length. The cache
+    /// must later materialize or release exactly one lease for that entry.
+    ///
+    /// This is a no-op at runtime, it exists to mark the ownership transition.
+    #[inline(always)]
+    const fn into_banked(self) {}
+
+    /// Returns the referenced size class.
+    ///
+    /// The token is valid because `SizeClassLease` owns one strong reference.
+    #[inline(always)]
+    const fn class(&self) -> &SizeClass {
+        // SAFETY: guaranteed by the ownership invariant documented on
+        // `SizeClassLease`.
+        unsafe { self.token.as_ref() }
+    }
+
+    /// Returns the buffer size for this lease's size class.
+    #[inline(always)]
+    pub(crate) const fn size(&self) -> usize {
+        self.class().size
+    }
+
+    /// Returns a buffer to this class's global freelist and releases the class
+    /// reference.
+    ///
+    /// The buffer is parked before the strong reference is released. If this is
+    /// the last outstanding reference after the public pool has been dropped,
+    /// dropping the `SizeClass` will then drain the just-parked buffer.
+    #[inline(always)]
+    fn return_global(self, slot: u32, buffer: PooledBuffer) {
+        self.class().global.put(slot, buffer);
+        // SAFETY: this lease owns one strong reference.
+        unsafe { self.token.release() };
     }
 }
 
 /// Free tracked buffer owned by a thread-local size-class cache.
 ///
-/// This is allocator cache state, not a checked-out buffer. While an entry is
-/// held here, the buffer is owned by the current thread and is not visible to
-/// the class-global freelist.
+/// This is allocator cache state, not a caller-visible pooled view. While an
+/// entry is held here, the buffer is owned by the current thread and is not
+/// visible to the class-global freelist.
 ///
-/// The `slot` identifies the buffer within its [`SizeClass`]. The cached
-/// [`Arc<SizeClass>`] is moved back into a checked-out pooled buffer on a local
-/// hit, and is also what lets spill and thread-exit drop paths return the
-/// buffer to the correct class-global freelist even if the originating
-/// [`BufferPool`] handle has already been dropped.
+/// The `slot` identifies the buffer within its [`SizeClass`]. The enclosing
+/// cache owns one banked size-class reference for this entry. The entry itself
+/// intentionally stores only `(buffer, slot)` so local pop/push does not move a
+/// class pointer per buffer.
 struct TlsSizeClassCacheEntry {
     buffer: PooledBuffer,
-    class: Arc<SizeClass>,
     slot: u32,
 }
 
@@ -539,58 +826,111 @@ struct TlsSizeClassCacheEntry {
 /// returning them to the global freelist happens only on miss refill, overflow,
 /// explicit flush, or thread exit.
 ///
+/// `class` is a non-owning token for this cache's size class. It can be stale
+/// while `len == 0`, because an empty cache does not keep its pool alive. When
+/// `len > 0`, each initialized entry in `entries[..len]` owns one banked
+/// size-class reference, which keeps the pointed-to class alive. The entry
+/// itself stays small (`buffer, slot`), popping it materializes a
+/// [`SizeClassLease`] from one banked reference.
+///
+/// As described in [`SizeClassToken`], a banked reference is represented by
+/// cache state rather than by a value stored in the entry. Changing `len` is
+/// therefore an ownership transition as well as a stack operation.
+///
+/// An empty cache may keep a stale token only for identity checks. It must not
+/// dereference the token or adjust its strong count until a live
+/// [`SizeClassHandle`], [`SizeClassLease`], or banked entry proves the class is
+/// still alive.
+///
 /// The hot steady-state allocation path pops an entry from `entries`, and the
 /// hot return path pushes one back while there is room.
 struct TlsSizeClassCache {
-    entries: Vec<TlsSizeClassCacheEntry>,
+    class: SizeClassToken,
+    entries: Box<[MaybeUninit<TlsSizeClassCacheEntry>]>,
+    len: usize,
     capacity: usize,
 }
 
 impl TlsSizeClassCache {
     /// Creates a new empty cache with the given maximum thread-cache size.
-    fn new(capacity: usize) -> Self {
+    ///
+    /// The cache stores `class` for identity, but starts with `len == 0` and
+    /// therefore owns no banked size-class references.
+    fn new(class: SizeClassToken, capacity: usize) -> Self {
+        let entries = (0..capacity)
+            .map(|_| MaybeUninit::uninit())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
-            entries: Vec::with_capacity(capacity),
+            class,
+            entries,
+            len: 0,
             capacity,
         }
     }
 
-    /// Removes and returns one reusable buffer.
+    /// Removes and returns one reusable buffer entry.
     ///
     /// Local hits are served directly from the cache. On a local miss, small
     /// caches take only the buffer being returned to the caller. Larger caches
     /// batch-take from the global freelist, return the first claimed buffer,
     /// and retain the rest locally for future allocations.
+    ///
+    /// The returned lease is materialized from the banked size-class reference
+    /// associated with the returned entry.
     #[inline(always)]
-    fn pop(&mut self, class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
-        // Serve local hits without touching shared state.
-        if let Some(entry) = self.entries.pop() {
-            return Some(entry);
+    fn pop(&mut self, class: &SizeClassHandle) -> Option<(TlsSizeClassCacheEntry, SizeClassLease)> {
+        if let Some(entry) = self.pop_local() {
+            // SAFETY: the popped entry consumed one banked reference owned by
+            // this cache. Transfer that reference to the returned lease.
+            let lease = unsafe { SizeClassLease::from_banked(class) };
+            return Some((entry, lease));
         }
 
-        // Refill from the global freelist on a local miss.
-        self.pop_miss(class)
+        // Take from the class-global freelist on a local miss.
+        self.pop_global(class)
     }
 
-    /// Handles a local-cache miss by taking from the class-global freelist.
+    /// Removes and returns one entry from this thread's local stack.
     ///
-    /// This is separate from [`Self::pop`] so the steady-state allocation hot path
-    /// can inline only the local cache hit. We annotate with `inline(never)` to keep
-    /// the refill and batching code out of `BufferPoolInner::try_alloc`, reducing
-    /// hot-path code size and register pressure.
+    /// This touches only thread-local cache state. A returned entry consumes
+    /// one banked size-class reference from this cache, the caller must
+    /// materialize or release that reference.
+    #[inline(always)]
+    fn pop_local(&mut self) -> Option<TlsSizeClassCacheEntry> {
+        if self.len == 0 {
+            return None;
+        }
+
+        self.len -= 1;
+        // SAFETY: entries in `0..self.len` are initialized. Decrementing `len`
+        // above makes this slot uninitialized again.
+        Some(unsafe { self.entries.get_unchecked(self.len).assume_init_read() })
+    }
+
+    /// Takes from the class-global freelist after the local stack misses.
+    ///
+    /// Every claimed global entry gets one retained class reference. The first
+    /// claimed entry is returned with that reference materialized as a
+    /// [`SizeClassLease`], additional claimed entries are parked in this cache
+    /// and counted by `len`.
+    ///
+    /// This is separate from [`Self::pop`] so the steady-state allocation hot
+    /// path can inline only the local cache hit. We annotate with `inline(never)`
+    /// to keep the refill and batching code out of `BufferPoolInner::try_alloc`,
+    /// reducing hot-path code size and register pressure.
     #[inline(never)]
-    fn pop_miss(&mut self, class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
-        // Tiny caches do not batch enough to justify the wider global
-        // claim. Keep their miss path equivalent to a single take.
+    fn pop_global(
+        &mut self,
+        class: &SizeClassHandle,
+    ) -> Option<(TlsSizeClassCacheEntry, SizeClassLease)> {
+        // Tiny caches do not batch enough to justify the wider global claim.
+        // Keep their miss path equivalent to a single take.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
-            return class
-                .global
-                .take()
-                .map(|(slot, buffer)| TlsSizeClassCacheEntry {
-                    buffer,
-                    class: class.clone(),
-                    slot,
-                });
+            return class.global.take().map(|(slot, buffer)| {
+                let lease = SizeClassLease::retain(class);
+                (TlsSizeClassCacheEntry { buffer, slot }, lease)
+            });
         }
 
         // Refill larger caches to half capacity. That leaves room for future
@@ -599,21 +939,19 @@ impl TlsSizeClassCache {
         let mut entry = None;
         let take = self.capacity / 2;
         class.global.take_batch(take, |slot, buffer| {
-            let cache_entry = TlsSizeClassCacheEntry {
-                buffer,
-                class: class.clone(),
-                slot,
-            };
-
+            // Each claimed global entry becomes either the returned lease or a
+            // local cache entry, so each needs one retained class reference.
+            let cache_entry = TlsSizeClassCacheEntry { buffer, slot };
+            let lease = SizeClassLease::retain(class);
             if entry.is_none() {
                 // Hand the first claimed buffer to the allocation that missed
                 // locally. Additional claimed buffers refill the local cache.
-                entry = Some(cache_entry);
+                entry = Some((cache_entry, lease));
             } else {
-                // The take count is derived from the target occupancy, so refill
-                // cannot overflow the local cache. Push directly to avoid the
-                // spill checks used by return-to-cache.
-                self.entries.push(cache_entry);
+                // The take count is derived from the target occupancy, so
+                // refill cannot overflow the local cache. Push directly to
+                // avoid the spill checks used by return-to-cache.
+                self.push_local(cache_entry, lease);
             }
         });
 
@@ -623,60 +961,110 @@ impl TlsSizeClassCache {
     /// Pushes an entry into the local cache, spilling to global if full.
     ///
     /// Small local caches prioritize same-thread locality and route overflow
-    /// directly to the global freelist. Once the local cache is large enough
-    /// to batch effectively, half the entries are drained to amortize global
-    /// queue traffic across future returns.
+    /// directly to the global freelist. Once the local cache is large enough to
+    /// batch effectively, half the entries are drained to amortize global queue
+    /// traffic across future returns.
     #[inline(always)]
-    fn push(&mut self, entry: TlsSizeClassCacheEntry) {
-        // Preserve same-thread locality while the cache still has room.
-        if self.entries.len() < self.capacity {
-            self.entries.push(entry);
+    fn push(&mut self, lease: SizeClassLease, slot: u32, buffer: PooledBuffer) {
+        let entry = TlsSizeClassCacheEntry { buffer, slot };
+
+        if self.len < self.capacity {
+            // Keep the returned entry local while there is room.
+            self.push_local(entry, lease);
             return;
         }
 
-        // Spill to the global freelist when the local cache is full.
-        self.push_full(entry);
+        // Handle overflow when the local stack is full.
+        self.push_full(entry, lease);
     }
 
-    /// Handles a full local cache by returning entries to the global freelist.
+    /// Pushes one entry onto this thread's local stack.
     ///
-    /// This is separate from [`Self::push`] so the steady-state return hot path can
-    /// inline only the local cache push. We annotate with `inline(never)` to keep the
-    /// spill and batching code out of pooled buffer drop, which keeps that hot frame
-    /// small when the local cache has room.
+    /// The caller must ensure the stack has room. `lease` becomes the banked
+    /// size-class reference represented by `entry`.
+    #[inline(always)]
+    fn push_local(&mut self, entry: TlsSizeClassCacheEntry, lease: SizeClassLease) {
+        lease.into_banked();
+
+        // SAFETY: the caller ensured `self.len < self.capacity`, so this slot
+        // is in bounds and currently uninitialized.
+        unsafe {
+            self.entries.get_unchecked_mut(self.len).write(entry);
+        }
+        self.len += 1;
+    }
+
+    /// Handles a push after the local stack fills.
+    ///
+    /// Very small caches return the incoming entry directly to the global
+    /// freelist. Larger caches spill older local entries in a batch, then keep
+    /// the incoming entry local so the dropping thread retains the freshest
+    /// buffer.
+    ///
+    /// This is separate from [`Self::push`] so the steady-state return hot path
+    /// can inline only the local cache push. We annotate with `inline(never)`
+    /// to keep the spill and batching code out of pooled buffer drop when the
+    /// local cache has room.
     #[inline(never)]
-    fn push_full(&mut self, entry: TlsSizeClassCacheEntry) {
+    fn push_full(&mut self, entry: TlsSizeClassCacheEntry, lease: SizeClassLease) {
         // Very small caches cannot spill enough entries to amortize a batch
         // insert, so overflow goes straight to the global freelist.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
-            entry.class.global.put(entry.slot, entry.buffer);
+            lease.return_global(entry.slot, entry.buffer);
             return;
         }
 
         // Spill half the cache to global to make room.
-        let spill = self.entries.len().min(self.capacity / 2).max(1);
-        let split = self.entries.len() - spill;
-        entry.class.global.put_batch(
-            self.entries
-                .drain(split..)
-                .map(|spilled| (spilled.slot, spilled.buffer)),
-        );
+        let spill = self.len.min(self.capacity / 2).max(1);
+        let end = self.len;
+        let start = end - spill;
+        // Stop tracking slots before moving them out.
+        self.len = start;
 
-        self.entries.push(entry);
+        lease
+            .class()
+            .global
+            .put_batch((start..end).rev().map(|index| {
+                // SAFETY: `start..end` was initialized before `len` was lowered
+                // to `start`. Reading each slot moves it out and leaves the
+                // slot uninitialized.
+                let entry = unsafe { self.entries.as_mut_ptr().add(index).read().assume_init() };
+                // SAFETY: this drained entry carried one banked reference. The
+                // incoming class lease keeps the size class live while
+                // `put_batch` parks the spilled entries.
+                unsafe { self.class.release() };
+                (entry.slot, entry.buffer)
+            }));
+
+        // Keep the incoming entry local after making room.
+        self.push_local(entry, lease);
     }
 }
 
 impl Drop for TlsSizeClassCache {
     fn drop(&mut self) {
-        let Some(entry) = self.entries.pop() else {
+        if self.len == 0 {
             return;
-        };
-        entry.class.global.put_batch(
-            self.entries
-                .drain(..)
-                .map(|entry| (entry.slot, entry.buffer))
-                .chain(std::iter::once((entry.slot, entry.buffer))),
-        );
+        }
+
+        let entries = self.entries.as_mut_ptr();
+        // SAFETY: each initialized entry carries one banked class reference out
+        // of this cache. Because `self.len > 0`, those references keep `class`
+        // live while the entries are parked.
+        unsafe { self.class.as_ref() }
+            .global
+            .put_batch((0..self.len).rev().map(move |index| {
+                // SAFETY: `0..self.len` is initialized. Reading each slot moves
+                // it out and leaves the slot uninitialized.
+                let entry = unsafe { entries.add(index).read().assume_init() };
+                (entry.slot, entry.buffer)
+            }));
+
+        for _ in 0..self.len {
+            // SAFETY: each drained entry was returned to the global freelist,
+            // so its banked reference can be released.
+            unsafe { self.class.release() };
+        }
     }
 }
 
@@ -692,6 +1080,10 @@ impl Drop for TlsSizeClassCache {
 /// entry is a [`TlsSizeClassCache`] for that global size class. Missing entries
 /// mean this thread has not used that size class yet. Holes can remain for the
 /// lifetime of the thread because class ids are monotonic and never reused.
+/// Empty initialized caches can also remain after their pool has been dropped.
+/// Their class token is inert while the cache is empty. If the class is still
+/// live because a pooled buffer is outstanding, a later return of that buffer to
+/// this same thread can bank a fresh reference and make the cache usable again.
 ///
 /// We intentionally use `Vec<Option<...>>` because class ids are dense enough
 /// for direct indexing to be cheaper than hashing, but a thread may initialize
@@ -707,16 +1099,26 @@ impl TlsSizeClassCaches {
         Self { bins: Vec::new() }
     }
 
-    /// Returns the cache for `class_id`, creating it lazily on first use.
+    /// Returns the cache for the given class, creating it lazily on first use.
+    ///
+    /// The caller must provide a live token from a [`SizeClassHandle`] or
+    /// [`SizeClassLease`]. A missing cache copies that token for identity only
+    /// and starts with no banked references. The first local push or global
+    /// refill is what banks references for entries in that cache.
     #[inline(always)]
-    fn get_or_init(&mut self, class_id: usize, capacity: usize) -> &mut TlsSizeClassCache {
+    fn get_or_init(
+        &mut self,
+        class: SizeClassToken,
+        class_id: usize,
+        capacity: usize,
+    ) -> &mut TlsSizeClassCache {
         if class_id < self.bins.len() && self.bins[class_id].is_some() {
             return self.bins[class_id]
                 .as_mut()
                 .expect("class cache was checked as initialized");
         }
 
-        self.init(class_id, capacity)
+        self.init(class, class_id, capacity)
     }
 
     /// Initializes and returns the cache for `class_id`.
@@ -726,11 +1128,22 @@ impl TlsSizeClassCaches {
     /// `inline(never)` to keep the resize and allocation path out of pooled
     /// allocation and drop.
     #[inline(never)]
-    fn init(&mut self, class_id: usize, capacity: usize) -> &mut TlsSizeClassCache {
+    fn init(
+        &mut self,
+        class: SizeClassToken,
+        class_id: usize,
+        capacity: usize,
+    ) -> &mut TlsSizeClassCache {
         if class_id >= self.bins.len() {
             self.bins.resize_with(class_id + 1, || None);
         }
-        self.bins[class_id].get_or_insert_with(|| TlsSizeClassCache::new(capacity))
+        self.bins[class_id].get_or_insert_with(|| TlsSizeClassCache::new(class, capacity))
+    }
+
+    /// Returns an initialized cache without creating a missing one.
+    #[inline(always)]
+    fn get(&mut self, class_id: usize) -> Option<&mut TlsSizeClassCache> {
+        self.bins.get_mut(class_id).and_then(Option::as_mut)
     }
 }
 
@@ -751,6 +1164,12 @@ impl Drop for TlsSizeClassCaches {
 /// main TLS key owns the registry. It has a destructor, so thread exit drops
 /// the registry and each `TlsSizeClassCache` flushes its remaining entries to
 /// the class-global freelist.
+///
+/// Steady-state allocation and return first read `TLS_SIZE_CLASS_CACHES_FAST`.
+/// If it points at this thread's registry and the requested class cache is
+/// initialized, the caller touches only thread-local memory. Missing TLS state
+/// routes through `cache_slow` or `push_slow`, which access the owning TLS key,
+/// install the fast pointer, and lazily initialize the class cache.
 ///
 /// Rust's access path for TLS values with destructors includes checks for
 /// access during or after destruction. Those checks are correct, but they are
@@ -791,109 +1210,148 @@ impl BufferPoolThreadCache {
 
     /// Returns a buffer to the current thread's local cache for the given
     /// size class, spilling to the global freelist if the cache is full.
+    ///
+    /// The hot path uses only an already-initialized cache from the fast TLS
+    /// pointer. If the fast pointer is missing, or this thread has not
+    /// initialized the size class yet, [`Self::push_slow`] performs the checked
+    /// TLS access and creates the local cache. The returned lease is live proof
+    /// that initialization is safe. During thread-local teardown, checked TLS
+    /// access can fail, in that case the buffer falls back to the global
+    /// freelist.
     #[inline(always)]
-    pub(super) fn push(class: Arc<SizeClass>, slot: u32, buffer: PooledBuffer) {
+    pub(super) fn push(lease: SizeClassLease, slot: u32, buffer: PooledBuffer) {
+        let class = lease.class();
         if class.thread_cache_capacity == 0 {
-            class.global.put(slot, buffer);
+            lease.return_global(slot, buffer);
             return;
         }
 
+        let caches = Self::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| fast.get());
+        if !caches.is_null() {
+            // SAFETY: the fast pointer is set only from this thread's
+            // `TLS_SIZE_CLASS_CACHES` value and cleared before that value
+            // drops.
+            if let Some(cache) = unsafe { (&mut *caches).get(class.class_id) } {
+                cache.push(lease, slot, buffer);
+                return;
+            }
+        }
+
+        Self::push_slow(lease, slot, buffer);
+    }
+
+    /// Returns a buffer to the current thread's local cache after the fast
+    /// lookup misses.
+    ///
+    /// This is called when the fast TLS pointer is not initialized, or when
+    /// that pointer exists but this size class has no local cache yet. It
+    /// installs the fast TLS pointer after successfully accessing the owning
+    /// TLS key, then initializes the size-class cache if needed.
+    ///
+    /// This is separate from [`Self::push`] so the steady-state return hot path
+    /// only contains the initialized-cache lookup and local push.
+    #[inline(never)]
+    fn push_slow(lease: SizeClassLease, slot: u32, buffer: PooledBuffer) {
         // Returning a pooled buffer can happen from arbitrary Drop code,
         // including during thread-local destruction. If the local cache is
         // unavailable, fall back to the global freelist instead of panicking.
-        match Self::cache(class.class_id, class.thread_cache_capacity) {
+        match Self::TLS_SIZE_CLASS_CACHES
+            .try_with(|caches| {
+                let class = lease.class();
+                let caches = caches.get();
+
+                // Publish the checked owner TLS address to the fast key.
+                Self::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| fast.set(caches));
+
+                // SAFETY: this TLS value is only ever accessed by the current thread.
+                ptr::NonNull::from(unsafe {
+                    (&mut *caches).get_or_init(
+                        lease.token,
+                        class.class_id,
+                        class.thread_cache_capacity,
+                    )
+                })
+            })
+            .ok()
+        {
             Some(mut cache) => {
                 // SAFETY: `cache` points to this thread's initialized TLS cache.
-                unsafe {
-                    cache.as_mut().push(TlsSizeClassCacheEntry {
-                        buffer,
-                        class,
-                        slot,
-                    });
-                }
+                unsafe { cache.as_mut().push(lease, slot, buffer) };
             }
-            None => class.global.put(slot, buffer),
+            None => lease.return_global(slot, buffer),
         }
     }
 
     /// Takes a buffer from the current thread's local cache for the given
     /// size class, refilling from the global freelist if the cache is empty.
     ///
-    /// The local cache is checked first. On a local miss, the global freelist
-    /// is queried once. The first claimed buffer is returned to the caller, and
-    /// any additional claimed buffers are appended directly to the local cache.
+    /// The hot path uses only an already-initialized cache from the fast TLS
+    /// pointer. On a local miss, the global freelist is queried once. The first
+    /// claimed buffer is returned to the caller, and any additional claimed
+    /// buffers are appended directly to the local cache.
     #[inline(always)]
-    fn pop(class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
+    fn pop(class: &SizeClassHandle) -> Option<(PooledBuffer, SizeClassLease, u32)> {
         if class.thread_cache_capacity == 0 {
             return class
                 .global
                 .take()
-                .map(|(slot, buffer)| TlsSizeClassCacheEntry {
-                    buffer,
-                    class: class.clone(),
-                    slot,
-                });
+                .map(|(slot, buffer)| (buffer, SizeClassLease::retain(class), slot));
         }
 
-        // Allocation can happen from caller-owned TLS destructors during thread
-        // teardown. If the local cache is unavailable, fall back to the global
-        // freelist instead of panicking.
-        #[allow(clippy::option_if_let_else)]
-        match Self::cache(class.class_id, class.thread_cache_capacity) {
-            Some(mut cache) => {
-                // SAFETY: `cache` points to this thread's initialized TLS cache.
-                unsafe { cache.as_mut().pop(class) }
-            }
-            None => class
-                .global
-                .take()
-                .map(|(slot, buffer)| TlsSizeClassCacheEntry {
-                    buffer,
-                    class: class.clone(),
-                    slot,
-                }),
-        }
-    }
-
-    /// Returns the current thread's local cache for `class_id`.
-    ///
-    /// The raw fast path serves steady-state accesses and initializes missing
-    /// size-class caches when the registry pointer is already available. The
-    /// checked TLS path is only needed when this thread has not stored the raw
-    /// registry pointer yet.
-    #[inline(always)]
-    fn cache(class_id: usize, capacity: usize) -> Option<ptr::NonNull<TlsSizeClassCache>> {
         let caches = Self::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| fast.get());
         if !caches.is_null() {
             // SAFETY: the fast pointer is set only from this thread's
             // `TLS_SIZE_CLASS_CACHES` value and cleared before that value
             // drops.
-            return Some(ptr::NonNull::from(unsafe {
-                (&mut *caches).get_or_init(class_id, capacity)
-            }));
+            if let Some(cache) = unsafe { (&mut *caches).get(class.class_id) } {
+                return cache
+                    .pop(class)
+                    .map(|(entry, lease)| (entry.buffer, lease, entry.slot));
+            }
         }
 
-        Self::cache_slow(class_id, capacity)
+        // Resolve the cache and fall back to the global freelist if
+        // unavailable.
+        let Some(mut cache) = Self::cache_slow(class) else {
+            return class
+                .global
+                .take()
+                .map(|(slot, buffer)| (buffer, SizeClassLease::retain(class), slot));
+        };
+
+        // SAFETY: `cache` points to this thread's initialized TLS cache.
+        unsafe { cache.as_mut() }
+            .pop(class)
+            .map(|(entry, lease)| (entry.buffer, lease, entry.slot))
     }
 
-    /// Initializes the TLS fast path, then returns the local cache.
+    /// Resolves the local cache after the fast TLS or class-cache lookup
+    /// misses.
     ///
-    /// This runs once per thread, when [`Self::cache`] finds no cached registry
-    /// pointer. It goes through the checked owner TLS key, stores the registry
-    /// pointer in [`Self::TLS_SIZE_CLASS_CACHES_FAST`], and then initializes the
-    /// requested size-class cache if needed. We annotate with `inline(never)` to
-    /// keep that one-time setup out of pooled allocation and drop.
+    /// This is called when the fast TLS pointer is not initialized, or when
+    /// that pointer exists but this size class has no local cache yet. It
+    /// installs the fast TLS pointer after successfully accessing the owning
+    /// TLS key, then initializes the size-class cache if needed.
     #[inline(never)]
-    fn cache_slow(class_id: usize, capacity: usize) -> Option<ptr::NonNull<TlsSizeClassCache>> {
-        // The owning TLS key has a destructor, so it can be unavailable during
-        // thread-local teardown.
+    fn cache_slow(class: &SizeClassHandle) -> Option<ptr::NonNull<TlsSizeClassCache>> {
+        // Allocation can happen from caller-owned TLS destructors during thread
+        // teardown. Return `None` instead of panicking if the owning TLS key is
+        // unavailable.
         Self::TLS_SIZE_CLASS_CACHES
             .try_with(|caches| {
                 let caches = caches.get();
+
+                // Publish the checked owner TLS address to the fast key.
                 Self::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| fast.set(caches));
 
                 // SAFETY: this TLS value is only ever accessed by the current thread.
-                ptr::NonNull::from(unsafe { (&mut *caches).get_or_init(class_id, capacity) })
+                ptr::NonNull::from(unsafe {
+                    (&mut *caches).get_or_init(
+                        class.token,
+                        class.class_id,
+                        class.thread_cache_capacity,
+                    )
+                })
             })
             .ok()
     }
@@ -903,19 +1361,24 @@ impl BufferPoolThreadCache {
 struct Allocation {
     buffer: PooledBuffer,
     is_new: bool,
-    class: Arc<SizeClass>,
+    lease: SizeClassLease,
     slot: u32,
 }
 
 /// Internal state of the buffer pool.
 pub(crate) struct BufferPoolInner {
     config: BufferPoolConfig,
-    classes: Vec<Arc<SizeClass>>,
+    classes: Vec<SizeClassHandle>,
     metrics: PoolMetrics,
 }
 
 impl Drop for BufferPoolInner {
     fn drop(&mut self) {
+        // The public pool is going away. Drain globally parked buffers while
+        // the pool-owned class handles are still live. Pooled views and live
+        // TLS cache entries own their own size-class references, if they return
+        // later, they will park their buffer and release the reference that kept
+        // the class alive.
         for class in &self.classes {
             class.global.drain();
         }
@@ -940,12 +1403,12 @@ impl BufferPoolInner {
 
         // Reuse path: try the thread-local cache first, then the global
         // freelist with batch refill when the local cache is large enough.
-        if let Some(entry) = BufferPoolThreadCache::pop(class) {
+        if let Some((buffer, lease, slot)) = BufferPoolThreadCache::pop(class) {
             return Some(Allocation {
-                buffer: entry.buffer,
+                buffer,
                 is_new: false,
-                class: entry.class,
-                slot: entry.slot,
+                lease,
+                slot,
             });
         }
 
@@ -959,11 +1422,11 @@ impl BufferPoolInner {
     /// path can inline the TLS hit without also carrying slot reservation,
     /// metrics, and heap-allocation code.
     #[inline(never)]
-    fn try_alloc_new(&self, class: &Arc<SizeClass>, zeroed: bool) -> Option<Allocation> {
+    fn try_alloc_new(&self, class: &SizeClassHandle, zeroed: bool) -> Option<Allocation> {
         let label = SizeClassLabel {
             size_class: class.size as u64,
         };
-        let Some((slot, buffer)) = class.global.try_create(zeroed) else {
+        let Some((slot, buffer, lease)) = class.try_create(zeroed) else {
             self.metrics.exhausted_total.get_or_create(&label).inc();
             return None;
         };
@@ -972,7 +1435,7 @@ impl BufferPoolInner {
         Some(Allocation {
             buffer,
             is_new: true,
-            class: class.clone(),
+            lease,
             slot,
         })
     }
@@ -980,9 +1443,9 @@ impl BufferPoolInner {
 
 /// A pool of reusable, aligned buffers.
 ///
-/// Buffers are organized into power-of-two size classes. When a buffer is requested,
-/// the smallest size class that fits is used. Buffers are automatically returned to
-/// the pool when dropped.
+/// Buffers are organized into power-of-two size classes. When a buffer is
+/// requested, the smallest size class that fits is used. Pooled buffers are
+/// automatically returned when their final owning view is dropped.
 ///
 /// # Alignment
 ///
@@ -1037,7 +1500,7 @@ impl BufferPool {
         for i in 0..num_classes {
             let size = BufferPoolConfig::class_size(config.min_size.get(), i);
             let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
-            let class = Arc::new(SizeClass::new(
+            let class = SizeClassHandle::new(
                 class_id,
                 size,
                 config.alignment.get(),
@@ -1045,7 +1508,7 @@ impl BufferPool {
                 config.parallelism,
                 thread_cache_capacity,
                 config.prefill,
-            ));
+            );
             classes.push(class);
         }
 
@@ -1105,7 +1568,7 @@ impl BufferPool {
         class_index
     }
 
-    /// Attempts to allocate a pooled buffer.
+    /// Attempts to allocate a buffer without falling back on pool miss.
     ///
     /// Unlike [`Self::alloc`], this method does not fall back to untracked
     /// allocation on exhaustion or oversized requests. Requests smaller than
@@ -1122,7 +1585,7 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
+    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     #[inline(always)]
     pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
         if capacity < self.inner.config.pool_min_size {
@@ -1138,7 +1601,7 @@ impl BufferPool {
             .inner
             .try_alloc(class_index, false)
             .map(|allocation| {
-                PooledBufMut::new(allocation.buffer, allocation.class, allocation.slot)
+                PooledBufMut::new(allocation.buffer, allocation.lease, allocation.slot)
             })
             .ok_or(PoolError::Exhausted)?;
         Ok(IoBufMut::from_pooled(buffer))
@@ -1152,13 +1615,14 @@ impl BufferPool {
     /// other [`bytes::BufMut`] methods to write data to the buffer.
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
-    /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
-    /// bypass pooling and return an untracked aligned allocation. Otherwise, oversized or
-    /// exhausted requests fall back to an untracked aligned heap allocation
+    /// exhausted), this returns a pooled buffer that will be returned to the
+    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
+    /// bypass pooling and return an untracked aligned allocation. Oversized or
+    /// exhausted requests also fall back to an untracked aligned heap allocation
     /// that is deallocated when dropped.
     ///
-    /// Use [`Self::try_alloc`] if you need pooled-only behavior.
+    /// Use [`Self::try_alloc`] if eligible requests must fail instead of falling
+    /// back to direct allocation.
     ///
     /// # Initialization
     ///
@@ -1186,7 +1650,8 @@ impl BufferPool {
         buf
     }
 
-    /// Attempts to allocate a zero-initialized pooled buffer.
+    /// Attempts to allocate a zero-initialized buffer without falling back on
+    /// pool miss.
     ///
     /// Unlike [`Self::alloc_zeroed`], this method does not fall back to
     /// untracked allocation on exhaustion or oversized requests. Requests
@@ -1203,7 +1668,7 @@ impl BufferPool {
     /// # Errors
     ///
     /// - [`PoolError::Oversized`]: `len` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
+    /// - [`PoolError::Exhausted`]: pool exhausted for the required size class
     pub fn try_alloc_zeroed(&self, len: usize) -> Result<IoBufMut, PoolError> {
         if len < self.inner.config.pool_min_size {
             let size = len.max(1);
@@ -1222,7 +1687,7 @@ impl BufferPool {
 
         let mut buf = IoBufMut::from_pooled(PooledBufMut::new(
             allocation.buffer,
-            allocation.class,
+            allocation.lease,
             allocation.slot,
         ));
         if allocation.is_new {
@@ -1244,16 +1709,17 @@ impl BufferPool {
     /// The returned buffer has `len() == len` and `capacity() >= len`.
     ///
     /// If the pool can provide a buffer (len within limits and pool not
-    /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
-    /// bypass pooling and return an untracked aligned allocation. Otherwise, oversized or
-    /// exhausted requests fall back to an untracked aligned heap allocation
+    /// exhausted), this returns a pooled buffer that will be returned to the
+    /// pool when dropped. Requests smaller than [`BufferPoolConfig::pool_min_size`]
+    /// bypass pooling and return an untracked aligned allocation. Oversized or
+    /// exhausted requests also fall back to an untracked aligned heap allocation
     /// that is deallocated when dropped.
     ///
-    /// Use this for read APIs that require an initialized `&mut [u8]`.
-    /// This avoids `unsafe set_len` at callsites.
+    /// Use this for read APIs that require an initialized `&mut [u8]`. This
+    /// avoids `unsafe set_len` at callsites.
     ///
-    /// Use [`Self::try_alloc_zeroed`] if you need pooled-only behavior.
+    /// Use [`Self::try_alloc_zeroed`] if eligible requests must fail instead of
+    /// falling back to direct allocation.
     ///
     /// # Initialization
     ///
@@ -1289,8 +1755,8 @@ mod tests {
         thread,
     };
 
-    fn test_size_class(size: usize, alignment: usize) -> Arc<SizeClass> {
-        Arc::new(SizeClass::new(
+    fn test_size_class(size: usize, alignment: usize) -> SizeClassHandle {
+        SizeClassHandle::new(
             NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             size,
             alignment,
@@ -1298,7 +1764,7 @@ mod tests {
             NZUsize!(4),
             4,
             false,
-        ))
+        )
     }
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {
@@ -1320,7 +1786,19 @@ mod tests {
         }
     }
 
-    /// Helper to get the number of checked-out tracked buffers for a size class.
+    /// Returns the current strong count without changing it after the helper
+    /// returns.
+    fn size_class_strong_count(class: &SizeClassHandle) -> usize {
+        // SAFETY: the borrowed handle owns one strong reference for `class.token`
+        // for the duration of this call.
+        unsafe { class.token.retain() };
+        // SAFETY: the increment above created the strong reference consumed by
+        // this temporary Arc.
+        let arc = unsafe { Arc::from_raw(class.token.ptr.as_ptr()) };
+        Arc::strong_count(&arc) - 1
+    }
+
+    /// Helper to get the number of caller-owned tracked buffers for a size class.
     ///
     /// With TLS enabled, tracked buffers can be free in either the shared
     /// freelist or the current thread's local cache.
@@ -1357,7 +1835,7 @@ mod tests {
                 .bins
                 .get(class.class_id)
                 .and_then(Option::as_ref)
-                .map_or(0, |cache| cache.entries.len())
+                .map_or(0, |cache| cache.len)
         })
     }
 
@@ -1942,7 +2420,7 @@ mod tests {
 
         assert!(class.thread_cache_capacity >= MIN_TLS_BATCH_CAPACITY);
 
-        // Drop enough distinct checked-out buffers to force an overflow from a
+        // Drop enough distinct pooled buffers to force an overflow from a
         // full local cache. Large bins should spill half the entries to global
         // and keep the remainder local for fast same-thread reuse.
         let mut bufs = Vec::new();
@@ -1978,29 +2456,65 @@ mod tests {
         // A short global freelist should return the allocation and stop
         // without filling the local cache to its batch target.
         class.global.put(slot, buffer);
-        let entry = BufferPoolThreadCache::pop(&class).expect("global allocation");
+        let (buffer, lease, slot) = BufferPoolThreadCache::pop(&class).expect("global allocation");
 
         assert_eq!(get_local_len(&class), 0);
         assert_eq!(get_global_len(&class), 0);
 
         // Return the manually popped entry so the freelist owns and deallocates
         // the buffer at test teardown.
-        class.global.put(entry.slot, entry.buffer);
+        lease.return_global(slot, buffer);
+    }
+
+    #[test]
+    fn test_size_class_leases_use_raw_arc_tokens_across_cache_paths() {
+        let class = test_size_class(64, 64);
+        let mut cache = TlsSizeClassCache::new(class.token, MIN_TLS_BATCH_CAPACITY);
+        assert_eq!(size_class_strong_count(&class), 1);
+
+        let (slot, buffer) = class.global.try_create(false).expect("slot reservation");
+        let lease = SizeClassLease::retain(&class);
+        assert_eq!(size_class_strong_count(&class), 2);
+
+        // Moving a pooled-buffer lease into the local cache banks the same strong
+        // reference, it should not clone the class.
+        cache.push(lease, slot, buffer);
+        assert_eq!(size_class_strong_count(&class), 2);
+
+        let (entry, lease) = cache.pop(&class).expect("local cache pop");
+        assert_eq!(size_class_strong_count(&class), 2);
+        lease.return_global(entry.slot, entry.buffer);
+        assert_eq!(size_class_strong_count(&class), 1);
+
+        for _ in 0..2 {
+            let (slot, buffer) = class.global.try_create(false).expect("slot reservation");
+            class.global.put(slot, buffer);
+        }
+
+        let (entry, lease) = cache.pop(&class).expect("global refill");
+        assert_eq!(size_class_strong_count(&class), 3);
+
+        lease.return_global(entry.slot, entry.buffer);
+        assert_eq!(size_class_strong_count(&class), 2);
+
+        // Dropping the cache returns the banked refill entry and releases its
+        // size-class reference.
+        drop(cache);
+        assert_eq!(size_class_strong_count(&class), 1);
     }
 
     #[test]
     fn test_tls_size_class_cache_push_tolerates_empty_spill() {
         let class = test_size_class(64, 64);
         let (slot, buffer) = class.global.try_create(false).expect("slot reservation");
-        let mut cache = TlsSizeClassCache::new(0);
+        let lease = SizeClassLease::retain(&class);
+        let mut cache = TlsSizeClassCache::new(class.token, 0);
 
-        // Small local capacities should bypass batching and push straight to global.
-        cache.push(TlsSizeClassCacheEntry {
-            buffer,
-            class,
-            slot,
-        });
-        assert_eq!(cache.entries.len(), 0);
+        // Small local capacities should bypass batching and push straight to
+        // global. The retained reference above is represented by this lease and
+        // transferred into `cache.push`.
+        cache.push(lease, slot, buffer);
+        assert_eq!(cache.len, 0);
         drop(cache);
     }
 
@@ -2009,7 +2523,7 @@ mod tests {
         // Use a two-slot class with TLS capacity one so this test can exercise
         // the class-global freelist directly without involving local-cache
         // refill or spill behavior.
-        let class = Arc::new(SizeClass::new(
+        let class = SizeClassHandle::new(
             NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
             64,
             64,
@@ -2017,7 +2531,7 @@ mod tests {
             NZUsize!(1),
             1,
             false,
-        ));
+        );
 
         // Create both slot ids and keep each allocation's pointer so we can
         // verify that the freelist returns the same buffer parked for that slot.
@@ -2059,28 +2573,30 @@ mod tests {
         // into_bytes should detach without retaining the pool allocation.
         let page = page_size();
         let class = test_size_class(page, page);
-        let (slot0, buffer0) = class.global.try_create(false).expect("first slot");
-        let (slot1, buffer1) = class.global.try_create(false).expect("second slot");
-        let (slot2, buffer2) = class.global.try_create(false).expect("third slot");
+        let (slot0, buffer0, class0) = class.try_create(false).expect("first slot");
+        let (slot1, buffer1, class1) = class.try_create(false).expect("second slot");
+        let (slot2, buffer2, class2) = class.try_create(false).expect("third slot");
 
         // Mutable pooled debug should include cursor position.
         let pooled_mut_debug = {
-            let pooled_mut = PooledBufMut::new(buffer0, class.clone(), slot0);
+            let pooled_mut = PooledBufMut::new(buffer0, class0, slot0);
             format!("{pooled_mut:?}")
         };
         assert!(pooled_mut_debug.contains("PooledBufMut"));
         assert!(pooled_mut_debug.contains("cursor"));
 
         // Empty mutable buffer converts to empty Bytes without retaining pool memory.
-        let empty_from_mut = PooledBufMut::new(buffer1, class.clone(), slot1);
+        let empty_from_mut = PooledBufMut::new(buffer1, class1, slot1);
         assert!(empty_from_mut.into_bytes().is_empty());
 
         // Immutable pooled debug should include capacity.
-        let pooled = PooledBufMut::new(buffer2, class, slot2).into_pooled();
+        let pooled = PooledBufMut::new(buffer2, class2, slot2).into_pooled();
         let pooled_debug = format!("{pooled:?}");
         assert!(pooled_debug.contains("PooledBuf"));
         assert!(pooled_debug.contains("capacity"));
         assert!(pooled.into_bytes().is_empty());
+
+        BufferPoolThreadCache::flush();
     }
 
     #[test]
@@ -2376,9 +2892,9 @@ mod tests {
         }
         drop(tx);
 
-        // Receive and drop on another thread. Those returns should populate the
-        // dropping thread's local cache, so allocations on that same thread
-        // should be able to reuse them immediately.
+        // Receive and drop on another thread. Cross-thread returns initialize
+        // the dropping thread's local cache, so the buffers remain local to that
+        // thread instead of bouncing through the global freelist.
         let handle = thread::spawn(move || {
             while let Ok(iobuf) = rx.recv() {
                 drop(iobuf);
@@ -2387,15 +2903,13 @@ mod tests {
             let class_index = pool
                 .class_index(page)
                 .expect("class exists for page-sized buffer");
-            assert!(
-                get_local_len(&pool.inner.classes[class_index]) >= 1,
-                "dropping thread should retain returned buffers in its local cache"
-            );
+            assert_eq!(get_local_len(&pool.inner.classes[class_index]), 50);
+            assert_eq!(get_global_len(&pool.inner.classes[class_index]), 0);
 
             for _ in 0..50 {
                 let _buf = pool
                     .try_alloc(page)
-                    .expect("dropping thread should be able to reuse returned buffers");
+                    .expect("dropping thread should be able to reuse locally returned buffers");
             }
         });
 
@@ -2443,7 +2957,12 @@ mod tests {
         let class_index = pool
             .class_index(page)
             .expect("class exists for page-sized buffer");
-        let class = pool.inner.classes[class_index].clone();
+        let class = &pool.inner.classes[class_index];
+        // Keep a test-owned handle so the class remains inspectable after
+        // dropping the public pool below.
+        // SAFETY: `class` owns one strong reference for `class.token`.
+        unsafe { class.token.retain() };
+        let class = SizeClassHandle { token: class.token };
 
         // Return one buffer to the current thread's local cache and overflow
         // the other into the shared global freelist.
