@@ -30,7 +30,7 @@ jobs:
   benchmark:
     name: Run
     needs: has-new-commit # Only run if there are new commits
-    runs-on: ubuntu-latest-8
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 720
     strategy:
       fail-fast: false
@@ -39,21 +39,27 @@ jobs:
           - package: commonware-cryptography
             cargo_flags: ""
             benchmark_name: "commonware-cryptography"
+            runs_on: ubuntu-latest-8
           - package: commonware-storage
             cargo_flags: "--features test-traits"
             benchmark_name: "commonware-storage"
+            runs_on: ubuntu-latest-16
           - package: commonware-storage
             cargo_flags: "--features commonware-runtime/iouring-storage,test-traits"
             benchmark_name: "commonware-storage --features"
+            runs_on: ubuntu-latest-16
           - package: commonware-coding
             cargo_flags: ""
             benchmark_name: "commonware-coding"
+            runs_on: ubuntu-latest-8
           - package: commonware-formatting
             cargo_flags: ""
             benchmark_name: "commonware-formatting"
+            runs_on: ubuntu-latest-8
           - package: commonware-utils
             cargo_flags: ""
             benchmark_name: "commonware-utils"
+            runs_on: ubuntu-latest-8
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
       - name: Run setup

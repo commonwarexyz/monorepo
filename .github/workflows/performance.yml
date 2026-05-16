@@ -19,7 +19,7 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-latest-8
+    runs-on: ubuntu-latest-16
     timeout-minutes: 180
     env:
       BENCHMARK_TRACKING_CONFIG: .github/benchmark-tracking.toml
