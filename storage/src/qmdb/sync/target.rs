@@ -15,9 +15,9 @@ use commonware_utils::range::NonEmptyRange;
 pub struct Target<F: Family, D: Digest> {
     /// The database root expected after sync completes.
     pub root: D,
-    /// The ops root the sync engine verifies streaming batches against.
+    /// The ops root used to verify range proofs.
     pub ops_root: D,
-    /// Range of operations to sync
+    /// Range of operations to sync.
     pub range: NonEmptyRange<Location<F>>,
 }
 

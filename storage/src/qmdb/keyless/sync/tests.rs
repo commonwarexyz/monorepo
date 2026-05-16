@@ -461,7 +461,7 @@ where
             db_config: sync_db_config,
             fetch_batch_size: NZU64!(10),
             target: Target {
-                root: root,
+                root,
                 ops_root: root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
@@ -515,7 +515,7 @@ where
             db_config: sync_config,
             fetch_batch_size: NZU64!(10),
             target: Target {
-                root: root,
+                root,
                 ops_root: root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
@@ -761,7 +761,7 @@ where
             db_config: H::config(&format!("done_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(20),
             target: Target {
-                root: root,
+                root,
                 ops_root: root,
                 range: non_empty_range!(lower_bound, upper_bound),
             },
