@@ -256,7 +256,7 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast vote
-        sender.send(Recipients::All, vote, true).unwrap();
+        sender.send(Recipients::All, vote, true);
     }
 
     /// Send a certificate to every peer.
@@ -274,7 +274,7 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast certificate
-        sender.send(Recipients::All, certificate, true).unwrap();
+        sender.send(Recipients::All, certificate, true);
     }
 
     /// Blocks an equivocator.

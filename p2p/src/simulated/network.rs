@@ -952,7 +952,6 @@ impl<P: PublicKey, E: Clock> Clone for UnlimitedSender<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
-    type Error = Error;
     type PublicKey = P;
 
     fn send(
@@ -960,16 +959,17 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
         recipients: Recipients<P>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Result<Feedback, Error> {
+    ) -> Feedback {
         let message = message.into().coalesce();
-
-        // Check message size
-        if message.len() > self.max_size as usize {
-            return Err(Error::MessageTooLarge(message.len()));
-        }
+        assert!(
+            message.len() <= self.max_size as usize,
+            "message too large: {} > {}",
+            message.len(),
+            self.max_size
+        );
 
         if !self.active.load(Ordering::Acquire) || self.sender.is_closed() {
-            return Ok(Feedback::Closed);
+            return Feedback::Closed;
         }
 
         // The simulated network handles send submissions and topology updates
@@ -982,9 +982,9 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
             message,
             priority,
         }) {
-            Ok(Feedback::Ok)
+            Feedback::Ok
         } else {
-            Ok(Feedback::Closed)
+            Feedback::Closed
         }
     }
 }
@@ -1135,7 +1135,6 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
     for SplitCheckedSender<'a, P, E, F>
 {
     type PublicKey = P;
-    type Error = Error;
 
     fn recipients(&self) -> Vec<Self::PublicKey> {
         crate::CheckedSender::recipients(&self.checked)
@@ -1145,13 +1144,13 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         self,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Result<Feedback, Self::Error> {
+    ) -> Feedback {
         // Convert to IoBuf here since forwarder needs to inspect the message
         let message = message.into().coalesce();
 
         // Determine the set of recipients that will receive the message
         let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
-            return Ok(Feedback::Ok);
+            return Feedback::Ok;
         };
 
         // Extract the inner sender and send directly with the new recipients
@@ -1488,7 +1487,7 @@ mod tests {
         loop {
             let checked = sender.check(recipients.clone()).unwrap();
             if checked.recipients().len() == expected_recipients {
-                checked.send(message, priority).unwrap();
+                checked.send(message, priority);
                 return context.current();
             }
             context.sleep(Duration::from_millis(1)).await;
@@ -1684,17 +1683,13 @@ mod tests {
 
             // Send messages in both directions
             peer_a_sender
-                .send(Recipients::One(twin.clone()), b"from_a", false)
-                .unwrap();
+                .send(Recipients::One(twin.clone()), b"from_a", false);
             peer_b_sender
-                .send(Recipients::One(twin.clone()), b"from_b", false)
-                .unwrap();
+                .send(Recipients::One(twin.clone()), b"from_b", false);
             twin_primary_sender
-                .send(Recipients::All, b"primary_out", false)
-                .unwrap();
+                .send(Recipients::All, b"primary_out", false);
             twin_secondary_sender
-                .send(Recipients::All, b"secondary_out", false)
-                .unwrap();
+                .send(Recipients::All, b"secondary_out", false);
 
             // Verify routing: peer_a messages go to primary, peer_b to secondary
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
@@ -1770,8 +1765,7 @@ mod tests {
 
             // Send a message from peer_c to twin
             peer_c_sender
-                .send(Recipients::One(twin.clone()), b"to_both", false)
-                .unwrap();
+                .send(Recipients::One(twin.clone()), b"to_both", false);
 
             // Verify both receivers get the message
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
@@ -1841,8 +1835,7 @@ mod tests {
 
             // Send a message from peer_c to twin
             let sent = peer_c_sender
-                .send(Recipients::One(twin.clone()), b"to_both", false)
-                .unwrap();
+                .send(Recipients::One(twin.clone()), b"to_both", false);
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], twin);
 
@@ -1853,14 +1846,12 @@ mod tests {
 
             // Send a message from twin to peer_c
             let sent = twin_primary_sender
-                .send(Recipients::One(peer_c.clone()), b"to_both", false)
-                .unwrap();
+                .send(Recipients::One(peer_c.clone()), b"to_both", false);
             assert_eq!(sent.len(), 1);
 
             // Send a message from twin to peer_c
             let sent = twin_secondary_sender
-                .send(Recipients::One(peer_c.clone()), b"to_both", false)
-                .unwrap();
+                .send(Recipients::One(peer_c.clone()), b"to_both", false);
             assert_eq!(sent.len(), 1);
         });
     }
@@ -2073,8 +2064,7 @@ mod tests {
                 sender
                     .check(Recipients::One(recipient_pk.clone()))
                     .unwrap()
-                    .send(msg.clone(), false)
-                    .unwrap();
+                    .send(msg.clone(), false);
                 expected.push(msg);
             }
 
@@ -2261,7 +2251,7 @@ mod tests {
             let msg = vec![42u8; 10];
             let checked = sender1.check(Recipients::All).unwrap();
             let sent_to = crate::CheckedSender::recipients(&checked);
-            checked.send(msg.clone(), true).unwrap();
+            checked.send(msg.clone(), true);
 
             let pk2_count = sent_to.iter().filter(|pk| *pk == &pk2).count();
             assert_eq!(pk2_count, 1, "pk2 received duplicate sends");
@@ -2416,8 +2406,7 @@ mod tests {
                     secondary_1.clone(),
                 ]))
                 .unwrap()
-                .send(msg_1.clone(), true)
-                .unwrap();
+                .send(msg_1.clone(), true);
             assert_eq!(receiver_0.recv().await.unwrap().1, msg_1.as_slice());
             assert_eq!(receiver_1.recv().await.unwrap().1, msg_1.as_slice());
 
@@ -2448,8 +2437,7 @@ mod tests {
                     secondary_1.clone(),
                 ]))
                 .unwrap()
-                .send(msg_2.clone(), true)
-                .unwrap();
+                .send(msg_2.clone(), true);
             assert!(receiver_0.recv().now_or_never().is_none());
             assert_eq!(receiver_1.recv().await.unwrap().1, msg_2.as_slice());
         });

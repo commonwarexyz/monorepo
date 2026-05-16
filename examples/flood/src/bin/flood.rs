@@ -168,9 +168,7 @@ fn main() {
                     rng.fill_bytes(&mut msg[8..]);
 
                     // Send to all peers
-                    if let Err(e) = flood_sender.send(Recipients::All, msg, true) {
-                        error!(?e, "could not send flood message");
-                    }
+                    flood_sender.send(Recipients::All, msg, true);
                     messages.inc();
                 }
             });

@@ -58,11 +58,6 @@ pub enum Error {
     #[error("Application verified payload mismatch")]
     AppVerifiedPayloadMismatch,
 
-    // P2P Errors
-    /// Unable to send a message over the P2P network
-    #[error("Unable to send message")]
-    UnableToSendMessage,
-
     // Broadcast errors
     /// The chunk already has a certificate
     #[error("Already certified")]
@@ -73,9 +68,6 @@ pub enum Error {
     /// Nothing to rebroadcast
     #[error("Nothing to rebroadcast")]
     NothingToRebroadcast,
-    /// The broadcast failed
-    #[error("Broadcast failed")]
-    BroadcastFailed,
     /// A certificate is missing
     #[error("Missing certificate")]
     MissingCertificate,

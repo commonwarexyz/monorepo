@@ -568,9 +568,7 @@ impl<
         self.handle_ack(&ack)?;
 
         // Send the ack to the network
-        ack_sender
-            .send(Recipients::Some(recipients), ack, self.priority_acks)
-            .map_err(|_| Error::UnableToSendMessage)?;
+        ack_sender.send(Recipients::Some(recipients), ack, self.priority_acks);
 
         Ok(())
     }
@@ -848,13 +846,11 @@ impl<
         let _ = self.relay.broadcast(node.chunk.payload, ());
 
         // Send the node to all validators
-        node_sender
-            .send(
-                Recipients::Some(validators.iter().cloned().collect()),
-                node.encode(),
-                self.priority_proposals,
-            )
-            .map_err(|_| Error::BroadcastFailed)?;
+        node_sender.send(
+            Recipients::Some(validators.iter().cloned().collect()),
+            node.encode(),
+            self.priority_proposals,
+        );
 
         // Set the rebroadcast deadline
         self.rebroadcast_deadline = Some(self.context.current() + self.rebroadcast_timeout);

@@ -382,14 +382,17 @@ where
 
                                             let payload =
                                                 Message::<V, C::PublicKey>::Ack(ack).encode();
-                                            if let Err(e) = round_sender
-                                                .send(
-                                                    Recipients::One(sender_pk.clone()),
-                                                    payload,
-                                                    true,
-                                                )
-                                            {
-                                                warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+                                            let sent = round_sender.send(
+                                                Recipients::One(sender_pk.clone()),
+                                                payload,
+                                                true,
+                                            );
+                                            if sent.is_empty() {
+                                                warn!(
+                                                    ?epoch,
+                                                    dealer = ?sender_pk,
+                                                    "failed to send ack"
+                                                );
                                             }
                                         }
                                     }
@@ -624,17 +627,11 @@ where
 
             // Send to remote player
             let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
-            match sender.send(Recipients::One(player.clone()), payload, true) {
-                Ok(success) => {
-                    if success.is_empty() {
-                        debug!(?epoch, ?player, "failed to send share");
-                    } else {
-                        debug!(?epoch, ?player, "sent share");
-                    }
-                }
-                Err(e) => {
-                    warn!(?epoch, ?player, ?e, "error sending share");
-                }
+            let success = sender.send(Recipients::One(player.clone()), payload, true);
+            if success.is_empty() {
+                debug!(?epoch, ?player, "failed to send share");
+            } else {
+                debug!(?epoch, ?player, "sent share");
             }
         }
     }

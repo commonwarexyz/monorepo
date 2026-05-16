@@ -848,8 +848,7 @@ mod tests {
                     Recipients::One(victim.clone()),
                     IoBuf::from(vec![0xFF]),
                     false,
-                )
-                .expect("malformed payload send should not fail at transport level");
+                );
             assert_eq!(sent, vec![victim.clone()]);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 

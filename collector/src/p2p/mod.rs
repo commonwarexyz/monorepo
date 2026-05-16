@@ -4,6 +4,7 @@ use crate::{Handler, Monitor};
 
 mod engine;
 use commonware_p2p::Blocker;
+use std::num::NonZeroUsize;
 pub use engine::Engine;
 mod ingress;
 pub use ingress::{Mailbox, Message};
@@ -23,8 +24,8 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     /// The [Handler] that will be used to process requests.
     pub handler: H,
 
-    /// The size of the mailbox for sending and receiving messages.
-    pub mailbox_size: usize,
+    /// The non-zero size of the mailbox for sending and receiving messages.
+    pub mailbox_size: NonZeroUsize,
 
     /// Whether or not to send requests with priority over other network messages.
     pub priority_request: bool,
@@ -49,7 +50,8 @@ mod tests {
         },
         Config, Engine, Mailbox,
     };
-    use crate::{Error, Handler, Monitor, Originator};
+    use crate::{Handler, Monitor, Originator};
+    use commonware_actor::Feedback;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -65,12 +67,13 @@ mod tests {
         Supervisor as _,
     };
     use commonware_utils::{ordered::Set, NZUsize, NZU32};
+    use std::num::NonZeroUsize;
     use std::time::Duration;
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
-    const MAILBOX_SIZE: usize = 1024;
+    const MAILBOX_SIZE: NonZeroUsize = commonware_utils::NZUsize!(1024);
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
@@ -230,11 +233,10 @@ mod tests {
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
-            let recipients = mailbox1
-                .send(Recipients::One(peers[1].clone()), request.clone())
-                .await
-                .expect("send failed");
-            assert_eq!(recipients, vec![peers[1].clone()]);
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
+            );
 
             // Verify peer 2 received the request
             let processed = handler_out.recv().await.unwrap();
@@ -296,14 +298,13 @@ mod tests {
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
             let commitment = request.commitment();
-            let recipients = mailbox
-                .send(Recipients::One(peers[1].clone()), request.clone())
-                .await
-                .expect("send failed");
-            assert_eq!(recipients, vec![peers[1].clone()]);
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
+            );
 
             // Cancel immediately
-            mailbox.cancel(commitment).await;
+            assert_eq!(mailbox.cancel(commitment), Feedback::Ok);
 
             // Wait a bit and verify no response collected
             select! {
@@ -377,13 +378,7 @@ mod tests {
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
-            let recipients = mailbox1
-                .send(Recipients::All, request.clone())
-                .await
-                .expect("send failed");
-            assert_eq!(recipients.len(), 2);
-            assert!(recipients.contains(&peers[1]));
-            assert!(recipients.contains(&peers[2]));
+            assert_eq!(mailbox1.send(Recipients::All, request.clone()), Feedback::Ok);
 
             // Collect responses
             let mut responses_collected = 0;
@@ -454,11 +449,10 @@ mod tests {
             // Send the same request multiple times
             let request = Request { id: 5, data: 5 };
             for _ in 0..3 {
-                let recipients = mailbox1
-                    .send(Recipients::One(peers[1].clone()), request.clone())
-                    .await
-                    .expect("send failed");
-                assert_eq!(recipients, vec![peers[1].clone()]);
+                assert_eq!(
+                    mailbox1.send(Recipients::One(peers[1].clone()), request.clone()),
+                    Feedback::Ok
+                );
             }
 
             // Should only receive one response
@@ -526,14 +520,14 @@ mod tests {
             // Send multiple concurrent requests
             let request1 = Request { id: 10, data: 10 };
             let request2 = Request { id: 20, data: 20 };
-            mailbox1
-                .send(Recipients::One(peers[1].clone()), request1)
-                .await
-                .expect("send failed");
-            mailbox1
-                .send(Recipients::One(peers[1].clone()), request2)
-                .await
-                .expect("send failed");
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request1),
+                Feedback::Ok
+            );
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request2),
+                Feedback::Ok
+            );
 
             // Collect both responses
             let mut response10_received = false;
@@ -604,11 +598,10 @@ mod tests {
 
             // Send request
             let request = Request { id: 100, data: 100 };
-            let recipients = mailbox1
-                .send(Recipients::One(peers[1].clone()), request.clone())
-                .await
-                .expect("send failed");
-            assert_eq!(recipients, vec![peers[1].clone()]);
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
+            );
 
             // Verify handler received request but didn't respond
             let processed = handler_out2.recv().await.unwrap();
@@ -653,11 +646,7 @@ mod tests {
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
-            let recipients = mailbox
-                .send(Recipients::All, request.clone())
-                .await
-                .expect("send failed");
-            assert_eq!(recipients, Vec::<PublicKey>::new());
+            assert_eq!(mailbox.send(Recipients::All, request.clone()), Feedback::Ok);
 
             // Verify no responses collected
             select! {
@@ -672,7 +661,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_send_fails_with_network_error() {
+    fn test_send_closed_does_not_collect() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (oracle, schemes, peers, connections) =
@@ -708,16 +697,15 @@ mod tests {
 
             // Send request
             let request = Request { id: 1, data: 1 };
-            let err = mailbox
-                .send(Recipients::One(peers[1].clone()), request.clone())
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::SendFailed(_)));
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[1].clone()), request),
+                Feedback::Ok
+            );
         });
     }
 
     #[test_traced]
-    fn test_send_fails_with_canceled() {
+    fn test_send_after_shutdown_returns_closed() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (oracle, schemes, peers, connections) =
@@ -750,16 +738,16 @@ mod tests {
             // Start engine
             let handle = engine.start((sender1, receiver1), (sender2, receiver2));
 
-            // Stop the engine (which will result in all further requests being canceled)
+            // Stop the engine.
             handle.abort();
+            context.sleep(Duration::from_millis(1)).await;
 
-            // Send request (will return Error::Canceled instead of Error::SendFailed)
+            // Send request
             let request = Request { id: 1, data: 1 };
-            let err = mailbox
-                .send(Recipients::One(peers[1].clone()), request.clone())
-                .await
-                .unwrap_err();
-            assert!(matches!(err, Error::Canceled));
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[1].clone()), request),
+                Feedback::Closed
+            );
         });
     }
 
@@ -813,11 +801,10 @@ mod tests {
 
             // Send request from peer 1 to peer 2 (collector records the in-flight request)
             let request_to_peer2 = Request { id: 42, data: 42 };
-            let recipients = mailbox1
-                .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())
-                .await
-                .expect("send failed");
-            assert_eq!(recipients, vec![peers[1].clone()]);
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request_to_peer2.clone()),
+                Feedback::Ok
+            );
 
             // Send a response from peer 3 to peer 1
             let response_to_peer1 = Response { id: 42, result: 72 };
@@ -827,8 +814,7 @@ mod tests {
                     Recipients::One(peers[0].clone()),
                     response_to_peer1.encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give some time for messages to be processed
             context.sleep(Duration::from_millis(1_000)).await;
@@ -917,15 +903,13 @@ mod tests {
 
             // All operations should not panic after shutdown
 
-            // Send should not panic (returns error)
+            // Send should not panic.
             let request = Request { id: 1, data: 1 };
-            let result = mailboxes[0]
-                .send(Recipients::One(peers[1].clone()), request.clone())
-                .await;
-            assert!(result.is_err(), "send after shutdown should return error");
+            let feedback = mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone());
+            assert_eq!(feedback, Feedback::Closed);
 
             // Cancel should not panic
-            mailboxes[0].cancel(request.commitment()).await;
+            assert_eq!(mailboxes[0].cancel(request.commitment()), Feedback::Closed);
         });
     }
 
@@ -955,11 +939,10 @@ mod tests {
 
             // Verify network is functional - send a request and expect a response
             let request = Request { id: 1, data: 1 };
-            let recipients = mailboxes[0]
-                .send(Recipients::One(peers[1].clone()), request.clone())
-                .await
-                .expect("send failed");
-            assert_eq!(recipients, vec![peers[1].clone()]);
+            assert_eq!(
+                mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
+            );
 
             // Abort all engines
             for handle in handles {

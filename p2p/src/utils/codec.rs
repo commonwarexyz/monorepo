@@ -53,7 +53,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         recipients: Recipients<S::PublicKey>,
         message: V,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
+    ) -> Vec<S::PublicKey> {
         let encoded = message.encode_with_pool(&self.pool);
         self.sender.send(recipients, encoded, priority)
     }
@@ -91,7 +91,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         self,
         message: V,
         priority: bool,
-    ) -> Result<Feedback, <S::Checked<'a> as CheckedSender>::Error> {
+    ) -> Feedback {
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority)
     }

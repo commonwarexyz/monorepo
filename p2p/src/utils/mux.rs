@@ -301,9 +301,9 @@ impl<S: Sender> GlobalSender<S> {
         recipients: Recipients<S::PublicKey>,
         payload: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Result<Feedback, <S::Checked<'_> as CheckedSender>::Error> {
+    ) -> Feedback {
         self.check(recipients).map_or_else(
-            |_| Ok(Feedback::Backoff),
+            |_| Feedback::Backoff,
             |checked| checked.with_subchannel(subchannel).send(payload, priority),
         )
     }
@@ -342,7 +342,6 @@ impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
 
 impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     type PublicKey = S::PublicKey;
-    type Error = <S::Checked<'a> as CheckedSender>::Error;
 
     fn recipients(&self) -> Vec<Self::PublicKey> {
         self.inner.recipients()
@@ -352,7 +351,7 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         self,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Result<Feedback, Self::Error> {
+    ) -> Feedback {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
@@ -609,7 +608,7 @@ mod tests {
         for i in 0..count {
             let payload = IoBuf::from(vec![i as u8]);
             for tx in txs.iter_mut() {
-                let _ = tx.send(Recipients::All, payload.clone(), false).unwrap();
+                tx.send(Recipients::All, payload.clone(), false);
             }
         }
     }
@@ -681,8 +680,7 @@ mod tests {
             // Send and receive
             let payload = IoBuf::from(b"hello");
             let _ = sub_tx2
-                .send(Recipients::One(pk1.clone()), payload.clone(), false)
-                .unwrap();
+                .send(Recipients::One(pk1.clone()), payload.clone(), false);
             let (from, bytes) = sub_rx1.recv().await.unwrap();
             assert_eq!(from, pk2);
             assert_eq!(bytes, payload);
@@ -709,11 +707,9 @@ mod tests {
             let payload_a = IoBuf::from(b"A");
             let payload_b = IoBuf::from(b"B");
             let _ = tx2_a
-                .send(Recipients::One(pk1.clone()), payload_a.clone(), false)
-                .unwrap();
+                .send(Recipients::One(pk1.clone()), payload_a.clone(), false);
             let _ = tx2_b
-                .send(Recipients::One(pk1.clone()), payload_b.clone(), false)
-                .unwrap();
+                .send(Recipients::One(pk1.clone()), payload_b.clone(), false);
 
             let (from_a, bytes_a) = rx_a.recv().await.unwrap();
             assert_eq!(from_a, pk2);
@@ -857,8 +853,7 @@ mod tests {
             // Do not register any subchannels on the second peer.
 
             // Send a message from pk1 to pk2.
-            tx1.send(Recipients::One(pk2.clone()), b"REQUEST", false)
-                .unwrap();
+            tx1.send(Recipients::One(pk2.clone()), b"REQUEST", false);
 
             // Get the message from pk2's backup channel and respond.
             let (subchannel, (from, _)) = backup2.recv().await.unwrap();
@@ -868,8 +863,7 @@ mod tests {
             assert_eq!(checked.recipients(), vec![pk1]);
             checked
                 .with_subchannel(subchannel)
-                .send(b"TEST", true)
-                .unwrap();
+                .send(b"TEST", true);
 
             // Receive the response with pk1's receiver.
             let (from, bytes) = rx1.recv().await.unwrap();
@@ -903,10 +897,8 @@ mod tests {
 
             // Send to the closed subchannel, then verify it does not block
             // messages to another subchannel.
-            tx1.send(Recipients::One(pk2.clone()), b"closed", false)
-                .unwrap();
-            tx2.send(Recipients::One(pk2.clone()), b"open", false)
-                .unwrap();
+            tx1.send(Recipients::One(pk2.clone()), b"closed", false);
+            tx2.send(Recipients::One(pk2.clone()), b"open", false);
 
             // Subchannel 2 should still receive messages.
             expect_n_messages(&mut rx2, 1).await;

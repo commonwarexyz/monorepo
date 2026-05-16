@@ -243,9 +243,7 @@ where
         let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
-        if let Err(err) = sender.send(recipients, msg, self.priority) {
-            error!(?err, "failed to send message");
-        }
+        sender.send(recipients, msg, self.priority);
     }
 
     /// Handles a `subscribe` request from the application.

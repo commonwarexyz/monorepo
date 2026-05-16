@@ -276,8 +276,7 @@ pub async fn run(
                                 continue;
                             }
                             let mut successful = sender
-                                .send(Recipients::All, input.as_bytes().to_vec(), false)
-                                .expect("failed to send message");
+                                .send(Recipients::All, input.as_bytes().to_vec(), false);
                             if !successful.is_empty() {
                                 successful.sort();
                                 let mut friends = String::from_str("[").unwrap();
