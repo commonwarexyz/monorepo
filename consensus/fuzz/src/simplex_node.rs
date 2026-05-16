@@ -1320,9 +1320,9 @@ where
         let view = view.max(1);
 
         let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
-        let cert = self
-            .build_nullification_from_byz(round, &BYZANTINE_IDS)
-            .expect("byzantine nullification should build");
+        let Some(cert) = self.build_nullification_from_byz(round, &BYZANTINE_IDS) else {
+            return;
+        };
 
         self.last_nullified_view = self.last_nullified_view.max(view);
 
