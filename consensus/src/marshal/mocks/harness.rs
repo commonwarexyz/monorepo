@@ -69,6 +69,12 @@ pub type P = ConstantProvider<S, Epoch>;
 pub type CodingCtx = Context<Commitment, K>;
 pub type CodingB = Block<D, CodingCtx>;
 
+impl Reporter for () {
+    type Activity = shards::Activity<K>;
+
+    async fn report(&mut self, _activity: Self::Activity) {}
+}
+
 // Common test constants
 pub const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -2497,7 +2503,7 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _, ()> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
@@ -2509,6 +2515,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
             peer_provider: oracle.manager(),
+            reporter: None,
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
@@ -2684,7 +2691,7 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _, ()> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
@@ -2696,6 +2703,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
             peer_provider: oracle.manager(),
+            reporter: None,
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
