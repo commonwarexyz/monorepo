@@ -20,7 +20,28 @@ impl<V: Variant, P: PublicKey> Policy for Message<V, P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) {
-        overflow.push_back(message);
+        match message {
+            Self::Enter(transition) => {
+                let epoch = transition.epoch;
+                if let Some(index) = overflow
+                    .iter()
+                    .position(|pending| matches!(pending, Self::Exit(pending) if *pending == epoch))
+                {
+                    overflow.remove(index);
+                } else {
+                    overflow.push_back(Self::Enter(transition));
+                }
+            }
+            Self::Exit(epoch) => {
+                if let Some(index) = overflow.iter().position(
+                    |pending| matches!(pending, Self::Enter(pending) if pending.epoch == epoch),
+                ) {
+                    overflow.remove(index);
+                } else {
+                    overflow.push_back(Self::Exit(epoch));
+                }
+            }
+        }
     }
 }
 

@@ -354,7 +354,7 @@ fn fuzz(input: FuzzInput) {
                                 Recipients::Some(selected)
                             }
                         };
-                        let _ = mailbox.send(recipients, request).await;
+                        let _ = mailbox.send(recipients, request);
                     }
                 }
 
@@ -366,7 +366,7 @@ fn fuzz(input: FuzzInput) {
                     let commitment = request.commitment();
 
                     for mailbox in mailboxes.values_mut() {
-                        mailbox.cancel(commitment).await;
+                        let _ = mailbox.cancel(commitment);
                     }
                 }
 

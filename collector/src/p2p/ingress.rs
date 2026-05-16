@@ -1,9 +1,11 @@
-use crate::{Error, Originator};
-use commonware_actor::mailbox::{Policy, Sender};
+use crate::Originator;
+use commonware_actor::{
+    mailbox::{Policy, Sender},
+    Feedback,
+};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
 /// Messages that can be sent to a [Mailbox].
@@ -11,7 +13,6 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
     Send {
         request: R,
         recipients: Recipients<P>,
-        responder: oneshot::Sender<Result<Vec<P>, Error>>,
     },
     Cancel {
         commitment: R::Commitment,
@@ -43,23 +44,14 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P
     type Request = R;
     type PublicKey = P;
 
-    async fn send(&mut self, recipients: Recipients<P>, request: R) -> Result<Vec<P>, Error> {
-        let (tx, rx) = oneshot::channel();
-        if !self
-            .sender
-            .enqueue(Message::Send {
-                request,
-                recipients,
-                responder: tx,
-            })
-            .accepted()
-        {
-            return Err(Error::Canceled);
-        }
-        rx.await.map_err(|_| Error::Canceled)?
+    fn send(&mut self, recipients: Recipients<P>, request: R) -> Feedback {
+        self.sender.enqueue(Message::Send {
+            request,
+            recipients,
+        })
     }
 
-    async fn cancel(&mut self, commitment: R::Commitment) {
-        let _ = self.sender.enqueue(Message::Cancel { commitment });
+    fn cancel(&mut self, commitment: R::Commitment) -> Feedback {
+        self.sender.enqueue(Message::Cancel { commitment })
     }
 }

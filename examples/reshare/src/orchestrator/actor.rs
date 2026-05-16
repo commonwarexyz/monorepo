@@ -5,7 +5,7 @@ use crate::{
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
-use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
+use commonware_actor::mailbox::{self, Receiver};
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
     simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
@@ -18,7 +18,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, Receiver, Sender,
+    Blocker, Receiver as P2pReceiver, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -75,7 +75,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: ActorReceiver<Message<V, C::PublicKey>>,
+    mailbox: Receiver<Message<V, C::PublicKey>>,
     application: A,
 
     oracle: B,
@@ -139,15 +139,15 @@ where
         mut self,
         votes: (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         ),
         certificates: (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         ),
         resolver: (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(votes, certificates, resolver,))
@@ -157,15 +157,15 @@ where
         mut self,
         (vote_sender, vote_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         ),
         (certificate_sender, certificate_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         ),
         (resolver_sender, resolver_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         ),
     ) {
         // Start muxers for each physical channel used by consensus
@@ -288,15 +288,15 @@ where
         scheme: S,
         vote_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         >,
         certificate_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         >,
         resolver_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl P2pReceiver<PublicKey = C::PublicKey>,
         >,
     ) -> Handle<()> {
         // Start the new engine

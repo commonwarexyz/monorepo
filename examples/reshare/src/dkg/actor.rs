@@ -650,7 +650,6 @@ where
 mod tests {
     use super::*;
     use crate::{dkg::ContinueOnUpdate, orchestrator::Message, setup::PeerConfig};
-    use commonware_actor::mailbox as actor_mailbox;
     use commonware_cryptography::{
         bls12381::{dkg::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
@@ -782,7 +781,7 @@ mod tests {
             );
             let (sender, receiver) = inert_channel(&peer_config.participants);
             let (orchestrator_sender, mut orchestrator_receiver) =
-                actor_mailbox::new(context.child("orchestrator_mailbox"), NZUsize!(4));
+                mailbox::new(context.child("orchestrator_mailbox"), NZUsize!(4));
             actor.start(
                 None,
                 None,

@@ -61,6 +61,7 @@ impl<D: Digest> Policy for Message<D> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        // Every message has a responder, so pruning would strand a caller.
         overflow.push_back(message);
     }
 }
