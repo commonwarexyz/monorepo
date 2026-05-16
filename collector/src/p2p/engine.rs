@@ -143,20 +143,21 @@ where
                         recipients,
                         responder,
                     } => {
-                        // Track commitment (if not already tracked)
                         let commitment = request.commitment();
-                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                            self.outstanding.inc();
-                            (HashSet::new(), HashSet::new())
-                        });
-
                         // Send the request to recipients
                         match req_tx
                             .send(recipients, request, self.priority_request)
                             .await
                         {
                             Ok(recipients) => {
-                                entry.0.extend(recipients.iter().cloned());
+                                // Track commitment only if a request was actually sent to any peer.
+                                if !recipients.is_empty() {
+                                    let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                                        self.outstanding.inc();
+                                        (HashSet::new(), HashSet::new())
+                                    });
+                                    entry.0.extend(recipients.iter().cloned());
+                                }
                                 responder.send_lossy(Ok(recipients));
                             }
                             Err(err) => {
