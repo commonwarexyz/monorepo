@@ -48,13 +48,13 @@ impl<V: Variant, P: PublicKey> Mailbox<V, P> {
         Self { sender }
     }
 
-    pub async fn enter(&mut self, transition: EpochTransition<V, P>) {
+    pub fn enter(&mut self, transition: EpochTransition<V, P>) {
         if !self.sender.enqueue(Message::Enter(transition)).accepted() {
             error!("failed to send epoch transition");
         }
     }
 
-    pub async fn exit(&mut self, epoch: Epoch) {
+    pub fn exit(&mut self, epoch: Epoch) {
         if !self.sender.enqueue(Message::Exit(epoch)).accepted() {
             error!("failed to send epoch exit");
         }
