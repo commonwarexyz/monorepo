@@ -38,7 +38,7 @@ use std::{
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
-const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
+const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32_768);
 const PARTITION: &str = "bench-chained-growth";
 
 const SMALL_CHUNK_SIZE: usize = 32;

@@ -280,8 +280,8 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
-// Very large so all state is in memory.
-const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(131_072);
+// Large enough such that most reads hit the cache.
+const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32_768);
 // Very small so most reads miss the cache.
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
@@ -628,9 +628,21 @@ variants! {
 
 cfg_if::cfg_if! {
     if #[cfg(not(full_bench))] {
-        const NUM_KEYS: [u64; 1] = [10_000];
+        const NUM_KEYS: &[u64] = &[10_000];
+        const CHAINED_SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
+        const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
     } else {
-        const NUM_KEYS: [u64; 3] = [10_000, 100_000, 1_000_000];
+        const NUM_KEYS: &[u64] = &[10_000, 100_000, 1_000_000];
+        const CHAINED_SYNC_NUM_KEYS: &[u64] = &[10_000, 100_000];
+        const CHURNED_NUM_KEYS: &[u64] = &[10_000, 100_000];
+    }
+}
+
+const fn main_num_keys(chained: bool, seed_sync: bool) -> &'static [u64] {
+    if chained && seed_sync {
+        CHAINED_SYNC_NUM_KEYS
+    } else {
+        NUM_KEYS
     }
 }
 
@@ -638,7 +650,7 @@ fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for chained in [false, true] {
         for seed_sync in [false, true] {
-            for num_keys in NUM_KEYS {
+            for &num_keys in main_num_keys(chained, seed_sync) {
                 for &variant in VARIANTS {
                     c.bench_function(
                         &format!(
@@ -679,7 +691,7 @@ const CHURN_BATCHES: u64 = 50;
 fn bench_merkleize_churned(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     let cache_pages = SMALL_PAGE_CACHE_SIZE.get();
-    for num_keys in NUM_KEYS {
+    for &num_keys in CHURNED_NUM_KEYS {
         // `current::*` already used a bitmap; only `any::*` exercises the new scan path.
         for variant in VARIANTS.iter().copied().filter(Variant::is_any) {
             c.bench_function(
@@ -703,6 +715,6 @@ fn bench_merkleize_churned(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().sample_size(30);
+    config = Criterion::default().sample_size(10);
     targets = bench_merkleize, bench_merkleize_churned
 }
