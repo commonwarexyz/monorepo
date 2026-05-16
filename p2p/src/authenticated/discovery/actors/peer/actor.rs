@@ -356,6 +356,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
                     match msg {
                         types::Payload::Data(data) => {
+                            // Send message to application without blocking.
+                            //
+                            // We intentionally drop messages when the application buffer is
+                            // full rather than blocking. Blocking here would also block
+                            // processing of gossip messages (BitVec, Peers), causing the
+                            // peer connection to stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
                             let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
                         }

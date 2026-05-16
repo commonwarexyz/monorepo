@@ -9,7 +9,7 @@ use std::{collections::VecDeque, num::NonZeroUsize};
 pub(crate) struct Message<T>(T);
 
 impl<T> Message<T> {
-    fn into_inner(self) -> T {
+    pub(crate) fn into_inner(self) -> T {
         self.0
     }
 }
@@ -32,6 +32,7 @@ pub struct Relay<T> {
 }
 
 impl<T> Relay<T> {
+    /// Creates a prioritized relay backed by bounded low and high priority mailboxes.
     pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, Receivers<T>) {
         let (low_sender, low_receiver) = mailbox::new(metrics.child("low"), size);
         let (high_sender, high_receiver) = mailbox::new(metrics.child("high"), size);
@@ -47,6 +48,10 @@ impl<T> Relay<T> {
         )
     }
 
+    /// Submits `message` to the priority channel selected by `priority`.
+    ///
+    /// This never waits for capacity. [`Feedback::Backoff`] means the selected
+    /// channel was full, and [`Feedback::Closed`] means the receiver is gone.
     pub fn send(&self, message: T, priority: bool) -> Feedback {
         let sender = if priority { &self.high } else { &self.low };
         sender.enqueue(Message(message))

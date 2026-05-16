@@ -14,13 +14,10 @@ use crate::{
     Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
     UnlimitedSender as _,
 };
-use commonware_actor::{
-    mailbox::{self, Policy},
-    Feedback,
-};
+use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
@@ -43,6 +40,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -53,12 +54,14 @@ type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<Set<P>, Set<P>>;
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, IoBuf);
 
-struct TaskMessage<P: PublicKey>(Task<P>);
+struct RegistrationGuard {
+    active: Arc<AtomicBool>,
+}
 
-impl<P: PublicKey> Policy for TaskMessage<P> {
-    type Overflow = VecDeque<Self>;
-
-    fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
+impl Drop for RegistrationGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
 }
 
 /// Target for a message in a split receiver.
@@ -151,12 +154,6 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Sender for peer sources to subscribe through the main ingress path.
     ingress_sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
 
-    // A channel to receive tasks from peers
-    // The sender is cloned and given to each peer
-    // The receiver is polled in the main loop
-    sender: mpsc::UnboundedSender<Task<P>>,
-    receiver: mpsc::UnboundedReceiver<Task<P>>,
-
     // A map from a pair of public keys (from, to) to a link between the two peers
     links: HashMap<(P, P), Link>,
 
@@ -195,7 +192,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
-        let (sender, receiver) = mpsc::unbounded_channel();
         let (oracle_mailbox, oracle_receiver) = mpsc::unbounded_channel();
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
@@ -212,8 +208,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 next_addr,
                 ingress: oracle_receiver,
                 ingress_sender: oracle_mailbox.clone(),
-                sender,
-                receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
@@ -411,6 +405,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         match message {
+            ingress::Message::Send {
+                channel,
+                origin,
+                recipients,
+                message,
+                ..
+            } => {
+                self.handle_task((channel, origin, recipients, message));
+            }
             ingress::Message::Track { id, peers } => {
                 if !self.register_tracked_peer_set(id, peers).await {
                     return;
@@ -423,6 +426,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
+                // Broadcast updated tracked membership to SubscribeConnected subscribers.
                 self.broadcast_peer_list();
             }
             ingress::Message::Register {
@@ -442,12 +446,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     .with_attribute("peer", &public_key);
 
                 // Create a sender that allows sending messages to the network for a certain channel
-                let (sender, handle) = Sender::new(
-                    self.context.child("sender"),
+                let (sender, guard) = Sender::new(
                     public_key.clone(),
                     channel,
                     self.max_size,
-                    self.sender.clone(),
                     self.ingress_sender.clone(),
                     self.connected_peers_for(&public_key),
                     clock,
@@ -456,7 +458,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
-                let receiver = match peer.register(channel, handle).await {
+                let receiver = match peer.register(channel, guard).await {
                     Ok(receiver) => Receiver { receiver },
                     Err(err) => return send_result(result, Err(err)),
                 };
@@ -785,6 +787,62 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
+    fn queue_task(
+        high: &mut VecDeque<Task<P>>,
+        low: &mut VecDeque<Task<P>>,
+        task: Task<P>,
+        priority: bool,
+    ) {
+        if priority {
+            high.push_back(task);
+        } else {
+            low.push_back(task);
+        }
+    }
+
+    fn handle_tasks(&mut self, high: &mut VecDeque<Task<P>>, low: &mut VecDeque<Task<P>>) {
+        while let Some(task) = high.pop_front() {
+            self.handle_task(task);
+        }
+        while let Some(task) = low.pop_front() {
+            self.handle_task(task);
+        }
+    }
+
+    async fn handle_ordered_ingress(
+        &mut self,
+        mut message: ingress::Message<P, E>,
+        high: &mut VecDeque<Task<P>>,
+        low: &mut VecDeque<Task<P>>,
+    ) {
+        loop {
+            match message {
+                ingress::Message::Send {
+                    channel,
+                    origin,
+                    recipients,
+                    message,
+                    priority,
+                } => {
+                    Self::queue_task(high, low, (channel, origin, recipients, message), priority);
+                }
+                message => {
+                    self.handle_tasks(high, low);
+                    self.handle_ingress(message).await;
+                    return;
+                }
+            }
+
+            message = match self.ingress.try_recv() {
+                Ok(message) => message,
+                Err(_) => {
+                    self.handle_tasks(high, low);
+                    return;
+                }
+            };
+        }
+    }
+
     /// Run the simulated network.
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
@@ -794,6 +852,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     async fn run(mut self) {
+        let mut high = VecDeque::new();
+        let mut low = VecDeque::new();
         select_loop! {
             self.context,
             on_start => {
@@ -809,10 +869,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.process_completions(completions);
             },
             Some(message) = self.ingress.recv() else break => {
-                self.handle_ingress(message).await;
-            },
-            Some(task) = self.receiver.recv() else break => {
-                self.handle_task(task);
+                self.handle_ordered_ingress(message, &mut high, &mut low).await;
             },
         }
     }
@@ -874,17 +931,27 @@ impl<P: PublicKey, E: Clock> Connected for ConnectedPeerProvider<P, E> {
 /// Implementation of a [crate::Sender] for the simulated network without rate limiting.
 ///
 /// This is the inner sender used by [`Sender`] which wraps it with rate limiting.
-#[derive(Clone)]
-pub struct UnlimitedSender<P: PublicKey> {
+pub struct UnlimitedSender<P: PublicKey, E: Clock> {
     me: P,
     channel: Channel,
     max_size: u32,
-    sender: mpsc::UnboundedSender<Task<P>>,
-    high: mailbox::Sender<TaskMessage<P>>,
-    low: mailbox::Sender<TaskMessage<P>>,
+    sender: mpsc::UnboundedSender<ingress::Message<P, E>>,
+    active: Arc<AtomicBool>,
 }
 
-impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
+impl<P: PublicKey, E: Clock> Clone for UnlimitedSender<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            me: self.me.clone(),
+            channel: self.channel,
+            max_size: self.max_size,
+            sender: self.sender.clone(),
+            active: self.active.clone(),
+        }
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
     type Error = Error;
     type PublicKey = P;
 
@@ -901,18 +968,24 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
             return Err(Error::MessageTooLarge(message.len()));
         }
 
-        if self.sender.is_closed() {
+        if !self.active.load(Ordering::Acquire) || self.sender.is_closed() {
             return Ok(Feedback::Closed);
         }
 
-        // Send message
-        let channel = if priority { &self.high } else { &self.low };
-        Ok(channel.enqueue(TaskMessage((
-            self.channel,
-            self.me.clone(),
+        // The simulated network handles send submissions and topology updates
+        // through the same ingress queue so callers can mutate links immediately
+        // after `send` without racing the actor.
+        if self.sender.send_lossy(ingress::Message::Send {
+            channel: self.channel,
+            origin: self.me.clone(),
             recipients,
             message,
-        ))))
+            priority,
+        }) {
+            Ok(Feedback::Ok)
+        } else {
+            Ok(Feedback::Closed)
+        }
     }
 }
 
@@ -921,7 +994,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 /// Also implements [crate::LimitedSender] to support rate-limit checking
 /// before sending messages.
 pub struct Sender<P: PublicKey, E: Clock> {
-    limited_sender: LimitedSender<E, UnlimitedSender<P>, ConnectedPeerProvider<P, E>>,
+    limited_sender: LimitedSender<E, UnlimitedSender<P, E>, ConnectedPeerProvider<P, E>>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for Sender<P, E> {
@@ -941,60 +1014,26 @@ impl<P: PublicKey, E: Clock> Debug for Sender<P, E> {
 impl<P: PublicKey, E: Clock> Sender<P, E> {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        context: impl Spawner + Metrics,
         me: P,
         channel: Channel,
         max_size: u32,
-        sender: mpsc::UnboundedSender<Task<P>>,
         ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
         connected_peers: Vec<P>,
         clock: E,
         quota: Quota,
-    ) -> (Self, Handle<()>) {
-        // Listen for messages
-        let (high, mut high_receiver) =
-            mailbox::new::<TaskMessage<P>>(context.child("high"), NZUsize!(1024));
-        let (low, mut low_receiver) =
-            mailbox::new::<TaskMessage<P>>(context.child("low"), NZUsize!(1024));
-        let task_sender = sender.clone();
-        let processor = context.child("processor").spawn(move |_| async move {
-            loop {
-                // Wait for task
-                let task;
-                select! {
-                    high_task = high_receiver.recv() => {
-                        task = match high_task {
-                            Some(task) => task.0,
-                            None => break,
-                        };
-                    },
-                    low_task = low_receiver.recv() => {
-                        task = match low_task {
-                            Some(task) => task.0,
-                            None => break,
-                        };
-                    },
-                }
-
-                // Send task
-                if let Err(err) = sender.send(task) {
-                    error!(?err, channel, "failed to send task");
-                }
-            }
-        });
-
+    ) -> (Self, RegistrationGuard) {
+        let active = Arc::new(AtomicBool::new(true));
         let unlimited_sender = UnlimitedSender {
             me: me.clone(),
             channel,
             max_size,
-            sender: task_sender,
-            high,
-            low,
+            sender: ingress.clone(),
+            active: active.clone(),
         };
         let peer_source = ConnectedPeerProvider::new(me, ingress, connected_peers);
         let limited_sender = LimitedSender::new(unlimited_sender, quota, clock, peer_source);
 
-        (Self { limited_sender }, processor)
+        (Self { limited_sender }, RegistrationGuard { active })
     }
 
     /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
@@ -1020,7 +1059,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
 impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
     type PublicKey = P;
     type Checked<'a>
-        = crate::utils::limited::CheckedSender<'a, UnlimitedSender<P>>
+        = crate::utils::limited::CheckedSender<'a, UnlimitedSender<P, E>>
     where
         Self: 'a;
 
@@ -1084,7 +1123,7 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
 /// This is necessary because [`SplitForwarder`] may examine message content to determine
 /// routing, but the message is not available at [`LimitedSender::check`] time.
 pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> {
-    checked: LimitedCheckedSender<'a, UnlimitedSender<P>>,
+    checked: LimitedCheckedSender<'a, UnlimitedSender<P, E>>,
     replica: SplitOrigin,
     forwarder: F,
     recipients: Recipients<P>,
@@ -1128,6 +1167,11 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
 }
 
 type MessageReceiver<P> = mpsc::UnboundedReceiver<NetworkMessage<P>>;
+type ChannelRegistration<P> = (
+    Channel,
+    RegistrationGuard,
+    oneshot::Sender<MessageReceiver<P>>,
+);
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
@@ -1205,7 +1249,7 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
+    control: mpsc::UnboundedSender<ChannelRegistration<P>>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -1220,10 +1264,8 @@ impl<P: PublicKey> Peer<P> {
         max_size: u32,
     ) -> Self {
         // The control is used to register channels.
-        // There is exactly one mailbox created for each channel that the peer is registered for.
-        #[allow(clippy::type_complexity)]
         let (control_sender, mut control_receiver): (
-            mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
+            mpsc::UnboundedSender<ChannelRegistration<P>>,
             _,
         ) = mpsc::unbounded_channel();
 
@@ -1241,14 +1283,11 @@ impl<P: PublicKey> Peer<P> {
                 context,
                 on_stopped => {},
                 // Listen for control messages, which are used to register channels
-                Some((channel, sender, result_tx)) = control_receiver.recv() else break => {
+                Some((channel, guard, result_tx)) = control_receiver.recv() else break => {
                     // Register channel
                     let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
-                    if let Some((_, existing_sender)) =
-                        mailboxes.insert(channel, (receiver_tx, sender))
-                    {
+                    if mailboxes.insert(channel, (receiver_tx, guard)).is_some() {
                         warn!(?public_key, ?channel, "overwriting existing channel");
-                        existing_sender.abort();
                     }
                     result_tx.send(receiver_rx).unwrap();
                 },
@@ -1337,11 +1376,11 @@ impl<P: PublicKey> Peer<P> {
     async fn register(
         &mut self,
         channel: Channel,
-        sender: Handle<()>,
+        guard: RegistrationGuard,
     ) -> Result<MessageReceiver<P>, Error> {
         let (result_tx, result_rx) = oneshot::channel();
         self.control
-            .send((channel, sender, result_tx))
+            .send((channel, guard, result_tx))
             .map_err(|_| Error::NetworkClosed)?;
         result_rx.await.map_err(|_| Error::NetworkClosed)
     }

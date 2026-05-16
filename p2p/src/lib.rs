@@ -429,9 +429,7 @@ macro_rules! block {
         let peer = $peer;
         tracing::warn!(peer = ?peer, $($arg)+);
         #[allow(clippy::disallowed_methods)]
-        {
-            $blocker.block(peer)
-        }
+        $blocker.block(peer)
     };
 }
 

@@ -1,13 +1,11 @@
 //! Utility functions for exchanging messages with many peers.
 
 use crate::{PeerSetUpdate, Provider, TrackedPeers};
-use commonware_actor::{mailbox, Feedback};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
         fallible::FallibleExt,
         mpsc::{self, UnboundedReceiver, UnboundedSender},
-        oneshot,
     },
     ordered::Set,
 };
@@ -17,53 +15,6 @@ pub mod limited;
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 pub mod mux;
-
-/// Submit a message to a mailbox and return the enqueue feedback.
-pub(crate) fn mailbox_enqueue<T: mailbox::Policy>(
-    sender: &mailbox::Sender<T>,
-    message: T,
-) -> Feedback {
-    sender.enqueue(message)
-}
-
-/// Send a request message to a mailbox and await a one-shot response.
-pub(crate) async fn mailbox_request<T, R, F>(sender: &mailbox::Sender<T>, make_msg: F) -> Option<R>
-where
-    T: mailbox::Policy,
-    R: Send,
-    F: FnOnce(oneshot::Sender<R>) -> T + Send,
-{
-    let (tx, rx) = oneshot::channel();
-    let _ = sender.enqueue(make_msg(tx));
-    rx.await.ok()
-}
-
-/// Send a mailbox request and return `default` if no response is received.
-pub(crate) async fn mailbox_request_or<T, R, F>(
-    sender: &mailbox::Sender<T>,
-    make_msg: F,
-    default: R,
-) -> R
-where
-    T: mailbox::Policy,
-    R: Send,
-    F: FnOnce(oneshot::Sender<R>) -> T + Send,
-{
-    mailbox_request(sender, make_msg).await.unwrap_or(default)
-}
-
-/// Send a mailbox request and return `R::default()` if no response is received.
-pub(crate) async fn mailbox_request_or_default<T, R, F>(
-    sender: &mailbox::Sender<T>,
-    make_msg: F,
-) -> R
-where
-    T: mailbox::Policy,
-    R: Default + Send,
-    F: FnOnce(oneshot::Sender<R>) -> T + Send,
-{
-    mailbox_request(sender, make_msg).await.unwrap_or_default()
-}
 
 /// Primary and secondary peer memberships at one peer set index.
 ///

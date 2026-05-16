@@ -1,8 +1,10 @@
 use super::{Error, Receiver, Sender};
-use crate::{Address, AddressableTrackedPeers, Channel, PeerSetSubscription, TrackedPeers};
+use crate::{
+    Address, AddressableTrackedPeers, Channel, PeerSetSubscription, Recipients, TrackedPeers,
+};
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Quota};
+use commonware_runtime::{Clock, IoBuf, Quota};
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Map,
@@ -17,6 +19,13 @@ pub enum Message<P: PublicKey, E: Clock> {
         quota: Quota,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P, E>, Receiver<P>), Error>>,
+    },
+    Send {
+        channel: Channel,
+        origin: P,
+        recipients: Recipients<P>,
+        message: IoBuf,
+        priority: bool,
     },
     Track {
         id: u64,
@@ -66,6 +75,7 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Register { .. } => f.debug_struct("Register").finish_non_exhaustive(),
+            Self::Send { .. } => f.debug_struct("Send").finish_non_exhaustive(),
             Self::Track { id, .. } => f
                 .debug_struct("Track")
                 .field("id", id)

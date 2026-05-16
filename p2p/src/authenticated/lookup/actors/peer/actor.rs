@@ -5,7 +5,7 @@ use crate::authenticated::{
         channels::{self, Channels},
         metrics, types,
     },
-    relay::{recv_prioritized, try_recv, Message as RelayMessage, Prioritized, Relay},
+    relay::{try_recv, Message as RelayMessage, Prioritized, Relay},
 };
 use commonware_actor::mailbox;
 use commonware_codec::Decode;
@@ -16,7 +16,8 @@ use commonware_runtime::{
     Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::time::SYSTEM_TIME_PRECISION;
+use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
+use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
@@ -27,7 +28,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     ping_frequency: Duration,
     send_batch_size: usize,
 
-    control: mailbox::Receiver<Message>,
+    control: ring::Receiver<Message>,
     high: mailbox::Receiver<RelayMessage<EncodedData>>,
     low: mailbox::Receiver<RelayMessage<EncodedData>>,
 
@@ -39,8 +40,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox, Relay<EncodedData>) {
-        let (control_sender, control_receiver) =
-            Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
         (
             Self {
@@ -84,6 +84,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         batch.push(payload);
     }
 
+    fn try_recv_control(control: &mut ring::Receiver<Message>) -> Option<Message> {
+        control.next().now_or_never().flatten()
+    }
+
     /// Drains already-queued messages into `batch`.
     ///
     /// Priority order: control > high > low. Only consumes messages that are
@@ -94,14 +98,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mailbox::Receiver<Message>,
+        control: &mut ring::Receiver<Message>,
         high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
         low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
-            if let Ok(msg) = control.try_recv() {
+            if let Some(msg) = Self::try_recv_control(control) {
                 match msg {
                     Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                 }
@@ -119,6 +123,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             break;
         }
         Ok(())
+    }
+
+    async fn recv_prioritized(
+        control: &mut ring::Receiver<Message>,
+        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+    ) -> Prioritized<Message, EncodedData> {
+        select! {
+            msg = control.next() => msg.map_or(Prioritized::Closed, Prioritized::Control),
+            msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+            msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+        }
     }
 
     pub async fn run<Si: Sink, St: Stream>(
@@ -192,7 +208,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     // Await any outbound message (control, high, or low), then
                     // drain already-queued messages into a single runtime write.
                     // Priority order: control > high > low.
-                    msg = recv_prioritized(control, high, low) => {
+                    msg = Self::recv_prioritized(control, high, low) => {
                         match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
                             Prioritized::Control(msg) => match msg {
@@ -279,6 +295,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
                         match msg {
                             types::Message::Data(data) => {
+                                // Send message to application without blocking.
+                                //
+                                // We intentionally drop messages when the application buffer is
+                                // full rather than blocking. Blocking here would also block
+                                // processing of Ping messages, causing the peer connection to
+                                // stall and potentially disconnect.
                                 let sender = senders.get_mut(&data.channel).unwrap();
                                 let _ =
                                     sender.enqueue(channels::Inbound((peer.clone(), data.message)));
