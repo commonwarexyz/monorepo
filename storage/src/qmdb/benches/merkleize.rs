@@ -638,7 +638,7 @@ cfg_if::cfg_if! {
     }
 }
 
-fn main_num_keys(chained: bool, seed_sync: bool) -> &'static [u64] {
+const fn main_num_keys(chained: bool, seed_sync: bool) -> &'static [u64] {
     if chained && seed_sync {
         CHAINED_SYNC_NUM_KEYS
     } else {
