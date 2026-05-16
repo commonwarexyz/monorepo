@@ -16,7 +16,10 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{channel::{fallible::OneshotExt, oneshot}, futures::Pool};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    futures::Pool,
+};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 

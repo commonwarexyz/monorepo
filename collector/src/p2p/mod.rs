@@ -4,8 +4,8 @@ use crate::{Handler, Monitor};
 
 mod engine;
 use commonware_p2p::Blocker;
-use std::num::NonZeroUsize;
 pub use engine::Engine;
+use std::num::NonZeroUsize;
 mod ingress;
 pub use ingress::{Mailbox, Message};
 
