@@ -257,7 +257,10 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        drop(mailbox.subscribe(digest).await);
+                        // Missing subscriptions can wait forever; get replies immediately.
+                        let _ = context
+                            .timeout(Duration::from_millis(1), mailbox.subscribe(digest))
+                            .await;
                     }
                 }
                 BroadcastAction::Get { peer_index, digest } => {
