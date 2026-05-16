@@ -3,11 +3,11 @@ use super::{
     Config,
 };
 use crate::p2p::{Handler, Monitor};
-use commonware_actor::mailbox::{self, Receiver};
+use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::wrap, Blocker, Receiver as P2pReceiver, Recipients, Sender};
+use commonware_p2p::{utils::codec::wrap, Blocker, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
@@ -42,7 +42,7 @@ where
     // Message passing
     monitor: M,
     handler: H,
-    mailbox: Receiver<Message<P, Rq>>,
+    mailbox: mailbox::Receiver<Message<P, Rq>>,
 
     // State
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
@@ -101,16 +101,28 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl P2pReceiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl P2pReceiver<PublicKey = P>),
+        requests: (
+            impl Sender<PublicKey = P>,
+            impl commonware_p2p::Receiver<PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<PublicKey = P>,
+            impl commonware_p2p::Receiver<PublicKey = P>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses))
     }
 
     async fn run(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl P2pReceiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl P2pReceiver<PublicKey = P>),
+        requests: (
+            impl Sender<PublicKey = P>,
+            impl commonware_p2p::Receiver<PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<PublicKey = P>,
+            impl commonware_p2p::Receiver<PublicKey = P>,
+        ),
     ) {
         // Wrap channels
         let (mut req_tx, mut req_rx) = wrap(
