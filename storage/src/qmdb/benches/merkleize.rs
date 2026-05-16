@@ -281,7 +281,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 // Large enough such that most reads hit the cache.
-const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32_768);
+const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 // Very small so most reads miss the cache.
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
@@ -629,18 +629,18 @@ variants! {
 cfg_if::cfg_if! {
     if #[cfg(not(full_bench))] {
         const NUM_KEYS: &[u64] = &[10_000];
-        const CHAINED_SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
+        const SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
         const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
     } else {
         const NUM_KEYS: &[u64] = &[10_000, 100_000, 1_000_000];
-        const CHAINED_SYNC_NUM_KEYS: &[u64] = &[10_000, 100_000];
+        const SYNC_NUM_KEYS: &[u64] = &[10_000, 100_000];
         const CHURNED_NUM_KEYS: &[u64] = &[10_000, 100_000];
     }
 }
 
-const fn main_num_keys(chained: bool, seed_sync: bool) -> &'static [u64] {
-    if chained && seed_sync {
-        CHAINED_SYNC_NUM_KEYS
+const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
+    if seed_sync {
+        SYNC_NUM_KEYS
     } else {
         NUM_KEYS
     }
@@ -650,7 +650,7 @@ fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for chained in [false, true] {
         for seed_sync in [false, true] {
-            for &num_keys in main_num_keys(chained, seed_sync) {
+            for &num_keys in main_num_keys(seed_sync) {
                 for &variant in VARIANTS {
                     c.bench_function(
                         &format!(
