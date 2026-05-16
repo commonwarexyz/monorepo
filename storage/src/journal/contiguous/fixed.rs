@@ -2961,11 +2961,13 @@ mod tests {
             metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
             metadata.put(CLEAR_TARGET_KEY, 2u64.to_be_bytes().to_vec());
             metadata.sync().await.unwrap();
+            drop(metadata);
 
             // Crash Scenario 2: after the new tail blob is created, but before final metadata
             // replaces the clear intent.
             let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap(); // Ensure it exists
+            drop(blob);
 
             // Recovery should complete the interrupted init_at_size(2).
             let journal = Journal::<_, Digest>::init(
