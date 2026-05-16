@@ -322,14 +322,14 @@ where
     }
 
     fn leader_for_view(&self, view: u64) -> Option<usize> {
+        if view == 0 {
+            return None;
+        }
         let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
-        let certificate = if view <= 1 {
+        let certificate = if view == 1 {
             None
         } else {
-            Some(
-                self.leader_certificate_by_view
-                    .get(&view.saturating_sub(1))?,
-            )
+            Some(self.leader_certificate_by_view.get(&(view - 1))?)
         };
         Some(usize::from(self.elector.elect(round, certificate)))
     }
