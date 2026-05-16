@@ -136,6 +136,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
                 // If we've made it this far, add the notarize
                 if verified {
+                    if self.leader.is_none()
+                        && !self.notarizes.iter().any(|pending| pending == &notarize)
+                    {
+                        // Keep a copy until we learn the round leader so set_leader can
+                        // recover leader_proposal from already-verified votes.
+                        self.notarizes.push(notarize);
+                    }
                     self.notarizes_verified += 1;
                 } else {
                     self.notarizes.push(notarize);
@@ -175,7 +182,10 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// also set the leader's proposal, filtering out any pending votes for other
     /// proposals.
     pub fn set_leader(&mut self, leader: Participant) {
-        assert!(self.leader.is_none());
+        if let Some(existing) = self.leader {
+            assert_eq!(existing, leader, "leader changed within round");
+            return;
+        }
         self.leader = Some(leader);
 
         // If we already have the leader's vote, set the leader proposal
@@ -619,6 +629,40 @@ mod tests {
         set_leader(secp256r1::fixture);
     }
 
+    fn set_leader_recovers_verified_leader_vote<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
+
+        let round = Round::new(Epoch::new(0), View::new(2));
+        let leader_vote = create_notarize(&schemes[0], round, View::new(1), 7);
+        assert!(verifier.add(Vote::Notarize(leader_vote.clone()), true));
+
+        verifier.set_leader(leader_vote.signer());
+        assert_eq!(
+            verifier.leader_proposal.as_ref(),
+            Some(&leader_vote.proposal),
+            "setting leader should recover proposal from previously verified leader vote"
+        );
+    }
+
+    #[test]
+    fn test_set_leader_recovers_verified_leader_vote() {
+        set_leader_recovers_verified_leader_vote(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        set_leader_recovers_verified_leader_vote(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        set_leader_recovers_verified_leader_vote(bls12381_threshold_std::fixture::<MinSig, _>);
+        set_leader_recovers_verified_leader_vote(bls12381_threshold_std::fixture::<MinPk, _>);
+        set_leader_recovers_verified_leader_vote(bls12381_multisig::fixture::<MinSig, _>);
+        set_leader_recovers_verified_leader_vote(bls12381_multisig::fixture::<MinPk, _>);
+        set_leader_recovers_verified_leader_vote(ed25519::fixture);
+        set_leader_recovers_verified_leader_vote(secp256r1::fixture);
+    }
+
     fn ready_and_verify_notarizes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
@@ -919,7 +963,32 @@ mod tests {
         leader_proposal_filters_messages(secp256r1::fixture);
     }
 
-    fn set_leader_twice_panics<S, F>(mut fixture: F)
+    fn set_leader_twice_same_value_is_noop<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, 3);
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
+        let leader = Participant::new(0);
+        verifier.set_leader(leader);
+        verifier.set_leader(leader);
+    }
+
+    #[test]
+    fn test_set_leader_twice_same_value_is_noop() {
+        set_leader_twice_same_value_is_noop(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        set_leader_twice_same_value_is_noop(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        set_leader_twice_same_value_is_noop(bls12381_threshold_std::fixture::<MinSig, _>);
+        set_leader_twice_same_value_is_noop(bls12381_threshold_std::fixture::<MinPk, _>);
+        set_leader_twice_same_value_is_noop(bls12381_multisig::fixture::<MinSig, _>);
+        set_leader_twice_same_value_is_noop(bls12381_multisig::fixture::<MinPk, _>);
+        set_leader_twice_same_value_is_noop(ed25519::fixture);
+        set_leader_twice_same_value_is_noop(secp256r1::fixture);
+    }
+
+    fn set_leader_change_panics<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
@@ -932,51 +1001,51 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_bls_threshold_minsig() {
-        set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinSig, _>);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_bls_threshold_minsig() {
+        set_leader_change_panics(bls12381_threshold_vrf::fixture::<MinSig, _>);
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_bls_threshold_minpk() {
-        set_leader_twice_panics(bls12381_threshold_vrf::fixture::<MinPk, _>);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_bls_threshold_minpk() {
+        set_leader_change_panics(bls12381_threshold_vrf::fixture::<MinPk, _>);
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_bls_threshold_std_minsig() {
-        set_leader_twice_panics(bls12381_threshold_std::fixture::<MinSig, _>);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_bls_threshold_std_minsig() {
+        set_leader_change_panics(bls12381_threshold_std::fixture::<MinSig, _>);
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_bls_threshold_std_minpk() {
-        set_leader_twice_panics(bls12381_threshold_std::fixture::<MinPk, _>);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_bls_threshold_std_minpk() {
+        set_leader_change_panics(bls12381_threshold_std::fixture::<MinPk, _>);
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_bls_multisig_minsig() {
-        set_leader_twice_panics(bls12381_multisig::fixture::<MinSig, _>);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_bls_multisig_minsig() {
+        set_leader_change_panics(bls12381_multisig::fixture::<MinSig, _>);
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_bls_multisig_minpk() {
-        set_leader_twice_panics(bls12381_multisig::fixture::<MinPk, _>);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_bls_multisig_minpk() {
+        set_leader_change_panics(bls12381_multisig::fixture::<MinPk, _>);
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_ed() {
-        set_leader_twice_panics(ed25519::fixture);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_ed() {
+        set_leader_change_panics(ed25519::fixture);
     }
 
     #[test]
-    #[should_panic(expected = "self.leader.is_none()")]
-    fn test_set_leader_twice_panics_secp() {
-        set_leader_twice_panics(secp256r1::fixture);
+    #[should_panic(expected = "leader changed within round")]
+    fn test_set_leader_change_panics_secp() {
+        set_leader_change_panics(secp256r1::fixture);
     }
 
     fn notarizes_wait_for_quorum<S, F>(mut fixture: F)

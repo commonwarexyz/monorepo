@@ -157,6 +157,7 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 term_length: cfg.term_length,
+                term_optimistic_views: cfg.term_optimistic_views,
                 term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
                 same_term_finalization_timeout: cfg.same_term_finalization_timeout,
             },
@@ -657,6 +658,22 @@ impl<
             .await;
     }
 
+    /// Pushes the current view context into batcher.
+    fn update_batcher(
+        &mut self,
+        batcher: &mut batcher::Mailbox<S, D>,
+        view: View,
+        forwardable_proposal: Option<Proposal<D>>,
+    ) {
+        let leader = self.state.leader_index(view).expect("leader not set");
+        batcher.update(
+            view,
+            leader,
+            self.state.last_finalized(),
+            forwardable_proposal,
+        );
+    }
+
     /// Spawns the actor event loop with the provided channels.
     pub fn start(
         mut self,
@@ -777,12 +794,8 @@ impl<
             "consensus initialized"
         );
 
-        // Initialize batcher with leader for current view
-        let leader = self
-            .state
-            .leader_index(observed_view)
-            .expect("leader not set");
-        batcher.update(observed_view, leader, self.state.last_finalized(), None);
+        // Initialize batcher with current view context.
+        self.update_batcher(&mut batcher, observed_view, None);
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
@@ -794,12 +807,12 @@ impl<
             on_start => {
                 // Drop any pending items if we have moved to a new view
                 if let Some(ref pp) = pending_propose {
-                    if pp.view() != self.state.current_view() {
+                    if pp.view() < self.state.current_view() {
                         pending_propose = None;
                     }
                 }
                 if let Some(ref pv) = pending_verify {
-                    if pv.view() != self.state.current_view() {
+                    if pv.view() < self.state.current_view() {
                         pending_verify = None;
                     }
                 }
@@ -864,11 +877,9 @@ impl<
                     }
                 };
 
-                // If we have already moved to another view, drop the response as we will
-                // not broadcast it
-                let our_round = Rnd::new(self.state.epoch(), self.state.current_view());
-                if our_round != context.round {
-                    debug!(round = ?context.round, ?our_round, "dropping requested proposal");
+                // If we have already moved past this view, drop the response.
+                if context.view() < self.state.current_view() {
+                    debug!(round = ?context.round, current = ?self.state.current_view(), "dropping requested proposal");
                     continue;
                 }
 
@@ -878,7 +889,7 @@ impl<
                     warn!(round = ?context.round, "dropped our proposal");
                     continue;
                 }
-                view = self.state.current_view();
+                view = context.view();
 
                 // Notify application of proposal.
                 let _ = self.relay.broadcast(
@@ -1029,25 +1040,14 @@ impl<
                 // Update the batcher if we have moved to a new view
                 let current_view = self.state.current_view();
                 if current_view > start {
-                    let leader = self
-                        .state
-                        .leader_index(current_view)
-                        .expect("leader not set");
-
                     // If we skip a view, we don't worry about forwarding our latest certified proposal
                     // because the network has already moved on
                     let forwardable_proposal = current_view
                         .previous()
                         .and_then(|view| self.state.forwardable_proposal(view));
 
-                    // If the leader nullified or is inactive, reduce leader
-                    // timeout to now
-                    batcher.update(
-                        current_view,
-                        leader,
-                        self.state.last_finalized(),
-                        forwardable_proposal,
-                    );
+                    // If the leader nullified or is inactive, reduce leader timeout to now.
+                    self.update_batcher(&mut batcher, current_view, forwardable_proposal);
                 }
             },
         }

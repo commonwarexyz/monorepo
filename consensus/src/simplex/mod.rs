@@ -370,6 +370,54 @@ cfg_if::cfg_if! {
             last_finalized.saturating_sub(activity_timeout)
         }
 
+        /// Returns the inclusive same-term optimistic upper bound for `current`.
+        ///
+        /// The bound is capped by both term end and `term_optimistic_views`.
+        pub(crate) fn same_term_optimistic_limit(
+            current: View,
+            term_length: NonZeroU64,
+            term_optimistic_views: u64,
+        ) -> Option<View> {
+            if current == View::zero() || term_length.get() <= 1 || term_optimistic_views == 0 {
+                return None;
+            }
+
+            let term_end = current
+                .next_term_start(term_length)
+                .previous()
+                .expect("next term start must be non-genesis");
+            let optimistic_end = View::new(current.get().saturating_add(term_optimistic_views));
+            Some(term_end.min(optimistic_end))
+        }
+
+        /// Returns true when `pending` is a bounded same-term optimistic future view of `current`.
+        pub(crate) fn in_same_term_optimistic_window(
+            current: View,
+            pending: View,
+            term_length: NonZeroU64,
+            term_optimistic_views: u64,
+        ) -> bool {
+            same_term_optimistic_limit(current, term_length, term_optimistic_views)
+                .is_some_and(|limit| pending > current && pending <= limit)
+        }
+
+        /// Returns whether `pending` is an accepted future view relative to `current`.
+        ///
+        /// Accepted futures are:
+        /// - `current + 1`
+        /// - `next_term_start(current)`
+        /// - bounded same-term optimistic lookahead views
+        pub(crate) fn accepts_optimistic_future_view(
+            current: View,
+            pending: View,
+            term_length: NonZeroU64,
+            term_optimistic_views: u64,
+        ) -> bool {
+            pending <= current.next()
+                || pending == current.next_term_start(term_length)
+                || in_same_term_optimistic_window(current, pending, term_length, term_optimistic_views)
+        }
+
         /// Whether or not a view is interesting to us.
         ///
         /// This is a function of both `min_active` and whether `pending` is too far in
@@ -381,6 +429,7 @@ cfg_if::cfg_if! {
             pending: View,
             allow_unbounded_future: bool,
             term_length: NonZeroU64,
+            term_optimistic_views: u64,
         ) -> bool {
             // If the view is genesis, skip it, genesis doesn't have votes
             if pending.is_zero() {
@@ -393,13 +442,15 @@ cfg_if::cfg_if! {
             // - the next view
             // - the first view of the next term (it may be the next view if the current view is nullified)
             // For a term length of 1, these two views are the same
-            if !allow_unbounded_future && pending > current {
-                let next = current.next();
-                let next_term_start = current.next_term_start(term_length);
-                if pending != next && pending != next_term_start {
+            if !allow_unbounded_future && pending > current
+                && !accepts_optimistic_future_view(
+                    current,
+                    pending,
+                    term_length,
+                    term_optimistic_views,
+                ) {
                     return false;
                 }
-            }
             true
         }
 
@@ -437,7 +488,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as Elector, Elector as ElectorTrait, Random, RoundRobin},
+            elector::{Config as Elector, Elector as _, Random, RoundRobin, RoundRobinElector},
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -510,6 +561,7 @@ mod tests {
             View::zero(),
             false,
             term_length,
+            0,
         ));
 
         // Below min_active
@@ -520,6 +572,7 @@ mod tests {
             View::new(5),
             false,
             term_length,
+            0,
         ));
 
         // At min_active boundary
@@ -530,6 +583,7 @@ mod tests {
             View::new(10),
             false,
             term_length,
+            0,
         ));
 
         // strict mode allows only current.next and current.next_term_start above current
@@ -540,6 +594,7 @@ mod tests {
             View::new(26),
             false,
             term_length,
+            0,
         ));
         assert!(interesting(
             activity_timeout,
@@ -548,6 +603,7 @@ mod tests {
             View::new(31),
             false,
             term_length,
+            0,
         ));
         assert!(!interesting(
             activity_timeout,
@@ -556,6 +612,7 @@ mod tests {
             View::new(27),
             false,
             term_length,
+            0,
         ));
         assert!(!interesting(
             activity_timeout,
@@ -564,6 +621,7 @@ mod tests {
             View::new(34),
             false,
             term_length,
+            0,
         ));
 
         // unbounded future still respects lower bound
@@ -574,6 +632,7 @@ mod tests {
             View::new(9),
             true,
             term_length,
+            0,
         ));
         assert!(interesting(
             activity_timeout,
@@ -582,6 +641,82 @@ mod tests {
             View::new(10_000),
             true,
             term_length,
+            0,
+        ));
+    }
+
+    #[test]
+    fn test_accepts_optimistic_future_view() {
+        let term_length = NZU64!(5);
+        let current = View::new(6);
+
+        // Always allow immediate successor.
+        assert!(accepts_optimistic_future_view(
+            current,
+            current.next(),
+            term_length,
+            0,
+        ));
+
+        // Always allow next-term start.
+        assert!(accepts_optimistic_future_view(
+            current,
+            current.next_term_start(term_length),
+            term_length,
+            0,
+        ));
+
+        // Bounded same-term optimistic lookahead.
+        assert!(accepts_optimistic_future_view(
+            current,
+            View::new(8),
+            term_length,
+            2,
+        ));
+        assert!(!accepts_optimistic_future_view(
+            current,
+            View::new(9),
+            term_length,
+            2,
+        ));
+
+        // Never allow arbitrarily far future when outside all accepted lanes.
+        assert!(!accepts_optimistic_future_view(
+            current,
+            View::new(100),
+            term_length,
+            10,
+        ));
+    }
+
+    #[test]
+    fn test_optimistic_future_does_not_bleed_into_next_term() {
+        let term_length = NZU64!(5);
+        let current = View::new(9);
+        let next_term_start = current.next_term_start(term_length);
+
+        // Large configuration still caps same-term optimism at term end (view 10).
+        assert!(accepts_optimistic_future_view(
+            current,
+            View::new(10),
+            term_length,
+            100,
+        ));
+
+        // Next-term start is always accepted as a special transition.
+        assert!(accepts_optimistic_future_view(
+            current,
+            next_term_start,
+            term_length,
+            100,
+        ));
+
+        // But optimistic lookahead must not bleed into later views of the next term.
+        assert!(!accepts_optimistic_future_view(
+            current,
+            next_term_start.next(),
+            term_length,
+            100,
         ));
     }
 
@@ -787,7 +922,7 @@ mod tests {
 
             // Link all validators
             let link = Link {
-                latency: Duration::from_millis(10),
+                latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
@@ -839,8 +974,8 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_secs(2),
+                    leader_timeout: Duration::from_secs(2),
+                    certification_timeout: Duration::from_secs(3),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
@@ -849,6 +984,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1109,6 +1245,7 @@ mod tests {
                     term_length,
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1158,6 +1295,360 @@ mod tests {
         dishonest_leader_certification_rejected::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
         dishonest_leader_certification_rejected::<_, _>(ed25519::fixture);
         dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
+    }
+
+    fn stable_leader_optimistic_blocks_faster_than_network_latency() {
+        let n = 5;
+        let required_containers = View::new(100);
+        let namespace = b"consensus_stable_leader_high_latency".to_vec();
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = Duration::from_secs(12);
+        let term_length = NZU64!(128);
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            let link_latency = Duration::from_millis(100);
+            let link = Link {
+                latency: link_latency,
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            let elector = RoundRobin::<Sha256>::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+
+            for (idx, validator) in participants.iter().enumerate() {
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 0.0),
+                    verify_latency: (1.0, 0.0),
+                    certify_latency: (1.0, 0.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    leader_timeout: Duration::from_millis(1_500),
+                    certification_timeout: Duration::from_millis(3_500),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: 4,
+                    term_length,
+                    term_stop_notarize_on_nullify: false,
+                    same_term_finalization_timeout: Duration::from_secs(20),
+                    term_optimistic_views: 128,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine.start(pending, recovered, resolver);
+            }
+
+            let participants_set = participants.clone().try_into().unwrap();
+            let built_elector: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(&participants_set, term_length);
+            let leader_idx = usize::from(crate::simplex::elector::Elector::elect(
+                &built_elector,
+                Round::new(Epoch::new(333), View::new(1)),
+                None,
+            ));
+
+            let leader_reporter = reporters[leader_idx].clone();
+            let start = context.current();
+            while !leader_reporter
+                .notarizes
+                .lock()
+                .contains_key(&required_containers)
+            {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let elapsed = context.current().duration_since(start).unwrap_or_default();
+            let average_block_time_s = elapsed.as_secs_f64() / required_containers.get() as f64;
+            let network_latency_s = link_latency.as_secs_f64();
+            assert!(
+                average_block_time_s < network_latency_s,
+                "expected average optimistic block time ({:.3}ms) to be below network latency ({:.3}ms); elapsed {:?} for {} views",
+                average_block_time_s * 1000.0,
+                network_latency_s * 1000.0,
+                elapsed,
+                required_containers
+            );
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_invalid();
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_stable_leader_optimistic_blocks_faster_than_network_latency() {
+        stable_leader_optimistic_blocks_faster_than_network_latency();
+    }
+
+    fn stable_leader_finalizes_full_term_without_nullification() {
+        let n = 5;
+        let required_view = View::new(1000);
+        let namespace = b"consensus_stable_leader_full_term_no_nullify".to_vec();
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = Duration::from_secs(12);
+        let term_length = NZU64!(1000);
+        let executor = deterministic::Runner::timed(Duration::from_secs(40));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            let link = Link {
+                latency: Duration::from_millis(1_000),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            let elector = RoundRobin::<Sha256>::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+
+            for (idx, validator) in participants.iter().enumerate() {
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (1.0, 0.0),
+                    verify_latency: (1.0, 0.0),
+                    certify_latency: (1.0, 0.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    leader_timeout: Duration::from_millis(1_500),
+                    certification_timeout: Duration::from_millis(3_500),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: 4,
+                    term_length,
+                    term_stop_notarize_on_nullify: false,
+                    same_term_finalization_timeout: Duration::from_secs(6),
+                    term_optimistic_views: 100,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine.start(pending, recovered, resolver);
+            }
+
+            let participants_set = participants.clone().try_into().unwrap();
+            let built_elector: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(&participants_set, term_length);
+            let leader_idx = usize::from(crate::simplex::elector::Elector::elect(
+                &built_elector,
+                Round::new(Epoch::new(333), View::new(1)),
+                None,
+            ));
+
+            let start = context.current();
+            let deadline = start + Duration::from_secs(25);
+            while !reporters
+                .iter()
+                .all(|reporter| reporter.finalizations.lock().contains_key(&required_view))
+            {
+                if context.current() >= deadline {
+                    let progress = reporters
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, reporter)| {
+                            let max_finalized = reporter
+                                .finalizations
+                                .lock()
+                                .keys()
+                                .copied()
+                                .max()
+                                .unwrap_or(View::zero());
+                            let max_notarized = reporter
+                                .notarizations
+                                .lock()
+                                .keys()
+                                .copied()
+                                .max()
+                                .unwrap_or(View::zero());
+                            let max_notarize_vote = reporter
+                                .notarizes
+                                .lock()
+                                .keys()
+                                .copied()
+                                .max()
+                                .unwrap_or(View::zero());
+                            let nullify_votes = reporter.nullifies.lock().len();
+                            let nullification_certs = reporter.nullifications.lock().len();
+                            format!(
+                                "r{idx}: finalized={max_finalized} notarize_vote={max_notarize_vote} notarized={max_notarized} nullify_votes={nullify_votes} nullifications={nullification_certs}"
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    panic!(
+                        "expected all validators to finalize view {} before {:?}; progress: {}",
+                        required_view, deadline, progress
+                    );
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let elapsed = context.current().duration_since(start).unwrap_or_default();
+            assert!(
+                elapsed <= Duration::from_secs(25),
+                "expected all validators to finalize view {} within 25s, got {:?}",
+                required_view,
+                elapsed
+            );
+
+            let leader_reporter = &reporters[leader_idx];
+            assert!(
+                leader_reporter.notarizes.lock().contains_key(&required_view),
+                "stable leader must notarize through full term ending at view {}",
+                required_view
+            );
+            let leader_tip_notarization = leader_reporter
+                .notarizations
+                .lock()
+                .get(&required_view)
+                .cloned()
+                .expect("leader reporter missing tip notarization");
+            assert_eq!(
+                leader_tip_notarization.proposal.parent,
+                required_view.previous().unwrap_or(View::zero()),
+                "unexpected parent for leader tip notarization"
+            );
+
+            for (idx, reporter) in reporters.iter().enumerate() {
+                reporter.assert_no_invalid();
+                reporter.assert_no_faults();
+
+                assert!(
+                    reporter.nullifies.lock().is_empty(),
+                    "reporter {} observed unexpected nullify votes",
+                    idx
+                );
+                assert!(
+                    reporter.nullifications.lock().is_empty(),
+                    "reporter {} observed unexpected nullification certificates",
+                    idx
+                );
+
+                let finalization = reporter
+                    .finalizations
+                    .lock()
+                    .get(&required_view)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("reporter {idx} missing tip finalization"));
+                assert_eq!(
+                    finalization.proposal.round.view(),
+                    required_view,
+                    "reporter {idx} has mismatched tip finalization round"
+                );
+                assert_eq!(
+                    finalization.proposal.parent,
+                    required_view.previous().unwrap_or(View::zero()),
+                    "reporter {idx} has non-chain tip finalization parent"
+                );
+            }
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn test_stable_leader_finalizes_full_term_without_nullification() {
+        stable_leader_finalizes_full_term_without_nullification();
     }
 
     fn observer<S, F, L>(mut fixture: F)
@@ -1271,6 +1762,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1436,7 +1928,8 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
-                        same_term_finalization_timeout: Duration::from_secs(13),
+                        same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1624,6 +2117,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(51),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1746,6 +2240,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(12),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1886,6 +2381,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2124,6 +2620,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(51),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2295,6 +2792,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2498,6 +2996,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2697,6 +3196,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2951,7 +3451,8 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
-                        same_term_finalization_timeout: Duration::from_secs(13),
+                        same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3134,6 +3635,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3311,6 +3813,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3652,6 +4155,7 @@ mod tests {
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
                         same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3820,6 +4324,7 @@ mod tests {
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
                         same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3914,6 +4419,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(12),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4144,6 +4650,7 @@ mod tests {
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
                         same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4303,6 +4810,7 @@ mod tests {
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
                         same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4479,6 +4987,7 @@ mod tests {
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
                         same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4621,6 +5130,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4786,6 +5296,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 same_term_finalization_timeout: Duration::from_secs(12),
+                term_optimistic_views: 0,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5014,6 +5525,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5379,7 +5891,8 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         term_length: NZU64!(1),
                         term_stop_notarize_on_nullify: false,
-                        same_term_finalization_timeout: Duration::from_secs(13),
+                        same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5597,6 +6110,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(51),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5747,6 +6261,7 @@ mod tests {
                     term_length,
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5849,6 +6364,7 @@ mod tests {
                     term_length,
                     term_stop_notarize_on_nullify: false,
                     same_term_finalization_timeout: Duration::from_secs(12),
+                    term_optimistic_views: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6389,6 +6905,7 @@ mod tests {
                             term_length,
                             term_stop_notarize_on_nullify: false,
                             same_term_finalization_timeout: Duration::from_secs(12),
+                            term_optimistic_views: 0,
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6462,6 +6979,7 @@ mod tests {
                         term_length,
                         term_stop_notarize_on_nullify: false,
                         same_term_finalization_timeout: Duration::from_secs(12),
+                        term_optimistic_views: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
