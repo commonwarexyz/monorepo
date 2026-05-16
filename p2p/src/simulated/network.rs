@@ -1140,11 +1140,7 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         crate::CheckedSender::recipients(&self.checked)
     }
 
-    fn send(
-        self,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Feedback {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
         // Convert to IoBuf here since forwarder needs to inspect the message
         let message = message.into().coalesce();
 
@@ -1682,14 +1678,10 @@ mod tests {
                 .unwrap();
 
             // Send messages in both directions
-            peer_a_sender
-                .send(Recipients::One(twin.clone()), b"from_a", false);
-            peer_b_sender
-                .send(Recipients::One(twin.clone()), b"from_b", false);
-            twin_primary_sender
-                .send(Recipients::All, b"primary_out", false);
-            twin_secondary_sender
-                .send(Recipients::All, b"secondary_out", false);
+            peer_a_sender.send(Recipients::One(twin.clone()), b"from_a", false);
+            peer_b_sender.send(Recipients::One(twin.clone()), b"from_b", false);
+            twin_primary_sender.send(Recipients::All, b"primary_out", false);
+            twin_secondary_sender.send(Recipients::All, b"secondary_out", false);
 
             // Verify routing: peer_a messages go to primary, peer_b to secondary
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
@@ -1764,8 +1756,7 @@ mod tests {
                 .unwrap();
 
             // Send a message from peer_c to twin
-            peer_c_sender
-                .send(Recipients::One(twin.clone()), b"to_both", false);
+            peer_c_sender.send(Recipients::One(twin.clone()), b"to_both", false);
 
             // Verify both receivers get the message
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
@@ -1834,8 +1825,7 @@ mod tests {
                 .unwrap();
 
             // Send a message from peer_c to twin
-            let sent = peer_c_sender
-                .send(Recipients::One(twin.clone()), b"to_both", false);
+            let sent = peer_c_sender.send(Recipients::One(twin.clone()), b"to_both", false);
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0], twin);
 
@@ -1845,13 +1835,12 @@ mod tests {
             assert!(twin_secondary_recv.recv().now_or_never().is_none());
 
             // Send a message from twin to peer_c
-            let sent = twin_primary_sender
-                .send(Recipients::One(peer_c.clone()), b"to_both", false);
+            let sent = twin_primary_sender.send(Recipients::One(peer_c.clone()), b"to_both", false);
             assert_eq!(sent.len(), 1);
 
             // Send a message from twin to peer_c
-            let sent = twin_secondary_sender
-                .send(Recipients::One(peer_c.clone()), b"to_both", false);
+            let sent =
+                twin_secondary_sender.send(Recipients::One(peer_c.clone()), b"to_both", false);
             assert_eq!(sent.len(), 1);
         });
     }

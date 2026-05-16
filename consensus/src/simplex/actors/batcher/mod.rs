@@ -3741,8 +3741,7 @@ mod tests {
 
             // Send first valid vote from participant 1
             let vote1 = sign_vote(&schemes[1], proposal.clone());
-            sender
-                .send(Recipients::One(me.clone()), vote1.encode(), true);
+            sender.send(Recipients::One(me.clone()), vote1.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3754,8 +3753,7 @@ mod tests {
             );
 
             // Send same vote again (exact duplicate) - should be ignored, not blocked
-            sender
-                .send(Recipients::One(me.clone()), vote1.encode(), true);
+            sender.send(Recipients::One(me.clone()), vote1.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3767,8 +3765,7 @@ mod tests {
 
             // Now send a vote with the SAME proposal but with a different signature
             let vote2 = sign_vote(&schemes[2], proposal.clone());
-            sender
-                .send(Recipients::One(me.clone()), vote2.encode(), true);
+            sender.send(Recipients::One(me.clone()), vote2.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3947,8 +3944,7 @@ mod tests {
 
             // Send first valid vote for proposal1
             let vote1 = sign_vote(&schemes[1], proposal1);
-            sender
-                .send(Recipients::One(me.clone()), vote1.encode(), true);
+            sender.send(Recipients::One(me.clone()), vote1.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3960,8 +3956,7 @@ mod tests {
 
             // Send conflicting vote for proposal2 (different payload = different proposal)
             let vote2 = sign_vote(&schemes[1], proposal2);
-            sender
-                .send(Recipients::One(me.clone()), vote2.encode(), true);
+            sender.send(Recipients::One(me.clone()), vote2.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 

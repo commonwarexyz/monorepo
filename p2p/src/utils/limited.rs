@@ -210,11 +210,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
         }
     }
 
-    fn send(
-        self,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Feedback {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
         self.sender.send(self.recipients, message, priority)
     }
 }
@@ -336,10 +332,7 @@ mod tests {
             let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
             let checked = limited.check(Recipients::One(key(1))).unwrap();
-            assert_eq!(
-                checked.send(IoBuf::from(b"hello"), false),
-                Feedback::Ok
-            );
+            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
         });
     }
 
@@ -372,10 +365,7 @@ mod tests {
 
             let peers_list = vec![key(1), key(2), key(3)];
             let checked = limited.check(Recipients::Some(peers_list)).unwrap();
-            assert_eq!(
-                checked.send(IoBuf::from(b"hello"), false),
-                Feedback::Ok
-            );
+            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
             assert_sent_to(&sender, 0, &[key(1), key(2), key(3)]);
         });
     }

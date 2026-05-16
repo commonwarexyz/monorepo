@@ -43,11 +43,7 @@ impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
         Vec::new()
     }
 
-    fn send(
-        self,
-        _message: impl Into<IoBufs> + Send,
-        _priority: bool,
-    ) -> Feedback {
+    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
         Feedback::Closed
     }
 }

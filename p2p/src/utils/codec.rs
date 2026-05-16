@@ -87,11 +87,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         self.sender.recipients()
     }
 
-    pub fn send(
-        self,
-        message: V,
-        priority: bool,
-    ) -> Feedback {
+    pub fn send(self, message: V, priority: bool) -> Feedback {
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority)
     }

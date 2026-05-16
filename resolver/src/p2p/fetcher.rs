@@ -588,11 +588,7 @@ mod tests {
             }
         }
 
-        fn send(
-            self,
-            message: impl Into<IoBufs> + Send,
-            priority: bool,
-        ) -> Feedback {
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
             self.sender.send(self.recipients, message, priority)
         }
     }

@@ -4,8 +4,8 @@ use crate::{Handler, Monitor};
 
 mod engine;
 use commonware_p2p::Blocker;
-use std::num::NonZeroUsize;
 pub use engine::Engine;
+use std::num::NonZeroUsize;
 mod ingress;
 pub use ingress::{Mailbox, Message};
 
@@ -67,8 +67,7 @@ mod tests {
         Supervisor as _,
     };
     use commonware_utils::{ordered::Set, NZUsize, NZU32};
-    use std::num::NonZeroUsize;
-    use std::time::Duration;
+    use std::{num::NonZeroUsize, time::Duration};
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
@@ -378,7 +377,10 @@ mod tests {
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
-            assert_eq!(mailbox1.send(Recipients::All, request.clone()), Feedback::Ok);
+            assert_eq!(
+                mailbox1.send(Recipients::All, request.clone()),
+                Feedback::Ok
+            );
 
             // Collect responses
             let mut responses_collected = 0;
@@ -808,13 +810,11 @@ mod tests {
 
             // Send a response from peer 3 to peer 1
             let response_to_peer1 = Response { id: 42, result: 72 };
-            res_conn3
-                .0
-                .send(
-                    Recipients::One(peers[0].clone()),
-                    response_to_peer1.encode(),
-                    true,
-                );
+            res_conn3.0.send(
+                Recipients::One(peers[0].clone()),
+                response_to_peer1.encode(),
+                true,
+            );
 
             // Give some time for messages to be processed
             context.sleep(Duration::from_millis(1_000)).await;

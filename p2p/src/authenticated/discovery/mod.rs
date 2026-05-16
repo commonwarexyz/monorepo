@@ -403,12 +403,11 @@ mod tests {
                                     for recipient in &recipients {
                                         // Loop until success
                                         loop {
-                                            let sent = sender
-                                                .send(
-                                                    Recipients::One(recipient.clone()),
-                                                    msg.as_ref().to_vec(),
-                                                    true,
-                                                );
+                                            let sent = sender.send(
+                                                Recipients::One(recipient.clone()),
+                                                msg.as_ref().to_vec(),
+                                                true,
+                                            );
                                             if sent.len() != 1 {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
@@ -420,18 +419,15 @@ mod tests {
                                 Mode::Some | Mode::All => {
                                     // Loop until all peer sends successful
                                     loop {
-                                        let sent = sender
-                                            .send(
-                                                match mode {
-                                                    Mode::Some => {
-                                                        Recipients::Some(recipients.clone())
-                                                    }
-                                                    Mode::All => Recipients::All,
-                                                    _ => unreachable!(),
-                                                },
-                                                msg.as_ref().to_vec(),
-                                                true,
-                                            );
+                                        let sent = sender.send(
+                                            match mode {
+                                                Mode::Some => Recipients::Some(recipients.clone()),
+                                                Mode::All => Recipients::All,
+                                                _ => unreachable!(),
+                                            },
+                                            msg.as_ref().to_vec(),
+                                            true,
+                                        );
                                         if sent.len() != recipients.len() {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
@@ -753,8 +749,7 @@ mod tests {
             }
 
             // Immediately send the second message to trigger the rate limit.
-            let sent = sender0
-                .send(Recipients::One(addresses[1].clone()), msg, true);
+            let sent = sender0.send(Recipients::One(addresses[1].clone()), msg, true);
             assert!(sent.is_empty());
 
             // Give the metrics time to reflect the rate-limited message.
@@ -891,8 +886,7 @@ mod tests {
                         // Send a message
                         let msg = signer.public_key();
                         loop {
-                            let sent = sender
-                                .send(Recipients::All, msg.as_ref().to_vec(), true);
+                            let sent = sender.send(Recipients::All, msg.as_ref().to_vec(), true);
                             if sent.len() >= expected_connections {
                                 break;
                             }
@@ -1151,8 +1145,8 @@ mod tests {
                                 recipients.sort();
 
                                 loop {
-                                    let mut sent = sender
-                                        .send(Recipients::All, msg.as_ref().to_vec(), true);
+                                    let mut sent =
+                                        sender.send(Recipients::All, msg.as_ref().to_vec(), true);
                                     if sent.len() != recipients.len() {
                                         context.sleep(Duration::from_millis(100)).await;
                                         continue;
@@ -1278,10 +1272,8 @@ mod tests {
 
             let mut received = 0;
             while received < 2 {
-                let sent0 = sender0
-                    .send(Recipients::One(pk1.clone()), pk0.as_ref().to_vec(), true);
-                let sent1 = sender1
-                    .send(Recipients::One(pk0.clone()), pk1.as_ref().to_vec(), true);
+                let sent0 = sender0.send(Recipients::One(pk1.clone()), pk0.as_ref().to_vec(), true);
+                let sent1 = sender1.send(Recipients::One(pk0.clone()), pk1.as_ref().to_vec(), true);
                 assert!(!sent0.is_empty());
                 assert!(!sent1.is_empty());
 
@@ -1371,8 +1363,8 @@ mod tests {
                                 recipients.sort();
 
                                 loop {
-                                    let mut sent = sender
-                                        .send(Recipients::All, msg.as_ref().to_vec(), true);
+                                    let mut sent =
+                                        sender.send(Recipients::All, msg.as_ref().to_vec(), true);
                                     if sent.len() != recipients.len() {
                                         context.sleep(Duration::from_millis(100)).await;
                                         continue;
@@ -1629,12 +1621,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        );
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1704,12 +1695,11 @@ mod tests {
                     // Wait for the restarted peer to reconnect to all others
                     let restarted_sender = senders[restart_peer_idx].as_mut().unwrap();
                     loop {
-                        let sent = restarted_sender
-                            .send(
-                                Recipients::All,
-                                peers[restart_peer_idx].public_key().as_ref().to_vec(),
-                                true,
-                            );
+                        let sent = restarted_sender.send(
+                            Recipients::All,
+                            peers[restart_peer_idx].public_key().as_ref().to_vec(),
+                            true,
+                        );
                         if sent.len() == n - 1 {
                             break;
                         }
@@ -1723,12 +1713,11 @@ mod tests {
                         }
                         let sender = senders[i].as_mut().unwrap();
                         loop {
-                            let sent = sender
-                                .send(
-                                    Recipients::One(addresses[restart_peer_idx].clone()),
-                                    peers[i].public_key().as_ref().to_vec(),
-                                    true,
-                                );
+                            let sent = sender.send(
+                                Recipients::One(addresses[restart_peer_idx].clone()),
+                                peers[i].public_key().as_ref().to_vec(),
+                                true,
+                            );
                             if sent.len() == 1 {
                                 break;
                             }
@@ -1810,12 +1799,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        );
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1883,12 +1871,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        );
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1979,12 +1966,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        );
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -2055,12 +2041,11 @@ mod tests {
             // 3. Peer 2 dials the restarted peer
             let restarted_sender = senders[restart_peer_idx].as_mut().unwrap();
             loop {
-                let sent = restarted_sender
-                    .send(
-                        Recipients::All,
-                        peers[restart_peer_idx].public_key().as_ref().to_vec(),
-                        true,
-                    );
+                let sent = restarted_sender.send(
+                    Recipients::All,
+                    peers[restart_peer_idx].public_key().as_ref().to_vec(),
+                    true,
+                );
                 if sent.len() == n - 1 {
                     break;
                 }
@@ -2074,12 +2059,11 @@ mod tests {
                 }
                 let sender = senders[i].as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::One(addresses[restart_peer_idx].clone()),
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        );
+                    let sent = sender.send(
+                        Recipients::One(addresses[restart_peer_idx].clone()),
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == 1 {
                         break;
                     }
@@ -2159,8 +2143,8 @@ mod tests {
 
             // Peer 0 should eventually connect to the honest peer 1 at socket1.
             loop {
-                let sent = sender0
-                    .send(Recipients::All, peer0.public_key().as_ref().to_vec(), true);
+                let sent =
+                    sender0.send(Recipients::All, peer0.public_key().as_ref().to_vec(), true);
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer1.public_key());
                     break;
@@ -2235,8 +2219,8 @@ mod tests {
 
             // Peer 0 can send to peer 2.
             loop {
-                let sent = sender0
-                    .send(Recipients::All, peer2.public_key().as_ref().to_vec(), true);
+                let sent =
+                    sender0.send(Recipients::All, peer2.public_key().as_ref().to_vec(), true);
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer2.public_key());
                     break;
@@ -2267,8 +2251,8 @@ mod tests {
 
             // Peer 1 should eventually connect to both peer 0 and peer 2.
             loop {
-                let sent = sender1
-                    .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
+                let sent =
+                    sender1.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
                 if sent.len() == 2 {
                     assert!(sent.contains(&peer0.public_key()));
                     assert!(sent.contains(&peer2.public_key()));

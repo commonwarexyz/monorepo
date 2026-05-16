@@ -3405,8 +3405,7 @@ mod tests {
                 Certificate::Notarization(notarization(View::new(3), View::new(2), b"payload-3")),
                 Certificate::Finalization(finalization(View::new(3), View::new(2), b"payload-3")),
             ] {
-                injector_sender
-                    .send(Recipients::One(me.clone()), certificate.encode(), true);
+                injector_sender.send(Recipients::One(me.clone()), certificate.encode(), true);
             }
 
             let elector = RoundRobin::<Sha256>::default();

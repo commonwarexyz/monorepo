@@ -513,28 +513,26 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     // Attempt to send the message
                     // Note: Always use low priority (false) to ensure FIFO ordering
-                    let send_result = peers[from_idx]
+                    let accepted_recipients = peers[from_idx]
                         .network
                         .sender
                         .send(recipients, message.clone(), false);
 
                     // Track message as expected only if send was accepted
-                    if let Ok(accepted_recipients) = send_result {
-                        // Map accepted recipient public keys to indices
-                        for pk in accepted_recipients.into_iter() {
-                            if let Some(&to_idx) = topology.pk_to_id.get(&pk) {
-                                // Add message to the queue for this (receiver, sender) pair
-                                expected_msgs
-                                    .entry((to_idx, from_idx as u8))
-                                    .or_default()
-                                    .push_back(message.clone());
+                    // Map accepted recipient public keys to indices
+                    for pk in accepted_recipients {
+                        if let Some(&to_idx) = topology.pk_to_id.get(&pk) {
+                            // Add message to the queue for this (receiver, sender) pair
+                            expected_msgs
+                                .entry((to_idx, from_idx as u8))
+                                .or_default()
+                                .push_back(message.clone());
 
-                                // Track that this receiver has pending messages from this sender
-                                pending_by_receiver
-                                    .entry(to_idx)
-                                    .or_default()
-                                    .insert(from_idx as u8);
-                            }
+                            // Track that this receiver has pending messages from this sender
+                            pending_by_receiver
+                                .entry(to_idx)
+                                .or_default()
+                                .insert(from_idx as u8);
                         }
                     }
                 }

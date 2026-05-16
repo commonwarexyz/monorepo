@@ -148,12 +148,11 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, proposal_a).expect("sign failed");
-            vote_sender
-                .send(
-                    Recipients::One(victim.clone()),
-                    Vote::Notarize(notarize_a).encode(),
-                    true,
-                );
+            vote_sender.send(
+                Recipients::One(victim.clone()),
+                Vote::Notarize(notarize_a).encode(),
+                true,
+            );
 
             // Notarize proposal B and send it to everyone else
             let notarize_b = Notarize::<S, _>::sign(&self.scheme, proposal_b).expect("sign failed");
@@ -167,12 +166,11 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 })
                 .map(|(_, key)| key.clone())
                 .collect();
-            vote_sender
-                .send(
-                    Recipients::Some(non_victims),
-                    Vote::Notarize(notarize_b).encode(),
-                    true,
-                );
+            vote_sender.send(
+                Recipients::Some(non_victims),
+                Vote::Notarize(notarize_b).encode(),
+                true,
+            );
         }
     }
 }

@@ -347,11 +347,7 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         self.inner.recipients()
     }
 
-    fn send(
-        self,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Feedback {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
@@ -679,8 +675,7 @@ mod tests {
 
             // Send and receive
             let payload = IoBuf::from(b"hello");
-            let _ = sub_tx2
-                .send(Recipients::One(pk1.clone()), payload.clone(), false);
+            let _ = sub_tx2.send(Recipients::One(pk1.clone()), payload.clone(), false);
             let (from, bytes) = sub_rx1.recv().await.unwrap();
             assert_eq!(from, pk2);
             assert_eq!(bytes, payload);
@@ -706,10 +701,8 @@ mod tests {
 
             let payload_a = IoBuf::from(b"A");
             let payload_b = IoBuf::from(b"B");
-            let _ = tx2_a
-                .send(Recipients::One(pk1.clone()), payload_a.clone(), false);
-            let _ = tx2_b
-                .send(Recipients::One(pk1.clone()), payload_b.clone(), false);
+            let _ = tx2_a.send(Recipients::One(pk1.clone()), payload_a.clone(), false);
+            let _ = tx2_b.send(Recipients::One(pk1.clone()), payload_b.clone(), false);
 
             let (from_a, bytes_a) = rx_a.recv().await.unwrap();
             assert_eq!(from_a, pk2);
@@ -861,9 +854,7 @@ mod tests {
             assert_eq!(from, pk1);
             let checked = global_sender2.check(Recipients::One(pk1.clone())).unwrap();
             assert_eq!(checked.recipients(), vec![pk1]);
-            checked
-                .with_subchannel(subchannel)
-                .send(b"TEST", true);
+            checked.with_subchannel(subchannel).send(b"TEST", true);
 
             // Receive the response with pk1's receiver.
             let (from, bytes) = rx1.recv().await.unwrap();

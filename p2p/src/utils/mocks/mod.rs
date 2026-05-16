@@ -136,8 +136,7 @@ mod tests {
         ];
 
         let (mut sender, _) = inert_channel(peers.as_slice());
-        let sent = sender
-            .send(Recipients::All, b"hello".to_vec(), false);
+        let sent = sender.send(Recipients::All, b"hello".to_vec(), false);
         assert_eq!(sent, peers);
     }
 }
