@@ -23,7 +23,262 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R>
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.push_back(message);
+        match message {
+            Self::Send {
+                request,
+                recipients,
+            } => {
+                let commitment = request.commitment();
+                // The actor tracks outbound requests by commitment, so overflow coalesces sends
+                // with the same key. Keep the first queued payload and union later recipients into
+                // that send.
+                if let Some(existing) = overflow.iter_mut().find(|message| {
+                    matches!(
+                        message,
+                        Self::Send { request, .. } if request.commitment() == commitment
+                    )
+                }) {
+                    let Self::Send {
+                        recipients: existing,
+                        ..
+                    } = existing
+                    else {
+                        unreachable!("matched send");
+                    };
+                    merge_recipients(existing, recipients);
+                } else {
+                    overflow.push_back(Self::Send {
+                        request,
+                        recipients,
+                    });
+                }
+            }
+            Self::Cancel { commitment } => {
+                // Drop queued sends that this cancel supersedes. Keep the cancel itself because
+                // the actor may already have in-flight state for the commitment.
+                overflow.retain(|message| {
+                    !matches!(
+                        message,
+                        Self::Send { request, .. } if request.commitment() == commitment
+                    )
+                });
+                overflow.push_back(Self::Cancel { commitment });
+            }
+        }
+    }
+}
+
+/// Merges recipients into an existing queued send without duplicating peers.
+fn merge_recipients<P: PublicKey>(existing: &mut Recipients<P>, incoming: Recipients<P>) {
+    if matches!(existing, Recipients::All) {
+        return;
+    }
+    if matches!(incoming, Recipients::All) {
+        *existing = Recipients::All;
+        return;
+    }
+
+    // Normalize specific recipients into a list, merge in first-seen order, and then compact the
+    // result back to `One` when only one peer remains.
+    let mut peers = match existing {
+        Recipients::All => unreachable!("handled above"),
+        Recipients::One(peer) => vec![peer.clone()],
+        Recipients::Some(peers) => std::mem::take(peers),
+    };
+
+    match incoming {
+        Recipients::All => unreachable!("handled above"),
+        Recipients::One(peer) => push_unique(&mut peers, peer),
+        Recipients::Some(incoming) => merge_peer_lists(&mut peers, incoming),
+    }
+
+    *existing = match peers.as_slice() {
+        [peer] => Recipients::One(peer.clone()),
+        _ => Recipients::Some(peers),
+    };
+}
+
+/// Adds each incoming peer that is not already present.
+fn merge_peer_lists<P: PublicKey>(existing: &mut Vec<P>, incoming: Vec<P>) {
+    for peer in incoming {
+        push_unique(existing, peer);
+    }
+}
+
+/// Adds a peer if it has not already been queued.
+fn push_unique<P: PublicKey>(peers: &mut Vec<P>, peer: P) {
+    if !peers.contains(&peer) {
+        peers.push(peer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Message, Policy};
+    use crate::p2p::mocks::types::Request;
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        Committable, Signer,
+    };
+    use commonware_p2p::Recipients;
+    use std::collections::VecDeque;
+
+    fn peer(seed: u64) -> PublicKey {
+        PrivateKey::from_seed(seed).public_key()
+    }
+
+    fn handle(
+        overflow: &mut VecDeque<Message<PublicKey, Request>>,
+        message: Message<PublicKey, Request>,
+    ) {
+        <Message<PublicKey, Request> as Policy>::handle(overflow, message);
+    }
+
+    #[test]
+    fn cancel_prunes_queued_sends_and_is_retained() {
+        let request1 = Request { id: 1, data: 10 };
+        let request2 = Request { id: 2, data: 20 };
+        let commitment1 = request1.commitment();
+        let mut overflow = VecDeque::new();
+
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request1,
+                recipients: Recipients::One(peer(1)),
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request2.clone(),
+                recipients: Recipients::One(peer(2)),
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Cancel {
+                commitment: commitment1,
+            },
+        );
+
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            &overflow[0],
+            Message::Send { request, .. } if request.commitment() == request2.commitment()
+        ));
+        assert!(matches!(
+            &overflow[1],
+            Message::Cancel { commitment } if commitment == &commitment1
+        ));
+    }
+
+    #[test]
+    fn send_merges_recipients_for_same_commitment() {
+        let request = Request { id: 1, data: 10 };
+        let peer1 = peer(1);
+        let peer2 = peer(2);
+        let peer3 = peer(3);
+        let mut overflow = VecDeque::new();
+
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request.clone(),
+                recipients: Recipients::One(peer1.clone()),
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request.clone(),
+                recipients: Recipients::Some(vec![peer2.clone(), peer1.clone()]),
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Send {
+                request,
+                recipients: Recipients::One(peer3.clone()),
+            },
+        );
+
+        assert_eq!(overflow.len(), 1);
+        let Message::Send { recipients, .. } = &overflow[0] else {
+            panic!("expected send");
+        };
+        let Recipients::Some(peers) = recipients else {
+            panic!("expected merged recipient set");
+        };
+        assert_eq!(peers, &vec![peer1, peer2, peer3]);
+    }
+
+    #[test]
+    fn send_merges_same_commitment_with_different_digest() {
+        let request1 = Request { id: 1, data: 10 };
+        let request2 = Request { id: 1, data: 20 };
+        let peer1 = peer(1);
+        let peer2 = peer(2);
+        let mut overflow = VecDeque::new();
+
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request1.clone(),
+                recipients: Recipients::One(peer1.clone()),
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request2,
+                recipients: Recipients::One(peer2.clone()),
+            },
+        );
+
+        assert_eq!(overflow.len(), 1);
+        let Message::Send {
+            request,
+            recipients,
+        } = &overflow[0]
+        else {
+            panic!("expected send");
+        };
+        assert_eq!(request, &request1);
+        let Recipients::Some(peers) = recipients else {
+            panic!("expected merged recipient set");
+        };
+        assert_eq!(peers, &vec![peer1, peer2]);
+    }
+
+    #[test]
+    fn send_merge_with_all_recipients_supersedes_specific_recipients() {
+        let request = Request { id: 1, data: 10 };
+        let mut overflow = VecDeque::new();
+
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request.clone(),
+                recipients: Recipients::One(peer(1)),
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Send {
+                request,
+                recipients: Recipients::All,
+            },
+        );
+
+        assert_eq!(overflow.len(), 1);
+        assert!(matches!(
+            &overflow[0],
+            Message::Send {
+                recipients: Recipients::All,
+                ..
+            }
+        ));
     }
 }
 

@@ -742,7 +742,7 @@ mod tests {
 
             // Stop the engine.
             handle.abort();
-            context.sleep(Duration::from_millis(1)).await;
+            handle.await.expect_err("engine should be aborted");
 
             // Send request
             let request = Request { id: 1, data: 1 };
@@ -897,8 +897,11 @@ mod tests {
                 spawn_engines_with_handles(context.child("engine"), &oracle, schemes, connections);
 
             // Abort all engines immediately
-            for handle in handles {
+            for handle in &handles {
                 handle.abort();
+            }
+            for handle in handles {
+                handle.await.expect_err("engine should be aborted");
             }
 
             // All operations should not panic after shutdown
