@@ -515,7 +515,7 @@ pub struct Node<P: PublicKey, S: Scheme, D: Digest> {
 
     /// Information about the parent chunk (previous height)
     ///
-    /// This part is not signed over, but it is used to verif that the previous chunk
+    /// This part is not signed over, but it is used to verify that the previous chunk
     /// in the chain was correctly broadcast. It contains the certificate that proves
     /// a quorum of validators acknowledged the parent.
     ///
