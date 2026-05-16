@@ -437,9 +437,10 @@ mod tests {
 
             let pk1 = pk(0);
             let pk2 = pk(1);
+            let pk3 = pk(2);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -458,20 +459,10 @@ mod tests {
             // Send a truncated payload (1 byte, but u32 needs 4).
             let invalid = IoBuf::from(vec![0xFFu8]);
             let _ = sender1.send(Recipients::One(pk2.clone()), invalid, true);
-            loop {
-                let blocked = oracle.blocked().await.unwrap();
-                if blocked.contains(&(pk2.clone(), pk1.clone())) {
-                    break;
-                }
-
-                context.sleep(Duration::from_millis(1)).await;
-            }
 
             // Then send a valid message from a different peer to confirm
             // the receiver is still running.
-            let pk3 = pk(2);
             let control3 = oracle.control(pk3.clone());
-            track_peers(&oracle, 1, [pk2.clone(), pk3.clone()]);
             link_bidirectional(&mut oracle, pk3.clone(), pk2.clone()).await;
             let (mut sender3, _) = control3.register(0, TEST_QUOTA).await.unwrap();
 
@@ -481,6 +472,16 @@ mod tests {
             let (from, value) = rx.recv().await.unwrap();
             assert_eq!(from, pk3);
             assert_eq!(value, 99u32);
+
+            // Verify pk1 was blocked.
+            loop {
+                let blocked = oracle.blocked().await.unwrap();
+                if blocked.contains(&(pk2.clone(), pk1.clone())) {
+                    break;
+                }
+
+                context.sleep(Duration::from_millis(1)).await;
+            }
         });
     }
 

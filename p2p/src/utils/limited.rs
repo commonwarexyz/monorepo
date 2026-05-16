@@ -462,6 +462,7 @@ mod tests {
             assert!(crate::CheckedSender::recipients(&checked).is_empty());
             checked.send(IoBuf::from(b"empty"), false).unwrap();
 
+            // Verify that the sender received the message with empty Recipients::Some.
             assert_sent_to(&sender, 0, &[]);
         });
     }

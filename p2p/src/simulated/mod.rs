@@ -1456,7 +1456,8 @@ mod tests {
             sender
                 .send(Recipients::One(pk2.clone()), slow.clone(), true)
                 .unwrap();
-            context.sleep(egress_time + Duration::from_millis(1)).await;
+            reschedule().await;
+            reschedule().await;
 
             // Update link
             oracle.remove_link(pk1.clone(), pk2.clone()).await.unwrap();

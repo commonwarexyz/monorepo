@@ -1,6 +1,6 @@
-use commonware_actor::mailbox::{self, Policy};
-use commonware_runtime::Metrics;
-use std::{collections::VecDeque, fmt, num::NonZeroUsize};
+use commonware_utils::channel::ring;
+use futures::Sink;
+use std::{fmt, num::NonZeroUsize, pin::Pin};
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -9,25 +9,17 @@ pub enum Message {
     Kill,
 }
 
-impl Policy for Message {
-    type Overflow = VecDeque<Self>;
-
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        overflow.clear();
-        overflow.push_back(message);
-    }
-}
-
-pub struct Mailbox(mailbox::Sender<Message>);
+pub struct Mailbox(ring::Sender<Message>);
 
 impl Mailbox {
-    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, mailbox::Receiver<Message>) {
-        let (sender, receiver) = mailbox::new(metrics, size);
+    pub fn new(size: NonZeroUsize) -> (Self, ring::Receiver<Message>) {
+        let (sender, receiver) = ring::channel(size);
         (Self(sender), receiver)
     }
 
     pub fn kill(&self) {
-        let _ = self.0.enqueue(Message::Kill);
+        let mut sender = self.0.clone();
+        let _ = Pin::new(&mut sender).start_send(Message::Kill);
     }
 }
 
@@ -47,15 +39,15 @@ impl fmt::Debug for Mailbox {
 mod tests {
     use super::*;
     use commonware_utils::NZUsize;
+    use futures::{FutureExt, StreamExt};
 
     #[test]
     fn kill_retained_on_overflow() {
-        let (mailbox, mut receiver) = Mailbox::new(crate::utils::mocks::Metrics, NZUsize!(1));
+        let (mailbox, mut receiver) = Mailbox::new(NZUsize!(1));
         mailbox.kill();
         mailbox.kill();
 
-        assert!(matches!(receiver.try_recv(), Ok(Message::Kill)));
-        assert!(matches!(receiver.try_recv(), Ok(Message::Kill)));
-        assert!(receiver.try_recv().is_err());
+        assert!(matches!(receiver.next().now_or_never(), Some(Some(Message::Kill))));
+        assert!(receiver.next().now_or_never().is_none());
     }
 }

@@ -9,7 +9,7 @@ use std::{collections::VecDeque, num::NonZeroUsize};
 pub(crate) struct Message<T>(T);
 
 impl<T> Message<T> {
-    fn into_inner(self) -> T {
+    pub(crate) fn into_inner(self) -> T {
         self.0
     }
 }

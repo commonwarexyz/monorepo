@@ -7,10 +7,6 @@ use crate::{
             types,
         },
     },
-    utils::{
-        mailbox_enqueue as enqueue, mailbox_request as request, mailbox_request_or as request_or,
-        mailbox_request_or_default as request_or_default,
-    },
     PeerSetSubscription, TrackedPeers,
 };
 use commonware_actor::{
@@ -166,73 +162,73 @@ impl<C: PublicKey> Mailbox<C> {
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
     pub(crate) async fn connect(&self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
-        request(&self.0, move |responder| Message::Connect {
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Connect {
             public_key,
             dialer,
             responder,
-        })
-        .await
+        });
+        receiver.await.ok()
     }
 
     /// Send a `Construct` message to the tracker.
     pub(crate) fn construct(&self, public_key: C, peer: peer::Mailbox<C>) -> Feedback {
-        enqueue(&self.0, Message::Construct { public_key, peer })
+        self.0.enqueue(Message::Construct { public_key, peer })
     }
 
     /// Send a `BitVec` message to the tracker.
     pub(crate) fn bit_vec(&self, bit_vec: types::BitVec, peer: peer::Mailbox<C>) -> Feedback {
-        enqueue(&self.0, Message::BitVec { bit_vec, peer })
+        self.0.enqueue(Message::BitVec { bit_vec, peer })
     }
 
     /// Send a `Peers` message to the tracker.
     pub(crate) fn peers(&self, peers: Vec<types::Info<C>>) -> Feedback {
-        enqueue(&self.0, Message::Peers { peers })
+        self.0.enqueue(Message::Peers { peers })
     }
 
     /// Request dialable peers from the tracker.
     ///
     /// Returns an empty response if the tracker is shut down.
     pub(crate) async fn dialable(&self) -> Dialable<C> {
-        request_or_default(&self.0, |responder| Message::Dialable { responder }).await
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Dialable { responder });
+        receiver.await.unwrap_or_default()
     }
 
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
     pub(crate) async fn dial(&self, public_key: C) -> Option<Reservation<C>> {
-        request(&self.0, move |reservation| Message::Dial {
+        let (reservation, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Dial {
             public_key,
             reservation,
-        })
-        .await
-        .flatten()
+        });
+        receiver.await.ok().flatten()
     }
 
     /// Send an `Acceptable` message to the tracker.
     ///
     /// Returns `false` if the tracker is shut down.
     pub(crate) async fn acceptable(&self, public_key: C) -> bool {
-        request_or(
-            &self.0,
-            move |responder| Message::Acceptable {
-                public_key,
-                responder,
-            },
-            false,
-        )
-        .await
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Acceptable {
+            public_key,
+            responder,
+        });
+        receiver.await.unwrap_or(false)
     }
 
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
     pub(crate) async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
-        request(&self.0, move |reservation| Message::Listen {
+        let (reservation, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Listen {
             public_key,
             reservation,
-        })
-        .await
-        .flatten()
+        });
+        receiver.await.ok().flatten()
     }
 }
 
@@ -250,7 +246,7 @@ impl<C: PublicKey> Releaser<C> {
 
     /// Release a reservation.
     pub fn release(&mut self, metadata: Metadata<C>) -> Feedback {
-        enqueue(&self.sender, Message::Release { metadata })
+        self.sender.enqueue(Message::Release { metadata })
     }
 }
 
@@ -273,21 +269,21 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        request(&self.sender, move |responder| Message::PeerSet {
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::PeerSet {
             index: id,
             responder,
-        })
-        .await
-        .flatten()
+        });
+        receiver.await.ok().flatten()
     }
 
     async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-        request(&self.sender, |responder| Message::Subscribe { responder })
-            .await
-            .unwrap_or_else(|| {
-                let (_, rx) = mpsc::unbounded_channel();
-                rx
-            })
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Subscribe { responder });
+        receiver.await.unwrap_or_else(|_| {
+            let (_, rx) = mpsc::unbounded_channel();
+            rx
+        })
     }
 }
 
@@ -296,13 +292,10 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     where
         R: Into<TrackedPeers<Self::PublicKey>> + Send,
     {
-        enqueue(
-            &self.sender,
-            Message::Register {
-                index,
-                peers: peers.into(),
-            },
-        )
+        self.sender.enqueue(Message::Register {
+            index,
+            peers: peers.into(),
+        })
     }
 }
 
@@ -310,6 +303,6 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
     fn block(&mut self, public_key: Self::PublicKey) -> Feedback {
-        enqueue(&self.sender, Message::Block { public_key })
+        self.sender.enqueue(Message::Block { public_key })
     }
 }

@@ -423,6 +423,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
+                // Broadcast updated tracked membership to SubscribeConnected subscribers.
                 self.broadcast_peer_list();
             }
             ingress::Message::Register {
