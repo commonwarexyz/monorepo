@@ -25,8 +25,8 @@ use blst::{
     blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -497,8 +497,25 @@ impl Read for Private {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read(buf)?;
-        Ok(Self::new(scalar))
+        let scalar = Scalar::read_blst_scalar_unchecked(buf)?;
+        let mut ret = blst_fr::default();
+
+        // SAFETY: `blst_sk_check` validates non-zero and in-range.
+        //
+        // We use `blst_sk_check` instead of blst_scalar_fr_check because it also checks non-zero
+        // per IETF BLS12-381 spec (Draft 4+).
+        //
+        // References:
+        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
+        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
+        unsafe {
+            if !blst_sk_check(&scalar) {
+                return Err(Invalid("Private", "Invalid: zero scalar"));
+            }
+            blst_fr_from_scalar(&mut ret, &scalar);
+        }
+
+        Ok(Self::new(Scalar(ret)))
     }
 }
 
@@ -596,6 +613,11 @@ impl Scalar {
         Self::from_limbs([i, 0, 0, 0])
     }
 
+    /// Constant-time equality check: if the scalar is zero or not.
+    pub fn is_zero(&self) -> Choice {
+        self.ct_eq(&Self::zero())
+    }
+
     /// Encodes the scalar into a byte array.
     fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
         let mut slice = Zeroizing::new([0u8; Self::SIZE]);
@@ -615,6 +637,28 @@ impl Scalar {
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
     }
+
+    /// Helper that is used in the [`Read`] implementation for [`Scalar`] and [`Private`].
+    ///
+    /// Only deserializes [`blst_scalar`] from big-endian bytes.
+    ///
+    /// # Attention
+    ///
+    /// - This method does not check if the scalar is in-range.
+    /// - This method does not check if the scalar is zero or not.
+    ///
+    /// The above checks are the responsibility of callers.
+    pub(crate) fn read_blst_scalar_unchecked(buf: &mut impl Buf) -> Result<blst_scalar, Error> {
+        let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let mut scalar = blst_scalar::default();
+
+        // SAFETY: bytes is a valid 32-byte array.
+        unsafe {
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+        }
+
+        Ok(scalar)
+    }
 }
 
 impl Write for Scalar {
@@ -628,23 +672,17 @@ impl Read for Scalar {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let scalar = Self::read_blst_scalar_unchecked(buf)?;
         let mut ret = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
-        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
-        // per IETF BLS12-381 spec (Draft 4+).
-        //
-        // References:
-        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
-        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
+
+        // SAFETY: `blst_scalar_fr_check` validates that the scalar is in-range.
         unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_sk_check(&scalar) {
-                return Err(Invalid("Scalar", "Invalid"));
+            if !blst_scalar_fr_check(&scalar) {
+                return Err(Invalid("Scalar", "Invalid: scalar not in range"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
         }
+
         Ok(Self(ret))
     }
 }
@@ -661,7 +699,7 @@ impl Hash for Scalar {
 }
 
 impl CtEq for Scalar {
-    fn ct_eq(&self, other: &Self) -> ctutils::Choice {
+    fn ct_eq(&self, other: &Self) -> Choice {
         self.0.l.ct_eq(&other.0.l)
     }
 }
@@ -1773,7 +1811,7 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, Encode, Error};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{test_suites, Random};
@@ -1832,11 +1870,35 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
+        // Check `Codec` for random scalar.
         let original = Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+
+        // Check `Codec` for zero scalar.
+        let zero = Scalar::zero();
+        let mut encoded = zero.encode();
+        let decoded = Scalar::decode(&mut encoded).unwrap();
+        assert!(decoded.is_zero().to_bool());
+    }
+
+    #[test]
+    fn test_private_codec() {
+        // Check `Codec` for random private.
+        let original = Private::random(&mut test_rng());
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), Private::SIZE);
+        let decoded = Private::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+
+        // Check `Codec` for private from zero.
+        let mut zeroes = bytes::Bytes::from(vec![0u8; Private::SIZE]);
+        let Err(Error::Invalid("Private", "Invalid: zero scalar")) = Private::decode(&mut zeroes)
+        else {
+            panic!("Private::decode succeeds for zero-bytes");
+        };
     }
 
     #[test]
