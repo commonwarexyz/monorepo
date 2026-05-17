@@ -30,6 +30,21 @@ To fix formatting automatically, run:
 $ just fix-fmt
 ```
 
+CI runs formatting checks with two rustfmt binaries:
+- Official rustfmt from the Rust toolchain (standard formatting rules)
+- A forked rustfmt that adds support for custom macros like `select!` and `select_loop!`
+
+You do not need the forked rustfmt locally. If the forked check fails in CI and you want to reproduce it, download the release asset and run:
+
+```bash
+$ RUSTFMT=/path/to/forked-rustfmt NIGHTLY_VERSION="" just check-fmt
+```
+
+To update the forked rustfmt used in CI:
+- Run the `Build Forked Rustfmt` workflow with the new fork commit.
+- Update `FORKED_RUSTFMT_COMMIT` in `.github/workflows/fast.yml`.
+- Ensure the release contains `forked-rustfmt-<commit>-linux-x64` and `forked-rustfmt-<commit>-linux-x64.sha256`.
+
 Before making a PR, to run all lints and tests, run:
 
 ```bash
