@@ -28,10 +28,10 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R>
                 request,
                 recipients,
             } => {
-                let commitment = request.commitment();
                 // The actor tracks outbound requests by commitment, so overflow coalesces sends
                 // with the same key. Keep the first queued payload and union later recipients into
                 // that send.
+                let commitment = request.commitment();
                 if let Some(existing) = overflow.iter_mut().find(|message| {
                     matches!(
                         message,
