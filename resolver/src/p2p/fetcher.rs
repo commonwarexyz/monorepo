@@ -292,7 +292,7 @@ where
                     payload: wire::Payload::Request(key.clone()),
                 };
                 match checked.send(message, self.priority_requests) {
-                    Ok(Feedback::Ok | Feedback::Backoff) => {
+                    Feedback::Ok | Feedback::Backoff => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -310,16 +310,10 @@ where
                         self.key_to_id.insert(key, id);
                         return;
                     }
-                    Ok(Feedback::Closed) => {
+                    Feedback::Closed => {
                         // Peer dropped message, try next peer
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, "send closed");
-                        self.update_performance(&peer, self.timeout);
-                    }
-                    Err(err) => {
-                        // Send failed, try next peer
-                        self.requests_sent.inc(Status::Failure);
-                        debug!(?err, ?peer, "send failed");
                         self.update_performance(&peer, self.timeout);
                     }
                 }
@@ -575,19 +569,7 @@ mod tests {
         BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
     };
     use commonware_utils::{sync::RwLock, NZU32};
-    use std::{fmt, sync::Arc, time::Duration};
-
-    // Mock error type for testing
-    #[derive(Debug)]
-    struct MockError;
-
-    impl fmt::Display for MockError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "mock error")
-        }
-    }
-
-    impl std::error::Error for MockError {}
+    use std::{sync::Arc, time::Duration};
 
     #[derive(Debug)]
     struct CheckedSender<'a, S: UnlimitedSender> {
@@ -597,7 +579,6 @@ mod tests {
 
     impl<'a, S: UnlimitedSender> commonware_p2p::CheckedSender for CheckedSender<'a, S> {
         type PublicKey = S::PublicKey;
-        type Error = S::Error;
 
         fn recipients(&self) -> Vec<Self::PublicKey> {
             match &self.recipients {
@@ -607,11 +588,7 @@ mod tests {
             }
         }
 
-        fn send(
-            self,
-            message: impl Into<IoBufs> + Send,
-            priority: bool,
-        ) -> Result<Feedback, Self::Error> {
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
             self.sender.send(self.recipients, message, priority)
         }
     }
@@ -621,15 +598,14 @@ mod tests {
 
     impl UnlimitedSender for FailMockSenderInner {
         type PublicKey = PublicKey;
-        type Error = MockError;
 
         fn send(
             &mut self,
             _recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Result<Feedback, Self::Error> {
-            Ok(Feedback::Closed)
+        ) -> Feedback {
+            Feedback::Closed
         }
     }
 
@@ -658,16 +634,15 @@ mod tests {
 
     impl UnlimitedSender for SuccessMockSenderInner {
         type PublicKey = PublicKey;
-        type Error = MockError;
 
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Result<Feedback, Self::Error> {
+        ) -> Feedback {
             match recipients {
-                Recipients::One(_) => Ok(Feedback::Ok),
+                Recipients::One(_) => Feedback::Ok,
                 _ => unimplemented!(),
             }
         }

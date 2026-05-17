@@ -87,14 +87,13 @@ impl<P: PublicKey> LimitedSender for InertSender<P> {
 
 impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
     type PublicKey = P;
-    type Error = Infallible;
 
     fn recipients(&self) -> Vec<Self::PublicKey> {
         self.recipients.clone()
     }
 
-    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Result<Feedback, Self::Error> {
-        Ok(Feedback::Ok)
+    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Feedback {
+        Feedback::Ok
     }
 }
 
@@ -137,9 +136,7 @@ mod tests {
         ];
 
         let (mut sender, _) = inert_channel(peers.as_slice());
-        let sent = sender
-            .send(Recipients::All, b"hello".to_vec(), false)
-            .unwrap();
+        let sent = sender.send(Recipients::All, b"hello".to_vec(), false);
         assert_eq!(sent, peers);
     }
 }

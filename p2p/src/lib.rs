@@ -51,9 +51,6 @@ stability_scope!(BETA {
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;
 
-        /// Error that can occur when sending a message.
-        type Error: Debug + StdError + Send + Sync + 'static;
-
         /// Sends a message to a set of recipients.
         ///
         /// # Offline Recipients
@@ -64,22 +61,14 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message for delivery, or an error if the
-        /// message could not be sent due to a validation failure (e.g., too large).
-        ///
-        /// Note: a successful send does not guarantee that the recipient will
-        /// receive the message.
-        ///
-        /// # Graceful Shutdown
-        ///
-        /// Errors should only be returned for validation failures that the caller
-        /// can act upon.
+        /// Feedback from submitting the message for delivery. [`Feedback::accepted`]
+        /// does not guarantee that the recipient will receive the message.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Result<Feedback, Self::Error>;
+        ) -> Feedback;
     }
 
     /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
@@ -117,9 +106,6 @@ stability_scope!(BETA {
         /// Public key type used to identify [`Recipients`].
         type PublicKey: PublicKey;
 
-        /// Error that can occur when sending a message.
-        type Error: Debug + StdError + Send + Sync + 'static;
-
         /// Returns the recipients retained by the check.
         fn recipients(&self) -> Vec<Self::PublicKey>;
 
@@ -133,21 +119,13 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message for delivery, or an error if the
-        /// message could not be sent due to a validation failure (e.g., too large).
-        ///
-        /// Note: a successful send does not guarantee that the recipient will
-        /// receive the message.
-        ///
-        /// # Graceful Shutdown
-        ///
-        /// Errors should only be returned for validation failures that the caller
-        /// can act upon.
+        /// Feedback from submitting the message for delivery. [`Feedback::accepted`]
+        /// does not guarantee that the recipient will receive the message.
         fn send(
             self,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Result<Feedback, Self::Error>;
+        ) -> Feedback;
     }
 
     /// Interface for sending messages to a set of recipients.
@@ -167,36 +145,30 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// The recipients retained by the synchronous check, or an error if the
-        /// message could not be sent due to a validation failure (e.g., too large).
-        /// Returns an empty list if all recipients are rate-limited, the sender
-        /// has closed.
+        /// The recipients retained by the synchronous check. Returns an empty
+        /// list if all recipients are rate-limited, the sender has closed, or
+        /// the send is not accepted.
         ///
-        /// Note: a successful send does not guarantee that the recipient will
-        /// receive the message.
-        ///
-        /// # Graceful Shutdown
-        ///
-        /// Errors should only be returned for validation failures that the caller
-        /// can act upon.
+        /// [`Feedback::accepted`] does not guarantee that the recipient will receive
+        /// the message.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error> {
-            match self.check(recipients) {
-                Ok(checked_sender) => {
+        ) -> Vec<Self::PublicKey> {
+            self.check(recipients).map_or_else(
+                |_| Vec::new(),
+                |checked_sender| {
                     let recipients = checked_sender.recipients();
-                    let feedback = checked_sender.send(message, priority)?;
+                    let feedback = checked_sender.send(message, priority);
                     if feedback.accepted() {
-                        Ok(recipients)
+                        recipients
                     } else {
-                        Ok(Vec::new())
+                        Vec::new()
                     }
-                }
-                Err(_) => Ok(Vec::new()),
-            }
+                },
+            )
         }
     }
 

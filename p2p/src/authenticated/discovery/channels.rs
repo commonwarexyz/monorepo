@@ -36,22 +36,23 @@ pub struct UnlimitedSender<P: PublicKey> {
 
 impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     type PublicKey = P;
-    type Error = Error;
 
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Result<Feedback, Self::Error> {
+    ) -> Feedback {
         let message = message.into();
-        if message.len() > self.max_size as usize {
-            return Err(Error::MessageTooLarge(message.len()));
-        }
+        assert!(
+            message.len() <= self.max_size as usize,
+            "message too large: {} > {}",
+            message.len(),
+            self.max_size
+        );
 
-        Ok(self
-            .messenger
-            .content(recipients, self.channel, message, priority))
+        self.messenger
+            .content(recipients, self.channel, message, priority)
     }
 }
 

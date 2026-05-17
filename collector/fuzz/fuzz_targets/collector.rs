@@ -24,6 +24,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     collections::HashMap,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 
@@ -209,10 +210,6 @@ impl Blocker for FuzzBlocker {
 #[derive(Debug, Clone)]
 struct MockSender;
 
-#[derive(Debug, thiserror::Error)]
-#[error("mock send error")]
-struct MockSendError;
-
 impl LimitedSender for MockSender {
     type PublicKey = PublicKey;
     type Checked<'a> = MockCheckedSender;
@@ -228,19 +225,14 @@ impl LimitedSender for MockSender {
 struct MockCheckedSender;
 
 impl CheckedSender for MockCheckedSender {
-    type Error = MockSendError;
     type PublicKey = PublicKey;
 
     fn recipients(&self) -> Vec<Self::PublicKey> {
         Vec::new()
     }
 
-    fn send(
-        self,
-        _message: impl Into<IoBufs> + Send,
-        _priority: bool,
-    ) -> Result<Feedback, Self::Error> {
-        Ok(Feedback::Ok)
+    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
+        Feedback::Ok
     }
 }
 
@@ -360,7 +352,7 @@ fn fuzz(input: FuzzInput) {
                                 Recipients::Some(selected)
                             }
                         };
-                        let _ = mailbox.send(recipients, request).await;
+                        let _ = mailbox.send(recipients, request);
                     }
                 }
 
@@ -372,7 +364,7 @@ fn fuzz(input: FuzzInput) {
                     let commitment = request.commitment();
 
                     for mailbox in mailboxes.values_mut() {
-                        mailbox.cancel(commitment).await;
+                        mailbox.cancel(commitment);
                     }
                 }
 
@@ -421,7 +413,8 @@ fn fuzz(input: FuzzInput) {
                     priority_response,
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
-                    let mailbox_size = mailbox_size.max(MIN_BUFFER_SIZE);
+                    let mailbox_size = usize::from(mailbox_size.max(MIN_BUFFER_SIZE));
+                    let mailbox_size = NonZeroUsize::new(mailbox_size).unwrap();
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
                         FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
                     });
@@ -430,7 +423,7 @@ fn fuzz(input: FuzzInput) {
                         blocker: FuzzBlocker,
                         monitor,
                         handler,
-                        mailbox_size: (mailbox_size as usize),
+                        mailbox_size,
                         priority_request,
                         request_codec: RangeCfg::from(..=MAX_LEN),
                         priority_response,

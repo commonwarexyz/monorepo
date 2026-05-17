@@ -344,8 +344,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::Notarization(notarization.clone()).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -361,8 +360,7 @@ mod tests {
                     Certificate::<S, Sha256Digest>::Nullification(nullification.clone())
                         .encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -377,8 +375,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::Finalization(finalization.clone()).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -510,8 +507,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::<S, Sha256Digest>::Nullification(nullification).encode(),
                     true,
-                )
-                .unwrap();
+                );
             context.sleep(Duration::from_millis(50)).await;
 
             let output = voter_receiver.recv().await.unwrap();
@@ -529,8 +525,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::Notarization(notarization).encode(),
                     true,
-                )
-                .unwrap();
+                );
             context.sleep(Duration::from_millis(50)).await;
 
             // Old notarization must still be forwarded to voter.
@@ -666,8 +661,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -818,8 +812,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -998,8 +991,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -1252,8 +1244,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
             let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
@@ -1267,8 +1258,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::Notarization(notarization).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             let mut saw_notarization = false;
             loop {
@@ -1457,8 +1447,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::Notarization(notarization).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Wait until the batcher has recovered the notarization from the
             // certificate path before advancing to the next view.
@@ -1628,8 +1617,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Notarize(leader_vote).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             let active_nullify = Nullify::sign::<Sha256Digest>(&schemes[6], round2).unwrap();
@@ -1639,8 +1627,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::<S, Sha256Digest>::Nullify(active_nullify).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             context.sleep(Duration::from_millis(50)).await;
@@ -1652,8 +1639,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Notarize(conflicting_vote).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             // Participants 3..5 vote for the leader proposal, so the batcher
@@ -1666,8 +1652,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(honest_vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -1852,8 +1837,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Finalize(finalize_vote).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             // Wait for finalize to be delivered and processed
@@ -1868,8 +1852,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -2069,8 +2052,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -2091,8 +2073,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::Notarization(notarization.clone()).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -2112,8 +2093,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Notarize(last_vote).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             // Give network time to deliver
@@ -2244,8 +2224,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Notarize(leader_vote).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             // Give time for leader's vote to arrive and set leader_proposal
@@ -2268,8 +2247,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -2305,8 +2283,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Notarize(vote6).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             // Give time for processing
@@ -2441,8 +2418,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Vote::Notarize(leader_vote).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give network time to deliver and batcher time to process
             context.sleep(Duration::from_millis(50)).await;
@@ -2557,8 +2533,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Vote::Notarize(leader_vote).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -2708,8 +2683,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Vote::Notarize(leader_vote).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
@@ -2851,8 +2825,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Vote::<S, Sha256Digest>::Nullify(leader_vote).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -2978,8 +2951,7 @@ mod tests {
                     Recipients::One(me.clone()),
                     Certificate::Finalization(finalization.clone()).encode(),
                     true,
-                )
-                .unwrap();
+                );
             context.sleep(Duration::from_millis(50)).await;
 
             // The threshold-view update should produce a fast-timeout, followed by the
@@ -3114,8 +3086,7 @@ mod tests {
                     )
                     .encode(),
                     true,
-                )
-                .unwrap();
+                );
             context.sleep(Duration::from_millis(50)).await;
 
             // Move current view to 2 with that same leader; this should fast-path timeout
@@ -3238,8 +3209,7 @@ mod tests {
                     Recipients::One(me),
                     Vote::<S, Sha256Digest>::Nullify(leader_nullify).encode(),
                     true,
-                )
-                .unwrap();
+                );
 
             expect_no_timeout(&mut context, &mut voter_receiver).await;
         });
@@ -3366,8 +3336,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -3408,8 +3377,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -3562,8 +3530,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::<S, Sha256Digest>::Nullify(warmup_vote).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3584,8 +3551,7 @@ mod tests {
                             Recipients::One(me.clone()),
                             Vote::Notarize(vote).encode(),
                             true,
-                        )
-                        .unwrap();
+                        );
                 }
             }
 
@@ -3632,8 +3598,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Notarize(late_vote).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             // Give network time to deliver
@@ -3661,8 +3626,7 @@ mod tests {
                         Recipients::One(me.clone()),
                         Vote::Notarize(vote_v3).encode(),
                         true,
-                    )
-                    .unwrap();
+                    );
             }
 
             context.sleep(Duration::from_millis(100)).await;
@@ -3777,9 +3741,7 @@ mod tests {
 
             // Send first valid vote from participant 1
             let vote1 = sign_vote(&schemes[1], proposal.clone());
-            sender
-                .send(Recipients::One(me.clone()), vote1.encode(), true)
-                .unwrap();
+            sender.send(Recipients::One(me.clone()), vote1.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3791,9 +3753,7 @@ mod tests {
             );
 
             // Send same vote again (exact duplicate) - should be ignored, not blocked
-            sender
-                .send(Recipients::One(me.clone()), vote1.encode(), true)
-                .unwrap();
+            sender.send(Recipients::One(me.clone()), vote1.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3805,9 +3765,7 @@ mod tests {
 
             // Now send a vote with the SAME proposal but with a different signature
             let vote2 = sign_vote(&schemes[2], proposal.clone());
-            sender
-                .send(Recipients::One(me.clone()), vote2.encode(), true)
-                .unwrap();
+            sender.send(Recipients::One(me.clone()), vote2.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -3986,9 +3944,7 @@ mod tests {
 
             // Send first valid vote for proposal1
             let vote1 = sign_vote(&schemes[1], proposal1);
-            sender
-                .send(Recipients::One(me.clone()), vote1.encode(), true)
-                .unwrap();
+            sender.send(Recipients::One(me.clone()), vote1.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 
@@ -4000,9 +3956,7 @@ mod tests {
 
             // Send conflicting vote for proposal2 (different payload = different proposal)
             let vote2 = sign_vote(&schemes[1], proposal2);
-            sender
-                .send(Recipients::One(me.clone()), vote2.encode(), true)
-                .unwrap();
+            sender.send(Recipients::One(me.clone()), vote2.encode(), true);
 
             context.sleep(Duration::from_millis(50)).await;
 

@@ -361,11 +361,11 @@ impl<
         // Send message to peer
         let result = sender.send(Recipients::One(peer.clone()), msg, priority);
 
-        // Log result, but do not handle errors
-        match result {
-            Err(err) => error!(?err, ?peer, ?id, "serve send failed"),
-            Ok(to) if to.is_empty() => warn!(?peer, ?id, "serve send failed"),
-            Ok(_) => trace!(?peer, ?id, "serve sent"),
+        // Log result, but do not handle errors.
+        if result.is_empty() {
+            warn!(?peer, ?id, "serve send failed");
+        } else {
+            trace!(?peer, ?id, "serve sent");
         };
     }
 

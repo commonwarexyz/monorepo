@@ -2,10 +2,8 @@ use super::{
     ingress::{Mailbox, Message},
     Config,
 };
-use crate::{
-    p2p::{Handler, Monitor},
-    Error,
-};
+use crate::p2p::{Handler, Monitor};
+use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
@@ -15,10 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc, oneshot},
-    futures::Pool,
-};
+use commonware_utils::{channel::oneshot, futures::Pool};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
@@ -44,7 +39,7 @@ where
     // Message passing
     monitor: M,
     handler: H,
-    mailbox: mpsc::Receiver<Message<P, Rq>>,
+    mailbox: mailbox::Receiver<Message<P, Rq>>,
 
     // State
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
@@ -70,7 +65,7 @@ where
     /// Returns a tuple of the engine and the mailbox for sending messages.
     pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
-        let (tx, rx) = mpsc::channel(cfg.mailbox_size);
+        let (tx, rx) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
 
         // Create metrics
@@ -141,25 +136,15 @@ where
                     Message::Send {
                         request,
                         recipients,
-                        responder,
                     } => {
-                        // Track commitment (if not already tracked)
                         let commitment = request.commitment();
-                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                            self.outstanding.inc();
-                            (HashSet::new(), HashSet::new())
-                        });
-
-                        // Send the request to recipients
-                        match req_tx.send(recipients, request, self.priority_request) {
-                            Ok(recipients) => {
-                                entry.0.extend(recipients.iter().cloned());
-                                responder.send_lossy(Ok(recipients));
-                            }
-                            Err(err) => {
-                                error!(?err, ?commitment, "failed to send message");
-                                responder.send_lossy(Err(Error::SendFailed(err.into())));
-                            }
+                        let recipients = req_tx.send(recipients, request, self.priority_request);
+                        if !recipients.is_empty() {
+                            let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                                self.outstanding.inc();
+                                (HashSet::new(), HashSet::new())
+                            });
+                            entry.0.extend(recipients);
                         }
                     }
                     Message::Cancel { commitment } => {

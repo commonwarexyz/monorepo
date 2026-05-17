@@ -843,13 +843,11 @@ mod tests {
             let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
 
             // Send malformed bytes that cannot decode into `TestMessage`.
-            let sent = attacker_sender
-                .send(
-                    Recipients::One(victim.clone()),
-                    IoBuf::from(vec![0xFF]),
-                    false,
-                )
-                .expect("malformed payload send should not fail at transport level");
+            let sent = attacker_sender.send(
+                Recipients::One(victim.clone()),
+                IoBuf::from(vec![0xFF]),
+                false,
+            );
             assert_eq!(sent, vec![victim.clone()]);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 

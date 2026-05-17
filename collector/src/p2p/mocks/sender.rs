@@ -5,16 +5,8 @@ use commonware_cryptography::PublicKey;
 use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
 use commonware_runtime::IoBufs;
 use std::time::SystemTime;
-use thiserror::Error;
 
-/// Errors that can be returned by [Failing].
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("send failed")]
-    Failed,
-}
-
-/// A sender that always fails with [Error::Canceled].
+/// A sender that always returns [Feedback::Closed].
 #[derive(Clone, Debug)]
 pub struct Failing<P: PublicKey> {
     _phantom: std::marker::PhantomData<P>,
@@ -46,17 +38,12 @@ pub struct CheckedFailing<P: PublicKey> {
 
 impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
     type PublicKey = P;
-    type Error = Error;
 
     fn recipients(&self) -> Vec<Self::PublicKey> {
         Vec::new()
     }
 
-    fn send(
-        self,
-        _message: impl Into<IoBufs> + Send,
-        _priority: bool,
-    ) -> Result<Feedback, Self::Error> {
-        Err(Error::Failed)
+    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
+        Feedback::Closed
     }
 }

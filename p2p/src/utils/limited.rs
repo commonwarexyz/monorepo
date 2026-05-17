@@ -201,7 +201,6 @@ impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
 
 impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
-    type Error = S::Error;
 
     fn recipients(&self) -> Vec<Self::PublicKey> {
         match &self.recipients {
@@ -211,11 +210,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
         }
     }
 
-    fn send(
-        self,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Result<Feedback, Self::Error> {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
         self.sender.send(self.recipients, message, priority)
     }
 }
@@ -228,14 +223,9 @@ mod tests {
     use commonware_runtime::{deterministic::Runner, IoBuf, Quota, Runner as _};
     use commonware_utils::{channel::ring, NZUsize, NZU32};
     use futures::SinkExt;
-    use thiserror::Error;
 
     type PublicKey = ed25519::PublicKey;
     type SentMessage = (Recipients<PublicKey>, IoBuf, bool);
-
-    #[derive(Debug, Error)]
-    #[error("mock send error")]
-    struct MockError;
 
     #[derive(Debug, Clone)]
     struct MockSender {
@@ -263,7 +253,6 @@ mod tests {
     }
 
     impl UnlimitedSender for MockSender {
-        type Error = MockError;
         type PublicKey = PublicKey;
 
         fn send(
@@ -271,10 +260,10 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Result<Feedback, Self::Error> {
+        ) -> Feedback {
             let message = message.into().coalesce();
             self.sent.lock().push((recipients, message, priority));
-            Ok(Feedback::Ok)
+            Feedback::Ok
         }
     }
 
@@ -343,10 +332,7 @@ mod tests {
             let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
             let checked = limited.check(Recipients::One(key(1))).unwrap();
-            assert_eq!(
-                checked.send(IoBuf::from(b"hello"), false).unwrap(),
-                Feedback::Ok
-            );
+            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
         });
     }
 
@@ -361,7 +347,7 @@ mod tests {
 
             // First check should succeed and consume the quota
             let checked = limited.check(Recipients::One(peer.clone())).unwrap();
-            checked.send(IoBuf::from(b"first"), false).unwrap();
+            checked.send(IoBuf::from(b"first"), false);
 
             // Second check should fail (rate limited)
             let result = limited.check(Recipients::One(peer));
@@ -379,10 +365,7 @@ mod tests {
 
             let peers_list = vec![key(1), key(2), key(3)];
             let checked = limited.check(Recipients::Some(peers_list)).unwrap();
-            assert_eq!(
-                checked.send(IoBuf::from(b"hello"), false).unwrap(),
-                Feedback::Ok
-            );
+            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
             assert_sent_to(&sender, 0, &[key(1), key(2), key(3)]);
         });
     }
@@ -401,14 +384,14 @@ mod tests {
 
             // Rate limit peer1 by sending to it first
             let checked = limited.check(Recipients::One(peer1.clone())).unwrap();
-            checked.send(IoBuf::from(b"limit"), false).unwrap();
+            checked.send(IoBuf::from(b"limit"), false);
 
             // Now check with all three peers - peer1 should be filtered out
             let expected = vec![peer2.clone(), peer3.clone()];
             let checked = limited
                 .check(Recipients::Some(vec![peer1, peer2, peer3]))
                 .unwrap();
-            checked.send(IoBuf::from(b"filtered"), false).unwrap();
+            checked.send(IoBuf::from(b"filtered"), false);
             assert_sent_to(&sender, 1, &expected);
         });
     }
@@ -427,14 +410,12 @@ mod tests {
             limited
                 .check(Recipients::One(peer1.clone()))
                 .unwrap()
-                .send(IoBuf::from(b"limit1"), false)
-                .unwrap();
+                .send(IoBuf::from(b"limit1"), false);
 
             limited
                 .check(Recipients::One(peer2.clone()))
                 .unwrap()
-                .send(IoBuf::from(b"limit2"), false)
-                .unwrap();
+                .send(IoBuf::from(b"limit2"), false);
 
             // Now both are rate limited - should return error with retry time
             assert!(limited.check(Recipients::Some(vec![peer1, peer2])).is_err());
@@ -464,7 +445,7 @@ mod tests {
             // No known peers yet
             let checked = limited.check(Recipients::All).unwrap();
             assert!(crate::CheckedSender::recipients(&checked).is_empty());
-            checked.send(IoBuf::from(b"empty"), false).unwrap();
+            checked.send(IoBuf::from(b"empty"), false);
 
             // Verify that the sender received the message with empty Recipients::Some.
             assert_sent_to(&sender, 0, &[]);
@@ -485,12 +466,11 @@ mod tests {
             limited
                 .check(Recipients::One(peer1))
                 .unwrap()
-                .send(IoBuf::from(b"limit"), false)
-                .unwrap();
+                .send(IoBuf::from(b"limit"), false);
 
             // Check All should filter out peer1
             let checked = limited.check(Recipients::All).unwrap();
-            checked.send(IoBuf::from(b"filtered"), false).unwrap();
+            checked.send(IoBuf::from(b"filtered"), false);
             assert_sent_to(&sender, 1, &[peer2]);
         });
     }
@@ -508,14 +488,12 @@ mod tests {
             limited
                 .check(Recipients::One(peer1))
                 .unwrap()
-                .send(IoBuf::from(b"limit1"), false)
-                .unwrap();
+                .send(IoBuf::from(b"limit1"), false);
 
             limited
                 .check(Recipients::One(peer2))
                 .unwrap()
-                .send(IoBuf::from(b"limit2"), false)
-                .unwrap();
+                .send(IoBuf::from(b"limit2"), false);
 
             // Check All should fail since all known peers are rate limited
             assert!(limited.check(Recipients::All).is_err());
@@ -559,8 +537,7 @@ mod tests {
             limited
                 .check(Recipients::One(peer))
                 .unwrap()
-                .send(IoBuf::from(b"priority"), true)
-                .unwrap();
+                .send(IoBuf::from(b"priority"), true);
 
             let messages = sender.sent_messages();
             assert_eq!(messages.len(), 1);
@@ -582,8 +559,7 @@ mod tests {
             limited1
                 .check(Recipients::One(peer.clone()))
                 .unwrap()
-                .send(IoBuf::from(b"limit"), false)
-                .unwrap();
+                .send(IoBuf::from(b"limit"), false);
 
             // Second instance should see the rate limit
             assert!(limited2.check(Recipients::One(peer)).is_err());

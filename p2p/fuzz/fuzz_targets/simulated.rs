@@ -200,17 +200,15 @@ fn fuzz(input: FuzzInput) {
 
                     // Attempt to send the message
                     // Note: Success only means accepted for transmission, not guaranteed delivery
-                    let sent = sender
-                        .send(
-                            Recipients::One(peer_pks[to_idx].clone()),
-                            message.clone(),
-                            true,
-                        )
-                        .is_ok();
+                    let sent = sender.send(
+                        Recipients::One(peer_pks[to_idx].clone()),
+                        message.clone(),
+                        true,
+                    );
 
                     // Track message as expected only if send was accepted
                     // Note: Message may still be dropped by unreliable link
-                    if sent {
+                    if !sent.is_empty() {
                         expected_msgs
                             .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
                             .or_default()

@@ -46,8 +46,7 @@
 //! - `message`: The arbitrary application payload as `IoBuf`.
 //!
 //! The size of the `message` bytes must not exceed the configured
-//! `max_message_size`. If it does, the sending operation will fail with
-//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
+//! `max_message_size`. If it does, the sending operation will panic. Messages can be sent with `priority`, allowing certain
 //! communications to potentially bypass lower-priority messages waiting in send queues across all
 //! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
 //! and rate limiting.
@@ -201,8 +200,6 @@ use thiserror::Error;
 /// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("message too large: {0}")]
-    MessageTooLarge(usize),
     #[error("network closed")]
     NetworkClosed,
 }
@@ -357,13 +354,11 @@ mod tests {
                                     for pub_key in &recipients {
                                         // Loop until success
                                         loop {
-                                            let sent = sender
-                                                .send(
-                                                    Recipients::One(pub_key.clone()),
-                                                    public_key.as_ref().to_vec(),
-                                                    true,
-                                                )
-                                                .unwrap();
+                                            let sent = sender.send(
+                                                Recipients::One(pub_key.clone()),
+                                                public_key.as_ref().to_vec(),
+                                                true,
+                                            );
                                             if sent.len() != 1 {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
@@ -375,19 +370,15 @@ mod tests {
                                 Mode::Some | Mode::All => {
                                     // Loop until all peer sends successful
                                     loop {
-                                        let sent = sender
-                                            .send(
-                                                match mode {
-                                                    Mode::Some => {
-                                                        Recipients::Some(recipients.clone())
-                                                    }
-                                                    Mode::All => Recipients::All,
-                                                    _ => unreachable!(),
-                                                },
-                                                public_key.as_ref().to_vec(),
-                                                true,
-                                            )
-                                            .unwrap();
+                                        let sent = sender.send(
+                                            match mode {
+                                                Mode::Some => Recipients::Some(recipients.clone()),
+                                                Mode::All => Recipients::All,
+                                                _ => unreachable!(),
+                                            },
+                                            public_key.as_ref().to_vec(),
+                                            true,
+                                        );
                                         if sent.len() != recipients.len() {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
@@ -560,7 +551,6 @@ mod tests {
                         loop {
                             if sender
                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                .unwrap()
                                 .len()
                                 == n - 1
                             {
@@ -592,6 +582,7 @@ mod tests {
     }
 
     #[test_traced]
+    #[should_panic(expected = "message too large")]
     fn test_message_too_large() {
         // Configure test
         let base_port = 3000;
@@ -640,8 +631,7 @@ mod tests {
 
             // Send message
             let recipient = Recipients::One(peers[1].clone());
-            let result = sender.send(recipient, msg, true);
-            assert!(matches!(result, Err(Error::MessageTooLarge(_))));
+            sender.send(recipient, msg, true);
         });
     }
 
@@ -694,7 +684,7 @@ mod tests {
                 // Confirm message is sent to peer
                 let checked = sender0.check(Recipients::All).unwrap();
                 if !checked.recipients().is_empty() {
-                    checked.send(msg.clone(), true).unwrap();
+                    checked.send(msg.clone(), true);
                     break;
                 }
 
@@ -704,7 +694,7 @@ mod tests {
             }
 
             // Immediately send the second message to trigger the rate limit.
-            let sent = sender0.send(Recipients::One(pk1), msg, true).unwrap();
+            let sent = sender0.send(Recipients::One(pk1), msg, true);
             assert!(sent.is_empty());
 
             // Give the metrics time to reflect the rate-limited message.
@@ -827,9 +817,7 @@ mod tests {
 
                         // Send a message
                         loop {
-                            let sent = sender
-                                .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                .unwrap();
+                            let sent = sender.send(Recipients::All, pk.as_ref().to_vec(), true);
                             if sent.len() >= expected_connections {
                                 break;
                             }
@@ -1109,9 +1097,11 @@ mod tests {
                                     recipients.sort();
 
                                     loop {
-                                        let mut sent = sender
-                                            .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                            .unwrap();
+                                        let mut sent = sender.send(
+                                            Recipients::All,
+                                            pk.as_ref().to_vec(),
+                                            true,
+                                        );
                                         if sent.len() != n - 1 {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
@@ -1240,9 +1230,11 @@ mod tests {
                                     recipients.sort();
 
                                     loop {
-                                        let mut sent = sender
-                                            .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                            .unwrap();
+                                        let mut sent = sender.send(
+                                            Recipients::All,
+                                            pk.as_ref().to_vec(),
+                                            true,
+                                        );
                                         if sent.len() != n - 1 {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
@@ -1340,9 +1332,7 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
 
             // Try to send from peer 1 - should not reach anyone since private IPs are blocked
-            let sent = sender1
-                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                .unwrap();
+            let sent = sender1.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
             assert!(
                 sent.is_empty(),
                 "peer 1 should not have connected to peer 0 (private IP)"
@@ -1441,9 +1431,7 @@ mod tests {
                 loop {
                     let checked = sender1.check(Recipients::All).unwrap();
                     if !checked.recipients().is_empty() {
-                        checked
-                            .send(peer1.public_key().as_ref().to_vec(), true)
-                            .unwrap();
+                        checked.send(peer1.public_key().as_ref().to_vec(), true);
                     }
 
                     select! {
@@ -1526,13 +1514,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .unwrap();
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1624,13 +1610,11 @@ mod tests {
                     // Wait for the restarted peer to reconnect to all others
                     let restarted_sender = senders[restart_peer_idx].as_mut().unwrap();
                     loop {
-                        let sent = restarted_sender
-                            .send(
-                                Recipients::All,
-                                peers[restart_peer_idx].public_key().as_ref().to_vec(),
-                                true,
-                            )
-                            .unwrap();
+                        let sent = restarted_sender.send(
+                            Recipients::All,
+                            peers[restart_peer_idx].public_key().as_ref().to_vec(),
+                            true,
+                        );
                         if sent.len() == n - 1 {
                             break;
                         }
@@ -1644,13 +1628,11 @@ mod tests {
                         }
                         let sender = senders[i].as_mut().unwrap();
                         loop {
-                            let sent = sender
-                                .send(
-                                    Recipients::One(addresses[restart_peer_idx].clone()),
-                                    peers[i].public_key().as_ref().to_vec(),
-                                    true,
-                                )
-                                .unwrap();
+                            let sent = sender.send(
+                                Recipients::One(addresses[restart_peer_idx].clone()),
+                                peers[i].public_key().as_ref().to_vec(),
+                                true,
+                            );
                             if sent.len() == 1 {
                                 break;
                             }
@@ -1740,13 +1722,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .unwrap();
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1830,13 +1810,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .unwrap();
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1896,9 +1874,7 @@ mod tests {
             crate::block_peer(&mut oracle, address.clone());
 
             // Sender operations should not panic even after shutdown
-            let sent = sender
-                .send(Recipients::All, address.as_ref().to_vec(), true)
-                .unwrap();
+            let sent = sender.send(Recipients::All, address.as_ref().to_vec(), true);
             assert!(sent.is_empty());
         });
     }
@@ -1995,9 +1971,7 @@ mod tests {
             context.sleep(Duration::from_secs(30)).await;
 
             // Peer 0 can't send to anyone
-            let sent = sender0
-                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                .unwrap();
+            let sent = sender0.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
             assert!(sent.is_empty());
 
             // Start peer 1 (has duplicate but correct address)
@@ -2021,9 +1995,8 @@ mod tests {
 
             // Now peer 0 should connect to peer 1 at correct address
             loop {
-                let sent = sender0
-                    .send(Recipients::All, peer0.public_key().as_ref().to_vec(), true)
-                    .unwrap();
+                let sent =
+                    sender0.send(Recipients::All, peer0.public_key().as_ref().to_vec(), true);
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer1.public_key());
                     break;
@@ -2086,9 +2059,8 @@ mod tests {
 
             // Peer 0 can send to peer 2
             loop {
-                let sent = sender0
-                    .send(Recipients::All, peer2.public_key().as_ref().to_vec(), true)
-                    .unwrap();
+                let sent =
+                    sender0.send(Recipients::All, peer2.public_key().as_ref().to_vec(), true);
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer2.public_key());
                     break;
@@ -2119,9 +2091,8 @@ mod tests {
 
             // Now peer 0 should connect to peer 1 at correct address and peer 2 should dial peer 1
             loop {
-                let sent = sender1
-                    .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                    .unwrap();
+                let sent =
+                    sender1.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
                 if sent.len() == 2 {
                     assert!(sent.contains(&peer0.public_key()));
                     assert!(sent.contains(&peer2.public_key()));

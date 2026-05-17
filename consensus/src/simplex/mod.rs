@@ -3405,9 +3405,7 @@ mod tests {
                 Certificate::Notarization(notarization(View::new(3), View::new(2), b"payload-3")),
                 Certificate::Finalization(finalization(View::new(3), View::new(2), b"payload-3")),
             ] {
-                injector_sender
-                    .send(Recipients::One(me.clone()), certificate.encode(), true)
-                    .unwrap();
+                injector_sender.send(Recipients::One(me.clone()), certificate.encode(), true);
             }
 
             let elector = RoundRobin::<Sha256>::default();
@@ -5157,9 +5155,9 @@ mod tests {
 
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
-            injector_sender.send(Recipients::All, msg, true).unwrap();
+            injector_sender.send(Recipients::All, msg, true);
             let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
-            injector_sender.send(Recipients::All, msg, true).unwrap();
+            injector_sender.send(Recipients::All, msg, true);
             // View F+1:
             let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
             let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
@@ -5169,7 +5167,7 @@ mod tests {
                     ParticipantType::Group1 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).unwrap();
+                injector_sender.send(recipient, msg, true);
             }
             // View F+2:
             let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
@@ -5180,7 +5178,7 @@ mod tests {
                     ParticipantType::Group2 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).unwrap();
+                injector_sender.send(recipient, msg, true);
             }
 
             // ========== Create engines ==========
