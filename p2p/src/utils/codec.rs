@@ -11,7 +11,6 @@ use commonware_runtime::{
 };
 use commonware_utils::futures::Pool;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
-use tracing::debug;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
