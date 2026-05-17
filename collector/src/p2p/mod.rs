@@ -24,7 +24,7 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     /// The [Handler] that will be used to process requests.
     pub handler: H,
 
-    /// The non-zero size of the mailbox for sending and receiving messages.
+    /// The size of the mailbox for sending and receiving messages.
     pub mailbox_size: NonZeroUsize,
 
     /// Whether or not to send requests with priority over other network messages.
