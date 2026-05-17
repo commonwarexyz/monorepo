@@ -413,6 +413,8 @@ impl<
     ///
     /// The certification may succeed, in which case the proposal can be used in future views—
     /// or fail, in which case we should nullify the view as fast as possible.
+    ///
+    /// This is append-only: callers are responsible for calling sync_journal after this returns.
     async fn handle_certification(
         &mut self,
         view: View,
@@ -424,7 +426,6 @@ impl<
         // Persist certification result for recovery
         let artifact = Artifact::Certification(Rnd::new(self.state.epoch(), view), success);
         self.append_journal(view, artifact.clone()).await;
-        self.sync_journal(view).await;
 
         Some(notarization)
     }
@@ -498,8 +499,33 @@ impl<
         }
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
-        // Persist the certificate before informing others.
+        // Persist the certificate before informing others. The notarization is durable
+        // here, so it serves as proof that ancestor certifications derived below are valid.
         self.sync_journal(view).await;
+
+        // Infer certifications for ancestors whose notarizations prove they were certified
+        // by f+1 signers before they could vote on view N.
+        let ancestors = self.state.infer_ancestors(view);
+        let epoch = self.state.epoch();
+        for (ancestor_view, _) in &ancestors {
+            self.append_journal(
+                *ancestor_view,
+                Artifact::Certification(Rnd::new(epoch, *ancestor_view), true),
+            )
+            .await;
+        }
+        if !ancestors.is_empty() {
+            if let Some(journal) = &self.journal {
+                journal.sync_all().await.expect("unable to sync journal");
+            }
+            for (ancestor_view, ancestor_notarization) in ancestors {
+                resolver.certified(ancestor_view, true).await;
+                self.reporter
+                    .report(Activity::Certification(ancestor_notarization))
+                    .await;
+            }
+        }
+
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
         self.broadcast_certificate(
@@ -717,6 +743,9 @@ impl<
                         self.reporter.report(Activity::Notarization(notarization));
                     }
                     Artifact::Certification(round, success) => {
+                        // No sync here: replay data is already durable. Inference does not
+                        // fire during replay because try_broadcast_notarization is never
+                        // called from the replay path.
                         let Some(notarization) =
                             self.handle_certification(round.view(), success).await
                         else {
@@ -757,6 +786,35 @@ impl<
             }
         }
         self.journal = Some(journal);
+
+        // Post-replay inference pass: recover any ancestor certifications that were inferred
+        // before a crash but not yet written to the journal. CertifyState::Outstanding cannot
+        // appear here since the certify pool is empty on startup.
+        let notarized_views = self.state.notarized_views_descending();
+        let mut all_inferred: Vec<(View, Notarization<S, D>)> = Vec::new();
+        let epoch = self.state.epoch();
+        for view in notarized_views {
+            let ancestors = self.state.infer_ancestors(view);
+            all_inferred.extend(ancestors);
+        }
+        for (ancestor_view, _) in &all_inferred {
+            self.append_journal(
+                *ancestor_view,
+                Artifact::Certification(Rnd::new(epoch, *ancestor_view), true),
+            )
+            .await;
+        }
+        if !all_inferred.is_empty() {
+            if let Some(journal) = &self.journal {
+                journal.sync_all().await.expect("unable to sync journal");
+            }
+            for (ancestor_view, ancestor_notarization) in all_inferred {
+                resolver.certified(ancestor_view, true).await;
+                self.reporter
+                    .report(Activity::Certification(ancestor_notarization))
+                    .await;
+            }
+        }
 
         // Log current view after recovery
         let end = self.context.current();
@@ -915,6 +973,7 @@ impl<
                         else {
                             continue;
                         };
+                        self.sync_journal(view).await;
                         // Always forward certification outcomes to resolver.
                         // This can happen after a nullification for the same view because
                         // certification is asynchronous; finalization is the boundary that

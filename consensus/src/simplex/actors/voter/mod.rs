@@ -8506,4 +8506,260 @@ mod tests {
         batcher_update_triggers_timeout(ed25519::fixture);
         batcher_update_triggers_timeout(secp256r1::fixture);
     }
+
+    /// Verifies that after a crash, the post-replay inference pass certifies ancestors whose
+    /// notarizations were durable but whose certifications were not written before the crash.
+    ///
+    /// Scenario:
+    /// 1. First run: view 3 certification hangs (Pending). View 4 notarization arrives from
+    ///    resolver, triggering try_broadcast_notarization(4). Inference stops because view 3 is
+    ///    Outstanding. Journal has notarization_3 and notarization_4 but no certification_3.
+    /// 2. Restart with Certifier::Cancel (automaton cannot certify). Inference must be the
+    ///    source of certification. Post-replay pass certifies view 3 via infer_ancestors(4).
+    fn post_replay_inference_certifies_ancestor<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"post_replay_infer_ancestor".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.clone(), participants.clone(), true).await;
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let partition = "post_replay_infer_ancestor".to_string();
+            let epoch = Epoch::new(333);
+
+            // First run: certification of view 3 hangs indefinitely (Pending).
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Pending,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app_pending"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter_pending"), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            if let batcher::Message::Update { response, .. } =
+                batcher_receiver.recv().await.unwrap()
+            {
+                response.send(None).unwrap();
+            }
+
+            // Advance to view 3 (finalizes view 2, puts us at view 3).
+            let view_3 = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                view_3,
+            )
+            .await;
+
+            // Send proposal for view 3 so the voter can verify and notarize it.
+            let proposal_3 = Proposal::new(
+                Round::new(epoch, view_3),
+                view_3.previous().unwrap(),
+                Sha256::hash(b"post_replay_infer_payload"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal_3.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader, (proposal_3.payload, contents));
+            mailbox.proposal(proposal_3.clone()).await;
+
+            // Build notarization for view 3 and deliver it — this triggers a (pending) certify.
+            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization_3))
+                .await;
+
+            // Give the actor time to process the notarization and dispatch the (pending) certify.
+            context.sleep(Duration::from_millis(200)).await;
+
+            // Build a notarization for view 4 (parent = view 3) and deliver it via resolver.
+            // This fires try_broadcast_notarization(4), which runs infer_ancestors(4). Because
+            // view 3 is Outstanding, inference stops — no certification_3 is written to journal.
+            let view_4 = View::new(4);
+            let proposal_4 = Proposal::new(
+                Round::new(epoch, view_4),
+                view_3,
+                Sha256::hash(b"post_replay_infer_payload_4"),
+            );
+            let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization_4))
+                .await;
+
+            // Wait for the notarization_4 broadcast to be processed (gives sync time).
+            context.sleep(Duration::from_millis(200)).await;
+
+            // Abort first voter — simulates crash.
+            handle.abort();
+
+            // Second run: Certifier::Cancel so the automaton cannot certify. If certification
+            // of view 3 occurs, it must come from the post-replay inference pass.
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Cancel,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app_cancel"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition,
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            if let batcher::Message::Update { response, .. } =
+                batcher_receiver.recv().await.unwrap()
+            {
+                response.send(None).unwrap();
+            }
+
+            // The post-replay inference pass must have certified view 3.
+            loop {
+                select! {
+                    msg = resolver_receiver.recv() => match msg.unwrap() {
+                        MailboxMessage::Certified { view, success } if view == view_3 => {
+                            assert!(
+                                success,
+                                "post-replay inference must certify view 3 as successful"
+                            );
+                            return;
+                        }
+                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
+                            response.send(None).unwrap();
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "timed out waiting for post-replay inference to certify view {view_3}"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_post_replay_inference_certifies_ancestor() {
+        post_replay_inference_certifies_ancestor::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        post_replay_inference_certifies_ancestor::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        post_replay_inference_certifies_ancestor::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        post_replay_inference_certifies_ancestor::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        post_replay_inference_certifies_ancestor::<_, _>(ed25519::fixture);
+        post_replay_inference_certifies_ancestor::<_, _>(secp256r1::fixture);
+    }
 }
