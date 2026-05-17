@@ -21,7 +21,11 @@ pub enum Message<O: Sink, I: Stream, P: PublicKey> {
 impl<P: PublicKey, O: Sink, I: Stream> Policy for Message<O, I, P> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) {
+        // We drop spawn requests when we are backlogged because it is more likely
+        // than not that by the time we get around to handling it the peer connection
+        // will have already timed out (and closed).
+    }
 }
 
 impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
