@@ -2,14 +2,16 @@
 //!
 //! A `current` database extends an `any` database with an activity bitmap that tracks which
 //! operations are active (i.e. represent the current state of their key) vs inactive (superseded or
-//! deleted). Its canonical root folds the ops root, a grafted merkle root (combining bitmap chunks
+//! deleted). Its database root folds the ops root, a grafted merkle root (combining bitmap chunks
 //! with ops subtree roots), and an optional partial-chunk digest. See [current] module
 //! documentation for more details.
 //!
-//! For sync, the engine targets the **ops root** (not the canonical root). The operations and proof
-//! format are identical to `any`; direct proof verifiers should use `qmdb::hasher`. The bitmap is
-//! reconstructed deterministically from the operations after sync completes. See the
-//! [Root structure](commonware_storage::qmdb::current) module documentation for details.
+//! For sync, the engine internally targets the **ops root** (not the database root). The
+//! operations and proof format are identical to `any`; direct proof verifiers should use
+//! `qmdb::hasher`. The bitmap is reconstructed deterministically from the operations after sync
+//! completes. The `current::sync` wrapper verifies each target's `OpsRootWitness` against its
+//! trusted database root, then checks the reconstructed database root for the target the
+//! engine finishes on.
 //!
 //! This module re-uses the same [`Operation`] type as [`super::any`] since the underlying
 //! operations log is the same.
@@ -25,11 +27,11 @@ use commonware_storage::{
     qmdb::{
         self,
         any::unordered::{fixed::Operation as FixedOperation, Update},
-        current::{self, FixedConfig as Config},
+        current::{self, sync::Target as CurrentTarget, FixedConfig as Config},
         operation::Committable,
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
@@ -145,9 +147,7 @@ where
     }
 
     fn root(&self) -> Key {
-        // Return the ops root (not the canonical root) because this is what the
-        // sync engine verifies against.
-        self.ops_root()
+        self.root()
     }
 
     fn name() -> &'static str {
@@ -184,6 +184,21 @@ where
     ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
         self.pinned_nodes_at(loc)
     }
+}
+
+pub async fn current_sync_target<E: Storage + Clock + Metrics>(
+    db: &Database<E>,
+) -> Result<CurrentTarget<mmr::Family, Key>, qmdb::Error<mmr::Family>> {
+    let hasher = qmdb::hasher::<Hasher>();
+    let witness = db.ops_root_witness(&hasher).await?;
+    let sync_boundary = db.sync_boundary();
+    let size = db.bounds().await.end;
+    Ok(CurrentTarget {
+        root: db.root(),
+        ops_root: db.ops_root(),
+        witness,
+        range: non_empty_range!(sync_boundary, size),
+    })
 }
 
 #[cfg(test)]

@@ -73,6 +73,9 @@ pub trait Database: Sized + Send {
         async { false }
     }
 
-    /// Get the root digest of the database for verification
+    /// Get the root of the operation log for range verification.
+    fn ops_root(&self) -> Self::Digest;
+
+    /// Get the database root digest.
     fn root(&self) -> Self::Digest;
 }

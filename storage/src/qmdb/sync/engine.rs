@@ -44,11 +44,11 @@ type Error<DB, R> =
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
-pub(crate) enum NextStep<C, D> {
+pub(crate) enum NextStep<C, D: Database> {
     /// Sync should continue with the updated client
     Continue(C),
-    /// Sync is complete with the final database
-    Complete(D),
+    /// Sync is complete with the final database and target
+    Complete(D, Target<D::Family, D::Digest>),
 }
 
 /// Events that can occur during synchronization
@@ -455,7 +455,7 @@ where
             let old_target_size = self.target.range.end();
             assert!(
                 self.retained_roots
-                    .insert(old_target_size, self.target.root)
+                    .insert(old_target_size, self.target.ops_root)
                     .is_none(),
                 "duplicate retained root for tree size {old_target_size:?}"
             );
@@ -682,7 +682,7 @@ where
         // requests match a historical root that was explicitly retained.
         let is_current_target = request.target_size == self.target.range.end();
         let target_root = if is_current_target {
-            &self.target.root
+            &self.target.ops_root
         } else {
             let Some(root) = self.retained_roots.get(&request.target_size) else {
                 // No historical root to verify against (evicted or
@@ -783,9 +783,13 @@ where
     /// 3. Handles different event types (target updates, fetch results)
     /// 4. Coordinates request scheduling and operation application
     ///
-    /// Returns `StepResult::Complete(database)` when sync is finished, or
-    /// `StepResult::Continue(self)` when more work remains.
-    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+    /// Returns `NextStep::Complete(database, target)` when sync is finished, or
+    /// `NextStep::Continue(self)` when more work remains.
+    pub(crate) async fn step(self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+        Box::pin(Self::step_inner(self)).await
+    }
+
+    async fn step_inner(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
         // Check if sync is complete
@@ -816,7 +820,7 @@ where
             )
             .await?;
 
-            // Verify the final root digest matches the final target
+            // Verify the final root digest matches the final target.
             let got_root = database.root();
             let expected_root = self.target.root;
             if got_root != expected_root {
@@ -826,7 +830,7 @@ where
                 }));
             }
 
-            return Ok(NextStep::Complete(database));
+            return Ok(NextStep::Complete(database, self.target));
         }
 
         // Wait for the next synchronization event
@@ -840,18 +844,25 @@ where
         self.handle_event(event).await
     }
 
-    /// Run sync to completion, returning the final database when done.
+    /// Run sync to completion, returning the final database and accepted target.
     ///
     /// This method repeatedly calls `step()` until sync is complete. The `step()` method
-    /// handles building the final database and verifying the root digest.
-    pub async fn sync(mut self) -> Result<DB, Error<DB, R>> {
-        // Run sync loop until completion
+    /// handles building the final database and verifying the root digest. Returning the target lets
+    /// wrappers check any metadata they attach to target updates.
+    pub(crate) async fn sync_with_target(
+        mut self,
+    ) -> Result<(DB, Target<DB::Family, DB::Digest>), Error<DB, R>> {
         loop {
             match self.step().await? {
                 NextStep::Continue(new_engine) => self = new_engine,
-                NextStep::Complete(database) => return Ok(database),
+                NextStep::Complete(database, target) => return Ok((database, target)),
             }
         }
+    }
+
+    /// Run sync to completion, returning the final database.
+    pub async fn sync(self) -> Result<DB, Error<DB, R>> {
+        self.sync_with_target().await.map(|(database, _)| database)
     }
 }
 

@@ -13,9 +13,11 @@ use commonware_utils::range::NonEmptyRange;
 /// them.
 #[derive(Debug)]
 pub struct Target<F: Family, D: Digest> {
-    /// The ops root the sync engine verifies streaming batches against.
+    /// The database root expected after sync completes.
     pub root: D,
-    /// Range of operations to sync
+    /// The ops root used to verify range proofs.
+    pub ops_root: D,
+    /// Range of operations to sync.
     pub range: NonEmptyRange<Location<F>>,
 }
 
@@ -23,6 +25,7 @@ impl<F: Family, D: Digest> Clone for Target<F, D> {
     fn clone(&self) -> Self {
         Self {
             root: self.root,
+            ops_root: self.ops_root,
             range: self.range.clone(),
         }
     }
@@ -30,7 +33,7 @@ impl<F: Family, D: Digest> Clone for Target<F, D> {
 
 impl<F: Family, D: Digest> PartialEq for Target<F, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.root == other.root && self.range == other.range
+        self.root == other.root && self.ops_root == other.ops_root && self.range == other.range
     }
 }
 
@@ -39,13 +42,14 @@ impl<F: Family, D: Digest> Eq for Target<F, D> {}
 impl<F: Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
+        self.ops_root.write(buf);
         self.range.write(buf);
     }
 }
 
 impl<F: Family, D: Digest> EncodeSize for Target<F, D> {
     fn encode_size(&self) -> usize {
-        self.root.encode_size() + self.range.encode_size()
+        self.root.encode_size() + self.ops_root.encode_size() + self.range.encode_size()
     }
 }
 
@@ -54,6 +58,7 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
+        let ops_root = D::read(buf)?;
         let range = NonEmptyRange::<Location<F>>::read(buf)?;
         if !range.start().is_valid() || !range.end().is_valid() {
             return Err(CodecError::Invalid(
@@ -61,7 +66,11 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
                 "range bounds out of valid range",
             ));
         }
-        Ok(Self { root, range })
+        Ok(Self {
+            root,
+            ops_root,
+            range,
+        })
     }
 }
 
@@ -72,11 +81,13 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let root = u.arbitrary()?;
+        let ops_root = u.arbitrary()?;
         let max_loc = F::MAX_LEAVES;
         let lower = u.int_in_range(0..=*max_loc - 1)?;
         let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {
             root,
+            ops_root,
             range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
         })
     }
@@ -111,7 +122,7 @@ where
         }));
     }
 
-    if new_target.root == old_target.root {
+    if new_target.ops_root == old_target.ops_root {
         return Err(sync::Error::Engine(EngineError::SyncTargetRootUnchanged));
     }
 
@@ -131,9 +142,10 @@ mod tests {
     use rstest::rstest;
     use std::io::Cursor;
 
-    fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
+    fn target(ops_root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
         Target {
-            root,
+            root: ops_root,
+            ops_root,
             range: non_empty_range!(Location::new(start), Location::new(end)),
         }
     }
@@ -156,13 +168,15 @@ mod tests {
         // Verify
         assert_eq!(target, deserialized);
         assert_eq!(target.root, deserialized.root);
+        assert_eq!(target.ops_root, deserialized.ops_root);
         assert_eq!(target.range, deserialized.range);
     }
 
     #[test]
     fn test_sync_target_read_invalid_bounds() {
-        // Manually encode root + two Locations to bypass the Range write panic
+        // Manually encode root + ops root + two Locations to bypass the Range write panic
         let mut buffer = Vec::new();
+        sha256::Digest::from([42; 32]).write(&mut buffer);
         sha256::Digest::from([42; 32]).write(&mut buffer);
         Location::<MmrFamily>::new(100).write(&mut buffer); // start
         Location::<MmrFamily>::new(50).write(&mut buffer); // end (< start = invalid)
@@ -176,6 +190,7 @@ mod tests {
         // Manually encode a target with an empty range (start == end)
         let root = sha256::Digest::from([42; 32]);
         let mut buffer = Vec::new();
+        root.write(&mut buffer);
         root.write(&mut buffer);
         (Location::<MmrFamily>::new(100)..Location::<MmrFamily>::new(100)).write(&mut buffer);
 

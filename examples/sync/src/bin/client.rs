@@ -11,7 +11,10 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{self, compact},
+    qmdb::{
+        current as current_qmdb,
+        sync::{self, compact},
+    },
 };
 use commonware_sync::{
     any, crate_version, current,
@@ -217,44 +220,94 @@ where
 
 /// Repeatedly sync a Current database to the server's state.
 ///
-/// The sync engine targets the ops root (not the canonical root). After sync completes,
-/// the bitmap and grafted MMR are reconstructed from the synced operations.
+/// Uses the `current::sync::sync` wrapper. The wrapper verifies each target's `OpsRootWitness`
+/// before forwarding its ops root to the shared sync engine, then checks the database root for the
+/// target the engine finishes on.
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
-    run_full_sync::<current::Database<_>, current::Operation, _, _, _>(
-        context,
-        config,
-        |context, config, resolver, initial_target, update_receiver, iteration| async move {
-            let db_config = current::create_config(&context);
-            let sync_config =
-                sync::engine::Config::<current::Database<_>, Resolver<current::Operation, Key>> {
-                    context,
-                    db_config,
-                    fetch_batch_size: config.batch_size,
-                    target: initial_target,
-                    resolver,
-                    apply_batch_size: 1024,
-                    max_outstanding_requests: config.max_outstanding_requests,
-                    update_rx: Some(update_receiver),
-                    finish_rx: None,
-                    reached_target_tx: None,
-                    max_retained_roots: 8,
-                };
-            let database: current::Database<_> = sync::sync(sync_config).await?;
-            info!(
-                sync_iteration = iteration,
-                canonical_root = %database.root(),
-                ops_root = %database.ops_root(),
-                sync_interval = ?config.sync_interval,
-                "Current sync completed successfully"
-            );
-            Ok(database)
-        },
-        "Current database",
-    )
-    .await
+    info!("starting Current database sync process");
+    let mut iteration = 0u32;
+    loop {
+        let resolver =
+            Resolver::<current::Operation, Key>::connect(context.child("resolver"), config.server)
+                .await?;
+
+        let initial_target = resolver.get_current_sync_target().await?;
+        info!(
+            root = %initial_target.root,
+            ops_root = %initial_target.ops_root,
+            range = ?initial_target.range,
+            "received current sync target"
+        );
+
+        let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
+
+        let target_update_handle = {
+            let resolver = resolver.clone();
+            let mut current_target_root = initial_target.root;
+            let target_update_interval = config.target_update_interval;
+            context
+                .child("target_update")
+                .spawn(move |context| async move {
+                    loop {
+                        context.sleep(target_update_interval).await;
+                        match resolver.get_current_sync_target().await {
+                            Ok(new_target) => {
+                                if current_target_root != new_target.root {
+                                    let new_root = new_target.root;
+                                    match update_sender.clone().try_send(new_target) {
+                                        Ok(()) => {
+                                            info!("target updated");
+                                            current_target_root = new_root;
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+                                        Err(err) => {
+                                            warn!(?err, "failed to send target update");
+                                            return Err(Error::TargetUpdateChannel {
+                                                reason: err.to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                warn!(?err, "failed to get sync target from server");
+                            }
+                        }
+                    }
+                })
+        };
+
+        let db_config = current::create_config(&context);
+        let database: current::Database<_> = current_qmdb::sync::sync(current_qmdb::sync::Config {
+            context: context.child("sync"),
+            resolver,
+            target: initial_target,
+            max_outstanding_requests: config.max_outstanding_requests,
+            fetch_batch_size: config.batch_size,
+            apply_batch_size: 1024,
+            db_config,
+            update_rx: Some(update_receiver),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
+        .await?;
+
+        target_update_handle.abort();
+        info!(
+            sync_iteration = iteration,
+            root = %database.root(),
+            ops_root = %database.ops_root(),
+            sync_interval = ?config.sync_interval,
+            "Current sync completed successfully"
+        );
+        database.destroy().await?;
+        context.sleep(config.sync_interval).await;
+        iteration += 1;
+    }
 }
 
 /// Repeatedly sync an Immutable database to the server's state.

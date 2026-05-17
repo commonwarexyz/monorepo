@@ -240,6 +240,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
+                        ops_root: db.root(),
                         range: non_empty_range!(db.sync_boundary(), db.bounds().await.end),
                     };
 

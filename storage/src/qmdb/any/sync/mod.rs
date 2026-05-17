@@ -50,14 +50,8 @@ use commonware_utils::{range::NonEmptyRange, Array};
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// Returns whether persisted local state already matches the requested sync target.
-///
-/// Shared helper for [crate::qmdb::any] sync implementations, which can reuse persisted
-/// state by checking only the operations-tree size and root.
-///
-/// [crate::qmdb::current] performs an additional lower-bound check because its grafted-state
-/// reconstruction depends on the persisted pruning point remaining at or below
-/// `target.range.start()`.
+/// Returns whether persisted local state already matches the requested sync target by confirming
+/// that the derived `ops_root` matches the one from the target.
 pub async fn has_local_target_state<F, E, H, S>(
     context: E,
     merkle_config: full::Config<S>,
@@ -82,8 +76,8 @@ where
     // the persisted DB without fetching boundary pins.
     matches!(
         peek,
-        Ok(Some((_, journal_leaves, root)))
-            if journal_leaves == target.range.end() && root == target.root
+        Ok(Some((_, journal_leaves, ops_root)))
+            if journal_leaves == target.range.end() && ops_root == target.ops_root
     )
 }
 
@@ -210,6 +204,10 @@ macro_rules! impl_sync_database {
                     inactive_peaks,
                 )
                 .await
+            }
+
+            fn ops_root(&self) -> Self::Digest {
+                crate::qmdb::any::db::Db::root(self)
             }
 
             fn root(&self) -> Self::Digest {
