@@ -1,12 +1,11 @@
+use super::ingress::Subscriber;
 use crate::{
     simplex::types::{Certificate, Notarization},
     types::View,
     Viewable,
 };
-use super::ingress::Subscriber;
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_resolver::Fetch;
-use commonware_resolver::Resolver;
+use commonware_resolver::{Fetch, Resolver};
 use commonware_utils::sequence::U64;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},

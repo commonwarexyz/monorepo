@@ -47,8 +47,7 @@ pub struct Engine<
     Pro: Producer<Request = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
->
-where
+> where
     Con::Subscriber: Eq,
 {
     /// Context used to spawn tasks, manage time, etc.

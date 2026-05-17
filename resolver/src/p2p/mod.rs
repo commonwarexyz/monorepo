@@ -1935,8 +1935,7 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1): (Consumer<Key, Bytes, SubscriberTag>, _) =
-                Consumer::new();
+            let (cons1, mut cons_out1): (Consumer<Key, Bytes, SubscriberTag>, _) = Consumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(

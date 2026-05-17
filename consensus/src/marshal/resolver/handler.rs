@@ -196,18 +196,14 @@ impl<D: Digest> Request<D> {
     /// subjects will be pruned if they are "less than or equal to" this subject.
     pub fn predicate(&self) -> impl Fn(&Subscriber<D>) -> bool + Send + 'static {
         let cloned = self.clone();
-        move |subscriber| {
-            match (&cloned, &subscriber.0) {
-                (Self::Block(_), _) => unreachable!("we should never retain by block"),
-                (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
-                    *theirs > *mine
-                }
-                (Self::Finalized { .. }, _) => true,
-                (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => {
-                    *theirs > *mine
-                }
-                (Self::Notarized { .. }, _) => true,
+        move |subscriber| match (&cloned, &subscriber.0) {
+            (Self::Block(_), _) => unreachable!("we should never retain by block"),
+            (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
+                *theirs > *mine
             }
+            (Self::Finalized { .. }, _) => true,
+            (Self::Notarized { round: mine }, Self::Notarized { round: theirs }) => *theirs > *mine,
+            (Self::Notarized { .. }, _) => true,
         }
     }
 }

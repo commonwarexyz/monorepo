@@ -118,10 +118,7 @@ impl<R, P, S> Pending<R, P, S> {
     }
 }
 
-fn retain_fetch<S>(
-    subscribers: &mut Vec<S>,
-    predicate: &(dyn Fn(&S) -> bool + Send),
-) -> bool {
+fn retain_fetch<S>(subscribers: &mut Vec<S>, predicate: &(dyn Fn(&S) -> bool + Send)) -> bool {
     subscribers.retain(|subscriber| predicate(subscriber));
     !subscribers.is_empty()
 }
@@ -217,11 +214,9 @@ where
             }
             Self::Retain { predicate } => {
                 // Retain prunes pending fetch subscribers before queued fetches drain.
-                overflow
-                    .fetches
-                    .retain_mut(|request| {
-                        retain_fetch(&mut request.subscribers, predicate.as_ref())
-                    });
+                overflow.fetches.retain_mut(|request| {
+                    retain_fetch(&mut request.subscribers, predicate.as_ref())
+                });
                 overflow
                     .modifications
                     .push_back(Modification::Retain { predicate });
@@ -383,7 +378,11 @@ mod tests {
         }])
     }
 
-    fn fetch_with_subscribers(request: u8, subscribers: Vec<u16>, targets: Option<NonEmptyVec<u8>>) -> TestMessage {
+    fn fetch_with_subscribers(
+        request: u8,
+        subscribers: Vec<u16>,
+        targets: Option<NonEmptyVec<u8>>,
+    ) -> TestMessage {
         Message::Fetch(vec![FetchRequest {
             request,
             subscribers,

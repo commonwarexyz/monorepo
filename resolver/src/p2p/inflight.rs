@@ -18,7 +18,8 @@ struct Entry {
 }
 
 /// Tracks all in-flight fetch state.
-pub(super) struct Inflight<E: Clock, Con: Consumer<Request = Request>, P: PublicKey, Request: Span> {
+pub(super) struct Inflight<E: Clock, Con: Consumer<Request = Request>, P: PublicKey, Request: Span>
+{
     /// Per-request entries tracking fetch duration timers and (when validating a response)
     /// the [Aborter] that cancels the in-flight consumer delivery.
     entries: HashMap<Request, Entry>,
@@ -115,7 +116,10 @@ where
         let aborter = self
             .deliveries
             .push(async move { (peer, request, receiver.await.unwrap_or(false)) });
-        let entry = self.entries.get_mut(&lookup_request).expect("inflight entry");
+        let entry = self
+            .entries
+            .get_mut(&lookup_request)
+            .expect("inflight entry");
         assert!(entry.delivery.replace(aborter).is_none());
     }
 

@@ -1701,8 +1701,7 @@ where
                     // SAFETY: We can rely on this derived parent commitment because
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
-                    resolver
-                        .fetch(Request::<V::Commitment>::Block(parent_commitment).into_fetch());
+                    resolver.fetch(Request::<V::Commitment>::Block(parent_commitment).into_fetch());
                     break 'cache_repair;
                 }
             }
