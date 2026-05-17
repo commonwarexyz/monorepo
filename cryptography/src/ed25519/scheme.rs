@@ -49,6 +49,26 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKey {
+    /// Construct from a 32-byte Ed25519 seed.
+    ///
+    /// Any 32 bytes are a valid Ed25519 seed (the seed is hashed internally
+    /// by the Ed25519 key derivation), so this operation is infallible.
+    pub fn from_bytes(bytes: [u8; PRIVATE_KEY_LENGTH]) -> Self {
+        let key = ed25519_consensus::SigningKey::from(bytes);
+        Self {
+            key: Secret::new(key),
+        }
+    }
+
+    /// Export the 32-byte Ed25519 seed.
+    ///
+    /// The returned value is wrapped in [`Zeroizing`] so it is automatically
+    /// zeroed when dropped.
+    pub fn to_bytes(&self) -> Zeroizing<[u8; PRIVATE_KEY_LENGTH]> {
+        self.key
+            .expose(|key| Zeroizing::new(*key.as_bytes()))
+    }
+
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
         let payload = namespace
@@ -813,6 +833,70 @@ mod tests {
     fn test_from_private_key_to_public_key() {
         let private_key = PrivateKey::random(&mut test_rng());
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
+    }
+
+    #[test]
+    fn test_from_bytes_roundtrip() {
+        let original = PrivateKey::random(&mut test_rng());
+        let bytes = original.to_bytes();
+        let restored = PrivateKey::from_bytes(*bytes);
+        assert_eq!(original, restored);
+        assert_eq!(original.public_key(), restored.public_key());
+    }
+
+    #[test]
+    fn test_from_bytes_rfc8032_vector() {
+        // RFC 8032 test vector 1 seed
+        let seed: [u8; 32] = commonware_utils::from_hex_formatted(
+            "
+            9d61b19deffd5a60ba844af492ec2cc4
+            4449c5697b326919703bac031cae7f60
+            ",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let key = PrivateKey::from_bytes(seed);
+        let expected_pk = parse_public_key(
+            "
+            d75a980182b10ab7d54bfed3c964073a
+            0ee172f3daa62325af021a68f707511a
+            ",
+        );
+        assert_eq!(key.public_key(), expected_pk);
+    }
+
+    #[test]
+    fn test_from_bytes_equivalence_with_decode() {
+        let seed: [u8; 32] = [42u8; 32];
+        let from_bytes_key = PrivateKey::from_bytes(seed);
+        let decoded_key = PrivateKey::decode(&seed[..]).unwrap();
+        assert_eq!(from_bytes_key, decoded_key);
+    }
+
+    #[test]
+    fn test_to_bytes_matches_encode() {
+        let key = PrivateKey::random(&mut test_rng());
+        let to_bytes = key.to_bytes();
+        let encoded = key.encode();
+        assert_eq!(&to_bytes[..], &encoded[..]);
+    }
+
+    #[test]
+    fn test_sign_verify_after_from_bytes() {
+        use crate::Verifier as _;
+
+        let original = PrivateKey::random(&mut test_rng());
+        let bytes = original.to_bytes();
+        let restored = PrivateKey::from_bytes(*bytes);
+
+        let namespace = b"test";
+        let message = b"hello world";
+        let sig = original.sign(namespace, message);
+        assert!(restored.public_key().verify(namespace, message, &sig));
+
+        let sig2 = restored.sign(namespace, message);
+        assert!(original.public_key().verify(namespace, message, &sig2));
     }
 
     #[cfg(feature = "arbitrary")]
