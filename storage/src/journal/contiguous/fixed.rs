@@ -935,7 +935,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&self, min_item_pos: u64) -> Result<bool, Error> {
-        let mut inner = self.inner.write().await;
+        let inner = self.inner.upgradable_read().await;
 
         // Calculate the section that would contain min_item_pos
         let target_section = min_item_pos / self.items_per_blob;
@@ -946,22 +946,28 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // Cap to tail section. The tail section is guaranteed to exist by our invariant.
         let min_section = std::cmp::min(target_section, tail_section);
 
-        let pruned = inner.journal.prune(min_section).await?;
+        // Begin pruning old sections while allowing concurrent readers to use existing open handles.
+        let Some(unlinked) = inner.journal.begin_prune(min_section).await? else {
+            return Ok(false);
+        };
 
-        // After pruning, update pruning_boundary to the start of the oldest remaining section
-        if pruned {
-            let new_oldest = inner
-                .journal
-                .oldest_section()
-                .expect("all sections pruned - violates tail section invariant");
-            // Pruning boundary only moves forward
-            assert!(inner.pruning_boundary < new_oldest * self.items_per_blob);
-            inner.pruning_boundary = new_oldest * self.items_per_blob;
-            self.metrics
-                .update(inner.size, inner.pruning_boundary, self.items_per_blob);
-        }
+        let mut inner = inner.upgrade().await;
+        inner.journal.finish_prune(unlinked);
 
-        Ok(pruned)
+        // Update pruning_boundary to the start of the oldest remaining section.
+        let new_oldest = inner
+            .journal
+            .oldest_section()
+            .expect("all sections pruned - violates tail section invariant");
+        // New pruning boundary should only move forward
+        assert!(inner.pruning_boundary < new_oldest * self.items_per_blob);
+        inner.pruning_boundary = new_oldest * self.items_per_blob;
+
+        // Update metrics
+        self.metrics
+            .update(inner.size, inner.pruning_boundary, self.items_per_blob);
+
+        Ok(true)
     }
 
     /// Remove any persisted data created by the journal.
@@ -1120,14 +1126,22 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
 mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_runtime::{
         deterministic::{self, Context},
-        Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Storage, Supervisor as _,
+        Blob, BufferPooler, Clock as _, Error as RuntimeError, Metrics as _, Runner, Spawner as _,
+        Storage, Supervisor as _,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_utils::{sync::Notify, NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
-    use std::num::NonZeroU16;
+    use std::{
+        num::NonZeroU16,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::{Duration, SystemTime},
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
@@ -1155,6 +1169,190 @@ mod tests {
             Ok(blobs) => blobs,
             Err(RuntimeError::PartitionMissing(_)) => Vec::new(),
             Err(err) => panic!("Failed to scan partition {partition}: {err}"),
+        }
+    }
+
+    /// Coordinates a test pause after a target section is removed from storage.
+    struct RemoveBlocker {
+        target: Vec<u8>,
+        removed: Notify,
+        release: Notify,
+    }
+
+    impl RemoveBlocker {
+        /// Create a blocker for removal of the given section.
+        fn new(section: u64) -> Self {
+            Self {
+                target: section.to_be_bytes().to_vec(),
+                removed: Notify::new(),
+                release: Notify::new(),
+            }
+        }
+    }
+
+    enum RemoveHook {
+        Block(Arc<RemoveBlocker>),
+        FailOnCall {
+            calls: Arc<AtomicUsize>,
+            fail_on: usize,
+        },
+    }
+
+    /// Deterministic test context that can intercept remove calls.
+    struct RemoveHookContext {
+        inner: Context,
+        hook: RemoveHook,
+    }
+
+    impl RemoveHookContext {
+        /// Wrap a deterministic context and pause removal of the blocker's target section.
+        fn blocking(inner: Context, blocker: Arc<RemoveBlocker>) -> Self {
+            Self {
+                inner,
+                hook: RemoveHook::Block(blocker),
+            }
+        }
+
+        /// Wrap a deterministic context and fail the `fail_on`th remove call.
+        fn failing(inner: Context, fail_on: usize) -> Self {
+            Self {
+                inner,
+                hook: RemoveHook::FailOnCall {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    fail_on,
+                },
+            }
+        }
+    }
+
+    impl commonware_runtime::Supervisor for RemoveHookContext {
+        fn name(&self) -> commonware_runtime::Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                hook: self.hook.clone(),
+            }
+        }
+
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            Self {
+                inner: self.inner.with_attribute(key, value),
+                hook: self.hook,
+            }
+        }
+    }
+
+    impl Clone for RemoveHook {
+        fn clone(&self) -> Self {
+            match self {
+                Self::Block(blocker) => Self::Block(blocker.clone()),
+                Self::FailOnCall { calls, fail_on } => Self::FailOnCall {
+                    calls: calls.clone(),
+                    fail_on: *fail_on,
+                },
+            }
+        }
+    }
+
+    impl commonware_runtime::Metrics for RemoveHookContext {
+        fn register<
+            N: Into<String>,
+            H: Into<String>,
+            M: commonware_runtime::telemetry::metrics::Metric,
+        >(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> commonware_runtime::telemetry::metrics::Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl governor::clock::Clock for RemoveHookContext {
+        type Instant = SystemTime;
+
+        fn now(&self) -> Self::Instant {
+            self.inner.current()
+        }
+    }
+
+    impl governor::clock::ReasonablyRealtime for RemoveHookContext {}
+
+    impl commonware_runtime::Clock for RemoveHookContext {
+        fn current(&self) -> SystemTime {
+            self.inner.current()
+        }
+
+        fn sleep(
+            &self,
+            duration: Duration,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            self.inner.sleep(duration)
+        }
+
+        fn sleep_until(
+            &self,
+            deadline: SystemTime,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            self.inner.sleep_until(deadline)
+        }
+    }
+
+    impl BufferPooler for RemoveHookContext {
+        fn network_buffer_pool(&self) -> &commonware_runtime::BufferPool {
+            self.inner.network_buffer_pool()
+        }
+
+        fn storage_buffer_pool(&self) -> &commonware_runtime::BufferPool {
+            self.inner.storage_buffer_pool()
+        }
+    }
+
+    impl Storage for RemoveHookContext {
+        type Blob = <Context as Storage>::Blob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), RuntimeError> {
+            self.inner.open_versioned(partition, name, versions).await
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RuntimeError> {
+            match &self.hook {
+                RemoveHook::Block(blocker) => {
+                    let block = name.is_some_and(|name| name == blocker.target.as_slice());
+                    let result = self.inner.remove(partition, name).await;
+                    if block {
+                        blocker.removed.notify_one();
+                        blocker.release.notified().await;
+                    }
+                    result
+                }
+                RemoveHook::FailOnCall { calls, fail_on } => {
+                    let call = calls.fetch_add(1, Ordering::Relaxed) + 1;
+                    if call == *fail_on {
+                        return Err(RuntimeError::Io(std::io::Error::other(
+                            "injected remove failure",
+                        )));
+                    }
+                    self.inner.remove(partition, name).await
+                }
+            }
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RuntimeError> {
+            self.inner.scan(partition).await
         }
     }
 
@@ -1397,6 +1595,133 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_reads_during_prune_unlink() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blocker = Arc::new(RemoveBlocker::new(0));
+            let journal_context =
+                RemoveHookContext::blocking(context.child("journal"), blocker.clone());
+            let cfg = test_cfg(&journal_context, NZU64!(2));
+            let journal = Arc::new(
+                Journal::<_, Digest>::init(journal_context.child("inner"), cfg)
+                    .await
+                    .expect("failed to initialize journal"),
+            );
+
+            for i in 0..6 {
+                let pos = journal.append(&test_digest(i)).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            journal.sync().await.unwrap();
+
+            let held_reader = journal.reader().await;
+            assert_eq!(held_reader.read(0).await.unwrap(), test_digest(0));
+
+            let prune = context.child("prune").spawn({
+                let journal = journal.clone();
+                |_| async move { journal.prune(4).await }
+            });
+
+            select! {
+                _ = blocker.removed.notified() => {},
+                _ = context.sleep(Duration::from_secs(1)) => panic!("prune did not unlink section"),
+            }
+
+            let reader = journal.reader();
+            pin_mut!(reader);
+            let reader = select! {
+                reader = reader => reader,
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("reader blocked while prune was unlinking")
+                },
+            };
+
+            assert_eq!(reader.read(0).await.unwrap(), test_digest(0));
+            assert_eq!(reader.read(4).await.unwrap(), test_digest(4));
+            drop(reader);
+
+            blocker.release.notify_one();
+            drop(held_reader);
+            assert!(prune.await.unwrap().unwrap());
+
+            assert_eq!(journal.pruning_boundary().await, 4);
+            assert_eq!(journal.test_oldest_section().await, Some(2));
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(0))));
+            assert_eq!(journal.read(4).await.unwrap(), test_digest(4));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_prune_remove_failure_reopens_contiguous() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..6 {
+                let pos = journal.append(&test_digest(i)).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            journal.sync().await.unwrap();
+
+            let fault_cfg = context.storage_fault_config();
+            *fault_cfg.write() = deterministic::FaultConfig::default().remove(1.0);
+            let err = journal.prune(4).await.expect_err("prune should fail");
+            assert!(matches!(err, Error::Runtime(RuntimeError::Io(_))));
+            drop(journal);
+
+            *fault_cfg.write() = deterministic::FaultConfig::default();
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+            assert_eq!(journal.bounds().await, 0..6);
+            assert_eq!(journal.test_oldest_section().await, Some(0));
+            for i in 0..6 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_partial_prune_remove_failure_reopens_suffix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let remove_context = RemoveHookContext::failing(context.child("first"), 2);
+            let cfg = test_cfg(&remove_context, NZU64!(2));
+            let journal = Journal::<_, Digest>::init(remove_context.child("journal"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..6 {
+                let pos = journal.append(&test_digest(i)).await.unwrap();
+                assert_eq!(pos, i);
+            }
+            journal.sync().await.unwrap();
+
+            let err = journal.prune(4).await.expect_err("prune should fail");
+            assert!(matches!(err, Error::Runtime(RuntimeError::Io(_))));
+            assert_eq!(journal.pruning_boundary().await, 0);
+
+            // The first section was unlinked from storage but remains readable through the
+            // open handle until the failed journal instance is dropped.
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+            assert_eq!(journal.bounds().await, 2..6);
+            assert_eq!(journal.test_oldest_section().await, Some(1));
+            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(0))));
+            for i in 2..6 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
         });
     }
 

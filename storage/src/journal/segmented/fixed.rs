@@ -20,7 +20,7 @@
 //! All data must be assigned to a `section`. This allows pruning entire sections
 //! (and their corresponding blobs) independently.
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager, Unlinked};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
@@ -379,6 +379,23 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         self.manager.prune(min).await
+    }
+
+    /// Begin pruning by removing section blobs less than `min` from storage without dropping open
+    /// handles.
+    ///
+    /// This allows fixed contiguous journals to perform physical removal while readers keep using
+    /// existing section handles. Returns a token if any sections were unlinked.
+    pub(in crate::journal) async fn begin_prune(
+        &self,
+        min: u64,
+    ) -> Result<Option<Unlinked>, Error> {
+        self.manager.begin_prune(min).await
+    }
+
+    /// Finish pruning sections described by `unlinked` by removing them from memory.
+    pub(in crate::journal) fn finish_prune(&mut self, unlinked: Unlinked) {
+        self.manager.finish_prune(unlinked)
     }
 
     /// Returns the oldest section number, if any blobs exist.
