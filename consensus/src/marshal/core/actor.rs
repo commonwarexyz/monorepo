@@ -373,8 +373,8 @@ where
     ) -> Handle<()>
     where
         R: Resolver<
-            Key = handler::Request<V::Commitment>,
-            Subscriber = handler::Request<V::Commitment>,
+            Request = handler::Request<V::Commitment>,
+            Subscriber = handler::Subscriber<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -390,8 +390,8 @@ where
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: Resolver<
-            Key = handler::Request<V::Commitment>,
-            Subscriber = handler::Request<V::Commitment>,
+            Request = handler::Request<V::Commitment>,
+            Subscriber = handler::Subscriber<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -607,7 +607,7 @@ where
                         } else {
                             debug!(?round, "notarized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Notarized { round });
+                                .fetch(Request::<V::Commitment>::Notarized { round }.into_fetch());
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -645,7 +645,7 @@ where
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver
-                                .fetch(Request::<V::Commitment>::Block(commitment));
+                                .fetch(Request::<V::Commitment>::Block(commitment).into_fetch());
                         }
                     }
                     Message::GetBlock {
@@ -687,7 +687,7 @@ where
 
                         // Trigger a targeted fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
-                        resolver.fetch_targeted(request, targets);
+                        resolver.fetch_targeted(request.into_fetch(), targets);
                     }
                     Message::SubscribeByDigest {
                         round,
@@ -889,7 +889,10 @@ where
         round: Option<Round>,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<
+            Request = Request<V::Commitment>,
+            Subscriber = handler::Subscriber<V::Commitment>,
+        >,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -927,7 +930,7 @@ where
             // If this is a valid view, this request should be fine to keep open
             // until resolution or pruning (even if the oneshot is canceled).
             debug!(?round, ?digest, "requested block missing");
-            resolver.fetch(Request::<V::Commitment>::Notarized { round });
+            resolver.fetch(Request::<V::Commitment>::Notarized { round }.into_fetch());
         }
 
         // Register subscriber.
@@ -1333,13 +1336,18 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<
+            Request = Request<V::Commitment>,
+            Subscriber = handler::Subscriber<V::Commitment>,
+        >,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver);
 
         // Cancel any useless requests
-        resolver.cancel(Request::<V::Commitment>::Block(commitment));
+        resolver.cancel(handler::Subscriber::from(Request::<V::Commitment>::Block(
+            commitment,
+        )));
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -1607,7 +1615,10 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<
+            Request = Request<V::Commitment>,
+            Subscriber = handler::Subscriber<V::Commitment>,
+        >,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
@@ -1641,7 +1652,7 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    resolver.fetch(Request::<V::Commitment>::Block(commitment));
+                    resolver.fetch(Request::<V::Commitment>::Block(commitment).into_fetch());
                 }
             }
         }
@@ -1690,7 +1701,8 @@ where
                     // SAFETY: We can rely on this derived parent commitment because
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
-                    resolver.fetch(Request::<V::Commitment>::Block(parent_commitment));
+                    resolver
+                        .fetch(Request::<V::Commitment>::Block(parent_commitment).into_fetch());
                     break 'cache_repair;
                 }
             }
@@ -1709,7 +1721,7 @@ where
             .map(|height| Request::<V::Commitment>::Finalized { height })
             .collect();
         if !requests.is_empty() {
-            resolver.fetch_all(requests);
+            resolver.fetch_all(requests.into_iter().map(Request::into_fetch).collect());
         }
         wrote
     }
@@ -1719,7 +1731,10 @@ where
     fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Key = Request<V::Commitment>, Subscriber = Request<V::Commitment>>,
+        resolver: &mut impl Resolver<
+            Request = Request<V::Commitment>,
+            Subscriber = handler::Subscriber<V::Commitment>,
+        >,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;

@@ -8,7 +8,7 @@ use commonware_utils::{
 use futures::future::Aborted;
 use std::{collections::HashMap, marker::PhantomData};
 
-/// Tracks per-key state for an in-flight fetch.
+/// Tracks per-request state for an in-flight fetch.
 ///
 /// `delivery` is `Some` while the consumer is validating a response, and `None` while
 /// the request is still pending in the fetcher.
@@ -18,14 +18,14 @@ struct Entry {
 }
 
 /// Tracks all in-flight fetch state.
-pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> {
-    /// Per-key entries tracking fetch duration timers and (when validating a response)
+pub(super) struct Inflight<E: Clock, Con: Consumer<Request = Request>, P: PublicKey, Request: Span> {
+    /// Per-request entries tracking fetch duration timers and (when validating a response)
     /// the [Aborter] that cancels the in-flight consumer delivery.
-    entries: HashMap<Key, Entry>,
+    entries: HashMap<Request, Entry>,
 
     /// Holds futures that resolve once the `Consumer` has validated fetched data.
-    /// Each completion yields `(peer, key, valid)`.
-    deliveries: AbortablePool<(P, Key, bool)>,
+    /// Each completion yields `(peer, request, valid)`.
+    deliveries: AbortablePool<(P, Request, bool)>,
 
     /// Consumer cloned per delivery to validate fetched data.
     consumer: Con,
@@ -34,7 +34,8 @@ pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key
     _clock: PhantomData<E>,
 }
 
-impl<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> Inflight<E, Con, P, Key>
+impl<E: Clock, Con: Consumer<Request = Request>, P: PublicKey, Request: Span>
+    Inflight<E, Con, P, Request>
 where
     Con::Value: Send + 'static,
 {
@@ -47,15 +48,15 @@ where
         }
     }
 
-    /// Returns true if there is an in-flight entry for the key.
-    pub(super) fn contains(&self, key: &Key) -> bool {
-        self.entries.contains_key(key)
+    /// Returns true if there is an in-flight entry for the request.
+    pub(super) fn contains(&self, request: &Request) -> bool {
+        self.entries.contains_key(request)
     }
 
-    /// Insert a new in-flight entry for the key.
-    pub(super) fn insert(&mut self, key: Key, timer: histogram::Timer) {
+    /// Insert a new in-flight entry for the request.
+    pub(super) fn insert(&mut self, request: Request, timer: histogram::Timer) {
         self.entries.insert(
-            key,
+            request,
             Entry {
                 timer,
                 delivery: None,
@@ -63,11 +64,11 @@ where
         );
     }
 
-    /// Remove the in-flight entry for the key and cancel its duration timer (suppressing
+    /// Remove the in-flight entry for the request and cancel its duration timer (suppressing
     /// the recording). If delivery validation was in progress, it is aborted and any
     /// invalid result is discarded. Returns true if an entry was present.
-    pub(super) fn cancel(&mut self, key: &Key) -> bool {
-        let Some(_entry) = self.entries.remove(key) else {
+    pub(super) fn cancel(&mut self, request: &Request) -> bool {
+        let Some(_entry) = self.entries.remove(request) else {
             return false;
         };
         // Dropping the entry aborts the in-flight delivery (if any) and suppresses duration
@@ -75,19 +76,19 @@ where
         true
     }
 
-    /// Mark the in-flight entry for the key as complete, recording its duration.
-    /// Panics if no entry exists for the key.
-    pub(super) fn complete(&mut self, key: &Key, clock: &E) {
+    /// Mark the in-flight entry for the request as complete, recording its duration.
+    /// Panics if no entry exists for the request.
+    pub(super) fn complete(&mut self, request: &Request, clock: &E) {
         self.entries
-            .remove(key)
+            .remove(request)
             .expect("inflight entry")
             .timer
             .observe(clock);
     }
 
     /// Drop entries for which the predicate returns false. Returns the count of dropped entries.
-    pub(super) fn retain<F: FnMut(&Key) -> bool>(&mut self, mut predicate: F) -> usize {
-        let removed: Vec<_> = self.entries.extract_if(|k, _| !predicate(k)).collect();
+    pub(super) fn retain<F: FnMut(&Request) -> bool>(&mut self, mut predicate: F) -> usize {
+        let removed: Vec<_> = self.entries.extract_if(|r, _| !predicate(r)).collect();
         removed.len()
     }
 
@@ -103,29 +104,29 @@ where
     /// the result for later handling.
     pub(super) fn deliver(
         &mut self,
-        key: Key,
-        delivery: Delivery<Key, Con::Subscriber>,
+        request: Request,
+        delivery: Delivery<Request, Con::Subscriber>,
         peer: P,
         value: Con::Value,
     ) {
-        let lookup_key = key.clone();
+        let lookup_request = request.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
         let aborter = self
             .deliveries
-            .push(async move { (peer, key, receiver.await.unwrap_or(false)) });
-        let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
+            .push(async move { (peer, request, receiver.await.unwrap_or(false)) });
+        let entry = self.entries.get_mut(&lookup_request).expect("inflight entry");
         assert!(entry.delivery.replace(aborter).is_none());
     }
 
-    /// Returns the next completed delivery as `(peer, key, valid)`, or [Aborted] if the
+    /// Returns the next completed delivery as `(peer, request, valid)`, or [Aborted] if the
     /// delivery was canceled. Clears the entry's delivery aborter so the slot is available
     /// for a retry.
-    pub(super) async fn next_delivery(&mut self) -> Result<(P, Key, bool), Aborted> {
-        let (peer, key, valid) = self.deliveries.next_completed().await?;
-        let entry = self.entries.get_mut(&key).expect("inflight entry");
+    pub(super) async fn next_delivery(&mut self) -> Result<(P, Request, bool), Aborted> {
+        let (peer, request, valid) = self.deliveries.next_completed().await?;
+        let entry = self.entries.get_mut(&request).expect("inflight entry");
         entry.delivery = None;
-        Ok((peer, key, valid))
+        Ok((peer, request, valid))
     }
 }
 
@@ -159,10 +160,9 @@ mod tests {
         PrivateKey::from_seed(0).public_key()
     }
 
-    fn delivery(key: MockKey) -> Delivery<MockKey, MockKey> {
+    fn delivery(key: MockKey) -> Delivery<MockKey, ()> {
         Delivery {
             request: key,
-            requested: true,
             subscribers: Vec::new(),
         }
     }

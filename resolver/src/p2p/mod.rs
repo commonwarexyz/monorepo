@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! The `p2p` module enables resolving data by fixed-length keys in a P2P network. Central to the
+//! The `p2p` module enables resolving data by fixed-length requests in a P2P network. Central to the
 //! module is the `peer` actor which manages the fetch-request lifecycle. Its mailbox allows
 //! initiation and cancellation of fetch requests via the `Resolver` interface.
 //!
@@ -39,12 +39,11 @@
 //!
 //! # Subscribers
 //!
-//! [`Resolver::fetch`](crate::Resolver::fetch) accepts either a bare request key or
-//! [`Fetch`](crate::Fetch) with local subscribers attached. This is useful when several local
-//! reasons can share the same peer-visible fetch. A fetch remains active while its bare request
-//! marker or at least one attached subscriber satisfies the latest
-//! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the request
-//! key, request marker, and currently retained subscribers are supplied to
+//! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible request and a local
+//! subscriber. This is useful when several local subscribers can share the same peer-visible
+//! fetch. A fetch remains active while at least one attached subscriber satisfies the latest
+//! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
+//! request and currently retained subscribers are supplied to
 //! [`Consumer::deliver`](crate::Consumer::deliver).
 //!
 //! # Peer Selection
@@ -81,11 +80,11 @@ pub mod mocks;
 
 /// Serves data requested by the network.
 pub trait Producer: Clone + Send + 'static {
-    /// Type used to uniquely identify data.
-    type Key: Span;
+    /// Type used to request data from peers.
+    type Request: Span;
 
     /// Serve a request received from the network.
-    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes>;
+    fn produce(&mut self, request: Self::Request) -> oneshot::Receiver<Bytes>;
 }
 
 #[cfg(test)]
@@ -94,7 +93,7 @@ mod tests {
         mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
     };
-    use crate::{Delivery, Fetch, Interest, Resolver};
+    use crate::{Delivery, Fetch, Resolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -247,7 +246,7 @@ mod tests {
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey, R>
     where
-        C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
+        C: crate::Consumer<Request = Key, Subscriber = R, Value = Bytes>,
         R: Clone + Ord + Send + 'static,
     {
         let public_key = signer.public_key();
@@ -308,13 +307,13 @@ mod tests {
     }
 
     impl crate::Consumer for BlockingConsumer {
-        type Key = Key;
-        type Subscriber = Key;
+        type Request = Key;
+        type Subscriber = ();
         type Value = Bytes;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Request, Self::Subscriber>,
             value: Self::Value,
         ) -> oneshot::Receiver<bool> {
             let key = delivery.request;
@@ -347,7 +346,10 @@ mod tests {
         }
     }
 
-    type RecordedDelivery = (Delivery<Key, Key>, Bytes);
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct SubscriberTag(u16);
+
+    type RecordedDelivery = (Delivery<Key, SubscriberTag>, Bytes);
 
     #[derive(Clone)]
     struct SubscriberRecordingConsumer {
@@ -362,13 +364,13 @@ mod tests {
     }
 
     impl crate::Consumer for SubscriberRecordingConsumer {
-        type Key = Key;
-        type Subscriber = Key;
+        type Request = Key;
+        type Subscriber = SubscriberTag;
         type Value = Bytes;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Request, Self::Subscriber>,
             value: Self::Value,
         ) -> oneshot::Receiver<bool> {
             let (sender, receiver) = oneshot::channel();
@@ -377,9 +379,6 @@ mod tests {
             receiver
         }
     }
-
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    struct SubscriberTag(u16);
 
     type TypedRecordedDelivery = (Delivery<Key, SubscriberTag>, Bytes);
 
@@ -396,13 +395,13 @@ mod tests {
     }
 
     impl crate::Consumer for TypedSubscriberRecordingConsumer {
-        type Key = Key;
+        type Request = Key;
         type Subscriber = SubscriberTag;
         type Value = Bytes;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Request, Self::Subscriber>,
             value: Self::Value,
         ) -> oneshot::Receiver<bool> {
             let (sender, receiver) = oneshot::channel();
@@ -418,11 +417,18 @@ mod tests {
         Retain,
     }
 
-    fn cancel_all(mailbox: &mut Mailbox<Key, PublicKey>, operation: CancelAll) {
+    fn cancel_all<S>(mailbox: &mut Mailbox<Key, PublicKey, S>, operation: CancelAll)
+    where
+        S: Clone + Eq + Send + 'static,
+    {
         match operation {
             CancelAll::Clear => mailbox.clear(),
             CancelAll::Retain => mailbox.retain(|_| false),
         };
+    }
+
+    fn dummy_consumer() -> Consumer<Key, Bytes> {
+        Consumer::dummy()
     }
 
     async fn wait_for_blocked(
@@ -479,11 +485,11 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -537,7 +543,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -548,15 +554,15 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
-            mailbox1.fetch(key1.clone());
+            mailbox1.fetch((key1.clone(), ()));
             let started_key = started.recv().await.expect("delivery did not start");
             assert_eq!(started_key, key1);
 
-            mailbox1.fetch(key2.clone());
+            mailbox1.fetch((key2.clone(), ()));
             select! {
                 started_key = started.recv() => {
                     assert_eq!(started_key.expect("delivery did not start"), key2);
@@ -617,16 +623,16 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
             let started_key = started.recv().await.expect("delivery did not start");
             assert_eq!(started_key, key);
 
-            mailbox1.cancel(key.clone());
-            mailbox1.fetch(key.clone());
+            mailbox1.cancel(());
+            mailbox1.fetch((key.clone(), ()));
 
             first_gate_sender.closed().await;
             let started_key = started.recv().await.expect("second delivery did not start");
@@ -687,7 +693,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -698,12 +704,12 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
             mailbox1.fetch_targeted(
-                key.clone(),
+                (key.clone(), ()),
                 non_empty_vec![peers[1].clone(), peers[2].clone()],
             );
             let started_key = started.recv().await.expect("delivery did not start");
@@ -767,11 +773,11 @@ mod tests {
             oracle.control(scheme.public_key()),
             scheme,
             connections.remove(0),
-            Consumer::dummy(),
+            dummy_consumer(),
             prod2,
         );
 
-        mailbox1.fetch(key.clone());
+        mailbox1.fetch((key.clone(), ()));
         let started_key = started.recv().await.expect("delivery did not start");
         assert_eq!(started_key, key);
 
@@ -831,8 +837,8 @@ mod tests {
             );
 
             let key = Key(3);
-            mailbox1.fetch(key.clone());
-            mailbox1.cancel(key.clone());
+            mailbox1.fetch((key.clone(), ()));
+            mailbox1.cancel(());
 
             select! {
                 _ = cons_out1.recv() => panic!("unexpected event"),
@@ -881,7 +887,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -892,11 +898,11 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -929,7 +935,7 @@ mod tests {
                 prod1,
             );
 
-            mailbox1.fetch(Key(4));
+            mailbox1.fetch((Key(4), ()));
             context.sleep(Duration::from_secs(5)).await;
 
             // With no peers, no event should arrive
@@ -999,11 +1005,11 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             select! {
                 event = cons_out1.recv() => {
@@ -1060,7 +1066,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -1071,7 +1077,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -1082,8 +1088,8 @@ mod tests {
             // Run the fetches multiple times to ensure that the peer tries both of its peers
             for _ in 0..10 {
                 // Initiate concurrent fetch requests
-                mailbox1.fetch(key2.clone());
-                mailbox1.fetch(key3.clone());
+                mailbox1.fetch((key2.clone(), ()));
+                mailbox1.fetch((key3.clone(), ()));
 
                 // Collect both events without assuming order
                 let mut events = Vec::new();
@@ -1144,12 +1150,12 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
             // Cancel before sending the fetch request, expecting no effect
-            mailbox1.cancel(key.clone());
+            mailbox1.cancel(());
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -1158,13 +1164,13 @@ mod tests {
             };
 
             // Initiate fetch and wait for data to be delivered
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, Bytes::from("data for key 6"));
 
             // Attempt to cancel after data has been delivered, expecting no effect
-            mailbox1.cancel(key.clone());
+            mailbox1.cancel(());
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -1174,8 +1180,8 @@ mod tests {
 
             // Initiate and cancel another fetch request
             let key = Key(7);
-            mailbox1.fetch(key.clone());
-            mailbox1.cancel(key.clone());
+            mailbox1.fetch((key.clone(), ()));
+            mailbox1.cancel(());
 
             // No event should arrive after cancel
             select! {
@@ -1236,7 +1242,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -1247,14 +1253,14 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
             // Fetch keyA multiple times to ensure that Peer2 is blocked.
             for _ in 0..20 {
                 // Fetch keyA
-                mailbox1.fetch(key_a.clone());
+                mailbox1.fetch((key_a.clone(), ()));
 
                 // Wait for success event for keyA
                 let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -1263,7 +1269,7 @@ mod tests {
             }
 
             // Fetch keyB
-            mailbox1.fetch(key_b.clone());
+            mailbox1.fetch((key_b.clone(), ()));
 
             // Wait for some time (longer than retry timeout)
             context.sleep(Duration::from_secs(5)).await;
@@ -1275,7 +1281,7 @@ mod tests {
             };
 
             // Cancel the fetch for keyB
-            mailbox1.cancel(key_b);
+            mailbox1.cancel(());
 
             // Check oracle
             let blocked = oracle.blocked().await.unwrap();
@@ -1321,13 +1327,13 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
             // Send duplicate fetch requests for the same key
-            mailbox1.fetch(key.clone());
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
+            mailbox1.fetch((key.clone(), ()));
 
             // Should receive the data only once
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -1388,12 +1394,12 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
             // Fetch key1 from peer 2
-            mailbox1.fetch(key1.clone());
+            mailbox1.fetch((key1.clone(), ()));
 
             // Wait for successful fetch
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -1408,7 +1414,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -1416,7 +1422,7 @@ mod tests {
             context.sleep(Duration::from_millis(200)).await;
 
             // Fetch key2 from peer 3
-            mailbox1.fetch(key2.clone());
+            mailbox1.fetch((key2.clone(), ()));
 
             // Wait for successful fetch
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -1468,7 +1474,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -1479,7 +1485,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -1490,7 +1496,7 @@ mod tests {
             // When peer 2 returns invalid data, only peer 2 should be removed from targets
             // Peer 3 should still be tried as a target and succeed
             mailbox1.fetch_targeted(
-                key.clone(),
+                (key.clone(), ()),
                 non_empty_vec![peers[1].clone(), peers[2].clone()],
             );
 
@@ -1551,7 +1557,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 Producer::default(), // no data
             );
 
@@ -1562,7 +1568,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 Producer::default(), // no data
             );
 
@@ -1573,7 +1579,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod4,
             );
 
@@ -1583,7 +1589,7 @@ mod tests {
             // Start fetch with targets for peers 2 and 3 (both don't have data)
             // Peer 4 has data but is NOT a target - it should NEVER be tried
             mailbox1.fetch_targeted(
-                key.clone(),
+                (key.clone(), ()),
                 non_empty_vec![peers[1].clone(), peers[2].clone()],
             );
 
@@ -1651,7 +1657,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -1662,7 +1668,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -1673,7 +1679,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod4,
             );
 
@@ -1685,10 +1691,10 @@ mod tests {
             // - key2 targeted to peer 4 (has data) -> should succeed from target
             // - key3 no targeting -> fetched from any peer (peer 3 has it)
             mailbox1.fetch_all_targeted(vec![
-                (key1.clone(), non_empty_vec![peers[1].clone()]), // peer 2 has key1
-                (key2.clone(), non_empty_vec![peers[3].clone()]), // peer 4 has key2
+                ((key1.clone(), ()), non_empty_vec![peers[1].clone()]), // peer 2 has key1
+                ((key2.clone(), ()), non_empty_vec![peers[3].clone()]), // peer 4 has key2
             ]);
-            mailbox1.fetch(key3.clone()); // no targeting for key3
+            mailbox1.fetch((key3.clone(), ())); // no targeting for key3
 
             // Collect all three events
             let mut results = HashMap::new();
@@ -1751,7 +1757,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 Producer::default(), // no data
             );
 
@@ -1762,7 +1768,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -1770,13 +1776,13 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch with target for peer 2 only (who doesn't have data)
-            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
+            mailbox1.fetch_targeted((key.clone(), ()), non_empty_vec![peers[1].clone()]);
 
             // Wait for the targeted fetch to fail a few times
             context.sleep(Duration::from_millis(500)).await;
 
             // Call fetch() which should clear the targets and allow fallback to any peer
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             // Should now succeed from peer 3 (who has data but wasn't originally targeted)
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -1822,7 +1828,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 Producer::default(), // no data
             );
 
@@ -1833,7 +1839,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -1841,14 +1847,14 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch without targets (can try any peer)
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             // Wait a bit for the fetch to start
             context.sleep(Duration::from_millis(50)).await;
 
             // Call fetch_targeted with peer 2 only (who doesn't have data)
             // This should NOT restrict the existing "all" fetch
-            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
+            mailbox1.fetch_targeted((key.clone(), ()), non_empty_vec![peers[1].clone()]);
 
             // Should still succeed from peer 3 (who has data but wasn't in the targeted call)
             // because the original fetch was "all" and shouldn't be restricted
@@ -1869,7 +1875,7 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1) = Consumer::new();
+            let (cons1, mut cons_out1): (Consumer<Key, Bytes, Key>, _) = Consumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -1889,7 +1895,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -1903,21 +1909,19 @@ mod tests {
             };
 
             // Start a fetch (no link, so fetch stays in-flight)
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch(Fetch::new(key.clone(), key.clone()));
 
-            // Retain with predicate that excludes the key
-            // This must clean up the in-flight entry for the key
+            // Retain with predicate that excludes the subscriber. This must clean up
+            // the in-flight entry for the request.
             let key_clone = key.clone();
-            mailbox1.retain(move |interest| {
-                !matches!(interest, Interest::Request(request) if request == &key_clone)
-            });
+            mailbox1.retain(move |subscriber| subscriber != &key_clone);
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch(Fetch::new(key.clone(), key.clone()));
 
             // Should succeed
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -1937,7 +1941,8 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1) = Consumer::new();
+            let (cons1, mut cons_out1): (Consumer<Key, Bytes, SubscriberTag>, _) =
+                Consumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -1957,25 +1962,17 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
-            let dropped_subscriber = Key(50);
-            let kept_subscriber = Key(51);
-            mailbox1.fetch(Fetch::with_subscribers(
-                key.clone(),
-                vec![dropped_subscriber],
-            ));
-            mailbox1.fetch(Fetch::with_subscribers(
-                key.clone(),
-                vec![kept_subscriber.clone()],
-            ));
+            let dropped_subscriber = SubscriberTag(50);
+            let kept_subscriber = SubscriberTag(51);
+            mailbox1.fetch(Fetch::new(key.clone(), dropped_subscriber));
+            mailbox1.fetch(Fetch::new(key.clone(), kept_subscriber.clone()));
 
             context.sleep(Duration::from_millis(100)).await;
-            mailbox1.retain(move |interest| {
-                matches!(interest, Interest::Subscriber(subscriber) if subscriber == &kept_subscriber)
-            });
+            mailbox1.retain(move |subscriber| subscriber == &kept_subscriber);
             context.sleep(Duration::from_millis(100)).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2017,20 +2014,14 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
-            let first_subscriber = Key(50);
-            let second_subscriber = Key(51);
-            mailbox1.fetch(Fetch::with_subscribers(
-                key.clone(),
-                vec![second_subscriber.clone()],
-            ));
-            mailbox1.fetch(Fetch::with_subscribers(
-                key.clone(),
-                vec![first_subscriber.clone()],
-            ));
+            let first_subscriber = SubscriberTag(50);
+            let second_subscriber = SubscriberTag(51);
+            mailbox1.fetch(Fetch::new(key.clone(), second_subscriber.clone()));
+            mailbox1.fetch(Fetch::new(key.clone(), first_subscriber.clone()));
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
@@ -2039,7 +2030,6 @@ mod tests {
                 delivery,
                 Delivery {
                     request: key,
-                    requested: false,
                     subscribers: vec![first_subscriber, second_subscriber],
                 }
             );
@@ -2048,7 +2038,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_deliver_receives_request_and_local_subscribers() {
+    fn test_deliver_receives_multiple_local_subscribers() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2078,16 +2068,14 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
-            let subscriber = Key(50);
-            mailbox1.fetch(key.clone());
-            mailbox1.fetch(Fetch::with_subscribers(
-                key.clone(),
-                vec![subscriber.clone()],
-            ));
+            let first_subscriber = SubscriberTag(49);
+            let second_subscriber = SubscriberTag(50);
+            mailbox1.fetch(Fetch::new(key.clone(), first_subscriber.clone()));
+            mailbox1.fetch(Fetch::new(key.clone(), second_subscriber.clone()));
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
@@ -2096,8 +2084,7 @@ mod tests {
                 delivery,
                 Delivery {
                     request: key.clone(),
-                    requested: true,
-                    subscribers: vec![subscriber],
+                    subscribers: vec![first_subscriber, second_subscriber],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2135,22 +2122,16 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
             let subscriber = SubscriberTag(50);
             let retained = subscriber.clone();
-            mailbox1.fetch(key.clone());
-            mailbox1.fetch(Fetch::with_subscribers(
-                key.clone(),
-                vec![subscriber.clone()],
-            ));
+            mailbox1.fetch(Fetch::new(key.clone(), subscriber.clone()));
 
             context.sleep(Duration::from_millis(100)).await;
-            mailbox1.retain(move |interest| {
-                matches!(interest, Interest::Subscriber(subscriber) if subscriber == &retained)
-            });
+            mailbox1.retain(move |subscriber| subscriber == &retained);
             context.sleep(Duration::from_millis(100)).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2160,7 +2141,6 @@ mod tests {
                 delivery,
                 Delivery {
                     request: key,
-                    requested: false,
                     subscribers: vec![subscriber],
                 }
             );
@@ -2169,7 +2149,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_deliver_uses_request_marker() {
+    fn test_deliver_receives_single_subscriber() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2199,11 +2179,12 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
-            mailbox1.fetch(key.clone());
+            let subscriber = SubscriberTag(50);
+            mailbox1.fetch(Fetch::new(key.clone(), subscriber.clone()));
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
@@ -2211,8 +2192,7 @@ mod tests {
                 delivery,
                 Delivery {
                     request: key,
-                    requested: true,
-                    subscribers: Vec::new(),
+                    subscribers: vec![subscriber],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2251,7 +2231,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -2265,7 +2245,7 @@ mod tests {
             };
 
             // Start a fetch (no link, so fetch stays in-flight)
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             // Clear all fetches
             mailbox1.clear();
@@ -2275,7 +2255,7 @@ mod tests {
 
             // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             // Should succeed
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -2334,7 +2314,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -2346,7 +2326,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -2357,8 +2337,8 @@ mod tests {
             // Issue 2 fetch requests rapidly
             // With rate limit of 1/sec per peer and 2 peers, both should complete
             // immediately via spill-over (one request to each peer)
-            mailbox1.fetch(Key(0));
-            mailbox1.fetch(Key(1));
+            mailbox1.fetch((Key(0), ()));
+            mailbox1.fetch((Key(1), ()));
 
             // Collect results
             let mut results = HashMap::new();
@@ -2432,7 +2412,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -2442,9 +2422,9 @@ mod tests {
 
             // Issue 3 fetch requests to a single peer with rate limit of 1/sec
             // Only 1 can be sent immediately, the others must wait for rate limit reset
-            mailbox1.fetch(Key(1));
-            mailbox1.fetch(Key(2));
-            mailbox1.fetch(Key(3));
+            mailbox1.fetch((Key(1), ()));
+            mailbox1.fetch((Key(2), ()));
+            mailbox1.fetch((Key(3), ()));
 
             // All 3 should eventually succeed (after rate limit resets)
             let mut results = HashMap::new();
@@ -2515,7 +2495,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -2523,7 +2503,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Fetch the key - should get it from peer 2, not from self
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             // Should succeed (from peer 2)
             let (key_actual, value) = cons_out1.recv().await.unwrap();
@@ -2607,7 +2587,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 Producer::default(),
             );
 
@@ -2621,13 +2601,13 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
             // Fetch should time out because the only peer with data (peer 3)
             // is secondary and won't be queried.
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             select! {
                 event = cons_out1.recv() => {
@@ -2714,7 +2694,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -2726,7 +2706,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 Producer::default(),
             );
 
@@ -2744,7 +2724,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(100)).await;
 
-            mailbox1.fetch(key);
+            mailbox1.fetch((key, ()));
 
             select! {
                 event = cons_out1.recv() => {
@@ -2757,7 +2737,7 @@ mod tests {
 
             // Explicit targets still respect the latest-primary filter.
             mailbox1
-                .fetch_targeted(targeted_key, non_empty_vec![peers[1].clone()]);
+                .fetch_targeted((targeted_key, ()), non_empty_vec![peers[1].clone()]);
 
             select! {
                 event = cons_out1.recv() => {
@@ -2846,7 +2826,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod2,
             );
 
@@ -2860,7 +2840,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod3,
             );
 
@@ -2875,7 +2855,7 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(100)).await;
 
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
 
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -2927,7 +2907,7 @@ mod tests {
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                Consumer::dummy(),
+                dummy_consumer(),
                 prod1,
             );
 
@@ -2945,7 +2925,7 @@ mod tests {
                 Producer::default(),
             );
 
-            mailbox2.fetch_targeted(key.clone(), non_empty_vec![peers[0].clone()]);
+            mailbox2.fetch_targeted((key.clone(), ()), non_empty_vec![peers[0].clone()]);
 
             let (key_actual, value) = cons_out2.recv().await.unwrap();
             assert_eq!(key_actual, key);
@@ -2975,7 +2955,7 @@ mod tests {
 
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
-            let (engine, mut mailbox1): (_, Mailbox<Key, PublicKey>) = Engine::new(
+            let (engine, mut mailbox1): (_, Mailbox<Key, PublicKey, ()>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 0),
                 Config {
                     peer_provider: oracle.manager(),
@@ -2995,12 +2975,12 @@ mod tests {
 
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
-            let (engine, _mailbox2): (_, Mailbox<Key, PublicKey>) = Engine::new(
+            let (engine, _mailbox2): (_, Mailbox<Key, PublicKey, ()>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 1),
                 Config {
                     peer_provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
-                    consumer: Consumer::dummy(),
+                    consumer: dummy_consumer(),
                     producer: prod2,
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
@@ -3013,7 +2993,7 @@ mod tests {
             );
             let handle2 = engine.start(connections.remove(0));
 
-            mailbox1.fetch(key.clone());
+            mailbox1.fetch((key.clone(), ()));
             let started_key = started.recv().await.expect("delivery did not start");
             assert_eq!(started_key, key);
 
@@ -3056,7 +3036,7 @@ mod tests {
         consumers: Vec<Consumer<Key, Bytes>>,
         producers: Vec<Producer<Key, Bytes>>,
     ) -> (
-        Vec<Mailbox<Key, PublicKey>>,
+        Vec<Mailbox<Key, PublicKey, ()>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
         let actor_context = context.child("actor");
@@ -3114,12 +3094,12 @@ mod tests {
                 &oracle,
                 schemes,
                 connections,
-                vec![cons1, Consumer::dummy()],
+                vec![cons1, dummy_consumer()],
                 vec![Producer::default(), prod2],
             );
 
             // Fetch to verify network is functional
-            mailboxes[0].fetch(key.clone());
+            mailboxes[0].fetch((key.clone(), ()));
             let (_, value) = cons_out1.recv().await.unwrap();
             assert_eq!(value, Bytes::from("data for key 1"));
 
@@ -3133,10 +3113,10 @@ mod tests {
 
             // Fetch should not panic
             let key2 = Key(2);
-            mailboxes[0].fetch(key2.clone());
+            mailboxes[0].fetch((key2.clone(), ()));
 
             // Cancel should not panic
-            mailboxes[0].cancel(key2);
+            mailboxes[0].cancel(());
 
             // Clear should not panic
             mailboxes[0].clear();
@@ -3145,7 +3125,7 @@ mod tests {
             mailboxes[0].retain(|_| true);
 
             // Fetch targeted should not panic
-            mailboxes[0].fetch_targeted(Key(3), non_empty_vec![peers[1].clone()]);
+            mailboxes[0].fetch_targeted((Key(3), ()), non_empty_vec![peers[1].clone()]);
         });
     }
 
@@ -3171,7 +3151,7 @@ mod tests {
                 &oracle,
                 schemes,
                 connections,
-                vec![cons1, Consumer::dummy()],
+                vec![cons1, dummy_consumer()],
                 vec![Producer::default(), prod2],
             );
 
@@ -3186,7 +3166,7 @@ mod tests {
             );
 
             // Verify network is functional
-            mailboxes[0].fetch(key.clone());
+            mailboxes[0].fetch((key.clone(), ()));
             let (_, value) = cons_out1.recv().await.unwrap();
             assert_eq!(value, Bytes::from("data for key 1"));
 

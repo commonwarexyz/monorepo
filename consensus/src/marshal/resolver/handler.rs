@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer, Delivery, Interest};
+use commonware_resolver::{p2p::Producer, Consumer, Delivery, Fetch};
 use commonware_utils::{channel::oneshot, Span};
 use std::{
     collections::VecDeque,
@@ -126,13 +126,13 @@ impl<D: Digest> Receiver<D> {
 }
 
 impl<D: Digest> Consumer for Handler<D> {
-    type Key = Request<D>;
-    type Subscriber = Request<D>;
+    type Request = Request<D>;
+    type Subscriber = Subscriber<D>;
     type Value = Bytes;
 
     fn deliver(
         &mut self,
-        delivery: Delivery<Self::Key, Self::Subscriber>,
+        delivery: Delivery<Self::Request, Self::Subscriber>,
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
@@ -146,9 +146,9 @@ impl<D: Digest> Consumer for Handler<D> {
 }
 
 impl<D: Digest> Producer for Handler<D> {
-    type Key = Request<D>;
+    type Request = Request<D>;
 
-    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Request) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Produce { key, response });
         receiver
@@ -163,6 +163,16 @@ pub enum Request<D: Digest> {
     Notarized { round: Round },
 }
 
+/// Local interest in a resolver request.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Subscriber<D: Digest>(Request<D>);
+
+impl<D: Digest> From<Request<D>> for Subscriber<D> {
+    fn from(request: Request<D>) -> Self {
+        Self(request)
+    }
+}
+
 impl<D: Digest> Request<D> {
     /// The subject of the request.
     const fn subject(&self) -> u8 {
@@ -173,17 +183,20 @@ impl<D: Digest> Request<D> {
         }
     }
 
+    /// Creates a fetch request with this request as its local subscriber.
+    pub fn into_fetch(self) -> Fetch<Self, Subscriber<D>> {
+        let subscriber = Subscriber(self.clone());
+        Fetch::new(self, subscriber)
+    }
+
     /// The predicate to use when pruning subjects related to this subject.
     ///
     /// Specifically, any subjects unrelated will be left unmodified. Any related
     /// subjects will be pruned if they are "less than or equal to" this subject.
-    pub fn predicate(&self) -> impl for<'a> Fn(Interest<'a, Self, Self>) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl Fn(&Subscriber<D>) -> bool + Send + 'static {
         let cloned = self.clone();
-        move |interest| {
-            let s = match interest {
-                Interest::Request(s) | Interest::Subscriber(s) => s,
-            };
-            match (&cloned, s) {
+        move |subscriber| {
+            match (&cloned, &subscriber.0) {
                 (Self::Block(_), _) => unreachable!("we should never retain by block"),
                 (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
                     *theirs > *mine
@@ -490,13 +503,13 @@ mod tests {
         };
 
         let predicate = r1.predicate();
-        assert!(predicate(Interest::Request(&r2))); // r2.height > r1.height
-        assert!(predicate(Interest::Request(&r3))); // Different variant (notarized)
+        assert!(predicate(&Subscriber::from(r2))); // r2.height > r1.height
+        assert!(predicate(&Subscriber::from(r3))); // Different variant (notarized)
 
         let r1_same = Request::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(Interest::Request(&r1_same))); // Same height, should not pass
+        assert!(!predicate(&Subscriber::from(r1_same))); // Same height, should not pass
     }
 
     #[test]

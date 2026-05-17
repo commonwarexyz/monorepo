@@ -1,4 +1,4 @@
-//! Resolve data identified by a fixed-length key.
+//! Resolve data identified by a fixed-length request.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -12,91 +12,49 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod p2p;
 
-    /// Local reason considered by [`Resolver::retain`].
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub enum Interest<'a, K, S> {
-        /// A bare request key submitted with [`Resolver::fetch`] or one of its variants.
-        Request(&'a K),
-        /// Local subscriber metadata attached to a request.
-        Subscriber(&'a S),
-    }
-
-    /// A request to fetch data, optionally with local subscribers.
+    /// A request to fetch data for a local subscriber.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct Fetch<K, S> {
-        /// The peer-visible request key.
-        pub request: K,
-        requested: bool,
-        /// Local subscribers attached to the request.
-        pub subscribers: Vec<S>,
+    pub struct Fetch<R, S> {
+        /// The peer-visible request.
+        pub request: R,
+        /// Local subscriber attached to the request.
+        pub subscriber: S,
     }
 
-    impl<K, S> Fetch<K, S> {
-        /// Create an ordinary fetch request with no local subscribers.
-        pub const fn new(request: K) -> Self {
-            Self {
-                request,
-                requested: true,
-                subscribers: Vec::new(),
-            }
+    impl<R, S> Fetch<R, S> {
+        /// Create a fetch request for a local subscriber.
+        pub const fn new(request: R, subscriber: S) -> Self {
+            Self { request, subscriber }
         }
 
-        /// Create a fetch request with local subscribers and no bare request interest.
-        ///
-        /// If `subscribers` is empty, the fetch has no retained interest. Use
-        /// [`Fetch::new`] for an ordinary bare request.
-        pub const fn with_subscribers(request: K, subscribers: Vec<S>) -> Self {
-            Self {
-                request,
-                requested: false,
-                subscribers,
-            }
-        }
-
-        /// Create an ordinary fetch request that also carries local subscribers.
-        pub const fn with_request_and_subscribers(request: K, subscribers: Vec<S>) -> Self {
-            Self {
-                request,
-                requested: true,
-                subscribers,
-            }
-        }
-
-        /// Returns true if this fetch includes a bare request interest.
-        pub const fn requested(&self) -> bool {
-            self.requested
-        }
-
-        /// Consume the fetch into its request key, request marker, and subscribers.
-        pub fn into_parts(self) -> (K, bool, Vec<S>) {
-            (self.request, self.requested, self.subscribers)
+        /// Consume the fetch into its request and subscriber.
+        pub fn into_parts(self) -> (R, S) {
+            (self.request, self.subscriber)
         }
     }
 
-    impl<K, S> From<K> for Fetch<K, S> {
-        fn from(request: K) -> Self {
-            Self::new(request)
+    impl<R, S> From<(R, S)> for Fetch<R, S> {
+        fn from((request, subscriber): (R, S)) -> Self {
+            Self::new(request, subscriber)
         }
     }
 
     /// Data delivered for a resolved fetch.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct Delivery<K, S> {
-        /// The peer-visible request key used to validate the response.
-        pub request: K,
-        /// Whether a bare request key was still retained when the response arrived.
-        pub requested: bool,
+    pub struct Delivery<R, S> {
+        /// The peer-visible request used to validate the response.
+        pub request: R,
         /// Local subscribers that were still retained when the response arrived.
         pub subscribers: Vec<S>,
     }
 
     /// Notified when data is available, and must validate it.
     pub trait Consumer: Clone + Send + 'static {
-        /// Type used to uniquely identify data.
-        type Key: Span;
+        /// Type used to request data from peers.
+        type Request: Span;
 
         /// Type used to track local subscribers on fetch requests.
-        type Subscriber: Clone + Send + 'static;
+        type Subscriber: Clone + Eq + Send + 'static;
 
         /// Type of data to retrieve.
         type Value;
@@ -110,56 +68,53 @@ commonware_macros::stability_scope!(BETA {
         /// [`Resolver::retain`]. When this happens, the resolver discards the
         /// validation result.
         ///
-        /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
+        /// Implementations of [`Resolver`] must only invoke `deliver` for requests that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
         ///
-        /// `delivery` contains the peer-visible request key and the retained
-        /// local interests for the fetch. Subscribers are local metadata for
-        /// deciding who should observe a valid response; they do not define peer
-        /// validity.
+        /// `delivery` contains the peer-visible request and the retained local
+        /// subscribers for the fetch. Subscribers are local metadata for deciding
+        /// who should observe a valid response; they do not define peer validity.
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Request, Self::Subscriber>,
             value: Self::Value,
         ) -> oneshot::Receiver<bool>;
     }
 
     /// Responsible for fetching data and notifying a `Consumer`.
     pub trait Resolver: Clone + Send + 'static {
-        /// Type used to uniquely identify data.
-        type Key: Span;
+        /// Type used to request data from peers.
+        type Request: Span;
 
         /// Type used to track local subscribers on fetch requests.
         ///
         /// Implementations that also own the [`Consumer`] should supply subscribers to
         /// [`Consumer::deliver`] when a fetch resolves.
-        type Subscriber: Clone + Send + 'static;
+        type Subscriber: Clone + Eq + Send + 'static;
 
         /// Type used to identify peers for targeted fetches.
         type PublicKey: PublicKey;
 
         /// Initiate a fetch request.
         ///
-        /// The resolver fetches and delivers the request key. A bare key is
-        /// retained as an [`Interest::Request`]. Subscribers are retained as
-        /// [`Interest::Subscriber`] and are supplied to [`Consumer::deliver`]
-        /// when the fetch resolves. If multiple interests are attached to the same
-        /// request key, the fetch is retained as long as at least one interest
-        /// satisfies the predicate.
+        /// The resolver fetches and delivers the request. The provided subscriber
+        /// is retained locally and supplied to [`Consumer::deliver`] when the
+        /// fetch resolves. If multiple subscribers are attached to the same
+        /// request, the fetch is retained as long as at least one subscriber
+        /// satisfies the latest [`retain`](Self::retain) predicate.
         ///
-        /// Passing a bare key is equivalent to [`Fetch::new`]. [`cancel`](Self::cancel)
-        /// cancels by request key.
-        fn fetch<R>(
+        /// [`cancel`](Self::cancel) cancels by subscriber.
+        fn fetch<F>(
             &mut self,
-            request: R,
+            request: F,
         ) -> Feedback
         where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
+            F: Into<Fetch<Self::Request, Self::Subscriber>> + Send;
 
         /// Initiate a fetch request for a batch of requests.
-        fn fetch_all<R>(&mut self, requests: Vec<R>) -> Feedback
+        fn fetch_all<F>(&mut self, requests: Vec<F>) -> Feedback
         where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
+            F: Into<Fetch<Self::Request, Self::Subscriber>> + Send;
 
         /// Initiate a fetch request restricted to specific target peers.
         ///
@@ -167,7 +122,7 @@ commonware_macros::stability_scope!(BETA {
         /// persist through transient failures (timeout, "no data" response, send failure)
         /// since the peer might be slow or might receive the data later.
         ///
-        /// If a fetch is already in progress for this key:
+        /// If a fetch is already in progress for this request:
         /// - If the existing fetch has targets, the new targets are added to the set
         /// - If the existing fetch has no targets (can try any peer), it remains
         ///   unrestricted (this call is ignored)
@@ -179,26 +134,26 @@ commonware_macros::stability_scope!(BETA {
         /// from the target set.
         fn fetch_targeted(
             &mut self,
-            request: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            request: impl Into<Fetch<Self::Request, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback;
 
         /// Initiate fetch requests for multiple requests, each with their own targets.
         ///
         /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-        fn fetch_all_targeted<R>(
+        fn fetch_all_targeted<F>(
             &mut self,
-            requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
+            requests: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
+            F: Into<Fetch<Self::Request, Self::Subscriber>> + Send;
 
-        /// Cancel a fetch request.
+        /// Cancel a subscriber's outstanding fetch interest.
         ///
-        /// If response validation is in progress, cancellation may drop the
-        /// [`Consumer::deliver`] future before it reports whether the data was
-        /// valid.
-        fn cancel(&mut self, key: Self::Key) -> Feedback;
+        /// If this removes the last subscriber for a request and response
+        /// validation is in progress, cancellation may drop the
+        /// [`Consumer::deliver`] future before it reports whether the data was valid.
+        fn cancel(&mut self, subscriber: Self::Subscriber) -> Feedback;
 
         /// Cancel all fetch requests.
         ///
@@ -206,15 +161,13 @@ commonware_macros::stability_scope!(BETA {
         /// in-progress response validation.
         fn clear(&mut self) -> Feedback;
 
-        /// Retain only fetches with at least one interest satisfying the predicate.
+        /// Retain only fetches with at least one subscriber satisfying the predicate.
         ///
         /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
         /// how cancellation affects in-progress response validation.
         fn retain(
             &mut self,
-            predicate: impl for<'a> Fn(Interest<'a, Self::Key, Self::Subscriber>) -> bool
-                + Send
-                + 'static,
+            predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback;
     }
 });

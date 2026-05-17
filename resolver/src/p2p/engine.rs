@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::{Consumer, Delivery, Interest};
+use crate::{Consumer, Delivery};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -43,11 +43,14 @@ pub struct Engine<
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
-    Con: Consumer<Key = Key, Value = Bytes>,
-    Pro: Producer<Key = Key>,
+    Con: Consumer<Request = Key, Value = Bytes>,
+    Pro: Producer<Request = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
-> {
+>
+where
+    Con::Subscriber: Eq,
+{
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
 
@@ -72,7 +75,7 @@ pub struct Engine<
     /// Tracks all in-flight fetch state
     inflight: Inflight<E, Con, P, Key>,
 
-    /// Local interests that keep each fetch key alive.
+    /// Local subscribers that keep each fetch request alive.
     interests: HashMap<Key, Interests<Con::Subscriber>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
@@ -92,14 +95,12 @@ pub struct Engine<
 }
 
 struct Interests<S> {
-    requested: bool,
     subscribers: BTreeSet<S>,
 }
 
 impl<S> Default for Interests<S> {
     fn default() -> Self {
         Self {
-            requested: false,
             subscribers: BTreeSet::new(),
         }
     }
@@ -107,7 +108,7 @@ impl<S> Default for Interests<S> {
 
 impl<S> Interests<S> {
     fn is_empty(&self) -> bool {
-        !self.requested && self.subscribers.is_empty()
+        self.subscribers.is_empty()
     }
 }
 
@@ -117,8 +118,8 @@ impl<
         D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
-        Con: Consumer<Key = Key, Value = Bytes>,
-        Pro: Producer<Key = Key>,
+        Con: Consumer<Request = Key, Value = Bytes>,
+        Pro: Producer<Request = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
@@ -248,25 +249,23 @@ where
                 match msg {
                     Message::Fetch(requests) => {
                         for FetchRequest {
-                            key,
-                            requested,
+                            request,
                             subscribers,
                             targets,
                         } in requests
                         {
-                            trace!(?key, "mailbox: fetch");
-                            if !requested && subscribers.is_empty() {
-                                trace!(?key, "fetch has no retained interests");
+                            trace!(?request, "mailbox: fetch");
+                            if subscribers.is_empty() {
+                                trace!(?request, "fetch has no retained subscribers");
                                 continue;
                             }
 
                             // Check if the fetch is already in progress
-                            let is_new = !self.inflight.contains(&key);
+                            let is_new = !self.inflight.contains(&request);
                             let interests = self
                                 .interests
-                                .entry(key.clone())
+                                .entry(request.clone())
                                 .or_default();
-                            interests.requested |= requested;
                             interests.subscribers.extend(subscribers);
 
                             // Update targets
@@ -275,44 +274,37 @@ where
                                     // Only add targets if this is a new fetch OR the existing
                                     // fetch already has targets. Don't restrict an "all" fetch
                                     // (no targets) to specific targets.
-                                    if is_new || self.fetcher.has_targets(&key) {
-                                        self.fetcher.add_targets(key.clone(), targets);
+                                    if is_new || self.fetcher.has_targets(&request) {
+                                        self.fetcher.add_targets(request.clone(), targets);
                                     }
                                 }
-                                None => self.fetcher.clear_targets(&key),
+                                None => self.fetcher.clear_targets(&request),
                             }
 
                             // Only start new fetch if not already in progress
                             if is_new {
                                 self.inflight.insert(
-                                    key.clone(),
+                                    request.clone(),
                                     self.metrics.fetch_duration.timer(self.context.as_ref()),
                                 );
-                                self.fetcher.add_ready(key);
+                                self.fetcher.add_ready(request);
                             } else {
-                                trace!(?key, "updated targets for existing fetch");
+                                trace!(?request, "updated targets for existing fetch");
                             }
                         }
                     }
-                    Message::Cancel { key } => {
-                        trace!(?key, "mailbox: cancel");
-                        let mut guard = self.metrics.cancel.guard(Status::Dropped);
-                        self.interests.remove(&key);
-                        self.fetcher.cancel(&key);
-                        if self.inflight.cancel(&key) {
-                            guard.set(Status::Success);
-                        }
+                    Message::Cancel { subscriber } => {
+                        trace!("mailbox: cancel");
+                        let count = self.cancel_subscriber(&subscriber);
+                        self.record_cancellations(count);
                     }
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.interests.retain(|key, interests| {
-                            if interests.requested && !predicate(Interest::Request(key)) {
-                                interests.requested = false;
-                            }
+                        self.interests.retain(|_, interests| {
                             interests
                                 .subscribers
-                                .retain(|subscriber| predicate(Interest::Subscriber(subscriber)));
+                                .retain(|subscriber| predicate(subscriber));
                             !interests.is_empty()
                         });
                         let interests = &self.interests;
@@ -405,6 +397,31 @@ where
         }
     }
 
+    /// Remove a subscriber from all fetches and cancel any requests that no longer
+    /// have subscribers.
+    fn cancel_subscriber(&mut self, subscriber: &Con::Subscriber) -> u64 {
+        let mut requests = Vec::new();
+        self.interests.retain(|request, interests| {
+            interests.subscribers.remove(subscriber);
+            if interests.is_empty() {
+                requests.push(request.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        let mut count = 0;
+        for request in requests {
+            self.fetcher.cancel(&request);
+            self.fetcher.clear_targets(&request);
+            if self.inflight.cancel(&request) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
@@ -474,7 +491,6 @@ where
         }
         let delivery = Delivery {
             request: key.clone(),
-            requested: interests.requested,
             subscribers: interests.subscribers.iter().cloned().collect(),
         };
 

@@ -347,7 +347,11 @@ where
         ),
         marshal: (
             handler::Receiver<H::Digest>,
-            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
+            commonware_resolver::p2p::Mailbox<
+                handler::Request<H::Digest>,
+                C::PublicKey,
+                handler::Subscriber<H::Digest>,
+            >,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
@@ -390,7 +394,11 @@ where
         ),
         marshal: (
             handler::Receiver<H::Digest>,
-            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
+            commonware_resolver::p2p::Mailbox<
+                handler::Request<H::Digest>,
+                C::PublicKey,
+                handler::Subscriber<H::Digest>,
+            >,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {

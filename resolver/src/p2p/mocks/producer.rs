@@ -18,13 +18,13 @@ impl<K: Span, V> Producer<K, V> {
 }
 
 impl<K: Span, V: Into<Bytes> + Clone + Send + 'static> crate::p2p::Producer for Producer<K, V> {
-    type Key = K;
+    type Request = K;
 
     /// Produce a value for the given key.
     ///
     /// If the key is not found, the returned receiver will resolve with an error since the sender
     /// is dropped.
-    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Request) -> oneshot::Receiver<Bytes> {
         let (sender, receiver) = oneshot::channel();
         if let Some(value) = self.data.get(&key) {
             sender.send_lossy(value.clone().into());
