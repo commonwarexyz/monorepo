@@ -27,7 +27,7 @@
 //! ```
 
 pub mod certificate;
-pub(in crate::ed25519) mod core;
+pub(crate) mod core;
 mod scheme;
 
 pub use scheme::{Batch, PrivateKey, PublicKey, Signature};

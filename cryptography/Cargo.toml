@@ -38,7 +38,7 @@ rand_chacha.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-x25519-dalek = { workspace = true, features = ["zeroize"] }
+x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
