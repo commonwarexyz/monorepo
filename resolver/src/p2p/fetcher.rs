@@ -311,7 +311,7 @@ where
                         return;
                     }
                     feedback @ (Feedback::Rejected | Feedback::Closed) => {
-                        // Send was not handled, try next peer.
+                        // Send was not handled, try next peer
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, ?feedback, "send failed");
                         self.update_performance(&peer, self.timeout);

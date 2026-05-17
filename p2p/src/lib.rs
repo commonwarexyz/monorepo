@@ -61,7 +61,7 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message to the local send path.
+        /// Feedback from submitting the message for delivery.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
         fn send(
             &mut self,
@@ -119,7 +119,7 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message to the local send path.
+        /// Feedback from submitting the message for delivery.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
         fn send(
             self,
@@ -145,12 +145,9 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// The recipients retained by the synchronous check and local submission. Returns an
+        /// The recipients we will attempt to send to. Returns an
         /// empty list if all recipients are rate-limited, the sender has closed, or the send is
         /// not accepted.
-        ///
-        /// [`Feedback::accepted`] does not guarantee that the recipient will receive
-        /// the message.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
