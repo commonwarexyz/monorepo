@@ -599,6 +599,7 @@ impl<
 
         // Broadcast the ack to all peers
         self.broadcast(ack, sender);
+
         Ok(())
     }
 
