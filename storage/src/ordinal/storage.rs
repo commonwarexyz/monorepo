@@ -372,14 +372,17 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         for section in sections_to_remove {
             if let Some(blob) = self.blobs.remove(&section) {
                 drop(blob);
+
+                // Remove from intervals before attempting disk removal so that
+                // if context.remove fails, blobs and intervals remain consistent.
+                let start_index = section * items_per_blob;
+                let end_index = (section + 1) * items_per_blob - 1;
+                self.intervals.remove(start_index, end_index);
+
                 self.context
                     .remove(&self.config.partition, Some(&section.to_be_bytes()))
                     .await?;
 
-                // Remove the corresponding index range from intervals
-                let start_index = section * items_per_blob;
-                let end_index = (section + 1) * items_per_blob - 1;
-                self.intervals.remove(start_index, end_index);
                 debug!(section, start_index, end_index, "pruned blob");
             }
 
