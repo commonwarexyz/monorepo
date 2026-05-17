@@ -80,7 +80,7 @@
 //! });
 //! ```
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager, Unlinked};
 use crate::journal::Error;
 use commonware_codec::{
     varint::{UInt, MAX_U32_VARINT_SIZE},
@@ -219,6 +219,11 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     /// Codec configuration.
     codec_config: V::Cfg,
+}
+
+/// Opaque token for sections unlinked from storage and ready to finish pruning.
+pub(in crate::journal) struct PendingPrune {
+    unlinked: Unlinked,
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
@@ -817,6 +822,27 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         self.manager.prune(min).await
+    }
+
+    /// Begin pruning by removing section blobs less than `min` from storage without dropping open
+    /// handles.
+    ///
+    /// This allows contiguous variable journals to perform physical removal while readers keep
+    /// using existing section handles. Returns a token if any sections were unlinked.
+    pub(in crate::journal) async fn begin_prune(
+        &self,
+        min: u64,
+    ) -> Result<Option<PendingPrune>, Error> {
+        Ok(self
+            .manager
+            .begin_prune(min)
+            .await?
+            .map(|unlinked| PendingPrune { unlinked }))
+    }
+
+    /// Finish pruning sections described by `pending` by removing them from memory.
+    pub(in crate::journal) fn finish_prune(&mut self, pending: PendingPrune) {
+        self.manager.finish_prune(pending.unlinked)
     }
 
     /// Returns the number of the oldest section in the journal.

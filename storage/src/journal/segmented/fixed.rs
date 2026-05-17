@@ -73,6 +73,11 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
+/// Opaque token for sections unlinked from storage and ready to finish pruning.
+pub(in crate::journal) struct PendingPrune {
+    unlinked: Unlinked,
+}
+
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = A::SIZE;
@@ -389,13 +394,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub(in crate::journal) async fn begin_prune(
         &self,
         min: u64,
-    ) -> Result<Option<Unlinked>, Error> {
-        self.manager.begin_prune(min).await
+    ) -> Result<Option<PendingPrune>, Error> {
+        Ok(self
+            .manager
+            .begin_prune(min)
+            .await?
+            .map(|unlinked| PendingPrune { unlinked }))
     }
 
-    /// Finish pruning sections described by `unlinked` by removing them from memory.
-    pub(in crate::journal) fn finish_prune(&mut self, unlinked: Unlinked) {
-        self.manager.finish_prune(unlinked)
+    /// Finish pruning sections described by `pending` by removing them from memory.
+    pub(in crate::journal) fn finish_prune(&mut self, pending: PendingPrune) {
+        self.manager.finish_prune(pending.unlinked)
     }
 
     /// Returns the oldest section number, if any blobs exist.
