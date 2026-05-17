@@ -166,7 +166,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     bitmap::BitMap,
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, oneshot},
     ordered::{Quorum, Set},
 };
 use rand::Rng;
@@ -251,9 +251,9 @@ where
     /// Capacity of the channel between the background receiver and the engine.
     ///
     /// The background receiver decodes incoming network messages in a separate
-    /// task and forwards them to the engine over an `mpsc` channel with this
+    /// task and forwards them to the engine over a mailbox with this
     /// capacity.
-    pub background_channel_capacity: usize,
+    pub background_channel_capacity: NonZeroUsize,
 
     /// Provider for peer set information. Pre-leader shards are buffered per
     /// peer only while that peer appears in the
@@ -324,7 +324,7 @@ where
     latest_primary_peers: Set<P>,
 
     /// Capacity of the background receiver channel.
-    background_channel_capacity: usize,
+    background_channel_capacity: NonZeroUsize,
 
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
@@ -412,8 +412,8 @@ where
             self.context.network_buffer_pool().clone(),
             sender,
         );
-        let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
-            WrappedBackgroundReceiver::new(
+        let (receiver_service, mut receiver) =
+            WrappedBackgroundReceiver::<_, P, X, _, Shard<C, H>>::new(
                 self.context.child("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
@@ -1801,7 +1801,7 @@ mod tests {
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: NZUsize!(64),
-                        background_channel_capacity: 1024,
+                        background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
 
@@ -1840,7 +1840,7 @@ mod tests {
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: NZUsize!(64),
-                        background_channel_capacity: 1024,
+                        background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
 
@@ -3624,7 +3624,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
-                background_channel_capacity: 1024,
+                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 
@@ -3753,7 +3753,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
-                background_channel_capacity: 1024,
+                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
@@ -3776,7 +3776,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
-                background_channel_capacity: 1024,
+                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
@@ -4555,7 +4555,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
-                background_channel_capacity: 1024,
+                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 
@@ -4658,7 +4658,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
-                background_channel_capacity: 16,
+                background_channel_capacity: NZUsize!(16),
                 peer_provider: oracle.manager(),
             };
 
@@ -4791,7 +4791,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
-                background_channel_capacity: 1024,
+                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 
@@ -4946,7 +4946,7 @@ mod tests {
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
-                background_channel_capacity: 1024,
+                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 
