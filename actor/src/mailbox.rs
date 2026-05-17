@@ -97,9 +97,15 @@ pub trait Policy: Sized {
     /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
     /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
     ///
-    /// Returns `true` when the message's effects were considered, including when a policy
-    /// coalesces it with retained work or ignores it as a no-op. Returns `false` only when the
-    /// message's effects were dropped.
+    /// Returns `true` when the policy considered the message's effects. This includes
+    /// retaining the message, coalescing it with retained work, replacing older retained work,
+    /// or deliberately doing no work because the message is already satisfied, superseded, or no
+    /// longer needed (for example, a request whose response channel is already closed). These
+    /// no-op cases are still handled: there is no remaining work, so there is no loss to report.
+    ///
+    /// Returns `false` only when the policy rejects the message under backpressure. This is the
+    /// lossy case: the submitted work was not semantically handled, and callers that care should
+    /// retry or treat the submission as failed.
     ///
     /// # Warning
     ///
@@ -308,7 +314,7 @@ impl<T: Policy> OverflowState<T> {
         if handled {
             Feedback::Backoff
         } else {
-            Feedback::Dropped
+            Feedback::Rejected
         }
     }
 
@@ -750,7 +756,7 @@ mod tests {
     async fn full_inbox_rejects_non_replaceable_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Dropped);
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Rejected);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
@@ -793,14 +799,14 @@ mod tests {
     }
 
     #[test]
-    fn dropped_feedback_is_not_accepted_or_counted_as_backoff() {
+    fn rejected_feedback_is_not_accepted_or_counted_as_backoff() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
             let feedback = sender.enqueue(Message::Vote(2));
 
-            assert_eq!(feedback, Feedback::Dropped);
+            assert_eq!(feedback, Feedback::Rejected);
             assert!(!feedback.accepted());
 
             let buffer = context.encode();

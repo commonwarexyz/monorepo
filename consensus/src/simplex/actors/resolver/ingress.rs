@@ -196,7 +196,7 @@ impl Policy for HandlerMessage {
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         if message.response_closed() {
-            return false;
+            return true;
         }
         overflow.0.push_back(message);
         true

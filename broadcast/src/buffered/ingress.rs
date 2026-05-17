@@ -79,7 +79,7 @@ impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         if message.response_closed() {
-            return false;
+            return true;
         }
 
         overflow.0.push_back(message);

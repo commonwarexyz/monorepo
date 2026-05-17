@@ -15,16 +15,19 @@ commonware_macros::stability_scope!(BETA {
     pub enum Feedback {
         /// The work was accepted within the configured capacity.
         Ok,
-        /// The submission exceeded the configured capacity and requests sender backoff.
+        /// The submission exceeded ready capacity but was handled by the overflow policy.
         Backoff,
-        /// The submission exceeded the configured capacity and was dropped.
-        Dropped,
+        /// The submission exceeded ready capacity and was rejected by the overflow policy.
+        Rejected,
         /// The endpoint is closed.
         Closed,
     }
 
     impl Feedback {
         /// Returns `true` when the endpoint handled the submission.
+        ///
+        /// This does not guarantee eventual delivery. Handled work may still be coalesced,
+        /// superseded, or fail later inside the receiver.
         pub const fn accepted(self) -> bool {
             matches!(self, Self::Ok | Self::Backoff)
         }

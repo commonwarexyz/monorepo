@@ -53,9 +53,9 @@ pub struct Config<C: Signer> {
 
     /// Message backlog allowed for internal actors.
     ///
-    /// When there are more messages in a mailbox than this value, messages may be
-    /// dropped mailboxes are processed. Refer to [`commonware_actor::Feedback`] and/or metrics
-    /// on [`commonware_actor::mailbox`] for a signal this is occurring.
+    /// When there are more messages in a mailbox than this value, messages may be rejected before
+    /// they are processed. Refer to [`commonware_actor::Feedback`] and/or metrics on
+    /// [`commonware_actor::mailbox`] for a signal this is occurring.
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.

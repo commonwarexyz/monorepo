@@ -51,7 +51,7 @@ const fn combine(a: Feedback, b: Feedback) -> Feedback {
     match (a, b) {
         (Feedback::Closed, _) | (_, Feedback::Closed) => Feedback::Closed,
         (Feedback::Backoff, _) | (_, Feedback::Backoff) => Feedback::Backoff,
-        (Feedback::Dropped, _) | (_, Feedback::Dropped) => Feedback::Dropped,
+        (Feedback::Rejected, _) | (_, Feedback::Rejected) => Feedback::Rejected,
         (Feedback::Ok, Feedback::Ok) => Feedback::Ok,
     }
 }
@@ -146,9 +146,9 @@ mod tests {
             Feedback::Closed
         );
         assert_eq!(combine(Feedback::Backoff, Feedback::Ok), Feedback::Backoff);
-        assert_eq!(combine(Feedback::Dropped, Feedback::Ok), Feedback::Dropped);
+        assert_eq!(combine(Feedback::Rejected, Feedback::Ok), Feedback::Rejected);
         assert_eq!(
-            combine(Feedback::Dropped, Feedback::Backoff),
+            combine(Feedback::Rejected, Feedback::Backoff),
             Feedback::Backoff
         );
         assert_eq!(combine(Feedback::Ok, Feedback::Ok), Feedback::Ok);

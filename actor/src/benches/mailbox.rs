@@ -258,7 +258,7 @@ fn bench_overflow_drop(c: &mut Criterion) {
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop()));
-                    assert_eq!(result, Feedback::Dropped);
+                    assert_eq!(result, Feedback::Rejected);
                     black_box(result);
                 }
             },

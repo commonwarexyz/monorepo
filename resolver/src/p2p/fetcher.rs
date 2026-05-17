@@ -310,8 +310,8 @@ where
                         self.key_to_id.insert(key, id);
                         return;
                     }
-                    feedback @ (Feedback::Dropped | Feedback::Closed) => {
-                        // Peer dropped message, try next peer
+                    feedback @ (Feedback::Rejected | Feedback::Closed) => {
+                        // Send was not handled, try next peer.
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, ?feedback, "send failed");
                         self.update_performance(&peer, self.timeout);
@@ -605,7 +605,7 @@ mod tests {
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
         ) -> Feedback {
-            Feedback::Closed
+            Feedback::Rejected
         }
     }
 

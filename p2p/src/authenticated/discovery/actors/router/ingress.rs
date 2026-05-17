@@ -154,7 +154,7 @@ mod tests {
     };
 
     #[test]
-    fn test_overflow_drops_content_but_retains_control() {
+    fn test_overflow_rejects_content_but_retains_control() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (control_sender, mut receiver) =
@@ -177,7 +177,7 @@ mod tests {
             );
             assert_eq!(
                 messenger.content(Recipients::One(peer), 7, IoBuf::from(b"two").into(), false),
-                Feedback::Dropped
+                Feedback::Rejected
             );
             assert_eq!(
                 mailbox.release(PrivateKey::from_seed(2).public_key()),

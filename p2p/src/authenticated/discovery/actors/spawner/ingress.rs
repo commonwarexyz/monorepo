@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_overflow_drops_message_and_releases_reservation() {
+    fn spawn_overflow_rejects_message_and_releases_reservation() {
         deterministic::Runner::default().start(|context| async move {
             let (connection_1, connection_2) =
                 connections(&context, PrivateKey::from_seed(1), PrivateKey::from_seed(2)).await;
@@ -157,7 +157,7 @@ mod tests {
             assert_eq!(spawner.spawn(connection_1, reservation_1), Feedback::Ok);
             assert_eq!(
                 spawner.spawn(connection_2, reservation_2),
-                Feedback::Dropped
+                Feedback::Rejected
             );
 
             let release = tracker_receiver

@@ -127,14 +127,14 @@ mod tests {
     use commonware_utils::test_rng;
 
     #[derive(Clone)]
-    struct DroppingSender<P: PublicKey> {
+    struct RejectingSender<P: PublicKey> {
         peer: P,
     }
 
-    impl<P: PublicKey> LimitedSender for DroppingSender<P> {
+    impl<P: PublicKey> LimitedSender for RejectingSender<P> {
         type PublicKey = P;
         type Checked<'a>
-            = DroppingSender<P>
+            = RejectingSender<P>
         where
             Self: 'a;
 
@@ -146,7 +146,7 @@ mod tests {
         }
     }
 
-    impl<P: PublicKey> CheckedSender for DroppingSender<P> {
+    impl<P: PublicKey> CheckedSender for RejectingSender<P> {
         type PublicKey = P;
 
         fn recipients(&self) -> Vec<Self::PublicKey> {
@@ -154,7 +154,7 @@ mod tests {
         }
 
         fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
-            Feedback::Dropped
+            Feedback::Rejected
         }
     }
 
@@ -173,10 +173,10 @@ mod tests {
     }
 
     #[test]
-    fn sender_returns_no_recipients_when_checked_send_drops() {
+    fn sender_returns_no_recipients_when_checked_send_rejects() {
         let mut rng = test_rng();
         let peer = PrivateKey::random(&mut rng).public_key();
-        let mut sender = DroppingSender { peer: peer.clone() };
+        let mut sender = RejectingSender { peer: peer.clone() };
 
         let sent = Sender::send(&mut sender, Recipients::One(peer), b"hello".to_vec(), false);
 
