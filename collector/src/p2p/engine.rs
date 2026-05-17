@@ -137,7 +137,6 @@ where
                         request,
                         recipients,
                     } => {
-                        // Send the request to recipients.
                         let commitment = request.commitment();
                         let recipients = req_tx.send(recipients, request, self.priority_request);
                         if !recipients.is_empty() {
