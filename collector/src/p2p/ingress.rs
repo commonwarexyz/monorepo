@@ -36,15 +36,25 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R>
                 });
             }
             Self::Cancel { commitment } => {
-                // Drop queued sends that this cancel supersedes. Keep the cancel itself because
-                // the actor may already have in-flight state for the commitment.
-                overflow.retain(|message| {
-                    !matches!(
-                        message,
-                        Self::Send { request, .. } if request.commitment() == commitment
-                    )
+                // Drop queued sends that this cancel supersedes and coalesce any queued cancels
+                // for the same commitment. Keep one cancel because the actor may already have
+                // in-flight state for the commitment.
+                let mut canceled = false;
+                overflow.retain(|message| match message {
+                    Self::Send { request, .. } => request.commitment() != commitment,
+                    Self::Cancel { commitment: queued } if queued == &commitment => {
+                        if canceled {
+                            false
+                        } else {
+                            canceled = true;
+                            true
+                        }
+                    }
+                    Self::Cancel { .. } => true,
                 });
-                overflow.push_back(Self::Cancel { commitment });
+                if !canceled {
+                    overflow.push_back(Self::Cancel { commitment });
+                }
             }
         }
         true
@@ -109,6 +119,51 @@ mod tests {
         assert!(matches!(
             &overflow[1],
             Message::Cancel { commitment } if commitment == &commitment1
+        ));
+    }
+
+    #[test]
+    fn cancel_coalesces_duplicate_cancels_in_place() {
+        let request1 = Request { id: 1, data: 10 };
+        let request2 = Request { id: 2, data: 20 };
+        let commitment1 = request1.commitment();
+        let commitment2 = request2.commitment();
+        let mut overflow = VecDeque::new();
+
+        handle(
+            &mut overflow,
+            Message::Cancel {
+                commitment: commitment1,
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Cancel {
+                commitment: commitment2,
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Send {
+                request: request1,
+                recipients: Recipients::One(peer(1)),
+            },
+        );
+        handle(
+            &mut overflow,
+            Message::Cancel {
+                commitment: commitment1,
+            },
+        );
+
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            &overflow[0],
+            Message::Cancel { commitment } if commitment == &commitment1
+        ));
+        assert!(matches!(
+            &overflow[1],
+            Message::Cancel { commitment } if commitment == &commitment2
         ));
     }
 
