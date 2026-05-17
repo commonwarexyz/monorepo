@@ -1699,6 +1699,7 @@ dependencies = [
  "criterion",
  "futures",
  "futures-util",
+ "governor",
  "rand 0.8.5",
  "rstest",
  "thiserror 2.0.17",

@@ -38,6 +38,7 @@ commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
+governor.workspace = true
 rand.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
