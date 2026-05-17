@@ -6,7 +6,7 @@
 
 use crate::{
     index::{
-        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
+        storage::{insert_front, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
         Cursor as CursorTrait, Ordered, Unordered,
     },
     translator::Translator,
@@ -30,9 +30,6 @@ use std::{
 impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
     for BTreeOccupiedEntry<'_, K, Record<V>>
 {
-    fn get(&self) -> &V {
-        &self.get().value
-    }
     fn get_mut(&mut self) -> &mut Record<V> {
         self.get_mut()
     }
@@ -251,11 +248,9 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     fn insert(&mut self, key: &[u8], value: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => {
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-                cursor.next();
-                cursor.insert(value);
+            BTreeEntry::Occupied(mut entry) => {
+                insert_front(entry.get_mut(), value);
+                self.items.inc();
             }
             BTreeEntry::Vacant(entry) => {
                 Self::create(&self.keys, &self.items, entry, value);
@@ -267,11 +262,9 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             BTreeEntry::Occupied(entry) => {
-                // Get entry
+                // Remove anything that is prunable.
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-
-                // Remove anything that is prunable.
                 cursor.prune(&predicate);
 
                 // Add our new value (if not prunable).
@@ -280,30 +273,27 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
                 }
             }
             BTreeEntry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, value);
+                // Create the entry only if the new value is not prunable.
+                if !predicate(&value) {
+                    Self::create(&self.keys, &self.items, entry, value);
+                }
             }
-        }
-    }
-
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&V) -> bool) {
-        let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => {
-                // Get cursor
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-
-                // Remove anything that is prunable.
-                cursor.prune(&predicate);
-            }
-            BTreeEntry::Vacant(_) => {}
         }
     }
 
     fn remove(&mut self, key: &[u8]) {
-        // To ensure metrics are accurate, we iterate over all conflicting values and remove them
-        // one-by-one (rather than just removing the entire entry).
-        self.prune(key, |_| true);
+        let k = self.translator.transform(key);
+        if let Some(mut record) = self.map.remove(&k) {
+            // To ensure metrics are accurate, account for all conflicting values in the chain.
+            self.keys.dec();
+            self.items.dec();
+            self.pruned.inc();
+            while let Some(next) = record.next.take() {
+                self.items.dec();
+                self.pruned.inc();
+                record = *next;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -387,15 +377,15 @@ mod tests {
             // Next translated key to 0x0b is 1c.
             let (mut next, wrapped) = index.next_translated_key(&hex!("0x0b0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
+            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x1b is 1c.
             let (mut next, wrapped) = index.next_translated_key(&hex!("0x1b010203")).unwrap();
             assert!(!wrapped);
-            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
+            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2a is 2d.
@@ -431,8 +421,8 @@ mod tests {
             // Previous translated key is 1c.
             let (mut prev, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next().unwrap(), &22);
+            assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 2d.

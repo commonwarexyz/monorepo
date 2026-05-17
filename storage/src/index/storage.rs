@@ -2,6 +2,7 @@
 
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
+use std::ptr::NonNull;
 
 /// Each key is mapped to a [Record] that contains a linked list of potential values for that key.
 ///
@@ -17,8 +18,15 @@ pub(super) struct Record<V: Eq + Send + Sync> {
     pub(super) next: Option<Box<Self>>,
 }
 
+pub(super) fn insert_front<V: Eq + Send + Sync>(record: &mut Record<V>, mut value: V) {
+    std::mem::swap(&mut record.value, &mut value);
+    record.next = Some(Box::new(Record {
+        value,
+        next: record.next.take(),
+    }));
+}
+
 pub(super) trait IndexEntry<V: Eq + Send + Sync>: Send + Sync {
-    fn get(&self) -> &V;
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
 }
@@ -27,50 +35,42 @@ pub(super) trait IndexEntry<V: Eq + Send + Sync>: Send + Sync {
 /// `delete()`.
 const MUST_CALL_NEXT: &str = "must call Cursor::next()";
 
-/// Panic message shown when `update()` is called after [Cursor] has returned `None` or after
-/// `insert()` or `delete()` (but before `next()`).
+/// Panic message shown when `update()` or `delete()` is called after [Cursor] has returned `None`.
 const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 
-/// Phases of the [Cursor] during iteration.
 #[derive(PartialEq, Eq)]
-enum Phase<V: Eq + Send + Sync> {
-    /// Before iteration starts.
-    Initial,
-
-    /// The current entry.
-    Entry,
-    /// Some item after the current entry.
-    Next(Box<Record<V>>),
-
-    /// Iteration is done.
+enum State {
+    /// Before first `next()` call, or immediately after `insert()`/`delete()`.
+    NeedNext,
+    /// `next()` returned a value; `update()`/`delete()` are valid.
+    Active,
+    /// `next()` returned `None`; only `insert()` is valid.
     Done,
-    /// The current entry has no valid item.
-    EntryDeleted,
-
-    /// The current entry has been deleted and we've updated its value in-place
-    /// to be the value of the next record.
-    PostDeleteEntry,
-    /// The item has been deleted and we may be pointing to the next item.
-    PostDeleteNext(Option<Box<Record<V>>>),
-    /// An item has been inserted.
-    PostInsert(Box<Record<V>>),
+    /// The sole element was deleted; the entry will be removed on Drop.
+    EntryRemoved,
 }
 
-/// A cursor for [crate::index] types that can be instantiated with any [IndexEntry] implementation.
+/// A cursor that traverses and mutates a linked list of [Record]s in place using raw pointers.
+///
+/// Tracks `prev` (for relinking on delete) and `current` (last item returned by `next`).
+/// The next element to visit is derived from `current.next` (or the entry head when
+/// `current` is `None`), so no separate `upcoming` pointer is needed.
+///
+/// Invariants:
+/// - `entry` owns the linked list and keeps it exclusively borrowed for the cursor's lifetime.
+/// - `prev` and `current`, when present, point into that list.
+/// - `prev` and `current` are created only from exclusive references through `record_ptr`.
+/// - When both are present, `prev.next` owns `current`.
+/// - After deleting a node, `current` is moved back to the previous live node or cleared.
 pub(super) struct Cursor<'a, V: Eq + Send + Sync, E: IndexEntry<V>> {
-    // The current phase of the cursor.
-    phase: Phase<V>,
-
-    // The current entry.
+    // The occupied index entry that owns the linked list while the cursor exists.
     entry: Option<E>,
-
-    // The head of the linked list of previously visited records.
-    past: Option<Box<Record<V>>>,
-    // The tail of the linked list of previously visited records.
-    past_tail: Option<*mut Record<V>>,
-    // Whether we've pushed a record with a populated `next` field to `past` (invalidates
-    // `past_tail`).
-    past_pushed_list: bool,
+    // The live record immediately before `current`, used to relink on non-head deletes.
+    prev: Option<NonNull<Record<V>>>,
+    // The last record returned by `next()`.
+    current: Option<NonNull<Record<V>>>,
+    // The current position/state of the cursor.
+    state: State,
 
     // Metrics.
     keys: &'a Gauge,
@@ -79,8 +79,7 @@ pub(super) struct Cursor<'a, V: Eq + Send + Sync, E: IndexEntry<V>> {
 }
 
 impl<'a, V: Eq + Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
-    /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for
-    /// iteration.
+    /// Creates a new [Cursor] from an occupied index entry.
     pub(super) const fn new(
         entry: E,
         keys: &'a Gauge,
@@ -88,190 +87,149 @@ impl<'a, V: Eq + Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
         pruned: &'a Counter,
     ) -> Self {
         Self {
-            phase: Phase::Initial,
-
             entry: Some(entry),
-
-            past: None,
-            past_tail: None,
-            past_pushed_list: false,
-
+            prev: None,
+            current: None,
+            state: State::NeedNext,
             keys,
             items,
             pruned,
         }
     }
 
-    /// Pushes a [Record] to the end of `past`.
-    ///
-    /// If the record has a `next`, this function cannot be called again.
-    pub(super) fn past_push(&mut self, next: Box<Record<V>>) {
-        // Ensure we only push a list once (`past_tail` becomes stale).
-        assert!(!self.past_pushed_list);
-        self.past_pushed_list = next.next.is_some();
-
-        // Add `next` to the tail of `past`.
-        if let Some(past_tail) = self.past_tail {
-            // SAFETY: `past_tail` is always either `None` or points to a valid `Record`
-            // within the `self.past` linked list. We only enter this branch when `past_tail`
-            // is `Some`, meaning it was previously set to point to an owned node. The
-            // assertion verifies the invariant that `past_tail.next` is `None` before we
-            // append to it.
-            unsafe {
-                assert!((*past_tail).next.is_none());
-                (*past_tail).next = Some(next);
-                let tail_next = (*past_tail).next.as_mut().unwrap();
-                self.past_tail = Some(&mut **tail_next as *mut Record<V>);
-            }
-        } else {
-            self.past = Some(next);
-            self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
-        }
+    fn record_ptr(record: &mut Record<V>) -> NonNull<Record<V>> {
+        NonNull::from(record)
     }
 
-    /// If we are in a phase where we could return a value, return it.
-    pub(super) fn value(&self) -> Option<&V> {
-        match &self.phase {
-            Phase::Initial => unreachable!(),
-            Phase::Entry => self.entry.as_ref().map(|e| e.get()),
-            Phase::Next(current) => Some(&current.value),
-            Phase::Done | Phase::EntryDeleted => None,
-            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
-                unreachable!()
-            }
-        }
+    const fn record_mut(&mut self, mut ptr: NonNull<Record<V>>) -> &mut Record<V> {
+        // SAFETY: `ptr` was created by `record_ptr` from a record owned by `entry`, which is
+        // exclusively borrowed through this cursor. Cursor state clears or rewinds pointers before
+        // an owner is dropped.
+        unsafe { ptr.as_mut() }
     }
 }
 
 impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     type Value = V;
 
-    fn update(&mut self, v: V) {
-        match &mut self.phase {
-            Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
-            Phase::Entry => {
-                self.entry.as_mut().unwrap().get_mut().value = v;
-            }
-            Phase::Next(next) => {
-                next.value = v;
-            }
-            Phase::Done
-            | Phase::EntryDeleted
-            | Phase::PostDeleteEntry
-            | Phase::PostDeleteNext(_)
-            | Phase::PostInsert(_) => unreachable!("{NO_ACTIVE_ITEM}"),
+    fn next(&mut self) -> Option<&V> {
+        match self.state {
+            State::Done | State::EntryRemoved => return None,
+            State::NeedNext | State::Active => {}
         }
+
+        // Derive the next record from `current.next` or the entry head.
+        let next_ptr = if let Some(current) = self.current {
+            match self.record_mut(current).next.as_deref_mut() {
+                Some(next) => Self::record_ptr(next),
+                None => {
+                    self.state = State::Done;
+                    return None;
+                }
+            }
+        } else {
+            Self::record_ptr(self.entry.as_mut().unwrap().get_mut())
+        };
+
+        self.prev = self.current;
+        self.current = Some(next_ptr);
+        self.state = State::Active;
+        Some(&self.record_mut(next_ptr).value)
     }
 
-    fn next(&mut self) -> Option<&V> {
-        match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial | Phase::PostDeleteEntry => {
-                // We must start with some entry, so this will always be some non-None value.
-                self.phase = Phase::Entry;
-            }
-            Phase::Entry => {
-                // If there is a record after, we set it to be the current record.
-                if let Some(next) = self.entry.as_mut().unwrap().get_mut().next.take() {
-                    self.phase = Phase::Next(next);
-                }
-            }
-            Phase::Next(mut current) | Phase::PostInsert(mut current) => {
-                // Take the next record and push the current one to the past list.
-                let next = current.next.take();
-                self.past_push(current);
-
-                // Set the next record to be the current record.
-                if let Some(next) = next {
-                    self.phase = Phase::Next(next);
-                }
-            }
-            Phase::Done => {}
-            Phase::EntryDeleted => {
-                self.phase = Phase::EntryDeleted;
-            }
-            Phase::PostDeleteNext(current) => {
-                // If the stale value is some, we set it to be the current record.
-                if let Some(current) = current {
-                    self.phase = Phase::Next(current);
-                }
-            }
+    fn update(&mut self, v: V) {
+        match self.state {
+            State::NeedNext => panic!("{MUST_CALL_NEXT}"),
+            State::Done | State::EntryRemoved => panic!("{NO_ACTIVE_ITEM}"),
+            State::Active => {}
         }
-        self.value()
+        assert!(self.current.is_some(), "Active state requires current");
+        let current = self.current.unwrap();
+        self.record_mut(current).value = v;
     }
 
     fn insert(&mut self, v: V) {
-        self.items.inc();
-        match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
-            Phase::Entry => {
-                // Create a new record that points to entry's next.
-                let new = Box::new(Record {
-                    value: v,
-                    next: self.entry.as_mut().unwrap().get_mut().next.take(),
-                });
-
-                // Set the phase to the new record.
-                self.phase = Phase::PostInsert(new);
+        match self.state {
+            State::NeedNext => panic!("{MUST_CALL_NEXT}"),
+            State::Active => {
+                self.items.inc();
+                assert!(self.current.is_some(), "Active state requires current");
+                let current = self.current.unwrap();
+                let inserted = {
+                    let current_record = self.record_mut(current);
+                    let new = Box::new(Record {
+                        value: v,
+                        next: current_record.next.take(),
+                    });
+                    current_record.next = Some(new);
+                    Self::record_ptr(current_record.next.as_deref_mut().unwrap())
+                };
+                // Advance past the inserted node so next() returns the element after it.
+                self.prev = self.current;
+                self.current = Some(inserted);
+                self.state = State::NeedNext;
             }
-            Phase::Next(mut current) => {
-                // Take next.
-                let next = current.next.take();
-
-                // Add current to the past list.
-                self.past_push(current);
-
-                // Create a new record that points to the next's next.
-                let new = Box::new(Record { value: v, next });
-                self.phase = Phase::PostInsert(new);
+            State::EntryRemoved => {
+                // Re-populate the entry that was emptied by delete.
+                self.items.inc();
+                let entry_record = self.entry.as_mut().unwrap().get_mut();
+                entry_record.value = v;
+                entry_record.next = None;
+                self.prev = None;
+                self.current = Some(Self::record_ptr(entry_record));
+                self.state = State::Done;
             }
-            Phase::Done => {
-                // If we are done, we need to create a new record and
-                // immediately push it to the past list.
-                let new = Box::new(Record {
-                    value: v,
-                    next: None,
-                });
-                self.past_push(new);
-            }
-            Phase::EntryDeleted => {
-                // If entry is deleted, we need to update it.
-                self.entry.as_mut().unwrap().get_mut().value = v;
-
-                // We don't consider overwriting a deleted entry a collision.
-            }
-            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
-                unreachable!("{MUST_CALL_NEXT}")
+            State::Done => {
+                self.items.inc();
+                let last = self.current.or(self.prev);
+                assert!(last.is_some(), "Done state requires current or prev");
+                let inserted = {
+                    let last_record = self.record_mut(last.unwrap());
+                    last_record.next = Some(Box::new(Record {
+                        value: v,
+                        next: None,
+                    }));
+                    Self::record_ptr(last_record.next.as_deref_mut().unwrap())
+                };
+                self.prev = last;
+                self.current = Some(inserted);
+                self.state = State::Done;
             }
         }
     }
 
     fn delete(&mut self) {
+        match self.state {
+            State::NeedNext => panic!("{MUST_CALL_NEXT}"),
+            State::Done | State::EntryRemoved => panic!("{NO_ACTIVE_ITEM}"),
+            State::Active => {}
+        }
         self.pruned.inc();
         self.items.dec();
-        match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial => unreachable!("{MUST_CALL_NEXT}"),
-            Phase::Entry => {
-                // Attempt to overwrite the entry with the next value.
-                let entry = self.entry.as_mut().unwrap().get_mut();
-                if let Some(next) = entry.next.take() {
-                    entry.value = next.value;
-                    entry.next = next.next;
-                    self.phase = Phase::PostDeleteEntry;
-                    return;
-                }
 
-                // If there is no next, we consider the entry deleted.
-                self.phase = Phase::EntryDeleted;
-                // We wait to update metrics until `drop()`.
-            }
-            Phase::Next(mut current) => {
-                // Drop current instead of pushing it to the past list.
-                let next = current.next.take();
-                self.phase = Phase::PostDeleteNext(next);
-            }
-            Phase::Done | Phase::EntryDeleted => unreachable!("{NO_ACTIVE_ITEM}"),
-            Phase::PostDeleteEntry | Phase::PostDeleteNext(_) | Phase::PostInsert(_) => {
-                unreachable!("{MUST_CALL_NEXT}")
+        assert!(self.current.is_some(), "Active state requires current");
+        let current = self.current.unwrap();
+
+        if let Some(prev) = self.prev {
+            // Deleting a non-head node: relink prev.next to current.next.
+            let next = self.record_mut(current).next.take();
+            self.record_mut(prev).next = next;
+            self.current = self.prev;
+            self.prev = None;
+            self.state = State::NeedNext;
+        } else {
+            // Deleting the head node (the entry record itself).
+            let head = self.record_mut(current);
+            if let Some(next) = head.next.take() {
+                // Promote the next record into the head position.
+                head.value = next.value;
+                head.next = next.next;
+                self.current = None;
+                self.state = State::NeedNext;
+            } else {
+                // Sole element deleted.
+                self.current = None;
+                self.state = State::EntryRemoved;
             }
         }
     }
@@ -286,69 +244,20 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     }
 }
 
-// SAFETY: [Send] is safe because the raw pointer `past_tail` only ever points to heap memory
-// owned by `self.past`. Since the pointer's referent is moved along with the [Cursor], no data
-// races can occur. The `where` clause ensures all generic parameters are also [Send].
-unsafe impl<'a, V, E> Send for Cursor<'a, V, E>
-where
-    V: Eq + Send + Sync,
-    E: IndexEntry<V>,
-{
-}
-
-// SAFETY: [Sync] is safe because the raw pointer `past_tail` only ever points to heap memory
-// owned by `self.past`. Since `past_tail` is never dereferenced through shared references in
-// a way that could cause data races, and the `where` clause ensures all generic parameters
-// are also [Sync], it is safe to share references to [Cursor] across threads.
-unsafe impl<'a, V, E> Sync for Cursor<'a, V, E>
-where
-    V: Eq + Send + Sync,
-    E: IndexEntry<V>,
-{
-}
+// SAFETY: `NonNull` is not `Send`, so this cannot be derived automatically. `prev` and `current`
+// are only bookkeeping pointers into the linked list owned by `entry`. Moving the cursor to another
+// thread also moves `entry`, keeping the list alive and exclusively borrowed by the cursor.
+unsafe impl<V: Eq + Send + Sync, E: IndexEntry<V>> Send for Cursor<'_, V, E> {}
+// SAFETY: `NonNull` is not `Sync`, so this cannot be derived automatically. Sharing a cursor does
+// not grant access to the records without `&mut self`, and `entry` keeps the list alive and
+// exclusively borrowed for the cursor's lifetime.
+unsafe impl<V: Eq + Send + Sync, E: IndexEntry<V>> Sync for Cursor<'_, V, E> {}
 
 impl<V: Eq + Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
     fn drop(&mut self) {
-        // Take the entry.
-        let mut entry = self.entry.take().unwrap();
-
-        // If there is a dangling next, we should add it to past.
-        match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial | Phase::Entry => {
-                // No action needed.
-            }
-            Phase::Next(next) => {
-                // If there is a next, we should add it to past.
-                self.past_push(next);
-            }
-            Phase::Done => {
-                // No action needed.
-            }
-            Phase::EntryDeleted => {
-                // If the entry is deleted, we should remove it.
-                self.keys.dec();
-                entry.remove();
-                return;
-            }
-            Phase::PostDeleteEntry => {
-                // No action needed.
-            }
-            Phase::PostDeleteNext(Some(next)) => {
-                // If there is a stale record, we should add it to past.
-                self.past_push(next);
-            }
-            Phase::PostDeleteNext(None) => {
-                // No action needed.
-            }
-            Phase::PostInsert(next) => {
-                // If there is a current record, we should add it to past.
-                self.past_push(next);
-            }
-        }
-
-        // Attach the tip of past to the entry.
-        if let Some(past) = self.past.take() {
-            entry.get_mut().next = Some(past);
+        if self.state == State::EntryRemoved {
+            self.keys.dec();
+            self.entry.take().unwrap().remove();
         }
     }
 }

@@ -586,10 +586,13 @@ where
         // If the rewind target has a lower floor than the current snapshot was
         // built from, insert keys from the gap [rewind_floor, old_floor) that
         // were excluded by the higher-floor reconstruction.
+        //
+        // Iterate in reverse so front-insertion preserves ascending loc order
+        // for repeated keys, matching the ordering that apply_batch produces.
         if rewind_floor < old_floor {
             let reader = self.journal.journal.reader().await;
             let gap_end = core::cmp::min(*old_floor, rewind_size);
-            for loc in *rewind_floor..gap_end {
+            for loc in (*rewind_floor..gap_end).rev() {
                 if let Operation::Set(key, _) = reader.read(loc).await? {
                     self.snapshot.insert(&key, Location::new(loc));
                 }
@@ -2923,6 +2926,101 @@ pub(super) mod test {
         assert!(db.get(&k2).await.unwrap().is_none()); // above first_size, truncated
         assert_eq!(db.root(), first_root);
         assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Regression: rewind-after-reopen with a repeated key in the floor gap.
+    /// The gap-fill must maintain the same ordering as the live `apply_batch`
+    /// path so `get()` returns the same value.
+    pub(crate) async fn test_immutable_rewind_after_reopen_repeated_key_gap<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+        let k3 = Sha256::fill(8u8);
+        let v3 = Sha256::fill(19u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        commit_sets(&mut db, [(key, v1)], None).await;
+
+        // Commit B: Set(key, v2) with floor=0. get() returns v1 (earliest).
+        commit_sets(&mut db, [(key, v2)], None).await;
+        let second_size = db.bounds().await.end;
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        // Commit C: raises floor above both earlier writes.
+        commit_sets_with_floor(&mut db, [(k3, v3)], None, second_size).await;
+        db.sync().await.unwrap();
+
+        // Reopen: snapshot rebuilt from floor=second_size, key excluded.
+        drop(db);
+        let mut db = open_db(context.child("second")).await;
+        assert!(db.get(&key).await.unwrap().is_none());
+        assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
+
+        // Rewind to commit B: gap fill re-inserts both Set(key,...) entries.
+        db.rewind(second_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Regression: after restart, the snapshot can contain the newer write for
+    /// a repeated key. If rewind restores an older write for that same key, the
+    /// older write must be checked first, matching the pre-restart snapshot.
+    pub(crate) async fn test_immutable_rewind_after_reopen_mixed_gap_retained<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+        let k3 = Sha256::fill(8u8);
+        let v3 = Sha256::fill(19u8);
+
+        // Commit A: Set(key, v1) at loc=0, floor=0.
+        commit_sets(&mut db, [(key, v1)], None).await;
+        let first_size = db.bounds().await.end;
+
+        // Commit B: Set(key, v2), floor=0. get() returns v1 (earliest).
+        commit_sets(&mut db, [(key, v2)], None).await;
+        let second_size = db.bounds().await.end;
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        // Commit C: raises floor to first_size, so loc=0 is below floor but
+        // loc for v2 is retained.
+        commit_sets_with_floor(&mut db, [(k3, v3)], None, first_size).await;
+        db.sync().await.unwrap();
+
+        // Reopen: snapshot rebuilt from floor=first_size. The v2 write for key
+        // is retained; the v1 write is excluded.
+        drop(db);
+        let mut db = open_db(context.child("second")).await;
+        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
+
+        // Rewind to commit B: gap fill re-inserts the v1 write. The older
+        // write must appear before the retained v2 entry so get() returns v1.
+        db.rewind(second_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
     }

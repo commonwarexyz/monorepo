@@ -315,10 +315,10 @@ mod tests {
             }
 
             let first_translated_key = index.first_translated_key().unwrap().next().unwrap();
-            assert_eq!(*first_translated_key, 0);
+            assert_eq!(*first_translated_key, u64::MAX);
 
             let last_translated_key = index.last_translated_key().unwrap().next().unwrap();
-            assert_eq!(*last_translated_key, (255u64 << 8) | 255);
+            assert_eq!(*last_translated_key, u64::MAX);
 
             let last = [255u8, 255u8];
             let (mut iter, wrapped) = index.next_translated_key(&last).unwrap();
@@ -331,17 +331,17 @@ mod tests {
                     if !(b1 == 255 && b2 == 255) {
                         let (mut iter, _) = index.next_translated_key(&key).unwrap();
                         let next = *iter.next().unwrap();
-                        assert_eq!(next, ((b1 as u64) << 8 | b2 as u64) + 1);
-                        let next = *iter.next().unwrap();
                         assert_eq!(next, u64::MAX);
+                        let next = *iter.next().unwrap();
+                        assert_eq!(next, ((b1 as u64) << 8 | b2 as u64) + 1);
                         assert!(iter.next().is_none());
                     }
                     if !(b1 == 0 && b2 == 0) {
                         let (mut iter, _) = index.prev_translated_key(&key).unwrap();
                         let prev = *iter.next().unwrap();
-                        assert_eq!(prev, ((b1 as u64) << 8 | b2 as u64) - 1);
-                        let prev = *iter.next().unwrap();
                         assert_eq!(prev, u64::MAX);
+                        let prev = *iter.next().unwrap();
+                        assert_eq!(prev, ((b1 as u64) << 8 | b2 as u64) - 1);
                         assert!(iter.next().is_none());
                     }
                 }
@@ -380,15 +380,15 @@ mod tests {
             // Next translated key to 0x0b02 is 1c.
             let (mut iter, wrapped) = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), None);
 
             // Next translated key to 0x1b is 1c.
             let (mut iter, wrapped) = index.next_translated_key(&hex!("0x1b010203")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), None);
 
             // Next translated key to 0x2a is 2d.
@@ -424,8 +424,8 @@ mod tests {
             // Previous translated key is 1c.
             let (mut iter, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), None);
 
             // Previous translated key is 2d.
