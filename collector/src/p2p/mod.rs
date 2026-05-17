@@ -740,7 +740,7 @@ mod tests {
             // Start engine
             let handle = engine.start((sender1, receiver1), (sender2, receiver2));
 
-            // Stop the engine.
+            // Stop the engine
             handle.abort();
             handle.await.expect_err("engine should be aborted");
 
@@ -906,7 +906,7 @@ mod tests {
 
             // All operations should not panic after shutdown
 
-            // Send should not panic.
+            // Send should not panic
             let request = Request { id: 1, data: 1 };
             let feedback = mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone());
             assert_eq!(feedback, Feedback::Closed);
