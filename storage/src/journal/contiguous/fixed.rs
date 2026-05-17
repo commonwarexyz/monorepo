@@ -58,7 +58,10 @@ use super::Reader as _;
 use crate::{
     journal::{
         contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
-        segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
+        segmented::fixed::{
+            Config as SegmentedConfig, Journal as SegmentedJournal,
+            PendingPrune as SegmentedPendingPrune,
+        },
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
@@ -66,7 +69,9 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
-use commonware_utils::sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock};
+use commonware_utils::sync::{
+    AsyncRwLockReadGuard, UpgradableAsyncRwLock, UpgradableAsyncRwLockUpgradableReadGuard,
+};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
@@ -208,6 +213,40 @@ pub struct Reader<'a, E: Context, A: CodecFixedShared> {
     guard: AsyncRwLockReadGuard<'a, Inner<E, A>>,
     items_per_blob: u64,
     metrics: &'a Metrics<E>,
+}
+
+/// Pending fixed journal prune whose storage removal has completed but is not yet published.
+pub(in crate::journal) struct PendingPrune<'a, E: Context, A: CodecFixedShared> {
+    inner: UpgradableAsyncRwLockUpgradableReadGuard<'a, Inner<E, A>>,
+    pending: SegmentedPendingPrune,
+    items_per_blob: u64,
+    metrics: &'a Metrics<E>,
+}
+
+impl<E: Context, A: CodecFixedShared> PendingPrune<'_, E, A> {
+    /// Finish a successful prune by dropping removed section handles and advancing the boundary.
+    pub(in crate::journal) async fn finish(self) {
+        let Self {
+            inner,
+            pending,
+            items_per_blob,
+            metrics,
+        } = self;
+        let mut inner = inner.upgrade().await;
+        inner.journal.finish_prune(pending);
+
+        // Update pruning_boundary to the start of the oldest remaining section.
+        let new_oldest = inner
+            .journal
+            .oldest_section()
+            .expect("all sections pruned - violates tail section invariant");
+        // New pruning boundary should only move forward
+        assert!(inner.pruning_boundary < new_oldest * items_per_blob);
+        inner.pruning_boundary = new_oldest * items_per_blob;
+
+        // Update metrics
+        metrics.update(inner.size, inner.pruning_boundary, items_per_blob);
+    }
 }
 
 impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
@@ -935,6 +974,21 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&self, min_item_pos: u64) -> Result<bool, Error> {
+        let Some(pending) = self.begin_prune(min_item_pos).await? else {
+            return Ok(false);
+        };
+        pending.finish().await;
+        Ok(true)
+    }
+
+    /// Begin pruning by removing old section blobs from storage without dropping open handles.
+    ///
+    /// Returns a token if any sections were removed from storage. Call [PendingPrune::finish] to
+    /// publish the prune in memory.
+    pub(in crate::journal) async fn begin_prune(
+        &self,
+        min_item_pos: u64,
+    ) -> Result<Option<PendingPrune<'_, E, A>>, Error> {
         let inner = self.inner.upgradable_read().await;
 
         // Calculate the section that would contain min_item_pos
@@ -947,27 +1001,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let min_section = std::cmp::min(target_section, tail_section);
 
         // Begin pruning old sections while allowing concurrent readers to use existing open handles.
-        let Some(unlinked) = inner.journal.begin_prune(min_section).await? else {
-            return Ok(false);
+        let Some(pending) = inner.journal.begin_prune(min_section).await? else {
+            return Ok(None);
         };
 
-        let mut inner = inner.upgrade().await;
-        inner.journal.finish_prune(unlinked);
-
-        // Update pruning_boundary to the start of the oldest remaining section.
-        let new_oldest = inner
-            .journal
-            .oldest_section()
-            .expect("all sections pruned - violates tail section invariant");
-        // New pruning boundary should only move forward
-        assert!(inner.pruning_boundary < new_oldest * self.items_per_blob);
-        inner.pruning_boundary = new_oldest * self.items_per_blob;
-
-        // Update metrics
-        self.metrics
-            .update(inner.size, inner.pruning_boundary, self.items_per_blob);
-
-        Ok(true)
+        Ok(Some(PendingPrune {
+            inner,
+            pending,
+            items_per_blob: self.items_per_blob,
+            metrics: &self.metrics,
+        }))
     }
 
     /// Remove any persisted data created by the journal.
