@@ -481,7 +481,7 @@ impl<
         let _ = self.handle_ack(&ack).await;
 
         // Send ack over the network.
-        self.broadcast(ack, sender)?;
+        self.broadcast(ack, sender);
 
         Ok(())
     }
@@ -598,7 +598,8 @@ impl<
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
-        self.broadcast(ack, sender)
+        self.broadcast(ack, sender);
+        Ok(())
     }
 
     // ---------- Validation ----------
@@ -719,8 +720,6 @@ impl<
     }
 
     /// Broadcasts an ack to all peers with the appropriate priority.
-    ///
-    /// Returns an error if the sender returns an error.
     fn broadcast(
         &mut self,
         ack: Ack<P::Scheme, D>,
@@ -728,13 +727,12 @@ impl<
             impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
-    ) -> Result<(), Error> {
+    ) {
         sender.send(
             Recipients::All,
             TipAck { ack, tip: self.tip },
             self.priority_acks,
         );
-        Ok(())
     }
 
     /// Returns the next height that we should process. This is the minimum height for
