@@ -61,14 +61,8 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message for delivery.
-        ///
-        /// Note: a successful send does not guarantee that the recipient will
-        /// receive the message.
-        ///
-        /// # Panics
-        ///
-        /// Panics if `message` exceeds the network's configured maximum message size.
+        /// Feedback from submitting the message for delivery. [`Feedback::accepted`]
+        /// does not guarantee that the recipient will receive the message.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
@@ -125,14 +119,8 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message for delivery.
-        ///
-        /// Note: a successful send does not guarantee that the recipient will
-        /// receive the message.
-        ///
-        /// # Panics
-        ///
-        /// Panics if `message` exceeds the network's configured maximum message size.
+        /// Feedback from submitting the message for delivery. [`Feedback::accepted`]
+        /// does not guarantee that the recipient will receive the message.
         fn send(
             self,
             message: impl Into<IoBufs> + Send,
@@ -161,12 +149,8 @@ stability_scope!(BETA {
         /// list if all recipients are rate-limited, the sender has closed, or
         /// the send is not accepted.
         ///
-        /// Note: a successful send does not guarantee that the recipient will
-        /// receive the message.
-        ///
-        /// # Panics
-        ///
-        /// Panics if `message` exceeds the network's configured maximum message size.
+        /// [`Feedback::accepted`] does not guarantee that the recipient will receive
+        /// the message.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
