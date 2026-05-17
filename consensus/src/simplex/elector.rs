@@ -249,7 +249,7 @@ mod tests {
         sha256::Digest as Sha256Digest, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TryFromIterator};
+    use commonware_utils::{test_rng, test_rng_seeded, Faults, N3f1, TryFromIterator};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn random_uses_certificate_randomness() {
-        let mut rng = test_rng();
+        let mut rng = test_rng_seeded(42);
         let Fixture {
             participants,
             schemes,
@@ -464,7 +464,7 @@ mod tests {
         // Different certificates produce different leaders
         //
         // NOTE: In general, different certificates could produce the same leader by chance.
-        // However, for our specific test inputs (rng seed 42, 5 participants), we've
+        // However, for this deterministic fixture (rng seed 42, 5 participants), we've
         // verified these produce different results.
         let leader2 = elector.elect(round1, Some(&cert2));
         assert_ne!(leader1a, leader2);

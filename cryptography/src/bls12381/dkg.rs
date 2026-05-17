@@ -305,7 +305,7 @@
 use super::primitives::group::{Private, Share};
 use crate::{
     bls12381::primitives::{
-        group::Scalar,
+        group::{Scalar, ScalarReadCfg},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
@@ -825,7 +825,13 @@ impl Read for DealerPrivMsg {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(ReadExt::read(buf)?))
+        // For backwards compatibility, reject zero explicitly.
+        // Ideally, we would allow zero, because that's not an issue in theory.
+        // Honest dealers will never run into this issue.
+        Ok(Self::new(Scalar::read_cfg(
+            buf,
+            &ScalarReadCfg::RejectZero,
+        )?))
     }
 }
 
@@ -3640,6 +3646,13 @@ mod test {
         let msg = DealerPrivMsg::new(Scalar::random(&mut rng));
         let debug = format!("{:?}", msg);
         assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_dealer_priv_msg_decode_rejects_zero_scalar() {
+        let mut encoded = Scalar::zero().encode();
+        let decoded: Result<DealerPrivMsg, _> = Read::read_cfg(&mut encoded, &());
+        assert!(decoded.is_err());
     }
 
     #[cfg(feature = "arbitrary")]
