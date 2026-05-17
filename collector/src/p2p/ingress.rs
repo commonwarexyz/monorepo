@@ -78,37 +78,33 @@ fn merge_recipients<P: PublicKey>(existing: &mut Recipients<P>, incoming: Recipi
         return;
     }
 
-    // Normalize specific recipients into a list, merge in first-seen order, and then compact the
-    // result back to `One` when only one peer remains.
+    let previous = std::mem::replace(existing, Recipients::All);
+    *existing = union_recipients(previous, incoming);
+}
+
+/// Returns the sorted, deduplicated union of two non-`All` recipient sets.
+fn union_recipients<P: PublicKey>(
+    existing: Recipients<P>,
+    incoming: Recipients<P>,
+) -> Recipients<P> {
     let mut peers = match existing {
         Recipients::All => unreachable!("handled above"),
-        Recipients::One(peer) => vec![peer.clone()],
-        Recipients::Some(peers) => std::mem::take(peers),
+        Recipients::One(peer) => vec![peer],
+        Recipients::Some(peers) => peers,
     };
 
     match incoming {
         Recipients::All => unreachable!("handled above"),
-        Recipients::One(peer) => push_unique(&mut peers, peer),
-        Recipients::Some(incoming) => merge_peer_lists(&mut peers, incoming),
+        Recipients::One(peer) => peers.push(peer),
+        Recipients::Some(incoming) => peers.extend(incoming),
     }
 
-    *existing = match peers.as_slice() {
-        [peer] => Recipients::One(peer.clone()),
-        _ => Recipients::Some(peers),
-    };
-}
-
-/// Adds each incoming peer that is not already present.
-fn merge_peer_lists<P: PublicKey>(existing: &mut Vec<P>, incoming: Vec<P>) {
-    for peer in incoming {
-        push_unique(existing, peer);
-    }
-}
-
-/// Adds a peer if it has not already been queued.
-fn push_unique<P: PublicKey>(peers: &mut Vec<P>, peer: P) {
-    if !peers.contains(&peer) {
-        peers.push(peer);
+    peers.sort();
+    peers.dedup();
+    if peers.len() == 1 {
+        Recipients::One(peers.pop().expect("single peer"))
+    } else {
+        Recipients::Some(peers)
     }
 }
 
@@ -210,7 +206,9 @@ mod tests {
         let Recipients::Some(peers) = recipients else {
             panic!("expected merged recipient set");
         };
-        assert_eq!(peers, &vec![peer1, peer2, peer3]);
+        let mut expected = vec![peer1, peer2, peer3];
+        expected.sort();
+        assert_eq!(peers, &expected);
     }
 
     #[test]
@@ -248,7 +246,9 @@ mod tests {
         let Recipients::Some(peers) = recipients else {
             panic!("expected merged recipient set");
         };
-        assert_eq!(peers, &vec![peer1, peer2]);
+        let mut expected = vec![peer1, peer2];
+        expected.sort();
+        assert_eq!(peers, &expected);
     }
 
     #[test]
