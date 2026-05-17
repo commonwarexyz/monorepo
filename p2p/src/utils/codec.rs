@@ -132,7 +132,7 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// tasks reaches this limit, the receiver stops accepting new messages until an in-flight
 /// task completes, bounding CPU work. Successfully decoded messages are forwarded through a
 /// bounded mailbox; if the consumer falls behind and the mailbox fills, additional decoded
-/// messages are dropped.
+/// messages are dropped (they would likely no longer be useful by the time we get back to them).
 struct Decoded<P: PublicKey, V>(P, V);
 
 impl<P: PublicKey, V> mailbox::Policy for Decoded<P, V> {
