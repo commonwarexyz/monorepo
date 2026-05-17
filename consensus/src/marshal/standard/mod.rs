@@ -83,7 +83,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Fetch, Resolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics as _, Quota, Runner, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -1685,8 +1685,8 @@ mod tests {
     }
 
     impl RecordingResolver {
-        fn holding() -> (handler::Receiver<D>, Self) {
-            let (sender, receiver) = mailbox::new(NZUsize!(100));
+        fn holding(metrics: impl Metrics) -> (handler::Receiver<D>, Self) {
+            let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
                 handler::Receiver::new(receiver),
                 Self {
@@ -1915,7 +1915,7 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_rx, resolver) = RecordingResolver::holding();
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
@@ -2011,7 +2011,7 @@ mod tests {
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            let (resolver_tx, resolver_rx) = mailbox::new(NZUsize!(100));
+            let (resolver_tx, resolver_rx) = mailbox::new(context.child("mailbox"), NZUsize!(100));
 
             let (actor, _mailbox, _) = Actor::init(
                 context.child("actor"),

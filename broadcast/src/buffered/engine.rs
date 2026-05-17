@@ -117,7 +117,8 @@ where
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
     pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
-        let (mailbox_sender, mailbox_receiver) = mailbox::new(cfg.mailbox_size);
+        let (mailbox_sender, mailbox_receiver) =
+            mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
         let metrics = metrics::Metrics::init(&context);
@@ -187,7 +188,7 @@ where
                     message,
                 } => {
                     trace!("mailbox: broadcast");
-                    self.handle_broadcast(&mut sender, recipients, message).await;
+                    self.handle_broadcast(&mut sender, recipients, message);
                 }
                 Message::Subscribe { digest, responder } => {
                     trace!("mailbox: subscribe");
@@ -231,7 +232,7 @@ where
     ////////////////////////////////////////
 
     /// Handles a `broadcast` request from the application.
-    async fn handle_broadcast<Sr: Sender<PublicKey = P>>(
+    fn handle_broadcast<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, M>,
         recipients: Recipients<P>,
@@ -242,9 +243,7 @@ where
         let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
-        if let Err(err) = sender.send(recipients, msg, self.priority).await {
-            error!(?err, "failed to send message");
-        }
+        sender.send(recipients, msg, self.priority);
     }
 
     /// Handles a `subscribe` request from the application.

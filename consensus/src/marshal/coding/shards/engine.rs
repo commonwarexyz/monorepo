@@ -369,7 +369,7 @@ where
     /// Create a new [`Engine`] with the given configuration.
     pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
-        let (sender, mailbox) = mailbox::new(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -469,15 +469,14 @@ where
 
                 match message {
                     Message::Proposed { block, round } => {
-                        self.broadcast_shards(&mut sender, round, block).await;
+                        self.broadcast_shards(&mut sender, round, block);
                     }
                     Message::Discovered {
                         commitment,
                         leader,
                         round,
                     } => {
-                        self.handle_external_proposal(&mut sender, commitment, leader, round)
-                            .await;
+                        self.handle_external_proposal(&mut sender, commitment, leader, round);
                     }
                     Message::GetByCommitment {
                         commitment,
@@ -538,16 +537,14 @@ where
                         warn!(%commitment, "no scheme for epoch, ignoring shard");
                         continue;
                     };
-                    let progressed = state
-                        .on_network_shard(
-                            peer,
-                            shard,
-                            InsertCtx::new(scheme.as_ref(), &self.strategy),
-                            &mut self.blocker,
-                        )
-                        .await;
+                    let progressed = state.on_network_shard(
+                        peer,
+                        shard,
+                        InsertCtx::new(scheme.as_ref(), &self.strategy),
+                        &mut self.blocker,
+                    );
                     if progressed {
-                        self.try_advance(&mut sender, commitment).await;
+                        self.try_advance(&mut sender, commitment);
                     }
                 } else {
                     self.buffer_peer_shard(peer, shard);
@@ -645,7 +642,7 @@ where
     }
 
     /// Handles leader announcements for a commitment and advances reconstruction.
-    async fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
+    fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
@@ -682,9 +679,9 @@ where
             commitment,
             ReconstructionState::new(leader, round, participants_len),
         );
-        let buffered_progress = self.ingest_buffered_shards(commitment).await;
+        let buffered_progress = self.ingest_buffered_shards(commitment);
         if buffered_progress {
-            self.try_advance(sender, commitment).await;
+            self.try_advance(sender, commitment);
         }
     }
 
@@ -711,7 +708,7 @@ where
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
-    async fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
+    fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let mut buffered = Vec::new();
         for (peer, queue) in self.peer_buffers.iter_mut() {
             let mut i = 0;
@@ -739,9 +736,7 @@ where
         let mut progressed = false;
         let ctx = InsertCtx::new(scheme.as_ref(), &self.strategy);
         for (peer, shard) in buffered {
-            progressed |= state
-                .on_network_shard(peer, shard, ctx, &mut self.blocker)
-                .await;
+            progressed |= state.on_network_shard(peer, shard, ctx, &mut self.blocker);
         }
         progressed
     }
@@ -757,7 +752,7 @@ where
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
-    async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
+    fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
@@ -808,9 +803,7 @@ where
                 );
                 return;
             };
-            let _ = sender
-                .send(Recipients::One(peer.clone()), shard, true)
-                .await;
+            let _ = sender.send(Recipients::One(peer.clone()), shard, true);
         }
 
         // Send the leader's shard to peers in aggregate membership who are not participants.
@@ -821,9 +814,7 @@ where
             .cloned()
             .collect();
         if !non_participants.is_empty() {
-            let _ = sender
-                .send(Recipients::Some(non_participants), leader_shard, true)
-                .await;
+            let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
         }
 
         // Cache the block so we don't have to reconstruct it again.
@@ -837,25 +828,24 @@ where
     }
 
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
-    async fn broadcast_shard<Sr: Sender<PublicKey = P>>(
+    fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         shard: Shard<C, H>,
     ) {
         let commitment = shard.commitment();
-        if let Ok(peers) = sender.send(Recipients::All, shard, true).await {
-            debug!(
-                ?commitment,
-                peers = peers.len(),
-                "broadcasted shard to all peers"
-            );
-        }
+        let peers = sender.send(Recipients::All, shard, true);
+        debug!(
+            ?commitment,
+            peers = peers.len(),
+            "broadcasted shard to all peers"
+        );
     }
 
     /// Broadcasts any pending validated shard for the given commitment and attempts
     /// reconstruction. If reconstruction succeeds or fails, the state is cleaned
     /// up and subscribers are notified.
-    async fn try_advance<Sr: Sender<PublicKey = P>>(
+    fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
@@ -863,7 +853,7 @@ where
         if let Some(state) = self.state.get_mut(&commitment) {
             match state.take_pending_action() {
                 Some(AssignedShardVerifiedAction::Broadcast(shard)) => {
-                    self.broadcast_shard(sender, shard).await;
+                    self.broadcast_shard(sender, shard);
                     self.notify_assigned_shard_verified_subscribers(commitment);
                 }
                 Some(AssignedShardVerifiedAction::NotifyOnly) => {
@@ -1173,7 +1163,7 @@ where
     ///
     /// Returns `false` if verification fails (sender is blocked), `true` on
     /// success.
-    async fn verify_assigned_shard(
+    fn verify_assigned_shard(
         &mut self,
         sender: P,
         commitment: Commitment,
@@ -1217,7 +1207,7 @@ where
 {
     /// Check whether quorum is met and, if so, batch-validate all pending
     /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
-    async fn try_transition(
+    fn try_transition(
         &mut self,
         commitment: Commitment,
         participants_len: u64,
@@ -1399,7 +1389,7 @@ where
     ///   engine level in bounded per-peer queues until
     ///   [`Mailbox::discovered`] creates a
     ///   reconstruction state for this commitment.
-    async fn on_network_shard<Sch, S, X>(
+    fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,
         shard: Shard<C, H>,
@@ -1460,23 +1450,22 @@ where
         // even after transitioning to Ready. This ensures we broadcast
         // our own shard to help slower peers reach quorum.
         if is_from_leader && !self.common().assigned_shard_verified {
-            let progressed = self
-                .common_mut()
-                .verify_assigned_shard(
-                    sender,
-                    commitment,
-                    indexed,
-                    ctx.scheme.me().is_some(),
-                    blocker,
-                )
-                .await;
+            let progressed = self.common_mut().verify_assigned_shard(
+                sender,
+                commitment,
+                indexed,
+                ctx.scheme.me().is_some(),
+                blocker,
+            );
 
             if progressed {
                 if let Self::AwaitingQuorum(state) = self {
-                    if let Some(ready) = state
-                        .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-                        .await
-                    {
+                    if let Some(ready) = state.try_transition(
+                        commitment,
+                        ctx.participants_len,
+                        ctx.strategy,
+                        blocker,
+                    ) {
                         *self = Self::Ready(ready);
                     }
                 }
@@ -1496,9 +1485,8 @@ where
             .insert(indexed.index, indexed.data.clone());
         state.common.contributed.set(u64::from(indexed.index), true);
         state.pending_shards.insert(sender, indexed);
-        if let Some(ready) = state
-            .try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-            .await
+        if let Some(ready) =
+            state.try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
         {
             *self = Self::Ready(ready);
         }
@@ -2113,9 +2101,7 @@ mod tests {
                 let invalid_bytes = invalid_shard.encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(receiver_pk.clone()), invalid_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk.clone()), invalid_bytes, true);
 
                 context.sleep(config.link.latency * 2).await;
 
@@ -2129,9 +2115,7 @@ mod tests {
                 let valid_bytes = valid_shard.encode();
                 peers[1]
                     .sender
-                    .send(Recipients::One(receiver_pk), valid_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk), valid_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Subscription should now resolve.
@@ -2240,17 +2224,13 @@ mod tests {
                 // Send peer 2 their shard from peer 0 (leader, first time - should succeed).
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send the same shard again from peer 0 (leader duplicate - ignored).
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // The leader should NOT be blocked for sending an identical duplicate.
@@ -2304,17 +2284,13 @@ mod tests {
                 // Send peer 2 their shard from the leader (first time - succeeds).
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes1, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), shard_bytes1, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send a different shard from the leader (equivocation - should block).
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_bytes2, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), shard_bytes2, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 2 should have blocked the leader for equivocation.
@@ -2353,9 +2329,7 @@ mod tests {
                 // (wrong: non-leaders must use their own index).
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 1 should be blocked by peer 2 for wrong shard index.
@@ -2386,9 +2360,7 @@ mod tests {
                 // This is wrong: non-leaders must send at their own index.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Nobody should be blocked yet (shard is buffered, leader unknown).
@@ -2454,9 +2426,7 @@ mod tests {
                 // Original leader sends shard; this should still be accepted.
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Subscription should resolve from accepted leader shard.
@@ -2470,9 +2440,7 @@ mod tests {
                 // The conflicting leader should still be treated as non-leader and blocked.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
@@ -2523,9 +2491,7 @@ mod tests {
                 // Leader unknown path: this shard should be buffered, not blocked.
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
                 context.sleep(config.link.latency * 2).await;
 
                 let blocked = oracle.blocked().await.unwrap();
@@ -2584,16 +2550,13 @@ mod tests {
                     )
                     .await
                     .expect("link should be added");
-                oracle
-                    .manager()
-                    .track(
-                        2,
-                        TrackedPeers::new(
-                            Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
-                            Set::from_iter_dedup([non_participant_pk.clone()]),
-                        ),
-                    )
-                    .await;
+                oracle.manager().track(
+                    2,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
+                        Set::from_iter_dedup([non_participant_pk.clone()]),
+                    ),
+                );
                 context.sleep(Duration::from_millis(10)).await;
 
                 peers[2].mailbox.discovered(
@@ -2606,10 +2569,7 @@ mod tests {
                 let shard = coded_block.shard(peer2_index).expect("missing shard");
                 let shard_bytes = shard.encode();
 
-                non_participant_sender
-                    .send(Recipients::One(receiver_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                non_participant_sender.send(Recipients::One(receiver_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 assert_blocked(&oracle, &peers[2].public_key, &non_participant_pk).await;
@@ -2646,16 +2606,13 @@ mod tests {
                     )
                     .await
                     .expect("link should be added");
-                oracle
-                    .manager()
-                    .track(
-                        2,
-                        TrackedPeers::new(
-                            Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
-                            Set::from_iter_dedup([non_participant_pk.clone()]),
-                        ),
-                    )
-                    .await;
+                oracle.manager().track(
+                    2,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
+                        Set::from_iter_dedup([non_participant_pk.clone()]),
+                    ),
+                );
                 context.sleep(Duration::from_millis(10)).await;
 
                 let peer2_index = peers[2].index.get() as u16;
@@ -2665,10 +2622,7 @@ mod tests {
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
 
-                non_participant_sender
-                    .send(Recipients::One(receiver_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                non_participant_sender.send(Recipients::One(receiver_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 peers[2].mailbox.discovered(
@@ -2729,31 +2683,23 @@ mod tests {
                 let leader_shard_bytes = peer2_shard.encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send peer 1's shard to peer 2 (first time - should succeed, 2 checked shards).
                 let peer1_shard_bytes = peer1_shard.encode();
-                peers[1]
-                    .sender
-                    .send(
-                        Recipients::One(peer2_pk.clone()),
-                        peer1_shard_bytes.clone(),
-                        true,
-                    )
-                    .await
-                    .expect("send failed");
+                peers[1].sender.send(
+                    Recipients::One(peer2_pk.clone()),
+                    peer1_shard_bytes.clone(),
+                    true,
+                );
                 context.sleep(config.link.latency * 2).await;
 
                 // Send the same shard again (exact duplicate - should be ignored, not blocked).
                 // With 10 peers, minimum_shards=4, so we haven't reconstructed yet.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), peer1_shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), peer1_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 1 should NOT be blocked for sending an identical duplicate.
@@ -2813,27 +2759,21 @@ mod tests {
                 let leader_shard_bytes = leader_shard.encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send peer 1's valid shard to peer 2 (first time - succeeds).
                 let shard_bytes = peer1_shard.encode();
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Send a different shard from peer 1 (equivocation - should block).
                 let equivocating_bytes = peer1_equivocating_shard.encode();
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), equivocating_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), equivocating_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 2 should have blocked peer 1 for equivocation.
@@ -2883,9 +2823,7 @@ mod tests {
                     .encode();
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_a.clone(), true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), shard_a.clone(), true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Create/reconstruct B at higher view.
@@ -2901,9 +2839,7 @@ mod tests {
                     .encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), leader_shard_b, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), leader_shard_b, true);
 
                 // Three shards for minimum threshold (4 total with leader's).
                 for i in [1usize, 3usize, 4usize] {
@@ -2913,9 +2849,7 @@ mod tests {
                         .encode();
                     peers[i]
                         .sender
-                        .send(Recipients::One(peer2_pk.clone()), shard, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(peer2_pk.clone()), shard, true);
                 }
                 context.sleep(config.link.latency * 4).await;
 
@@ -2931,9 +2865,7 @@ mod tests {
                 // shard for A again should NOT be treated as duplicate.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_a, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), shard_a, true);
                 context.sleep(config.link.latency * 2).await;
 
                 let blocked = oracle.blocked().await.unwrap();
@@ -2986,11 +2918,11 @@ mod tests {
                         .shard(peers[sender_idx].index.get() as u16)
                         .expect("missing shard");
                     let shard_bytes = shard.encode();
-                    peers[sender_idx]
-                        .sender
-                        .send(Recipients::One(peer3_pk.clone()), shard_bytes, true)
-                        .await
-                        .expect("send failed");
+                    peers[sender_idx].sender.send(
+                        Recipients::One(peer3_pk.clone()),
+                        shard_bytes,
+                        true,
+                    );
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -3007,9 +2939,7 @@ mod tests {
                 let leader_shard_bytes = leader_shard.encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer3_pk), leader_shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer3_pk), leader_shard_bytes, true);
 
                 context.sleep(config.link.latency * 2).await;
 
@@ -3070,9 +3000,7 @@ mod tests {
                     .encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(receiver_pk.clone()), leader_shard, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk.clone()), leader_shard, true);
 
                 for i in [1usize, 2usize, 4usize] {
                     let shard = coded_block
@@ -3081,9 +3009,7 @@ mod tests {
                         .encode();
                     peers[i]
                         .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(receiver_pk.clone()), shard, true);
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -3162,9 +3088,7 @@ mod tests {
                     .encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(receiver_pk.clone()), leader_shard, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk.clone()), leader_shard, true);
 
                 // Subscription should resolve from the leader's shard.
                 select! {
@@ -3182,9 +3106,7 @@ mod tests {
                         .encode();
                     peers[i]
                         .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(receiver_pk.clone()), shard, true);
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -3220,9 +3142,7 @@ mod tests {
                 let garbage = Bytes::from(vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB]);
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer0_pk.clone()), garbage, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer0_pk.clone()), garbage, true);
 
                 context.sleep(config.link.latency * 2).await;
 
@@ -3257,9 +3177,7 @@ mod tests {
                 // Peer 1 sends the shard to peer 2 (buffered, leader unknown).
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
                 context.sleep(config.link.latency * 2).await;
 
                 // No one should be blocked yet.
@@ -3269,9 +3187,7 @@ mod tests {
                 // Peer 1 sends the same shard AGAIN (duplicate while leader unknown).
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer2_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Still no blocking before a leader is known.
@@ -3323,9 +3239,7 @@ mod tests {
                 // Leader (peer 0) sends the invalid shard.
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer2_pk), wrong_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer2_pk), wrong_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 0 (leader) should be blocked for invalid crypto.
@@ -3372,17 +3286,13 @@ mod tests {
                 let shard_bytes = leader_shard.encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer3_pk.clone()), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer3_pk.clone()), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 1 sends a shard with a mismatched index to peer 3.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer3_pk), wrong_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer3_pk), wrong_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 1 should be blocked for shard index mismatch.
@@ -3433,17 +3343,13 @@ mod tests {
                 let shard_bytes = leader_shard.encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer3_pk.clone()), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer3_pk.clone()), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 1 sends the invalid shard.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // No block yet: batch validation deferred until quorum.
@@ -3455,9 +3361,7 @@ mod tests {
                     let bytes = shard.encode();
                     peers[idx]
                         .sender
-                        .send(Recipients::One(peer3_pk.clone()), bytes, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(peer3_pk.clone()), bytes, true);
                 }
                 context.sleep(config.link.latency * 2).await;
 
@@ -3508,23 +3412,17 @@ mod tests {
                     .encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(receiver_pk.clone()), leader_shard, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk.clone()), leader_shard, true);
 
                 // Contribute exactly minimum_shards total:
                 // - invalid shard from peer1
                 // - valid shard from peer2
                 // - valid shard from peer4
-                peers[1]
-                    .sender
-                    .send(
-                        Recipients::One(receiver_pk.clone()),
-                        invalid_shard.encode(),
-                        true,
-                    )
-                    .await
-                    .expect("send failed");
+                peers[1].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    invalid_shard.encode(),
+                    true,
+                );
                 for idx in [2usize, 4usize] {
                     let shard = coded_block1
                         .shard(peers[idx].index.get() as u16)
@@ -3532,9 +3430,7 @@ mod tests {
                         .encode();
                     peers[idx]
                         .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(receiver_pk.clone()), shard, true);
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -3558,9 +3454,7 @@ mod tests {
                     .encode();
                 peers[5]
                     .sender
-                    .send(Recipients::One(receiver_pk), extra_shard, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk), extra_shard, true);
 
                 context.sleep(config.link.latency * 2).await;
 
@@ -3605,9 +3499,7 @@ mod tests {
                 // so it gets buffered in pending shards).
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // No one should be blocked yet (shard is buffered).
@@ -3623,9 +3515,7 @@ mod tests {
                     let bytes = shard.encode();
                     peers[idx]
                         .sender
-                        .send(Recipients::One(peer3_pk.clone()), bytes, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(peer3_pk.clone()), bytes, true);
                 }
                 context.sleep(config.link.latency * 2).await;
 
@@ -3645,9 +3535,7 @@ mod tests {
                 let shard_bytes = leader_shard.encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(peer3_pk), shard_bytes, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(peer3_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 1 should be blocked after batch validation validates and
@@ -3710,13 +3598,10 @@ mod tests {
                 .add_link(future_peer_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
                 .await
                 .expect("link should be added");
-            oracle
-                .manager()
-                .track(
-                    0,
-                    Set::from_iter_dedup([receiver_pk.clone(), future_peer_pk.clone()]),
-                )
-                .await;
+            oracle.manager().track(
+                0,
+                Set::from_iter_dedup([receiver_pk.clone(), future_peer_pk.clone()]),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             // Set up the receiver's engine with a multi-epoch provider.
@@ -3762,10 +3647,7 @@ mod tests {
             let shard_bytes = future_shard.encode();
 
             // Send the shard BEFORE external_proposed (goes to pre-leader buffer).
-            future_peer_sender
-                .send(Recipients::One(receiver_pk.clone()), shard_bytes, true)
-                .await
-                .expect("send failed");
+            future_peer_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // No one should be blocked yet (shard is buffered, leader unknown).
@@ -3838,7 +3720,7 @@ mod tests {
                         .expect("link should be added");
                 }
             }
-            oracle.manager().track(0, participants.clone()).await;
+            oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let (_leader_control, mut leader_sender, _leader_receiver) = registrations
@@ -3919,10 +3801,7 @@ mod tests {
                 .shard(broadcaster_index)
                 .expect("missing shard")
                 .encode();
-            leader_sender
-                .send(Recipients::One(broadcaster_pk), broadcaster_shard, true)
-                .await
-                .expect("send failed");
+            leader_sender.send(Recipients::One(broadcaster_pk), broadcaster_shard, true);
 
             let receiver_index = participants
                 .index(&receiver_pk)
@@ -3932,10 +3811,7 @@ mod tests {
                 .shard(receiver_index)
                 .expect("missing shard")
                 .encode();
-            leader_sender
-                .send(Recipients::One(receiver_pk.clone()), receiver_shard, true)
-                .await
-                .expect("send failed");
+            leader_sender.send(Recipients::One(receiver_pk.clone()), receiver_shard, true);
 
             context.sleep(DEFAULT_LINK.latency * 3).await;
 
@@ -4003,15 +3879,11 @@ mod tests {
                     .shard(receiver_shard_idx)
                     .expect("missing shard");
                 leader_shard.commitment = fake_commitment;
-                peers[0]
-                    .sender
-                    .send(
-                        Recipients::One(receiver_pk.clone()),
-                        leader_shard.encode(),
-                        true,
-                    )
-                    .await
-                    .expect("send failed");
+                peers[0].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    leader_shard.encode(),
+                    true,
+                );
 
                 // Send enough shards to reach minimum_shards (4 for 10 peers).
                 // Need 3 more shards after the leader's shard.
@@ -4019,11 +3891,11 @@ mod tests {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let mut shard = coded_block2.shard(peer_shard_idx).expect("missing shard");
                     shard.commitment = fake_commitment;
-                    peers[idx]
-                        .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
-                        .expect("send failed");
+                    peers[idx].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -4060,24 +3932,20 @@ mod tests {
                 let leader_shard1 = coded_block1
                     .shard(receiver_shard_idx)
                     .expect("missing shard");
-                peers[0]
-                    .sender
-                    .send(
-                        Recipients::One(receiver_pk.clone()),
-                        leader_shard1.encode(),
-                        true,
-                    )
-                    .await
-                    .expect("send failed");
+                peers[0].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    leader_shard1.encode(),
+                    true,
+                );
 
                 for &idx in &[1usize, 2, 4] {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let shard = coded_block1.shard(peer_shard_idx).expect("missing shard");
-                    peers[idx]
-                        .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
-                        .expect("send failed");
+                    peers[idx].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -4136,25 +4004,21 @@ mod tests {
                     .shard(receiver_shard_idx)
                     .expect("missing shard");
                 leader_shard.commitment = fake_commitment;
-                peers[0]
-                    .sender
-                    .send(
-                        Recipients::One(receiver_pk.clone()),
-                        leader_shard.encode(),
-                        true,
-                    )
-                    .await
-                    .expect("send failed");
+                peers[0].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    leader_shard.encode(),
+                    true,
+                );
 
                 for &idx in &[1usize, 2, 4] {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let mut shard = coded_block.shard(peer_shard_idx).expect("missing shard");
                     shard.commitment = fake_commitment;
-                    peers[idx]
-                        .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
-                        .expect("send failed");
+                    peers[idx].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -4181,24 +4045,20 @@ mod tests {
                 let real_leader_shard = coded_block
                     .shard(receiver_shard_idx)
                     .expect("missing shard");
-                peers[0]
-                    .sender
-                    .send(
-                        Recipients::One(receiver_pk.clone()),
-                        real_leader_shard.encode(),
-                        true,
-                    )
-                    .await
-                    .expect("send failed");
+                peers[0].sender.send(
+                    Recipients::One(receiver_pk.clone()),
+                    real_leader_shard.encode(),
+                    true,
+                );
 
                 for &idx in &[1usize, 2, 4] {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let shard = coded_block.shard(peer_shard_idx).expect("missing shard");
-                    peers[idx]
-                        .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard.encode(), true)
-                        .await
-                        .expect("send failed");
+                    peers[idx].sender.send(
+                        Recipients::One(receiver_pk.clone()),
+                        shard.encode(),
+                        true,
+                    );
                 }
 
                 context.sleep(config.link.latency * 2).await;
@@ -4266,9 +4126,7 @@ mod tests {
                     .encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(receiver_pk.clone()), shard_b, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk.clone()), shard_b, true);
 
                 // Reconstruct conflicting commitment A first.
                 let shard_a = block_a
@@ -4277,9 +4135,7 @@ mod tests {
                     .encode();
                 peers[0]
                     .sender
-                    .send(Recipients::One(receiver_pk.clone()), shard_a, true)
-                    .await
-                    .expect("send failed");
+                    .send(Recipients::One(receiver_pk.clone()), shard_a, true);
                 for i in [1usize, 2usize, 4usize] {
                     let shard_a = block_a
                         .shard(peers[i].index.get() as u16)
@@ -4287,9 +4143,7 @@ mod tests {
                         .encode();
                     peers[i]
                         .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard_a, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(receiver_pk.clone()), shard_a, true);
                 }
                 context.sleep(config.link.latency * 4).await;
                 let reconstructed_a = peers[receiver_idx]
@@ -4307,9 +4161,7 @@ mod tests {
                         .encode();
                     peers[i]
                         .sender
-                        .send(Recipients::One(receiver_pk.clone()), shard_b, true)
-                        .await
-                        .expect("send failed");
+                        .send(Recipients::One(receiver_pk.clone()), shard_b, true);
                 }
 
                 select! {
@@ -4375,11 +4227,11 @@ mod tests {
                 // Leader sends this unrelated/invalid shard to receiver.
                 // The shard index no longer matches sender's participant index,
                 // so leader must be blocked.
-                peers[leader_idx]
-                    .sender
-                    .send(Recipients::One(receiver_pk), unrelated_shard.encode(), true)
-                    .await
-                    .expect("send failed");
+                peers[leader_idx].sender.send(
+                    Recipients::One(receiver_pk),
+                    unrelated_shard.encode(),
+                    true,
+                );
                 context.sleep(config.link.latency * 2).await;
 
                 assert_blocked(&oracle, &peers[receiver_idx].public_key, &leader_pk).await;
@@ -4683,7 +4535,7 @@ mod tests {
                 .expect("link should be added");
 
             // Track the full participant set so the engine sees all peers.
-            oracle.manager().track(0, participants.clone()).await;
+            oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme = Scheme::signer(
@@ -4725,28 +4577,22 @@ mod tests {
             let shard_bytes = leader_shard.encode();
 
             // Send the shard BEFORE leader announcement (it gets buffered).
-            leader_sender
-                .send(
-                    Recipients::One(receiver_pk.clone()),
-                    shard_bytes.clone(),
-                    true,
-                )
-                .await
-                .expect("send failed");
+            leader_sender.send(
+                Recipients::One(receiver_pk.clone()),
+                shard_bytes.clone(),
+                true,
+            );
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // Now send a peer set update that excludes the leader.
             let remaining: Set<P> =
                 Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
-            oracle.manager().track(1, remaining).await;
+            oracle.manager().track(1, remaining);
             context.sleep(Duration::from_millis(10)).await;
 
             // The retained overlap window still lets the leader reach the receiver,
             // but this fresh pre-leader shard must not be buffered again.
-            leader_sender
-                .send(Recipients::One(receiver_pk.clone()), shard_bytes, true)
-                .await
-                .expect("send failed");
+            leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // Announce the leader. Buffered shards from the leader should have been
@@ -4792,9 +4638,9 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
             let receiver_pk = peer_keys[0].clone();
             let sender_pk = peer_keys[1].clone();
-            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys);
 
-            let receiver_control = oracle.control(receiver_pk.clone());
+            let receiver_control = oracle.control(receiver_pk);
             let scheme = Scheme::signer(
                 SCHEME_NAMESPACE,
                 participants.clone(),
@@ -4843,7 +4689,7 @@ mod tests {
             // No reconstruction state yet: `ingest_buffered_shards` drains matching shards from the
             // per-peer queues then returns without applying them, leaving an empty deque under the
             // same map key while the sender stays in `latest.primary`.
-            let progressed = engine.ingest_buffered_shards(commitment).await;
+            let progressed = engine.ingest_buffered_shards(commitment);
             assert!(
                 !progressed,
                 "ingest should not progress without reconstruction state"
@@ -4924,7 +4770,7 @@ mod tests {
                 .expect("link should be added");
 
             // Peer-set id 0: epoch 0 primaries before any cutover.
-            oracle.manager().track(0, epoch0_set.clone()).await;
+            oracle.manager().track(0, epoch0_set.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme_epoch0 =
@@ -4966,20 +4812,17 @@ mod tests {
                 .expect("missing shard");
 
             // Inbound: epoch-0 leader shard arrives before `Discovered` (pre-leader buffer path).
-            leader_sender
-                .send(
-                    Recipients::One(receiver_pk.clone()),
-                    leader_shard.encode(),
-                    true,
-                )
-                .await
-                .expect("send failed");
+            leader_sender.send(
+                Recipients::One(receiver_pk.clone()),
+                leader_shard.encode(),
+                true,
+            );
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) is no
             // longer in `latest.primary`, so overlap-buffered shards for that sender must not feed
             // reconstruction.
-            oracle.manager().track(1, epoch1_set).await;
+            oracle.manager().track(1, epoch1_set);
             context.sleep(Duration::from_millis(10)).await;
 
             // Leader announcement for the old commitment: should not complete reconstruction from
@@ -5083,7 +4926,7 @@ mod tests {
             }
 
             // Start with the full committee so the receiver's signer scheme matches the coded block.
-            oracle.manager().track(0, participants.clone()).await;
+            oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
             let scheme = Scheme::signer(
@@ -5129,33 +4972,25 @@ mod tests {
                     Recipients::One(receiver_pk.clone()),
                     peer2_shard,
                     true,
-                )
-                .await
-                .expect("send failed");
+                );
             peer4_sender
                 .send(
                     Recipients::One(receiver_pk.clone()),
                     peer4_shard,
                     true,
-                )
-                .await
-                .expect("send failed");
+                );
             peer5_sender
                 .send(
                     Recipients::One(receiver_pk.clone()),
                     peer5_shard,
                     true,
-                )
-                .await
-                .expect("send failed");
+                );
             peer6_sender
                 .send(
                     Recipients::One(receiver_pk.clone()),
                     peer6_shard,
                     true,
-                )
-                .await
-                .expect("send failed");
+                );
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // Evict the receiver from `latest.primary`: buffered shards from remaining primaries must
@@ -5166,7 +5001,7 @@ mod tests {
                     .filter(|pk| **pk != receiver_pk)
                     .cloned(),
             );
-            oracle.manager().track(1, latest_primary).await;
+            oracle.manager().track(1, latest_primary);
             context.sleep(Duration::from_millis(10)).await;
 
             // Leader announcement drains overlap-buffered peer shards; the evicted receiver should
@@ -5279,11 +5114,11 @@ mod tests {
                 let leader_shard = coded_block
                     .shard(peers[victim_idx].index.get() as u16)
                     .expect("missing victim shard");
-                peers[leader_idx]
-                    .sender
-                    .send(Recipients::One(victim.clone()), leader_shard.encode(), true)
-                    .await
-                    .expect("send failed");
+                peers[leader_idx].sender.send(
+                    Recipients::One(victim.clone()),
+                    leader_shard.encode(),
+                    true,
+                );
                 context.sleep(config.link.latency * 2).await;
 
                 // The shard subscription should now resolve because the
@@ -5308,11 +5143,11 @@ mod tests {
                 let extra_shard = coded_block
                     .shard(peers[extra_sender_idx].index.get() as u16)
                     .expect("missing shard");
-                peers[extra_sender_idx]
-                    .sender
-                    .send(Recipients::One(victim.clone()), extra_shard.encode(), true)
-                    .await
-                    .expect("send failed");
+                peers[extra_sender_idx].sender.send(
+                    Recipients::One(victim.clone()),
+                    extra_shard.encode(),
+                    true,
+                );
                 context.sleep(config.link.latency * 2).await;
 
                 // The gossip shard should be silently dropped (not blocked).

@@ -139,7 +139,7 @@ fn main() {
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);
 
         // Provide authorized peers
-        oracle.track(0, peer_keys.clone()).await;
+        oracle.track(0, peer_keys.clone());
 
         // Register flood channel
         let (mut flood_sender, mut flood_receiver) = network.register(
@@ -168,9 +168,7 @@ fn main() {
                     rng.fill_bytes(&mut msg[8..]);
 
                     // Send to all peers
-                    if let Err(e) = flood_sender.send(Recipients::All, msg, true).await {
-                        error!(?e, "could not send flood message");
-                    }
+                    flood_sender.send(Recipients::All, msg, true);
                     messages.inc();
                 }
             });

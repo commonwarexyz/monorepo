@@ -303,7 +303,7 @@ impl<
         // and attempt to rebroadcast if necessary.
         if let Some(ref signer) = self.sequencer_signer {
             self.journal_prepare(&signer.public_key()).await;
-            if let Err(err) = self.rebroadcast(&mut node_sender).await {
+            if let Err(err) = self.rebroadcast(&mut node_sender) {
                 // Rebroadcasting may return a non-critical error, so log the error and continue.
                 info!(?err, "initial rebroadcast failed");
             }
@@ -351,7 +351,7 @@ impl<
             _ = rebroadcast => {
                 if let Some(ref signer) = self.sequencer_signer {
                     debug!(epoch = %self.epoch, sender = ?signer.public_key(), "rebroadcast");
-                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
+                    if let Err(err) = self.rebroadcast(&mut node_sender) {
                         info!(?err, "rebroadcast failed");
                         continue;
                     }
@@ -568,10 +568,7 @@ impl<
         self.handle_ack(&ack)?;
 
         // Send the ack to the network
-        ack_sender
-            .send(Recipients::Some(recipients), ack, self.priority_acks)
-            .await
-            .map_err(|_| Error::UnableToSendMessage)?;
+        ack_sender.send(Recipients::Some(recipients), ack, self.priority_acks);
 
         Ok(())
     }
@@ -773,7 +770,7 @@ impl<
         self.propose_timer = Some(self.metrics.e2e_duration.timer(self.context.as_ref()));
 
         // Broadcast to network
-        if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {
+        if let Err(err) = self.broadcast(node, node_sender, self.epoch) {
             guard.set(Status::Failure);
             return Err(err);
         };
@@ -789,7 +786,7 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the certificate for the chunk.
-    async fn rebroadcast(
+    fn rebroadcast(
         &mut self,
         node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
@@ -827,13 +824,13 @@ impl<
 
         // Broadcast the message, which resets the rebroadcast deadline
         guard.set(Status::Failure);
-        self.broadcast(tip, node_sender, self.epoch).await?;
+        self.broadcast(tip, node_sender, self.epoch)?;
         guard.set(Status::Success);
         Ok(())
     }
 
     /// Send a  `Node` message to all validators in the given epoch.
-    async fn broadcast(
+    fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
         node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
@@ -849,14 +846,11 @@ impl<
         let _ = self.relay.broadcast(node.chunk.payload, ());
 
         // Send the node to all validators
-        node_sender
-            .send(
-                Recipients::Some(validators.iter().cloned().collect()),
-                node.encode(),
-                self.priority_proposals,
-            )
-            .await
-            .map_err(|_| Error::BroadcastFailed)?;
+        node_sender.send(
+            Recipients::Some(validators.iter().cloned().collect()),
+            node.encode(),
+            self.priority_proposals,
+        );
 
         // Set the rebroadcast deadline
         self.rebroadcast_deadline = Some(self.context.current() + self.rebroadcast_timeout);

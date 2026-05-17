@@ -1206,7 +1206,15 @@ mod tests {
             // Kick off the optimistic verify, which spawns `deferred_verify`.
             // Its gated `app.verify` blocks until we release it, giving us a
             // deterministic window to abort the marshal actor.
-            let _optimistic_rx = marshaled.verify(child_ctx, child_digest).await;
+            let optimistic_rx = marshaled.verify(child_ctx, child_digest).await;
+            let result = optimistic_rx
+                .await
+                .expect("optimistic verify should resolve");
+            assert!(
+                result,
+                "optimistic verify should accept the available block"
+            );
+
             let certify_rx = marshaled.certify(child_round, child_digest).await;
             verify_started
                 .await

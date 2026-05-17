@@ -111,7 +111,7 @@ where
             "certificate recover latency",
             Buckets::CRYPTOGRAPHY,
         );
-        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
@@ -490,7 +490,6 @@ where
                     .entry(view)
                     .or_insert_with(|| self.new_round())
                     .add_network(sender.clone(), message)
-                    .await
                 {
                     self.added.inc();
 

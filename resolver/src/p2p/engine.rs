@@ -133,7 +133,7 @@ where
         context: E,
         cfg: Config<P, D, B, Key, Con, Pro>,
     ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
-        let (sender, receiver) = mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
         let fetcher = Fetcher::new(
@@ -239,7 +239,7 @@ where
             },
             // Handle pending deadline
             _ = deadline_pending => {
-                self.fetcher.fetch(&mut sender).await;
+                self.fetcher.fetch(&mut sender);
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox.recv() else {
@@ -331,7 +331,7 @@ where
                     Ok(delivery) => delivery,
                     Err(_) => continue,
                 };
-                self.handle_delivery(peer, key, result).await;
+                self.handle_delivery(peer, key, result);
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
@@ -355,8 +355,7 @@ where
                 }
 
                 // Send response to peer
-                self.handle_serve(&mut sender, peer, id, result, self.priority_responses)
-                    .await;
+                self.handle_serve(&mut sender, peer, id, result, self.priority_responses);
             },
             // Handle network messages
             msg = receiver.recv() => {
@@ -423,7 +422,7 @@ where
     }
 
     /// Handles the case where the application responds to a request from an external peer.
-    async fn handle_serve(
+    fn handle_serve(
         &mut self,
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
@@ -439,15 +438,13 @@ where
         let msg = wire::Message { id, payload };
 
         // Send message to peer
-        let result = sender
-            .send(Recipients::One(peer.clone()), msg, priority)
-            .await;
+        let result = sender.send(Recipients::One(peer.clone()), msg, priority);
 
-        // Log result, but do not handle errors
-        match result {
-            Err(err) => error!(?err, ?peer, ?id, "serve send failed"),
-            Ok(to) if to.is_empty() => warn!(?peer, ?id, "serve send failed"),
-            Ok(_) => trace!(?peer, ?id, "serve sent"),
+        // Log result, but do not handle errors.
+        if result.is_empty() {
+            warn!(?peer, ?id, "serve send failed");
+        } else {
+            trace!(?peer, ?id, "serve sent");
         };
     }
 
@@ -499,7 +496,7 @@ where
     }
 
     /// Handle completed delivery to the consumer.
-    async fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
+    fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
         if valid {
             self.metrics.fetch.inc(Status::Success);
             self.inflight.complete(&key, self.context.as_ref());

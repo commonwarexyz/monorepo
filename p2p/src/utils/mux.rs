@@ -9,6 +9,7 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
+use commonware_actor::Feedback;
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufs, Spawner};
@@ -234,13 +235,12 @@ impl<S: Sender> LimitedSender for SubSender<S> {
     type PublicKey = S::PublicKey;
     type Checked<'a> = CheckedGlobalSender<'a, S>;
 
-    async fn check(
+    fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.inner
             .check(recipients)
-            .await
             .map(|checked| checked.with_subchannel(self.subchannel))
     }
 }
@@ -295,22 +295,17 @@ impl<S: Sender> GlobalSender<S> {
     }
 
     /// Send a message over the given `subchannel`.
-    pub async fn send(
+    pub fn send(
         &mut self,
         subchannel: Channel,
         recipients: Recipients<S::PublicKey>,
         payload: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
-        match self.check(recipients).await {
-            Ok(checked) => {
-                checked
-                    .with_subchannel(subchannel)
-                    .send(payload, priority)
-                    .await
-            }
-            Err(_) => Ok(Vec::new()),
-        }
+    ) -> Feedback {
+        self.check(recipients).map_or_else(
+            |_| Feedback::Rejected,
+            |checked| checked.with_subchannel(subchannel).send(payload, priority),
+        )
     }
 }
 
@@ -318,13 +313,12 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
     type PublicKey = S::PublicKey;
     type Checked<'a> = CheckedGlobalSender<'a, S>;
 
-    async fn check(
+    fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.inner
             .check(recipients)
-            .await
             .map(|checked| CheckedGlobalSender {
                 subchannel: None,
                 inner: checked,
@@ -348,17 +342,16 @@ impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
 
 impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     type PublicKey = S::PublicKey;
-    type Error = <S::Checked<'a> as CheckedSender>::Error;
 
-    async fn send(
-        self,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        self.inner.recipients()
+    }
+
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
-        self.inner.send(message, priority).await
+        self.inner.send(message, priority)
     }
 }
 
@@ -513,7 +506,10 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{ordered::Set, NZUsize};
-    use std::{num::NonZeroU32, time::Duration};
+    use std::{
+        num::NonZeroU32,
+        time::{Duration, SystemTime},
+    };
 
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
@@ -552,12 +548,10 @@ mod tests {
     ) {
         let mut manager = oracle.manager();
         let peers = manager.peer_set(0).await.unwrap_or_default();
-        manager
-            .track(
-                0,
-                Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
-            )
-            .await;
+        manager.track(
+            0,
+            Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
+        );
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
     }
@@ -609,14 +603,11 @@ mod tests {
     }
 
     /// Send a burst of messages to a list of senders.
-    async fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
+    fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
         for i in 0..count {
             let payload = IoBuf::from(vec![i as u8]);
             for tx in txs.iter_mut() {
-                let _ = tx
-                    .send(Recipients::All, payload.clone(), false)
-                    .await
-                    .unwrap();
+                tx.send(Recipients::All, payload.clone(), false);
             }
         }
     }
@@ -671,6 +662,43 @@ mod tests {
         assert_eq!(n_backup, count_backup);
     }
 
+    #[derive(Clone)]
+    struct RateLimitedSender;
+
+    struct UnusedCheckedSender;
+
+    impl CheckedSender for UnusedCheckedSender {
+        type PublicKey = PublicKey;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            unreachable!("rate-limited sender should not produce a checked sender");
+        }
+
+        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Feedback {
+            unreachable!("rate-limited sender should not send");
+        }
+    }
+
+    impl LimitedSender for RateLimitedSender {
+        type PublicKey = PublicKey;
+        type Checked<'a> = UnusedCheckedSender;
+
+        fn check(
+            &mut self,
+            _: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Err(SystemTime::UNIX_EPOCH)
+        }
+    }
+
+    #[test]
+    fn test_global_sender_rate_limited_send_rejected() {
+        let mut sender = GlobalSender::new(RateLimitedSender);
+        let feedback = sender.send(0, Recipients::One(pk(0)), b"rate-limited", false);
+        assert_eq!(feedback, Feedback::Rejected);
+        assert!(!feedback.accepted());
+    }
+
     #[test]
     fn test_basic_routing() {
         // Can register a subchannel and send messages to it.
@@ -687,10 +715,7 @@ mod tests {
 
             // Send and receive
             let payload = IoBuf::from(b"hello");
-            let _ = sub_tx2
-                .send(Recipients::One(pk1.clone()), payload.clone(), false)
-                .await
-                .unwrap();
+            let _ = sub_tx2.send(Recipients::One(pk1.clone()), payload.clone(), false);
             let (from, bytes) = sub_rx1.recv().await.unwrap();
             assert_eq!(from, pk2);
             assert_eq!(bytes, payload);
@@ -716,14 +741,8 @@ mod tests {
 
             let payload_a = IoBuf::from(b"A");
             let payload_b = IoBuf::from(b"B");
-            let _ = tx2_a
-                .send(Recipients::One(pk1.clone()), payload_a.clone(), false)
-                .await
-                .unwrap();
-            let _ = tx2_b
-                .send(Recipients::One(pk1.clone()), payload_b.clone(), false)
-                .await
-                .unwrap();
+            let _ = tx2_a.send(Recipients::One(pk1.clone()), payload_a.clone(), false);
+            let _ = tx2_b.send(Recipients::One(pk1.clone()), payload_b.clone(), false);
 
             let (from_a, bytes_a) = rx_a.recv().await.unwrap();
             assert_eq!(from_a, pk2);
@@ -755,7 +774,7 @@ mod tests {
 
             // Send 10 messages to each subchannel from pk1 to pk2.
             // With buffer size of CAPACITY=5, messages beyond that are dropped.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2).await;
+            send_burst(&mut [tx1, tx2], CAPACITY * 2);
 
             // Each subchannel should receive up to CAPACITY messages (the rest are dropped).
             expect_n_messages(&mut rx1, CAPACITY).await;
@@ -786,7 +805,7 @@ mod tests {
 
             // Send messages to both subchannels. Messages to subchannel 99 will be dropped
             // since its receiver was dropped.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // rx2 should receive all CAPACITY messages sent to subchannel 100.
             expect_n_messages(&mut rx2, CAPACITY).await;
@@ -814,7 +833,7 @@ mod tests {
             // Send CAPACITY messages to each subchannel.
             // Messages to subchannel 1 are dropped (unregistered).
             // Messages to subchannel 2 fill the buffer.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // Receive messages from subchannel 2.
             expect_n_messages(&mut rx2, CAPACITY).await;
@@ -842,7 +861,7 @@ mod tests {
 
             // Send CAPACITY messages to each subchannel.
             // Subchannel 1 messages go to backup, subchannel 2 messages go to rx2.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // Both channels should receive CAPACITY messages each.
             expect_n_messages_with_backup(&mut rx2, &mut backup2, CAPACITY, CAPACITY).await;
@@ -863,20 +882,19 @@ mod tests {
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             // Register the subchannels.
-            let (tx1, mut rx1) = handle1.register(1).await.unwrap();
+            let (mut tx1, mut rx1) = handle1.register(1).await.unwrap();
             // Do not register any subchannels on the second peer.
 
-            // Send 1 message to each subchannel from pk1 to pk2.
-            send_burst(&mut [tx1], 1).await;
+            // Send a message from pk1 to pk2.
+            tx1.send(Recipients::One(pk2.clone()), b"REQUEST", false);
 
             // Get the message from pk2's backup channel and respond.
             let (subchannel, (from, _)) = backup2.recv().await.unwrap();
             assert_eq!(subchannel, 1);
             assert_eq!(from, pk1);
-            global_sender2
-                .send(subchannel, Recipients::One(pk1), b"TEST", true)
-                .await
-                .unwrap();
+            let checked = global_sender2.check(Recipients::One(pk1.clone())).unwrap();
+            assert_eq!(checked.recipients(), vec![pk1]);
+            checked.with_subchannel(subchannel).send(b"TEST", true);
 
             // Receive the response with pk1's receiver.
             let (from, bytes) = rx1.recv().await.unwrap();
@@ -900,28 +918,21 @@ mod tests {
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             // Register the subchannels.
-            let (tx1, _) = handle1.register(1).await.unwrap();
-            let (tx2, _) = handle1.register(2).await.unwrap();
-            let (_, mut rx1) = handle2.register(1).await.unwrap();
+            let (mut tx1, _) = handle1.register(1).await.unwrap();
+            let (mut tx2, _) = handle1.register(2).await.unwrap();
+            let (_, rx1) = handle2.register(1).await.unwrap();
             let (_, mut rx2) = handle2.register(2).await.unwrap();
 
-            // Send CAPACITY messages to subchannel 1, then drain them.
-            send_burst(&mut [tx1.clone()], CAPACITY).await;
-            expect_n_messages(&mut rx1, CAPACITY).await;
+            // Explicitly close the first subchannel.
+            drop(rx1);
 
-            // Send CAPACITY messages to subchannel 2, then drain them.
-            send_burst(&mut [tx2.clone()], CAPACITY).await;
-            expect_n_messages(&mut rx2, CAPACITY).await;
+            // Send to the closed subchannel, then verify it does not block
+            // messages to another subchannel.
+            tx1.send(Recipients::One(pk2.clone()), b"closed", false);
+            tx2.send(Recipients::One(pk2.clone()), b"open", false);
 
-            // Explicitly close the underlying receiver for the first subchannel.
-            rx1.receiver.close();
-
-            // Send CAPACITY messages to each subchannel.
-            // Messages to subchannel 1 are dropped (receiver closed).
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
-
-            // Subchannel 2 should receive CAPACITY messages.
-            expect_n_messages(&mut rx2, CAPACITY).await;
+            // Subchannel 2 should still receive messages.
+            expect_n_messages(&mut rx2, 1).await;
         });
     }
 
@@ -950,7 +961,7 @@ mod tests {
             // Send CAPACITY messages to each subchannel.
             // Subchannel 1 messages are dropped (backup is closed).
             // Subchannel 2 messages go to rx2.
-            send_burst(&mut [tx1, tx2], CAPACITY).await;
+            send_burst(&mut [tx1, tx2], CAPACITY);
 
             // rx2 should receive all CAPACITY messages.
             expect_n_messages(&mut rx2, CAPACITY).await;

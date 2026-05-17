@@ -50,6 +50,7 @@ where
 const fn combine(a: Feedback, b: Feedback) -> Feedback {
     match (a, b) {
         (Feedback::Closed, _) | (_, Feedback::Closed) => Feedback::Closed,
+        (Feedback::Rejected, _) | (_, Feedback::Rejected) => Feedback::Rejected,
         (Feedback::Backoff, _) | (_, Feedback::Backoff) => Feedback::Backoff,
         (Feedback::Ok, Feedback::Ok) => Feedback::Ok,
     }
@@ -145,6 +146,14 @@ mod tests {
             Feedback::Closed
         );
         assert_eq!(combine(Feedback::Backoff, Feedback::Ok), Feedback::Backoff);
+        assert_eq!(
+            combine(Feedback::Rejected, Feedback::Ok),
+            Feedback::Rejected
+        );
+        assert_eq!(
+            combine(Feedback::Rejected, Feedback::Backoff),
+            Feedback::Rejected
+        );
         assert_eq!(combine(Feedback::Ok, Feedback::Ok), Feedback::Ok);
     }
 }

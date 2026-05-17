@@ -1,25 +1,62 @@
+use commonware_actor::{
+    mailbox::{self, Policy},
+    Feedback,
+};
 use commonware_macros::select;
-use commonware_utils::channel::mpsc::{self, error::TrySendError};
+use commonware_runtime::Metrics;
+use std::{collections::VecDeque, num::NonZeroUsize};
+
+pub(crate) struct Message<T>(T);
+
+impl<T> Message<T> {
+    pub(crate) fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Policy for Message<T> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
+        false
+    }
+}
+
+pub(crate) struct Receivers<T> {
+    pub(crate) low: mailbox::Receiver<Message<T>>,
+    pub(crate) high: mailbox::Receiver<Message<T>>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Relay<T> {
-    low: mpsc::Sender<T>,
-    high: mpsc::Sender<T>,
+    low: mailbox::Sender<Message<T>>,
+    high: mailbox::Sender<Message<T>>,
 }
 
 impl<T> Relay<T> {
-    pub const fn new(low: mpsc::Sender<T>, high: mpsc::Sender<T>) -> Self {
-        Self { low, high }
+    /// Creates a prioritized relay backed by bounded low and high priority mailboxes.
+    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, Receivers<T>) {
+        let (low_sender, low_receiver) = mailbox::new(metrics.child("low"), size);
+        let (high_sender, high_receiver) = mailbox::new(metrics.child("high"), size);
+        (
+            Self {
+                low: low_sender,
+                high: high_sender,
+            },
+            Receivers {
+                low: low_receiver,
+                high: high_receiver,
+            },
+        )
     }
 
-    /// Sends the given `message` to the appropriate channel based on `priority`.
+    /// Submits `message` to the priority channel selected by `priority`.
     ///
-    /// Uses non-blocking `try_send` to avoid blocking the caller when the
-    /// channel buffer is full. Returns an error if the channel is full or
-    /// disconnected.
-    pub fn send(&self, message: T, priority: bool) -> Result<(), TrySendError<T>> {
+    /// This never waits for capacity. [`Feedback::Rejected`] means the selected channel was full
+    /// and did not handle the message, and [`Feedback::Closed`] means the receiver is gone.
+    pub fn send(&self, message: T, priority: bool) -> Feedback {
         let sender = if priority { &self.high } else { &self.low };
-        sender.try_send(message)
+        sender.enqueue(Message(message))
     }
 }
 
@@ -34,48 +71,61 @@ pub enum Prioritized<C, D> {
 }
 
 /// Awaits a message from control, high, or low priority receivers.
-pub async fn recv_prioritized<C, D>(
-    control: &mut mpsc::Receiver<C>,
-    high: &mut mpsc::Receiver<D>,
-    low: &mut mpsc::Receiver<D>,
+pub async fn recv_prioritized<C: Policy, D>(
+    control: &mut mailbox::Receiver<C>,
+    high: &mut mailbox::Receiver<Message<D>>,
+    low: &mut mailbox::Receiver<Message<D>>,
 ) -> Prioritized<C, D> {
     select! {
         msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
-        msg = high.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
-        msg = low.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
+        msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+        msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
     }
+}
+
+/// Attempts to receive one data message from a relay receiver.
+pub(crate) fn try_recv<T>(receiver: &mut mailbox::Receiver<Message<T>>) -> Option<T> {
+    receiver.try_recv().ok().map(Message::into_inner)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::mocks::Metrics;
+    use commonware_utils::NZUsize;
 
     #[test]
     fn test_relay_content_priority() {
-        let (low_sender, mut low_receiver) = mpsc::channel(1);
-        let (high_sender, mut high_receiver) = mpsc::channel(1);
-        let relay = Relay::new(low_sender, high_sender);
+        let (relay, mut receivers) = Relay::new(Metrics, NZUsize!(1));
 
-        // Send a high priority message
         let data = 123;
-        relay.send(data, true).unwrap();
-        match high_receiver.try_recv() {
+        assert_eq!(relay.send(data, true), Feedback::Ok);
+        match receivers.high.try_recv().map(Message::into_inner) {
             Ok(received_data) => {
                 assert_eq!(data, received_data);
             }
             _ => panic!("Expected high priority message"),
         }
-        assert!(low_receiver.try_recv().is_err());
+        assert!(receivers.low.try_recv().is_err());
 
-        // Send a low priority message
         let data = 456;
-        relay.send(data, false).unwrap();
-        match low_receiver.try_recv() {
+        assert_eq!(relay.send(data, false), Feedback::Ok);
+        match receivers.low.try_recv().map(Message::into_inner) {
             Ok(received_data) => {
                 assert_eq!(data, received_data);
             }
             _ => panic!("Expected low priority message"),
         }
-        assert!(high_receiver.try_recv().is_err());
+        assert!(receivers.high.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_relay_rejects_on_overflow() {
+        let (relay, mut receivers) = Relay::new(Metrics, NZUsize!(1));
+
+        assert_eq!(relay.send(1, false), Feedback::Ok);
+        assert_eq!(relay.send(2, false), Feedback::Rejected);
+        assert_eq!(receivers.low.try_recv().map(Message::into_inner), Ok(1));
+        assert!(receivers.low.try_recv().is_err());
     }
 }

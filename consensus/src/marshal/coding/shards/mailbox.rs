@@ -166,12 +166,13 @@ where
 {
     type Overflow = Pending<B, C, H, P>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         if message.response_closed() {
-            return;
+            return true;
         }
 
         overflow.0.push_back(message);
+        true
     }
 }
 

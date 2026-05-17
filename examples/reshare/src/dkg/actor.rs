@@ -143,7 +143,7 @@ where
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
-        let (sender, mailbox) = mailbox::new(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
 
         // Create metrics
         let successful_epochs = context.counter("successful_epochs", "successful epochs");
@@ -285,15 +285,13 @@ where
             // Secondary = current players + next-epoch players (give time to sync)
             //
             // Overlapping keys are deduplicated as primary (so we don't need to do any filtering here)
-            self.manager
-                .track(
-                    epoch.get(),
-                    TrackedPeers::new(
-                        dealers.clone(),
-                        Set::from_iter_dedup(players.iter().chain(next_players.iter()).cloned()),
-                    ),
-                )
-                .await;
+            self.manager.track(
+                epoch.get(),
+                TrackedPeers::new(
+                    dealers.clone(),
+                    Set::from_iter_dedup(players.iter().chain(next_players.iter()).cloned()),
+                ),
+            );
 
             let self_pk = self.signer.public_key();
             let am_dealer = dealers.position(&self_pk).is_some();
@@ -384,15 +382,17 @@ where
 
                                             let payload =
                                                 Message::<V, C::PublicKey>::Ack(ack).encode();
-                                            if let Err(e) = round_sender
-                                                .send(
-                                                    Recipients::One(sender_pk.clone()),
-                                                    payload,
-                                                    true,
-                                                )
-                                                .await
-                                            {
-                                                warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
+                                            let sent = round_sender.send(
+                                                Recipients::One(sender_pk.clone()),
+                                                payload,
+                                                true,
+                                            );
+                                            if sent.is_empty() {
+                                                warn!(
+                                                    ?epoch,
+                                                    dealer = ?sender_pk,
+                                                    "failed to send ack"
+                                                );
                                             }
                                         }
                                     }
@@ -627,20 +627,11 @@ where
 
             // Send to remote player
             let payload = Message::<V, C::PublicKey>::Dealer(pub_msg, priv_msg).encode();
-            match sender
-                .send(Recipients::One(player.clone()), payload, true)
-                .await
-            {
-                Ok(success) => {
-                    if success.is_empty() {
-                        debug!(?epoch, ?player, "failed to send share");
-                    } else {
-                        debug!(?epoch, ?player, "sent share");
-                    }
-                }
-                Err(e) => {
-                    warn!(?epoch, ?player, ?e, "error sending share");
-                }
+            let success = sender.send(Recipients::One(player.clone()), payload, true);
+            if success.is_empty() {
+                debug!(?epoch, ?player, "failed to send share");
+            } else {
+                debug!(?epoch, ?player, "sent share");
             }
         }
     }
@@ -650,6 +641,7 @@ where
 mod tests {
     use super::*;
     use crate::{dkg::ContinueOnUpdate, orchestrator::Message, setup::PeerConfig};
+    use commonware_actor::Feedback;
     use commonware_cryptography::{
         bls12381::{dkg::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
@@ -687,10 +679,11 @@ mod tests {
     }
 
     impl<P: PublicKey> Manager for NoopManager<P> {
-        async fn track<R>(&mut self, _: u64, _: R)
+        fn track<R>(&mut self, _: u64, _: R) -> Feedback
         where
             R: Into<TrackedPeers<Self::PublicKey>> + Send,
         {
+            Feedback::Ok
         }
     }
 

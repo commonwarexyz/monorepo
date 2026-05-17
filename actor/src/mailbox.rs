@@ -40,6 +40,10 @@
 //! however, are not globally ordered and may be observed in any interleaving.
 
 use crate::Feedback;
+use commonware_runtime::{
+    telemetry::metrics::{Counter, MetricsExt as _},
+    Metrics,
+};
 use std::{
     collections::VecDeque,
     fmt,
@@ -89,9 +93,15 @@ pub trait Policy: Sized {
 
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
-    /// Messages already in the ready queue are not provided here. Policy changes only apply to
-    /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
-    /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
+    /// Returns `true` when the policy considered the message's effects. This includes
+    /// retaining the message, coalescing it with retained work, replacing older retained work,
+    /// or deliberately doing no work because the message is already satisfied, superseded, or no
+    /// longer needed (for example, a request whose response channel is already closed). These
+    /// no-op cases are still handled: there is no remaining work, so there is no loss to report.
+    ///
+    /// Returns `false` only when the policy rejects the message under backpressure. This is the
+    /// lossy case: the submitted work was not semantically handled, and callers that care should
+    /// retry or treat the submission as failed.
     ///
     /// # Warning
     ///
@@ -102,7 +112,7 @@ pub trait Policy: Sized {
     /// This method should not unwind after mutating `overflow`. A panic, including one from a
     /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
     /// the mailbox.
-    fn handle(overflow: &mut Self::Overflow, message: Self);
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
 }
 
 // `activity` packs the published overflow state and in-flight overflow
@@ -295,9 +305,13 @@ impl<T: Policy> OverflowState<T> {
         };
 
         // Preserve overflow order, or handle a still-full ready queue.
-        T::handle(&mut queue, message);
+        let handled = T::handle(&mut queue, message);
         mutation.publish(queue.is_empty());
-        Feedback::Backoff
+        if handled {
+            Feedback::Backoff
+        } else {
+            Feedback::Rejected
+        }
     }
 
     fn refill(&self, ready: &Ready<T>) {
@@ -368,6 +382,7 @@ impl Drop for Mutation<'_> {
 struct State<T: Policy> {
     ready: Ready<T>,
     overflow: OverflowState<T>,
+    backoff: Counter,
     closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
@@ -435,10 +450,15 @@ impl<T: Policy> Sender<T> {
             self.state.closed.load(Ordering::Acquire)
         });
 
-        // Wake on any handled enqueue because a receiver may have skipped
-        // refill while this overflow mutation was active. By the time we wake,
-        // the mutation has published its overflow state. Spurious wakes are
-        // acceptable.
+        // Record any backoff.
+        if feedback == Feedback::Backoff {
+            self.state.backoff.inc();
+        }
+
+        // Wake after any non-closed slow-path enqueue because a receiver may
+        // have skipped refill while this overflow mutation was active. By the
+        // time we wake, the mutation has published its overflow state. Spurious
+        // wakes are acceptable.
         if feedback != Feedback::Closed {
             self.state.waker.wake();
         }
@@ -530,10 +550,11 @@ impl<T: Policy> Drop for Receiver<T> {
 }
 
 /// Create a new bounded mailbox.
-pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let state = Arc::new(State {
         ready: Ready::new(capacity.get()),
         overflow: OverflowState::new(),
+        backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
         closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),
@@ -546,10 +567,52 @@ pub fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     )
 }
 
+#[cfg(test)]
+mod mocks {
+    use commonware_runtime::{
+        telemetry::metrics::{Metric, Registered, Registration},
+        Metrics as RuntimeMetrics, Name, Supervisor,
+    };
+    use std::fmt;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct Metrics;
+
+    impl Supervisor for Metrics {
+        fn name(&self) -> Name {
+            Name::default()
+        }
+
+        fn child(&self, _label: &'static str) -> Self {
+            Self
+        }
+
+        fn with_attribute(self, _key: &'static str, _value: impl fmt::Display) -> Self {
+            self
+        }
+    }
+
+    impl RuntimeMetrics for Metrics {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            _name: N,
+            _help: H,
+            metric: M,
+        ) -> Registered<M> {
+            Registered::with_registration(metric, Registration::from(()))
+        }
+
+        fn encode(&self) -> String {
+            String::new()
+        }
+    }
+}
+
 #[cfg(all(test, not(feature = "loom")))]
 mod tests {
-    use super::*;
+    use super::{mocks, *};
     use commonware_macros::test_async;
+    use commonware_runtime::{deterministic, Runner as _, Supervisor};
     use commonware_utils::{channel::oneshot, NZUsize};
     use futures::{
         pin_mut,
@@ -561,6 +624,10 @@ mod tests {
         mpsc::TryRecvError,
         Arc,
     };
+
+    fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+        super::new(mocks::Metrics, capacity)
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Message {
@@ -574,7 +641,7 @@ mod tests {
     impl Policy for Message {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             match message {
                 Self::Update(value) => {
                     if let Some(index) = overflow
@@ -584,21 +651,24 @@ mod tests {
                         overflow.remove(index);
                     }
                     overflow.push_back(Self::Update(value));
+                    true
                 }
                 Self::Required(_) | Self::Buffered(_) => {
                     overflow.push_back(message);
+                    true
                 }
                 Self::Hint(value) => {
                     let Some(index) = overflow
                         .iter()
                         .rposition(|pending| matches!(pending, Self::Update(_)))
                     else {
-                        return;
+                        return true;
                     };
                     overflow.remove(index);
                     overflow.push_back(Self::Hint(value));
+                    true
                 }
-                Self::Vote(_) => {}
+                Self::Vote(_) => false,
             }
         }
     }
@@ -610,8 +680,9 @@ mod tests {
     impl Policy for Ack {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             overflow.push_back(message);
+            true
         }
     }
 
@@ -681,7 +752,7 @@ mod tests {
     async fn full_inbox_rejects_non_replaceable_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Backoff);
+        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Rejected);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
@@ -704,6 +775,42 @@ mod tests {
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
+    }
+
+    #[test]
+    fn backoff_metric_counts_backoff_feedback() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
+            assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+            assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+            assert_eq!(sender.enqueue(Message::Buffered(3)), Feedback::Backoff);
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("mailbox_backoff_total 2"),
+                "missing backoff count in metrics: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn rejected_feedback_is_not_accepted_or_counted_as_backoff() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
+            assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+            let feedback = sender.enqueue(Message::Vote(2));
+
+            assert_eq!(feedback, Feedback::Rejected);
+            assert!(!feedback.accepted());
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("mailbox_backoff_total 0"),
+                "unexpected backoff count in metrics: {buffer}"
+            );
+        });
     }
 
     #[test]
@@ -933,9 +1040,10 @@ mod tests {
     impl Policy for ClearingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             overflow.push_back(message);
             overflow.clear();
+            true
         }
     }
 
@@ -964,8 +1072,9 @@ mod tests {
     impl Policy for SpillMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             overflow.push_back(message);
+            true
         }
     }
 
@@ -990,7 +1099,7 @@ mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::*;
+    use super::{mocks, *};
     use commonware_utils::NZUsize;
     use futures::pin_mut;
     use loom::{
@@ -1004,6 +1113,10 @@ mod loom_tests {
         future::Future,
         task::{RawWaker, RawWakerVTable, Waker},
     };
+
+    fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+        super::new(mocks::Metrics, capacity)
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Message {
@@ -1053,11 +1166,12 @@ mod loom_tests {
     impl Policy for Message {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             match message {
-                Self::Drop(_) => {}
+                Self::Drop(_) => false,
                 Self::Spill(_) => {
                     overflow.push_back(message);
+                    true
                 }
             }
         }
@@ -1066,7 +1180,7 @@ mod loom_tests {
     impl Policy for OrderedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             let gate = match &message {
                 Self::Item(_) => None,
                 Self::Coordinated(_, gate) => Some(gate.clone()),
@@ -1078,15 +1192,16 @@ mod loom_tests {
                     thread::yield_now();
                 }
             }
+            true
         }
     }
 
     impl Policy for ReplacingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             match message {
-                Self::FillReady => {}
+                Self::FillReady => false,
                 Self::Replace(_) => {
                     if let Some(pending) = overflow
                         .iter_mut()
@@ -1097,6 +1212,7 @@ mod loom_tests {
                     } else {
                         overflow.push_back(message);
                     }
+                    true
                 }
             }
         }
@@ -1105,16 +1221,18 @@ mod loom_tests {
     impl Policy for TrackedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             overflow.push_back(message);
+            true
         }
     }
 
     impl Policy for CyclicMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
             overflow.push_back(message);
+            true
         }
     }
 
