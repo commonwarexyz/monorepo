@@ -533,7 +533,7 @@ mod tests {
                 receiver2,
                 (),
                 control2.clone(),
-                NonZeroUsize::new(count as usize).unwrap(),
+                NZUsize!(20),
                 &Sequential,
             );
             let _handle = bg.start();
@@ -579,7 +579,7 @@ mod tests {
                 receiver2,
                 (),
                 control2.clone(),
-                NonZeroUsize::new(count as usize).unwrap(),
+                NZUsize!(50),
                 &Sequential,
             );
             let _handle = bg.start();
@@ -711,7 +711,7 @@ mod tests {
                 MockReceiver { receiver },
                 (),
                 NoopBlocker,
-                NonZeroUsize::new(count as usize).unwrap(),
+                NZUsize!(64),
                 &HintStrategy(8),
             );
             let _handle = bg.start();
