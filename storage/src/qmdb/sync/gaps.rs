@@ -40,7 +40,7 @@ pub fn find_next<'a, F: Family>(
     let mut fetched_ops_iter = fetched_operations
         .iter()
         .map(|(&start_loc, &operation_count)| {
-            let end_loc = start_loc.checked_add(operation_count).unwrap();
+            let end_loc = start_loc.checked_add(operation_count).unwrap_or(range.end);
             start_loc..end_loc
         })
         .peekable();
@@ -48,7 +48,7 @@ pub fn find_next<'a, F: Family>(
     let mut outstanding_reqs_iter = outstanding_requests
         .into_iter()
         .map(|&start_loc| {
-            let end_loc = start_loc.checked_add(fetch_batch_size.get()).unwrap();
+            let end_loc = start_loc.checked_add(fetch_batch_size.get()).unwrap_or(range.end);
             start_loc..end_loc
         })
         .peekable();
