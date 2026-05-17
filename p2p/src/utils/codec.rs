@@ -1,6 +1,7 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
 use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
+use commonware_actor::Feedback;
 use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -47,25 +48,24 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
     }
 
     /// Send a message to a set of recipients.
-    pub async fn send(
+    pub fn send(
         &mut self,
         recipients: Recipients<S::PublicKey>,
         message: V,
         priority: bool,
-    ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
+    ) -> Vec<S::PublicKey> {
         let encoded = message.encode_with_pool(&self.pool);
-        self.sender.send(recipients, encoded, priority).await
+        self.sender.send(recipients, encoded, priority)
     }
 
     /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]
     /// or the time at which the send can be retried.
-    pub async fn check(
+    pub fn check(
         &mut self,
         recipients: Recipients<S::PublicKey>,
     ) -> Result<CheckedWrappedSender<'_, S, V>, SystemTime> {
         self.sender
             .check(recipients)
-            .await
             .map(|checked| CheckedWrappedSender {
                 pool: &self.pool,
                 sender: checked,
@@ -83,13 +83,13 @@ pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
 }
 
 impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
-    pub async fn send(
-        self,
-        message: V,
-        priority: bool,
-    ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
+    pub fn recipients(&self) -> Vec<S::PublicKey> {
+        self.sender.recipients()
+    }
+
+    pub fn send(self, message: V, priority: bool) -> Feedback {
         let encoded = message.encode_with_pool(self.pool);
-        self.sender.send(encoded, priority).await
+        self.sender.send(encoded, priority)
     }
 }
 
@@ -268,6 +268,7 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         Manager as _, Recipients,
     };
+    use commonware_actor::Feedback;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -275,7 +276,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, Strategy};
-    use commonware_runtime::{deterministic, IoBuf, Quota, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, Clock as _, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{ordered::Set, NZUsize};
     use std::{io, num::NonZeroU32, time::Duration};
 
@@ -304,17 +305,11 @@ mod tests {
         PrivateKey::from_seed(seed).public_key()
     }
 
-    async fn track_peers<I>(
-        oracle: &Oracle<PublicKey, deterministic::Context>,
-        index: u64,
-        peers: I,
-    ) where
+    fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, index: u64, peers: I)
+    where
         I: IntoIterator<Item = PublicKey>,
     {
-        oracle
-            .manager()
-            .track(index, Set::from_iter_dedup(peers))
-            .await;
+        oracle.manager().track(index, Set::from_iter_dedup(peers));
     }
 
     async fn link_bidirectional(
@@ -390,7 +385,9 @@ mod tests {
     impl crate::Blocker for NoopBlocker {
         type PublicKey = PublicKey;
 
-        async fn block(&mut self, _peer: Self::PublicKey) {}
+        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+            Feedback::Ok
+        }
     }
 
     #[test_traced]
@@ -403,7 +400,7 @@ mod tests {
             let pk2 = pk(1);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -420,9 +417,7 @@ mod tests {
             let _handle = bg.start();
 
             let msg: u32 = 42;
-            let _ = sender1
-                .send(Recipients::One(pk2.clone()), msg.encode(), true)
-                .await;
+            let _ = sender1.send(Recipients::One(pk2.clone()), msg.encode(), true);
 
             let (from, value) = rx.recv().await.unwrap();
             assert_eq!(from, pk1);
@@ -438,9 +433,10 @@ mod tests {
 
             let pk1 = pk(0);
             let pk2 = pk(1);
+            let pk3 = pk(2);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -458,34 +454,30 @@ mod tests {
 
             // Send a truncated payload (1 byte, but u32 needs 4).
             let invalid = IoBuf::from(vec![0xFFu8]);
-            let _ = sender1
-                .send(Recipients::One(pk2.clone()), invalid, true)
-                .await;
+            let _ = sender1.send(Recipients::One(pk2.clone()), invalid, true);
 
             // Then send a valid message from a different peer to confirm
             // the receiver is still running.
-            let pk3 = pk(2);
             let control3 = oracle.control(pk3.clone());
-            track_peers(&oracle, 1, [pk2.clone(), pk3.clone()]).await;
             link_bidirectional(&mut oracle, pk3.clone(), pk2.clone()).await;
             let (mut sender3, _) = control3.register(0, TEST_QUOTA).await.unwrap();
 
             let msg: u32 = 99;
-            let _ = sender3
-                .send(Recipients::One(pk2.clone()), msg.encode(), true)
-                .await;
+            let _ = sender3.send(Recipients::One(pk2.clone()), msg.encode(), true);
 
             let (from, value) = rx.recv().await.unwrap();
             assert_eq!(from, pk3);
             assert_eq!(value, 99u32);
 
             // Verify pk1 was blocked.
-            let blocked = oracle.blocked().await.unwrap();
-            assert!(
-                blocked.contains(&(pk2.clone(), pk1.clone())),
-                "expected pk1 to be blocked by pk2, blocked list: {:?}",
-                blocked
-            );
+            loop {
+                let blocked = oracle.blocked().await.unwrap();
+                if blocked.contains(&(pk2.clone(), pk1.clone())) {
+                    break;
+                }
+
+                context.sleep(Duration::from_millis(1)).await;
+            }
         });
     }
 
@@ -499,7 +491,7 @@ mod tests {
             let pk2 = pk(1);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -518,9 +510,7 @@ mod tests {
             let count = 20;
             for i in 0..count {
                 let msg: u32 = i;
-                let _ = sender1
-                    .send(Recipients::One(pk2.clone()), msg.encode(), true)
-                    .await;
+                let _ = sender1.send(Recipients::One(pk2.clone()), msg.encode(), true);
             }
 
             let mut received = Vec::new();
@@ -544,7 +534,7 @@ mod tests {
             let pk2 = pk(1);
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
@@ -565,9 +555,7 @@ mod tests {
 
             let count = 50u32;
             for i in 0..count {
-                let _ = sender1
-                    .send(Recipients::One(pk2.clone()), i.encode(), true)
-                    .await;
+                let _ = sender1.send(Recipients::One(pk2.clone()), i.encode(), true);
             }
 
             let mut received = Vec::new();
@@ -593,7 +581,7 @@ mod tests {
             let control1 = oracle.control(pk1.clone());
             let control2 = oracle.control(pk2.clone());
             let control3 = oracle.control(pk3.clone());
-            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]).await;
+            track_peers(&oracle, 0, [pk1.clone(), pk2.clone(), pk3.clone()]);
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
             link_bidirectional(&mut oracle, pk3.clone(), pk2.clone()).await;
 
@@ -612,19 +600,13 @@ mod tests {
             let _handle = bg.start();
 
             // pk3 sends valid message.
-            let _ = sender3
-                .send(Recipients::One(pk2.clone()), 10u32.encode(), true)
-                .await;
+            let _ = sender3.send(Recipients::One(pk2.clone()), 10u32.encode(), true);
 
             // pk1 sends invalid message.
-            let _ = sender1
-                .send(Recipients::One(pk2.clone()), IoBuf::from(vec![0xFF]), true)
-                .await;
+            let _ = sender1.send(Recipients::One(pk2.clone()), IoBuf::from(vec![0xFF]), true);
 
             // pk3 sends another valid message.
-            let _ = sender3
-                .send(Recipients::One(pk2.clone()), 20u32.encode(), true)
-                .await;
+            let _ = sender3.send(Recipients::One(pk2.clone()), 20u32.encode(), true);
 
             // Collect the two valid messages.
             let mut values = Vec::new();
@@ -637,9 +619,15 @@ mod tests {
             assert_eq!(values, vec![10u32, 20]);
 
             // Only pk1 should be blocked.
-            let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.contains(&(pk2.clone(), pk1.clone())));
-            assert!(!blocked.contains(&(pk2.clone(), pk3.clone())));
+            loop {
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(!blocked.contains(&(pk2.clone(), pk3.clone())));
+                if blocked.contains(&(pk2.clone(), pk1.clone())) {
+                    break;
+                }
+
+                context.sleep(Duration::from_millis(1)).await;
+            }
         });
     }
 

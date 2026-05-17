@@ -14,10 +14,10 @@ mod actor;
 pub use actor::Actor;
 
 mod ingress;
-pub use ingress::Message;
+pub use ingress::{Mailbox, Message};
 
 pub struct Config<C: PublicKey> {
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub send_batch_size: NonZeroUsize,
     pub gossip_bit_vec_frequency: Duration,
     pub max_peer_set_size: u64,
@@ -26,7 +26,6 @@ pub struct Config<C: PublicKey> {
 
     pub sent_messages: CounterFamily<metrics::Message<C>>,
     pub received_messages: CounterFamily<metrics::Message<C>>,
-    pub dropped_messages: CounterFamily<metrics::Message<C>>,
     pub rate_limited: CounterFamily<metrics::Message<C>>,
 }
 

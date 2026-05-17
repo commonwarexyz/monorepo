@@ -1,10 +1,47 @@
 //! Mock implementations for testing.
 
 use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{IoBuf, IoBufs};
+use commonware_runtime::{
+    telemetry::metrics::{Metric, Registered, Registration},
+    IoBuf, IoBufs, Metrics as RuntimeMetrics, Name, Supervisor,
+};
 use core::future;
 use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
+
+/// Metrics implementation that registers nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Metrics;
+
+impl Supervisor for Metrics {
+    fn name(&self) -> Name {
+        Name::default()
+    }
+
+    fn child(&self, _label: &'static str) -> Self {
+        Self
+    }
+
+    fn with_attribute(self, _key: &'static str, _value: impl std::fmt::Display) -> Self {
+        self
+    }
+}
+
+impl RuntimeMetrics for Metrics {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        _name: N,
+        _help: H,
+        metric: M,
+    ) -> Registered<M> {
+        Registered::with_registration(metric, Registration::from(()))
+    }
+
+    fn encode(&self) -> String {
+        String::new()
+    }
+}
 
 /// Sender that accepts messages without delivering them.
 ///
@@ -34,7 +71,7 @@ impl<P: PublicKey> LimitedSender for InertSender<P> {
     where
         Self: 'a;
 
-    async fn check(
+    fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
@@ -50,14 +87,13 @@ impl<P: PublicKey> LimitedSender for InertSender<P> {
 
 impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
     type PublicKey = P;
-    type Error = Infallible;
 
-    async fn send(
-        self,
-        _: impl Into<IoBufs> + Send,
-        _: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        Ok(self.recipients)
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        self.recipients.clone()
+    }
+
+    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Feedback {
+        Feedback::Ok
     }
 }
 
@@ -89,7 +125,38 @@ mod tests {
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
-    use futures::executor::block_on;
+
+    #[derive(Clone)]
+    struct RejectingSender<P: PublicKey> {
+        peer: P,
+    }
+
+    impl<P: PublicKey> LimitedSender for RejectingSender<P> {
+        type PublicKey = P;
+        type Checked<'a>
+            = Self
+        where
+            Self: 'a;
+
+        fn check(
+            &mut self,
+            _recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(self.clone())
+        }
+    }
+
+    impl<P: PublicKey> CheckedSender for RejectingSender<P> {
+        type PublicKey = P;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            vec![self.peer.clone()]
+        }
+
+        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
+            Feedback::Rejected
+        }
+    }
 
     #[test]
     fn inert_sender_expands_all_recipients() {
@@ -101,8 +168,18 @@ mod tests {
         ];
 
         let (mut sender, _) = inert_channel(peers.as_slice());
-        let sent = block_on(sender.send(Recipients::All, b"hello".to_vec(), false)).unwrap();
-
+        let sent = sender.send(Recipients::All, b"hello".to_vec(), false);
         assert_eq!(sent, peers);
+    }
+
+    #[test]
+    fn sender_returns_no_recipients_when_checked_send_rejects() {
+        let mut rng = test_rng();
+        let peer = PrivateKey::random(&mut rng).public_key();
+        let mut sender = RejectingSender { peer: peer.clone() };
+
+        let sent = Sender::send(&mut sender, Recipients::One(peer), b"hello".to_vec(), false);
+
+        assert!(sent.is_empty());
     }
 }

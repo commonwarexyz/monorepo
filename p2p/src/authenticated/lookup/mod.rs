@@ -46,8 +46,7 @@
 //! - `message`: The arbitrary application payload as `IoBuf`.
 //!
 //! The size of the `message` bytes must not exceed the configured
-//! `max_message_size`. If it does, the sending operation will fail with
-//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
+//! `max_message_size`. If it does, the sending operation will panic. Messages can be sent with `priority`, allowing certain
 //! communications to potentially bypass lower-priority messages waiting in send queues across all
 //! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
 //! and rate limiting.
@@ -102,10 +101,9 @@
 //!
 //! ## Message Delivery
 //!
-//! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers
-//! from blocking sends to other peers. Incoming messages are dropped when the application's
-//! receive buffer is full, ensuring ping messages continue to flow and connections remain
-//! healthy.
+//! Outgoing message submissions can be rejected when a peer's send buffer is full, preventing slow
+//! peers from blocking sends to other peers. Incoming messages are dropped when the application's
+//! receive buffer is full, ensuring ping messages continue to flow and connections remain healthy.
 //!
 //! # Example
 //!
@@ -168,7 +166,7 @@
 //!         (peer2, peer2_addr.into()),
 //!         (peer3, peer3_addr.into()),
 //!     ].try_into().unwrap();
-//!     oracle.track(0, peers).await;
+//!     oracle.track(0, peers);
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
@@ -182,7 +180,7 @@
 //!     network.start();
 //!
 //!     // Example: Use sender
-//!     let _ = sender.send(Recipients::All, IoBuf::from(b"hello"), false).await;
+//!     let _ = sender.send(Recipients::All, IoBuf::from(b"hello"), false);
 //!
 //!     // Graceful shutdown (stops all spawned tasks)
 //!     context.stop(0, None).await.unwrap();
@@ -201,8 +199,6 @@ use thiserror::Error;
 /// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("message too large: {0}")]
-    MessageTooLarge(usize),
     #[error("network closed")]
     NetworkClosed,
 }
@@ -215,18 +211,26 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Address, AddressableManager, Ingress, Provider, Receiver, Recipients, Sender};
+    use crate::{
+        authenticated::{
+            lookup::actors::router::{Actor as RouterActor, Config as RouterConfig},
+            relay::Relay,
+        },
+        Address, AddressableManager, CheckedSender as _, Ingress, LimitedSender as _, Provider,
+        Receiver, Recipients, Sender,
+    };
+    use commonware_actor::Feedback;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock,
+        deterministic, telemetry::metrics::count_running_tasks, tokio, BufferPooler, Clock, IoBuf,
         Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
         channel::mpsc,
         hostname,
         ordered::{Map, Set},
-        Hostname, TryCollect, NZU32,
+        Hostname, NZUsize, TryCollect, NZU32,
     };
     use rand_core::{CryptoRngCore, RngCore};
     use std::{
@@ -253,8 +257,7 @@ mod tests {
     /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
     /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
     /// ```
-    fn assert_no_rate_limiting(context: &impl Metrics) {
-        let metrics = context.encode();
+    fn assert_no_rate_limiting(metrics: &str) {
         assert!(
             !metrics.contains("messages_rate_limited_total{"),
             "no messages should be rate limited: {metrics}"
@@ -298,7 +301,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
             // Register peers
-            oracle.track(0, Map::try_from(peers.clone()).unwrap()).await;
+            oracle.track(0, Map::try_from(peers.clone()).unwrap());
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -350,19 +353,15 @@ mod tests {
                                     for pub_key in &recipients {
                                         // Loop until success
                                         loop {
-                                            let sent = sender
-                                                .send(
-                                                    Recipients::One(pub_key.clone()),
-                                                    public_key.as_ref().to_vec(),
-                                                    true,
-                                                )
-                                                .await
-                                                .unwrap();
+                                            let sent = sender.send(
+                                                Recipients::One(pub_key.clone()),
+                                                public_key.as_ref().to_vec(),
+                                                true,
+                                            );
                                             if sent.len() != 1 {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
                                             }
-                                            assert_eq!(&sent[0], pub_key);
                                             break;
                                         }
                                     }
@@ -370,28 +369,19 @@ mod tests {
                                 Mode::Some | Mode::All => {
                                     // Loop until all peer sends successful
                                     loop {
-                                        let mut sent = sender
-                                            .send(
-                                                match mode {
-                                                    Mode::Some => {
-                                                        Recipients::Some(recipients.clone())
-                                                    }
-                                                    Mode::All => Recipients::All,
-                                                    _ => unreachable!(),
-                                                },
-                                                public_key.as_ref().to_vec(),
-                                                true,
-                                            )
-                                            .await
-                                            .unwrap();
+                                        let sent = sender.send(
+                                            match mode {
+                                                Mode::Some => Recipients::Some(recipients.clone()),
+                                                Mode::All => Recipients::All,
+                                                _ => unreachable!(),
+                                            },
+                                            public_key.as_ref().to_vec(),
+                                            true,
+                                        );
                                         if sent.len() != recipients.len() {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
                                         }
-
-                                        // Compare to expected
-                                        sent.sort();
-                                        assert_eq!(sent, recipients);
                                         break;
                                     }
                                 }
@@ -421,7 +411,7 @@ mod tests {
         }
 
         // Ensure no message rate limiting occurred
-        assert_no_rate_limiting(&context);
+        assert_no_rate_limiting(&context.encode());
     }
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
@@ -530,26 +520,20 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers at separate indices
-                oracle
-                    .track(0, Map::try_from([peers[0].clone()]).unwrap())
-                    .await;
-                oracle
-                    .track(
-                        1,
-                        Map::try_from([peers[1].clone(), peers[2].clone()]).unwrap(),
-                    )
-                    .await;
-                oracle
-                    .track(
-                        2,
-                        peers
-                            .iter()
-                            .skip(2)
-                            .cloned()
-                            .try_collect::<Map<_, _>>()
-                            .unwrap(),
-                    )
-                    .await;
+                oracle.track(0, Map::try_from([peers[0].clone()]).unwrap());
+                oracle.track(
+                    1,
+                    Map::try_from([peers[1].clone(), peers[2].clone()]).unwrap(),
+                );
+                oracle.track(
+                    2,
+                    peers
+                        .iter()
+                        .skip(2)
+                        .cloned()
+                        .try_collect::<Map<_, _>>()
+                        .unwrap(),
+                );
 
                 // Register basic application
                 let (mut sender, mut receiver) =
@@ -566,8 +550,6 @@ mod tests {
                         loop {
                             if sender
                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                .await
-                                .unwrap()
                                 .len()
                                 == n - 1
                             {
@@ -594,11 +576,12 @@ mod tests {
             }
 
             // Ensure no message rate limiting occurred
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
     #[test_traced]
+    #[should_panic(expected = "message too large")]
     fn test_message_too_large() {
         // Configure test
         let base_port = 3000;
@@ -632,7 +615,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
             // Register peers
-            oracle.track(0, peers.clone()).await;
+            oracle.track(0, peers.clone());
 
             // Register basic application
             let (mut sender, _) =
@@ -647,8 +630,7 @@ mod tests {
 
             // Send message
             let recipient = Recipients::One(peers[1].clone());
-            let result = sender.send(recipient, msg, true).await;
-            assert!(matches!(result, Err(Error::MessageTooLarge(_))));
+            sender.send(recipient, msg, true);
         });
     }
 
@@ -681,7 +663,7 @@ mod tests {
             let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
-            oracle0.track(0, peers.clone()).await;
+            oracle0.track(0, peers.clone());
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -690,7 +672,7 @@ mod tests {
             let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
             let (mut network1, mut oracle1) =
                 Network::new(context.child("peer").with_attribute("index", 1), config1);
-            oracle1.track(0, peers.clone()).await;
+            oracle1.track(0, peers.clone());
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
@@ -699,11 +681,9 @@ mod tests {
             let msg = vec![0u8; 1024]; // 1KB
             loop {
                 // Confirm message is sent to peer
-                let sent = sender0
-                    .send(Recipients::One(pk1.clone()), msg.clone(), true)
-                    .await
-                    .unwrap();
-                if !sent.is_empty() {
+                let checked = sender0.check(Recipients::All).unwrap();
+                if !checked.recipients().is_empty() {
+                    checked.send(msg.clone(), true);
                     break;
                 }
 
@@ -713,14 +693,12 @@ mod tests {
             }
 
             // Immediately send the second message to trigger the rate limit.
-            // With partial sends, rate-limited recipients return empty vec (not error).
-            // Outbound rate limiting skips the peer, returns empty vec.
-            let sent = sender0.send(Recipients::One(pk1), msg, true).await.unwrap();
+            let sent = sender0.send(Recipients::One(pk1), msg, true);
             assert!(sent.is_empty());
 
             // Give the metrics time to reflect the rate-limited message.
             for _ in 0..10 {
-                assert_no_rate_limiting(&context);
+                assert_no_rate_limiting(&context.encode());
                 context.sleep(Duration::from_millis(100)).await;
             }
         });
@@ -754,7 +732,7 @@ mod tests {
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
-            oracle.track(10, set10.clone()).await;
+            oracle.track(10, set10.clone());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 10);
             assert_eq!(&update.latest.primary, set10.keys());
@@ -769,7 +747,7 @@ mod tests {
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
-            oracle.track(9, set9.clone()).await;
+            oracle.track(9, set9.clone());
 
             // Add new peer set
             let set11: Map<_, _> = peers_and_sks
@@ -778,7 +756,7 @@ mod tests {
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
-            oracle.track(11, set11.clone()).await;
+            oracle.track(11, set11.clone());
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 11);
             assert_eq!(&update.latest.primary, set11.keys());
@@ -823,7 +801,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
                 // Register peer set
-                oracle.track(0, peers.clone()).await;
+                oracle.track(0, peers.clone());
 
                 let (mut sender, mut receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -838,10 +816,7 @@ mod tests {
 
                         // Send a message
                         loop {
-                            let sent = sender
-                                .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                .await
-                                .unwrap();
+                            let sent = sender.send(Recipients::All, pk.as_ref().to_vec(), true);
                             if sent.len() >= expected_connections {
                                 break;
                             }
@@ -955,7 +930,7 @@ mod tests {
 
             // Register a peer set that does NOT include self
             let peer_set: Map<_, _> = [(other_pk.clone(), other_addr.into())].try_into().unwrap();
-            oracle.track(1, peer_set.clone()).await;
+            oracle.track(1, peer_set.clone());
 
             // Receive subscription notification
             let update = subscription.recv().await.unwrap();
@@ -995,7 +970,7 @@ mod tests {
             ]
             .try_into()
             .unwrap();
-            oracle.track(2, peer_set.clone()).await;
+            oracle.track(2, peer_set.clone());
 
             // Receive subscription notification
             let update = subscription.recv().await.unwrap();
@@ -1080,7 +1055,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers with DNS addresses
-                oracle.track(0, Map::try_from(peers.clone()).unwrap()).await;
+                oracle.track(0, Map::try_from(peers.clone()).unwrap());
 
                 // Register channel
                 let (mut sender, mut receiver) =
@@ -1121,10 +1096,11 @@ mod tests {
                                     recipients.sort();
 
                                     loop {
-                                        let mut sent = sender
-                                            .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                            .await
-                                            .unwrap();
+                                        let mut sent = sender.send(
+                                            Recipients::All,
+                                            pk.as_ref().to_vec(),
+                                            true,
+                                        );
                                         if sent.len() != n - 1 {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
@@ -1155,7 +1131,7 @@ mod tests {
                 complete_receiver.recv().await.unwrap();
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
@@ -1212,7 +1188,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
                 // Register peers with mixed addresses
-                oracle.track(0, Map::try_from(peers.clone()).unwrap()).await;
+                oracle.track(0, Map::try_from(peers.clone()).unwrap());
 
                 // Register channel
                 let (mut sender, mut receiver) =
@@ -1253,10 +1229,11 @@ mod tests {
                                     recipients.sort();
 
                                     loop {
-                                        let mut sent = sender
-                                            .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                            .await
-                                            .unwrap();
+                                        let mut sent = sender.send(
+                                            Recipients::All,
+                                            pk.as_ref().to_vec(),
+                                            true,
+                                        );
                                         if sent.len() != n - 1 {
                                             context.sleep(Duration::from_millis(100)).await;
                                             continue;
@@ -1287,7 +1264,7 @@ mod tests {
                 complete_receiver.recv().await.unwrap();
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
@@ -1318,7 +1295,7 @@ mod tests {
                 (peer0.public_key(), Address::Symmetric(socket0)),
                 (peer1.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle0.track(0, Map::try_from(peers0).unwrap()).await;
+            oracle0.track(0, Map::try_from(peers0).unwrap());
 
             let (_sender0, mut receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1344,7 +1321,7 @@ mod tests {
                 ),
                 (peer1.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle1.track(0, Map::try_from(peers1).unwrap()).await;
+            oracle1.track(0, Map::try_from(peers1).unwrap());
 
             let (mut sender1, _receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1354,10 +1331,7 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
 
             // Try to send from peer 1 - should not reach anyone since private IPs are blocked
-            let sent = sender1
-                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                .await
-                .unwrap();
+            let sent = sender1.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
             assert!(
                 sent.is_empty(),
                 "peer 1 should not have connected to peer 0 (private IP)"
@@ -1438,9 +1412,7 @@ mod tests {
                 let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
                 let (mut network0, mut oracle0) =
                     Network::new(context.child("peer").with_attribute("index", 0), config0);
-                oracle0
-                    .track(0, Map::try_from(peers.clone()).unwrap())
-                    .await;
+                oracle0.track(0, Map::try_from(peers.clone()).unwrap());
                 let (_sender0, mut receiver0) =
                     network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network0.start();
@@ -1449,34 +1421,28 @@ mod tests {
                 let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
                 let (mut network1, mut oracle1) =
                     Network::new(context.child("peer").with_attribute("index", 1), config1);
-                oracle1
-                    .track(0, Map::try_from(peers.clone()).unwrap())
-                    .await;
+                oracle1.track(0, Map::try_from(peers.clone()).unwrap());
                 let (mut sender1, _receiver1) =
                     network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network1.start();
 
-                // Wait for peers to connect (may take multiple attempts due to random IP selection)
-                let pk0 = peer0.public_key();
+                // Send until peers connect (may take multiple attempts due to random IP selection).
                 loop {
-                    let sent = sender1
-                        .send(
-                            Recipients::One(pk0.clone()),
-                            peer1.public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .await
-                        .unwrap();
-                    if !sent.is_empty() {
-                        break;
+                    let checked = sender1.check(Recipients::All).unwrap();
+                    if !checked.recipients().is_empty() {
+                        checked.send(peer1.public_key().as_ref().to_vec(), true);
                     }
-                    context.sleep(Duration::from_millis(100)).await;
-                }
 
-                // Verify peer 0 received the message
-                let (sender, msg) = receiver0.recv().await.unwrap();
-                assert_eq!(sender, peer1.public_key());
-                assert_eq!(msg, peer1.public_key().as_ref());
+                    select! {
+                        result = receiver0.recv() => {
+                            let (sender, msg) = result.unwrap();
+                            assert_eq!(sender, peer1.public_key());
+                            assert_eq!(msg, peer1.public_key().as_ref());
+                            break;
+                        },
+                        _ = context.sleep(Duration::from_millis(100)) => {}
+                    }
+                }
             });
         }
     }
@@ -1531,9 +1497,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, Map::try_from(peer_set.clone()).unwrap())
-                    .await;
+                oracle.track(0, Map::try_from(peer_set.clone()).unwrap());
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1549,14 +1513,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .await
-                        .unwrap();
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1609,12 +1570,10 @@ mod tests {
 
                     // Update oracle on all running peers
                     for oracle in oracles.iter_mut().flatten() {
-                        oracle
-                            .track(
-                                (round * (n - 1) + restart_peer_idx) as u64,
-                                Map::try_from(updated_peer_set.clone()).unwrap(),
-                            )
-                            .await;
+                        oracle.track(
+                            (round * (n - 1) + restart_peer_idx) as u64,
+                            Map::try_from(updated_peer_set.clone()).unwrap(),
+                        );
                     }
 
                     // Restart the peer with new port
@@ -1630,12 +1589,10 @@ mod tests {
                     let (mut network, mut oracle) =
                         Network::new(peer_context.child("network"), config);
 
-                    oracle
-                        .track(
-                            (round * (n - 1) + restart_peer_idx) as u64,
-                            Map::try_from(updated_peer_set.clone()).unwrap(),
-                        )
-                        .await;
+                    oracle.track(
+                        (round * (n - 1) + restart_peer_idx) as u64,
+                        Map::try_from(updated_peer_set.clone()).unwrap(),
+                    );
 
                     let (sender, receiver) = network.register(
                         0,
@@ -1652,14 +1609,11 @@ mod tests {
                     // Wait for the restarted peer to reconnect to all others
                     let restarted_sender = senders[restart_peer_idx].as_mut().unwrap();
                     loop {
-                        let sent = restarted_sender
-                            .send(
-                                Recipients::All,
-                                peers[restart_peer_idx].public_key().as_ref().to_vec(),
-                                true,
-                            )
-                            .await
-                            .unwrap();
+                        let sent = restarted_sender.send(
+                            Recipients::All,
+                            peers[restart_peer_idx].public_key().as_ref().to_vec(),
+                            true,
+                        );
                         if sent.len() == n - 1 {
                             break;
                         }
@@ -1673,14 +1627,11 @@ mod tests {
                         }
                         let sender = senders[i].as_mut().unwrap();
                         loop {
-                            let sent = sender
-                                .send(
-                                    Recipients::One(addresses[restart_peer_idx].clone()),
-                                    peers[i].public_key().as_ref().to_vec(),
-                                    true,
-                                )
-                                .await
-                                .unwrap();
+                            let sent = sender.send(
+                                Recipients::One(addresses[restart_peer_idx].clone()),
+                                peers[i].public_key().as_ref().to_vec(),
+                                true,
+                            );
                             if sent.len() == 1 {
                                 break;
                             }
@@ -1700,7 +1651,7 @@ mod tests {
                 }
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
 
@@ -1754,9 +1705,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, Map::try_from(peer_set.clone()).unwrap())
-                    .await;
+                oracle.track(0, Map::try_from(peer_set.clone()).unwrap());
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1772,14 +1721,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .await
-                        .unwrap();
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1835,8 +1781,7 @@ mod tests {
             oracles[0]
                 .as_mut()
                 .unwrap()
-                .track(1, Map::try_from(updated_peer_set.clone()).unwrap())
-                .await;
+                .track(1, Map::try_from(updated_peer_set.clone()).unwrap());
 
             // Restart all shutdown peers with new ports
             for &idx in &restart_peers {
@@ -1848,9 +1793,7 @@ mod tests {
                 );
                 let (mut network, mut oracle) = Network::new(peer_context.child("network"), config);
 
-                oracle
-                    .track(1, Map::try_from(updated_peer_set.clone()).unwrap())
-                    .await;
+                oracle.track(1, Map::try_from(updated_peer_set.clone()).unwrap());
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1866,14 +1809,11 @@ mod tests {
             for (i, sender) in senders.iter_mut().enumerate() {
                 let sender = sender.as_mut().unwrap();
                 loop {
-                    let sent = sender
-                        .send(
-                            Recipients::All,
-                            peers[i].public_key().as_ref().to_vec(),
-                            true,
-                        )
-                        .await
-                        .unwrap();
+                    let sent = sender.send(
+                        Recipients::All,
+                        peers[i].public_key().as_ref().to_vec(),
+                        true,
+                    );
                     if sent.len() == n - 1 {
                         break;
                     }
@@ -1892,7 +1832,7 @@ mod tests {
                 }
             }
 
-            assert_no_rate_limiting(&context);
+            assert_no_rate_limiting(&context.encode());
         });
     }
     #[test_traced]
@@ -1917,7 +1857,7 @@ mod tests {
                 Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5200));
             let peers: Map<ed25519::PublicKey, Address> =
                 vec![(address.clone(), peer_addr)].try_into().unwrap();
-            oracle.track(0, peers.clone()).await;
+            oracle.track(0, peers.clone());
 
             // Start and immediately abort the network
             let handle = network.start();
@@ -1927,16 +1867,13 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Oracle operations should not panic even after shutdown
-            oracle.track(1, peers.clone()).await;
+            oracle.track(1, peers.clone());
             let _ = oracle.peer_set(0).await;
             let _ = oracle.subscribe().await;
-            crate::block_peer(&mut oracle, address.clone()).await;
+            crate::block_peer(&mut oracle, address.clone());
 
             // Sender operations should not panic even after shutdown
-            let sent = sender
-                .send(Recipients::All, address.as_ref().to_vec(), true)
-                .await
-                .unwrap();
+            let sent = sender.send(Recipients::All, address.as_ref().to_vec(), true);
             assert!(sent.is_empty());
         });
     }
@@ -1964,7 +1901,7 @@ mod tests {
                 Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5200));
             let peers: Map<ed25519::PublicKey, Address> =
                 vec![(peer.public_key(), peer_addr)].try_into().unwrap();
-            oracle.track(0, peers).await;
+            oracle.track(0, peers);
 
             // Start the network
             let handle = network.start();
@@ -2027,16 +1964,13 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle0.track(0, Map::try_from(peer_set0).unwrap()).await;
+            oracle0.track(0, Map::try_from(peer_set0).unwrap());
 
             // Wait for connections to be attempted
             context.sleep(Duration::from_secs(30)).await;
 
             // Peer 0 can't send to anyone
-            let sent = sender0
-                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                .await
-                .unwrap();
+            let sent = sender0.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
             assert!(sent.is_empty());
 
             // Start peer 1 (has duplicate but correct address)
@@ -2053,17 +1987,15 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle1.track(0, Map::try_from(peer_set1).unwrap()).await;
+            oracle1.track(0, Map::try_from(peer_set1).unwrap());
 
             // Wait for connections to be made
             context.sleep(Duration::from_secs(30)).await;
 
             // Now peer 0 should connect to peer 1 at correct address
             loop {
-                let sent = sender0
-                    .send(Recipients::All, peer0.public_key().as_ref().to_vec(), true)
-                    .await
-                    .unwrap();
+                let sent =
+                    sender0.send(Recipients::All, peer0.public_key().as_ref().to_vec(), true);
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer1.public_key());
                     break;
@@ -2118,20 +2050,16 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle0
-                .track(0, Map::try_from(peer_set.clone()).unwrap())
-                .await;
-            oracle2.track(0, Map::try_from(peer_set).unwrap()).await;
+            oracle0.track(0, Map::try_from(peer_set.clone()).unwrap());
+            oracle2.track(0, Map::try_from(peer_set).unwrap());
 
             // Wait for connections to be made
             context.sleep(Duration::from_secs(30)).await;
 
             // Peer 0 can send to peer 2
             loop {
-                let sent = sender0
-                    .send(Recipients::All, peer2.public_key().as_ref().to_vec(), true)
-                    .await
-                    .unwrap();
+                let sent =
+                    sender0.send(Recipients::All, peer2.public_key().as_ref().to_vec(), true);
                 if sent.len() == 1 {
                     assert_eq!(sent[0], peer2.public_key());
                     break;
@@ -2155,17 +2083,15 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle1.track(0, Map::try_from(peer_set1).unwrap()).await;
+            oracle1.track(0, Map::try_from(peer_set1).unwrap());
 
             // Wait for connections to be made
             context.sleep(Duration::from_secs(30)).await;
 
             // Now peer 0 should connect to peer 1 at correct address and peer 2 should dial peer 1
             loop {
-                let sent = sender1
-                    .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
-                    .await
-                    .unwrap();
+                let sent =
+                    sender1.send(Recipients::All, peer1.public_key().as_ref().to_vec(), true);
                 if sent.len() == 2 {
                     assert!(sent.contains(&peer0.public_key()));
                     assert!(sent.contains(&peer2.public_key()));
@@ -2184,6 +2110,45 @@ mod tests {
             assert!(received0);
             let (sender, _) = receiver2.recv().await.unwrap();
             assert_eq!(sender, peer1.public_key());
+        });
+    }
+
+    #[test]
+    fn test_broadcast_slow_peer_no_blocking() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = RouterConfig {
+                mailbox_size: NZUsize!(1),
+            };
+            let (router, mailbox, messenger) =
+                RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
+
+            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
+            let _handle = router.start(channels);
+
+            let slow_peer = ed25519::PrivateKey::from_seed(0).public_key();
+            let (slow_relay, _slow_receivers) =
+                Relay::new(context.child("slow_relay"), NZUsize!(10));
+            assert!(
+                mailbox.ready(slow_peer, slow_relay).await.is_some(),
+                "Failed to register slow peer"
+            );
+
+            let fast_peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let (fast_relay, mut fast_receivers) =
+                Relay::new(context.child("fast_relay"), NZUsize!(100));
+            assert!(
+                mailbox.ready(fast_peer, fast_relay).await.is_some(),
+                "Failed to register fast peer"
+            );
+
+            let message = IoBuf::from(vec![0u8; 100]);
+            for i in 0..11 {
+                let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
+                assert_ne!(sent, Feedback::Closed, "Broadcast {i} should be accepted");
+
+                assert!(fast_receivers.low.recv().await.is_some());
+            }
         });
     }
 }

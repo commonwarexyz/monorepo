@@ -1,10 +1,13 @@
-use super::{ingress::Message, Config, Error};
+use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
     data::EncodedData,
-    lookup::{channels::Channels, metrics, types},
-    relay::{recv_prioritized, Prioritized, Relay},
-    Mailbox,
+    lookup::{
+        channels::{self, Channels},
+        metrics, types,
+    },
+    relay::{try_recv, Message as RelayMessage, Prioritized, Relay},
 };
+use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
@@ -13,10 +16,8 @@ use commonware_runtime::{
     Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::{
-    channel::mpsc::{self, error::TrySendError},
-    time::SYSTEM_TIME_PRECISION,
-};
+use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
+use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
@@ -27,38 +28,35 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     ping_frequency: Duration,
     send_batch_size: usize,
 
-    control: mpsc::Receiver<Message>,
-    high: mpsc::Receiver<EncodedData>,
-    low: mpsc::Receiver<EncodedData>,
+    control: ring::Receiver<Message>,
+    high: mailbox::Receiver<RelayMessage<EncodedData>>,
+    low: mailbox::Receiver<RelayMessage<EncodedData>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
-    dropped_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
     _phantom: std::marker::PhantomData<C>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
         (
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 control: control_receiver,
-                high: high_receiver,
-                low: low_receiver,
+                high: receivers.high,
+                low: receivers.low,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
-                dropped_messages: cfg.dropped_messages,
                 rate_limited: cfg.rate_limited,
                 _phantom: std::marker::PhantomData,
             },
             control_sender,
-            Relay::new(low_sender, high_sender),
+            relay,
         )
     }
 
@@ -86,6 +84,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         batch.push(payload);
     }
 
+    fn try_recv_control(control: &mut ring::Receiver<Message>) -> Option<Message> {
+        control.next().now_or_never().flatten()
+    }
+
     /// Drains already-queued messages into `batch`.
     ///
     /// Priority order: control > high > low. Only consumes messages that are
@@ -96,24 +98,24 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mpsc::Receiver<Message>,
-        high: &mut mpsc::Receiver<EncodedData>,
-        low: &mut mpsc::Receiver<EncodedData>,
+        control: &mut ring::Receiver<Message>,
+        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
-            if let Ok(msg) = control.try_recv() {
+            if let Some(msg) = Self::try_recv_control(control) {
                 match msg {
                     Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                 }
             }
-            if let Ok(msg) = high.try_recv() {
+            if let Some(msg) = try_recv(high) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
-            if let Ok(msg) = low.try_recv() {
+            if let Some(msg) = try_recv(low) {
                 let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
                 Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
@@ -121,6 +123,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             break;
         }
         Ok(())
+    }
+
+    async fn recv_prioritized(
+        control: &mut ring::Receiver<Message>,
+        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+    ) -> Prioritized<Message, EncodedData> {
+        select! {
+            msg = control.next() => msg.map_or(Prioritized::Closed, Prioritized::Control),
+            msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+            msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+        }
     }
 
     pub async fn run<Si: Sink, St: Stream>(
@@ -194,7 +208,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     // Await any outbound message (control, high, or low), then
                     // drain already-queued messages into a single runtime write.
                     // Priority order: control > high > low.
-                    msg = recv_prioritized(control, high, low) => {
+                    msg = Self::recv_prioritized(control, high, low) => {
                         match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
                             Prioritized::Control(msg) => match msg {
@@ -231,79 +245,73 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 Ok(())
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self
-            .context
-            .child("receiver")
-            .spawn(move |context| async move {
-                loop {
-                    // Receive a message from the peer
-                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
+        let mut receive_handler: Handle<Result<(), Error>> =
+            self.context
+                .child("receiver")
+                .spawn(move |context| async move {
+                    loop {
+                        // Receive a message from the peer
+                        let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
-                    // Parse the message
-                    let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
-                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            debug!(?err, ?peer, "failed to decode message");
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_invalid(&peer))
-                                .inc();
-                            return Err(Error::DecodeFailed(err));
-                        }
-                    };
-
-                    // Validate channel and resolve rate limiter before emitting
-                    // any channel-labeled metrics (to avoid unbounded cardinality
-                    // from attacker-controlled channel values).
-                    let (metric, rate_limiter) = match &msg {
-                        types::Message::Data(data) => match rate_limits.get(&data.channel) {
-                            Some(rate_limit) => {
-                                (metrics::Message::new_data(&peer, data.channel), rate_limit)
-                            }
-                            None => {
-                                debug!(?peer, channel = data.channel, "invalid channel");
+                        // Parse the message
+                        let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
+                        let msg = match types::Message::decode_cfg(msg, &max_data_length) {
+                            Ok(msg) => msg,
+                            Err(err) => {
+                                debug!(?err, ?peer, "failed to decode message");
                                 self.received_messages
                                     .get_or_create(&metrics::Message::new_invalid(&peer))
                                     .inc();
-                                return Err(Error::InvalidChannel);
+                                return Err(Error::DecodeFailed(err));
                             }
-                        },
-                        types::Message::Ping => {
-                            (metrics::Message::new_ping(&peer), &ping_rate_limiter)
-                        }
-                    };
-                    self.received_messages.get_or_create(&metric).inc();
-                    if let Err(wait_until) = rate_limiter.check() {
-                        self.rate_limited.get_or_create(&metric).inc();
-                        let wait_duration = wait_until.wait_time_from(context.now());
-                        context.sleep(wait_duration).await;
-                    }
+                        };
 
-                    match msg {
-                        types::Message::Data(data) => {
-                            // Send message to application using non-blocking try_send.
-                            //
-                            // We intentionally drop messages when the application buffer is
-                            // full rather than blocking. Blocking here would also block
-                            // processing of Ping messages, causing the peer connection to
-                            // stall and potentially disconnect.
-                            let sender = senders.get_mut(&data.channel).unwrap();
-                            if let Err(e) = sender.try_send((peer.clone(), data.message)) {
-                                if matches!(e, TrySendError::Full(_)) {
-                                    self.dropped_messages
-                                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
-                                        .inc();
+                        // Validate channel and resolve rate limiter before emitting
+                        // any channel-labeled metrics (to avoid unbounded cardinality
+                        // from attacker-controlled channel values).
+                        let (metric, rate_limiter) = match &msg {
+                            types::Message::Data(data) => match rate_limits.get(&data.channel) {
+                                Some(rate_limit) => {
+                                    (metrics::Message::new_data(&peer, data.channel), rate_limit)
                                 }
-                                debug!(err=?e, channel=data.channel, "failed to send message to client");
+                                None => {
+                                    debug!(?peer, channel = data.channel, "invalid channel");
+                                    self.received_messages
+                                        .get_or_create(&metrics::Message::new_invalid(&peer))
+                                        .inc();
+                                    return Err(Error::InvalidChannel);
+                                }
+                            },
+                            types::Message::Ping => {
+                                (metrics::Message::new_ping(&peer), &ping_rate_limiter)
+                            }
+                        };
+                        self.received_messages.get_or_create(&metric).inc();
+                        if let Err(wait_until) = rate_limiter.check() {
+                            self.rate_limited.get_or_create(&metric).inc();
+                            let wait_duration = wait_until.wait_time_from(context.now());
+                            context.sleep(wait_duration).await;
+                        }
+
+                        match msg {
+                            types::Message::Data(data) => {
+                                // Send message to application without blocking.
+                                //
+                                // We intentionally drop messages when the application buffer is
+                                // full rather than blocking. Blocking here would also block
+                                // processing of Ping messages, causing the peer connection to
+                                // stall and potentially disconnect.
+                                let sender = senders.get_mut(&data.channel).unwrap();
+                                let _ =
+                                    sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                            }
+                            types::Message::Ping => {
+                                // We ignore ping messages, they are only used to keep
+                                // the connection alive
                             }
                         }
-                        types::Message::Ping => {
-                            // We ignore ping messages, they are only used to keep
-                            // the connection alive
-                        }
                     }
-                }
-            });
+                });
 
         // Wait for one of the handlers to finish or shutdown
         let mut shutdown = self.context.stopped();
@@ -328,10 +336,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{
-        lookup::{actors::router, channels::Channels},
-        Mailbox,
-    };
+    use crate::authenticated::lookup::{actors::router, channels::Channels};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -342,7 +347,7 @@ mod tests {
         Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};
+    use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
         sync::{
@@ -373,14 +378,13 @@ mod tests {
         }
     }
 
-    fn default_peer_config(context: &impl Metrics) -> Config<PublicKey> {
+    fn default_peer_config(context: impl Metrics) -> Config<PublicKey> {
         Config {
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             ping_frequency: Duration::from_secs(30),
             sent_messages: context.family("sent_messages", "test sent messages"),
             received_messages: context.family("received_messages", "test received messages"),
-            dropped_messages: context.family("dropped_messages", "test dropped messages"),
             rate_limited: context.family("rate_limited", "test rate limited messages"),
         }
     }
@@ -396,10 +400,16 @@ mod tests {
         }
     }
 
-    fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
-        let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger =
-            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+    fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
+        let (router_sender, _router_receiver) = commonware_actor::mailbox::new::<
+            router::Message<PublicKey>,
+        >(
+            context.child("router_mailbox"), NZUsize!(10)
+        );
+        let messenger = router::Messenger::new(
+            context.network_buffer_pool().clone(),
+            router::Mailbox::new(router_sender),
+        );
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 
@@ -461,14 +471,14 @@ mod tests {
             );
             let cfg = Config {
                 received_messages: received_messages.clone(),
-                ..default_peer_config(&context)
+                ..default_peer_config(context.child("config"))
             };
             let (peer_actor, _mailbox, _relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
             // Only channel 0 is registered -- any other channel value is
             // attacker-controlled and must not produce a metric label.
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.child("channels"));
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
@@ -565,28 +575,34 @@ mod tests {
 
             let cfg = Config {
                 send_batch_size: NZUsize!(2),
-                ..default_peer_config(&context)
+                ..default_peer_config(context.child("config"))
             };
             let (peer_actor, peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
-            let mut channels = create_channels(&context);
+            let mut channels = create_channels(context.child("channels"));
             let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
 
             let pool = context.network_buffer_pool().clone();
-            relay
-                .send(
-                    types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
-                    false,
-                )
-                .expect("first send failed");
-            relay
-                .send(
-                    types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
-                    false,
-                )
-                .expect("second send failed");
+            assert!(
+                relay
+                    .send(
+                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
+                        false,
+                    )
+                    .accepted(),
+                "first send failed"
+            );
+            assert!(
+                relay
+                    .send(
+                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
+                        false,
+                    )
+                    .accepted(),
+                "second send failed"
+            );
 
             let peer_handle = context.child("task").spawn(move |_context| async move {
                 peer_actor
@@ -611,7 +627,7 @@ mod tests {
             assert_eq!(second.message, IoBuf::from(b"second"));
             assert_eq!(sends.load(Ordering::Relaxed), 1);
 
-            peer_mailbox.0.send_lossy(Message::Kill).await;
+            peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");
             assert!(
                 matches!(result, Err(Error::PeerKilled(_))),

@@ -24,11 +24,6 @@ pub enum Error {
     #[error("Application verify error: {0}")]
     AppProposeCanceled(oneshot::error::RecvError),
 
-    // P2P Errors
-    /// Unable to send a message over the P2P network
-    #[error("Unable to send message")]
-    UnableToSendMessage,
-
     // Epoch Errors
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
