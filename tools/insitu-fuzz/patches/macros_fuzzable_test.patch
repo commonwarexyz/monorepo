@@ -1,0 +1,79 @@
+diff --git a/macros/impl/src/lib.rs b/macros/impl/src/lib.rs
+index 1ecc53ecc..68ad9e528 100644
+--- a/macros/impl/src/lib.rs
++++ b/macros/impl/src/lib.rs
+@@ -742,3 +742,61 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
+     }
+     .into()
+ }
++
++/// Make a test function fuzzable by converting test attributes to conditional.
++///
++/// This macro automatically:
++/// - Makes the function public
++/// - Converts `#[test]`, `#[test_traced]`, `#[tokio::test]` to `#[cfg_attr(test, ...)]`
++/// - This allows the function to be a regular public function during fuzzing
++///   but a test function during normal testing
++#[proc_macro_attribute]
++pub fn fuzzable_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
++    let input = parse_macro_input!(item as ItemFn);
++
++    let sig = &input.sig;
++    let block = &input.block;
++
++    // Convert test attributes to cfg_attr(test, ...)
++    let converted_attrs: Vec<_> = input
++        .attrs
++        .iter()
++        .map(|attr| {
++            // Check if this is a test attribute that needs conversion
++            let is_test_attr = attr.path().is_ident("test")
++                || attr.path().is_ident("test_traced")
++                || attr.path().is_ident("test_async");
++
++            // Check for tokio::test (2-segment path)
++            let is_tokio_test = attr.path().segments.len() == 2
++                && attr
++                    .path()
++                    .segments
++                    .first()
++                    .map(|s| s.ident == "tokio")
++                    .unwrap_or(false)
++                && attr
++                    .path()
++                    .segments
++                    .last()
++                    .map(|s| s.ident == "test")
++                    .unwrap_or(false);
++
++            if is_test_attr || is_tokio_test {
++                // Convert to cfg_attr(test, original_attr)
++                let meta = &attr.meta;
++                quote! { #[cfg_attr(test, #meta)] }
++            } else {
++                // Preserve non-test attributes as-is
++                quote! { #attr }
++            }
++        })
++        .collect();
++
++    let output = quote! {
++        #(#converted_attrs)*
++        pub #sig #block
++    };
++
++    output.into()
++}
+diff --git a/macros/src/lib.rs b/macros/src/lib.rs
+index f42c5c5ce..15709d53f 100644
+--- a/macros/src/lib.rs
++++ b/macros/src/lib.rs
+@@ -333,6 +333,8 @@ pub use commonware_macros_impl::test_group;
+ /// ```
+ pub use commonware_macros_impl::test_traced;
+ 
++pub use commonware_macros_impl::fuzzable_test;
++
+ #[doc(hidden)]
+ #[cfg(feature = "std")]
+ pub mod __reexport {

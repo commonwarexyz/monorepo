@@ -1,0 +1,57 @@
+diff --git a/runtime/src/deterministic.rs b/runtime/src/deterministic.rs
+index dfb8a9098..51a7fc704 100644
+--- a/runtime/src/deterministic.rs
++++ b/runtime/src/deterministic.rs
+@@ -106,6 +106,15 @@ use std::{
+ use tracing::{info_span, trace, Instrument};
+ use tracing_opentelemetry::OpenTelemetrySpanExt;
+ 
++// Optional fuzzing hooks provided by insitu-fuzz via weak linkage.
++#[cfg(feature = "fuzz")]
++extern "C" {
++    #[linkage = "extern_weak"]
++    static commonware_fuzz_permute_tasks: Option<unsafe extern "C" fn(*mut u128, usize) -> bool>;
++    #[linkage = "extern_weak"]
++    static insitu_fuzz_checkpoint: Option<unsafe extern "C" fn()>;
++}
++
+ #[derive(Debug)]
+ struct Metrics {
+     iterations: Counter,
+@@ -564,10 +573,34 @@ impl Runner {
+             // Drain all ready tasks
+             let mut queue = executor.tasks.drain();
+ 
++            // Fuzzer checkpoint at quiescent point for deferred fork windows.
++            #[cfg(feature = "fuzz")]
++            unsafe {
++                if let Some(checkpoint) = insitu_fuzz_checkpoint {
++                    checkpoint();
++                }
++            }
++
+             // Shuffle tasks (if more than one)
+             if queue.len() > 1 {
+-                let mut rng = executor.rng.lock();
+-                queue.shuffle(&mut *rng);
++                // Try fuzzer-controlled permutation first (if insitu-fuzz is linked).
++                #[cfg(feature = "fuzz")]
++                let did_permute = unsafe {
++                    if let Some(permute) = commonware_fuzz_permute_tasks {
++                        permute(queue.as_mut_ptr(), queue.len())
++                    } else {
++                        false
++                    }
++                };
++
++                #[cfg(not(feature = "fuzz"))]
++                let did_permute = false;
++
++                // Fall back to seeded RNG when no fuzzer permutation is provided.
++                if !did_permute {
++                    let mut rng = executor.rng.lock();
++                    queue.shuffle(&mut *rng);
++                }
+             }
+ 
+             // Run all snapshotted tasks

@@ -1,0 +1,45 @@
+diff --git a/consensus/Cargo.toml b/consensus/Cargo.toml
+index de02c1e17..3079f4534 100644
+--- a/consensus/Cargo.toml
++++ b/consensus/Cargo.toml
+@@ -20,6 +20,7 @@ cfg-if.workspace = true
+ commonware-broadcast.workspace = true
+ commonware-codec.workspace = true
+ commonware-coding.workspace = true
++commonware-conformance = { workspace = true, optional = true }
+ commonware-cryptography.workspace = true
+ commonware-macros.workspace = true
+ commonware-math.workspace = true
+@@ -28,6 +29,7 @@ commonware-resolver.workspace = true
+ commonware-utils.workspace = true
+ futures.workspace = true
+ rand.workspace = true
++rand_chacha = { workspace = true, optional = true }
+ rand_core.workspace = true
+ thiserror.workspace = true
+ 
+@@ -43,6 +45,8 @@ rand_distr.workspace = true
+ rayon.workspace = true
+ tracing.workspace = true
+ 
++rstest = { workspace = true, optional = true }
++
+ [dev-dependencies]
+ commonware-conformance.workspace = true
+ commonware-consensus = { path = ".", features = ["mocks"] }
+@@ -60,6 +64,15 @@ bench = false
+ crate-type = ["rlib", "cdylib"]
+ 
+ [features]
++fuzzing = [
++    "commonware-p2p/fuzzing",
++    "commonware-runtime/fuzzing",
++    "dep:rstest",
++    "dep:commonware-conformance",
++    "dep:rand_chacha",
++    "fuzz",
++]
++fuzz = [ "mocks" ]
+ mocks = [ "commonware-cryptography/mocks" ]
+ arbitrary = [
+ 	"commonware-codec/arbitrary",

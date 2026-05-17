@@ -1,0 +1,36 @@
+diff --git a/p2p/Cargo.toml b/p2p/Cargo.toml
+index ed4428750..cdda2f9f7 100644
+--- a/p2p/Cargo.toml
++++ b/p2p/Cargo.toml
+@@ -22,7 +22,11 @@ commonware-parallel = { workspace = true, features = ["std"] }
+ commonware-runtime.workspace = true
+ commonware-stream.workspace = true
+ commonware-utils.workspace = true
++commonware-math = { workspace = true, optional = true }
++commonware-conformance = { workspace = true, optional = true }
++bytes.workspace = true
+ either.workspace = true
++libc.workspace = true
+ futures.workspace = true
+ num-bigint.workspace = true
+ num-integer.workspace = true
+@@ -50,6 +54,7 @@ arbitrary = [
+ 	"dep:arbitrary",
+ 	"num-bigint/arbitrary",
+ ]
++fuzzing = ["dep:commonware-math", "dep:commonware-conformance", "fuzz"]
+ 
+ [lib]
+ bench = false
+diff --git a/p2p/src/lib.rs b/p2p/src/lib.rs
+index fdad4139b..f9596fbbf 100644
+--- a/p2p/src/lib.rs
++++ b/p2p/src/lib.rs
+@@ -8,6 +8,7 @@
+     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+     html_favicon_url = "https://commonware.xyz/favicon.ico"
+ )]
++#![cfg_attr(feature = "fuzz", feature(linkage))]
+ 
+ use commonware_macros::{stability_mod, stability_scope};
+ 
