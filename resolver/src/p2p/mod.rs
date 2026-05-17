@@ -3092,7 +3092,7 @@ mod tests {
 
             // Fetch should not panic
             let key2 = Key(2);
-            mailboxes[0].fetch((key2.clone(), ()));
+            mailboxes[0].fetch((key2, ()));
 
             // Cancel should not panic
             mailboxes[0].cancel(());
