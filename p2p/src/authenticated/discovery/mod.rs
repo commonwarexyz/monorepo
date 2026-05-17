@@ -147,8 +147,8 @@
 //!
 //! ## Message Delivery
 //!
-//! Outgoing messages are dropped when a peer's send buffer is full, preventing slow peers
-//! from blocking sends to other peers. Incoming messages are dropped when the application's
+//! Outgoing message submissions can be rejected when a peer's send buffer is full, preventing slow
+//! peers from blocking sends to other peers. Incoming messages are dropped when the application's
 //! receive buffer is full, ensuring protocol messages (BitVec, Peers) continue to flow and
 //! connections remain healthy.
 //!

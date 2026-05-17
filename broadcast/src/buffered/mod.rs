@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_drops_closed_responders() {
+    fn policy_handles_closed_responders() {
         let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
         let pending_subscribe = TestMessage::shared(b"pending_subscribe");
         let pending_get = TestMessage::shared(b"pending_get");
@@ -196,13 +196,13 @@ mod tests {
 
         let (current_responder, current_receiver) = commonware_utils::channel::oneshot::channel();
         drop(current_receiver);
-        <Message<PublicKey, TestMessage> as Policy>::handle(
+        assert!(<Message<PublicKey, TestMessage> as Policy>::handle(
             &mut overflow,
             Message::Get {
                 digest: current_get.digest(),
                 responder: current_responder,
             },
-        );
+        ));
 
         let mut drained = VecDeque::new();
         overflow.drain(|message| {

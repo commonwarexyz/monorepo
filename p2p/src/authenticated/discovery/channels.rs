@@ -21,7 +21,9 @@ pub(crate) struct Inbound<P: PublicKey>(pub(crate) NetworkMessage<P>);
 impl<P: PublicKey> Policy for Inbound<P> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
+        false
+    }
 }
 
 /// An interior sender that enforces message size limits and

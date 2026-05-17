@@ -61,8 +61,8 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message for delivery. [`Feedback::accepted`]
-        /// does not guarantee that the recipient will receive the message.
+        /// Feedback from submitting the message for delivery.
+        /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
@@ -119,8 +119,8 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message for delivery. [`Feedback::accepted`]
-        /// does not guarantee that the recipient will receive the message.
+        /// Feedback from submitting the message for delivery.
+        /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
         fn send(
             self,
             message: impl Into<IoBufs> + Send,
@@ -145,12 +145,9 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// The recipients retained by the synchronous check. Returns an empty
-        /// list if all recipients are rate-limited, the sender has closed, or
-        /// the send is not accepted.
-        ///
-        /// [`Feedback::accepted`] does not guarantee that the recipient will receive
-        /// the message.
+        /// The recipients we will attempt to send to. Returns an
+        /// empty list if all recipients are rate-limited, the sender has closed, or the send is
+        /// not accepted.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
