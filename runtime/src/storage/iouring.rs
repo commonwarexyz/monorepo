@@ -312,6 +312,12 @@ impl crate::Blob for Blob {
             return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
         }
 
+        // io_uring may need multiple CQEs to satisfy one logical read. Ensure
+        // the offset for the final byte still fits in `u64` before enqueueing
+        // the request so follow-up SQEs never wrap around.
+        let last_byte = u64::try_from(len - 1).map_err(|_| Error::OffsetOverflow)?;
+        offset.checked_add(last_byte).ok_or(Error::OffsetOverflow)?;
+
         let io_buf = self
             .io_handle
             .read_at(self.file.clone(), offset, len, io_buf)
@@ -336,6 +342,12 @@ impl crate::Blob for Blob {
         if !bufs.has_remaining() {
             return Ok(());
         }
+
+        // io_uring may need multiple CQEs to satisfy one logical write. Ensure
+        // the offset for the final byte still fits in `u64` before enqueueing
+        // the request so follow-up SQEs never wrap around.
+        let last_byte = u64::try_from(bufs.len() - 1).map_err(|_| Error::OffsetOverflow)?;
+        offset.checked_add(last_byte).ok_or(Error::OffsetOverflow)?;
 
         self.io_handle
             .write_at(self.file.clone(), offset, bufs)
@@ -886,6 +898,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_single_write_no_spurious_offset_overflow() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open("partition", b"single_overflow").await.unwrap();
+
+        let result = blob
+            .write_at(u64::MAX - Header::SIZE_U64, IoBuf::from(b"x"))
+            .await;
+        assert!(
+            !matches!(result, Err(crate::Error::OffsetOverflow)),
+            "write at max offset should not trigger spurious OffsetOverflow"
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
     async fn test_blob_sync_reports_handle_disconnect() {
         // Verify the storage wrapper maps submission-channel disconnects to
         // `BlobSyncFailed(..., "failed to send work")`.
@@ -921,6 +949,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_vectored_write_no_spurious_offset_overflow() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage
+            .open("partition", b"vectored_overflow")
+            .await
+            .unwrap();
+
+        let result = blob
+            .write_at(
+                u64::MAX - Header::SIZE_U64 - 1,
+                vec![IoBuf::from(b"a"), IoBuf::from(b"b")],
+            )
+            .await;
+        assert!(
+            !matches!(result, Err(crate::Error::OffsetOverflow)),
+            "write at max offset should not trigger spurious OffsetOverflow"
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
     async fn test_resize_reports_kernel_error() {
         // Verify resize preserves its storage-specific wrapper when the
         // underlying descriptor is a socket rather than a regular file.
@@ -948,6 +998,18 @@ mod tests {
             "blob resize failed: partition/{} error:",
             hex(b"blob")
         )));
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_read_offset_overflow() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open("partition", b"read_overflow").await.unwrap();
+
+        blob.write_at(0, b"x".to_vec()).await.unwrap();
+        let result = blob.read_at(u64::MAX - Header::SIZE_U64, 2).await;
+        assert!(matches!(result, Err(crate::Error::OffsetOverflow)));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
