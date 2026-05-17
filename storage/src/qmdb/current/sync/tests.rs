@@ -193,6 +193,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
         db
     }
 
@@ -218,6 +219,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
         db
     }
 
@@ -243,6 +245,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
         db
     }
 
@@ -268,6 +271,7 @@ mod harnesses {
             batch.merkleize(&db, None::<Digest>).await.unwrap()
         };
         db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
         db
     }
 

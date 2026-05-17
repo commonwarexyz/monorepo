@@ -18,7 +18,7 @@ pub(super) struct CacheMetrics {
     misses: Counter,
 }
 
-/// Metrics registered only for variable-size journals.
+/// Metrics registered for durable commits.
 pub(super) struct CommitMetrics {
     /// Durable commit calls that do not fully sync all indexes.
     calls: Counter,
@@ -189,6 +189,7 @@ impl<E: Clock> CommonMetrics<E> {
 pub(super) struct FixedMetrics<E: Clock> {
     common: CommonMetrics<E>,
     cache: CacheMetrics,
+    commit: CommitMetrics,
 }
 
 impl<E: RuntimeMetrics + Clock> FixedMetrics<E> {
@@ -203,10 +204,22 @@ impl<E: RuntimeMetrics + Clock> FixedMetrics<E> {
             "Number of fixed items not satisfied synchronously, including pruned or out-of-range \
              try_read_sync probes that returned None",
         );
+        let calls = context
+            .as_ref()
+            .counter("commit_calls", "Number of commit calls");
+        let duration = duration_histogram(
+            context.as_ref(),
+            "commit_duration",
+            "Duration of commit calls",
+        );
         let common = CommonMetrics::new(context);
         Self {
             common,
             cache: CacheMetrics { hits, misses },
+            commit: CommitMetrics {
+                calls,
+                duration: Timed::new(duration),
+            },
         }
     }
 }
@@ -218,6 +231,14 @@ impl<E: Clock> FixedMetrics<E> {
 
     pub(super) fn record_cache_misses(&self, misses: u64) {
         self.cache.misses.inc_by(misses);
+    }
+
+    pub(super) fn commit_timer(&self) -> ScopedTimer<E> {
+        self.commit.duration.scoped(&self.common.clock)
+    }
+
+    pub(super) fn record_commit(&self) {
+        self.commit.calls.inc();
     }
 }
 
