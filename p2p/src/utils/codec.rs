@@ -279,10 +279,7 @@ where
         let (peer, decode_result) = result;
         match decode_result {
             Ok(value) => {
-                let feedback = sender.enqueue(Decoded(peer, value));
-                if !feedback.accepted() {
-                    debug!(?feedback, "dropping decoded message");
-                }
+                let _ = sender.enqueue(Decoded(peer, value));
             }
             Err(err) => {
                 crate::block!(blocker, peer, ?err, "received invalid message");
