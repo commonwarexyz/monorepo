@@ -93,10 +93,6 @@ pub trait Policy: Sized {
 
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
-    /// Messages already in the ready queue are not provided here. Policy changes only apply to
-    /// overflow retained beyond ready capacity. Policies may append, remove, replace, reorder, or
-    /// clear overflow, and are responsible for bounding it when a hard memory limit is required.
-    ///
     /// Returns `true` when the policy considered the message's effects. This includes
     /// retaining the message, coalescing it with retained work, replacing older retained work,
     /// or deliberately doing no work because the message is already satisfied, superseded, or no
