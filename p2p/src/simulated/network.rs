@@ -1146,7 +1146,7 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
 
         // Determine the set of recipients that will receive the message
         let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
-            return Feedback::Ok;
+            return Feedback::Rejected;
         };
 
         // Extract the inner sender and send directly with the new recipients
@@ -1769,8 +1769,8 @@ mod tests {
     }
 
     /// [`SplitTarget::None`] and a send router returning `None` drop traffic: inbound is not
-    /// delivered to either half, and outbound sends are accepted before the split forwarder drops
-    /// them.
+    /// delivered to either half, and outbound sends report no recipients after the split forwarder
+    /// drops them.
     #[test]
     fn test_split_channel_none() {
         let executor = deterministic::Runner::default();
@@ -1836,12 +1836,12 @@ mod tests {
 
             // Send a message from twin to peer_c
             let sent = twin_primary_sender.send(Recipients::One(peer_c.clone()), b"to_both", false);
-            assert_eq!(sent.len(), 1);
+            assert!(sent.is_empty());
 
             // Send a message from twin to peer_c
             let sent =
                 twin_secondary_sender.send(Recipients::One(peer_c.clone()), b"to_both", false);
-            assert_eq!(sent.len(), 1);
+            assert!(sent.is_empty());
         });
     }
 
