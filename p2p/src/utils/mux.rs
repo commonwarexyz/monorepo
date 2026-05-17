@@ -303,7 +303,7 @@ impl<S: Sender> GlobalSender<S> {
         priority: bool,
     ) -> Feedback {
         self.check(recipients).map_or_else(
-            |_| Feedback::Backoff,
+            |_| Feedback::Rejected,
             |checked| checked.with_subchannel(subchannel).send(payload, priority),
         )
     }
@@ -506,7 +506,10 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{ordered::Set, NZUsize};
-    use std::{num::NonZeroU32, time::Duration};
+    use std::{
+        num::NonZeroU32,
+        time::{Duration, SystemTime},
+    };
 
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
@@ -657,6 +660,43 @@ mod tests {
         }
         assert_eq!(n, count_std);
         assert_eq!(n_backup, count_backup);
+    }
+
+    #[derive(Clone)]
+    struct RateLimitedSender;
+
+    struct UnusedCheckedSender;
+
+    impl CheckedSender for UnusedCheckedSender {
+        type PublicKey = PublicKey;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            unreachable!("rate-limited sender should not produce a checked sender");
+        }
+
+        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Feedback {
+            unreachable!("rate-limited sender should not send");
+        }
+    }
+
+    impl LimitedSender for RateLimitedSender {
+        type PublicKey = PublicKey;
+        type Checked<'a> = UnusedCheckedSender;
+
+        fn check(
+            &mut self,
+            _: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Err(SystemTime::UNIX_EPOCH)
+        }
+    }
+
+    #[test]
+    fn test_global_sender_rate_limited_send_rejected() {
+        let mut sender = GlobalSender::new(RateLimitedSender);
+        let feedback = sender.send(0, Recipients::One(pk(0)), b"rate-limited", false);
+        assert_eq!(feedback, Feedback::Rejected);
+        assert!(!feedback.accepted());
     }
 
     #[test]
