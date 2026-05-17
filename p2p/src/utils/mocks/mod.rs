@@ -126,6 +126,38 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
 
+    #[derive(Clone)]
+    struct DroppingSender<P: PublicKey> {
+        peer: P,
+    }
+
+    impl<P: PublicKey> LimitedSender for DroppingSender<P> {
+        type PublicKey = P;
+        type Checked<'a>
+            = DroppingSender<P>
+        where
+            Self: 'a;
+
+        fn check(
+            &mut self,
+            _recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(self.clone())
+        }
+    }
+
+    impl<P: PublicKey> CheckedSender for DroppingSender<P> {
+        type PublicKey = P;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            vec![self.peer.clone()]
+        }
+
+        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
+            Feedback::Dropped
+        }
+    }
+
     #[test]
     fn inert_sender_expands_all_recipients() {
         let mut rng = test_rng();
@@ -138,5 +170,16 @@ mod tests {
         let (mut sender, _) = inert_channel(peers.as_slice());
         let sent = sender.send(Recipients::All, b"hello".to_vec(), false);
         assert_eq!(sent, peers);
+    }
+
+    #[test]
+    fn sender_returns_no_recipients_when_checked_send_drops() {
+        let mut rng = test_rng();
+        let peer = PrivateKey::random(&mut rng).public_key();
+        let mut sender = DroppingSender { peer: peer.clone() };
+
+        let sent = Sender::send(&mut sender, Recipients::One(peer), b"hello".to_vec(), false);
+
+        assert!(sent.is_empty());
     }
 }

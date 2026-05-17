@@ -42,10 +42,13 @@ pub enum Message<P: PublicKey> {
 impl<P: PublicKey> Policy for Message<P> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         match message {
-            Self::Content { .. } => {}
-            message => overflow.push_back(message),
+            Self::Content { .. } => false,
+            message => {
+                overflow.push_back(message);
+                true
+            }
         }
     }
 }
@@ -174,7 +177,7 @@ mod tests {
             );
             assert_eq!(
                 messenger.content(Recipients::One(peer), 7, IoBuf::from(b"two").into(), false),
-                Feedback::Backoff
+                Feedback::Dropped
             );
             assert_eq!(
                 mailbox.release(PrivateKey::from_seed(2).public_key()),

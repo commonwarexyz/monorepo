@@ -17,6 +17,8 @@ commonware_macros::stability_scope!(BETA {
         Ok,
         /// The submission exceeded the configured capacity and requests sender backoff.
         Backoff,
+        /// The submission exceeded the configured capacity and was dropped.
+        Dropped,
         /// The endpoint is closed.
         Closed,
     }

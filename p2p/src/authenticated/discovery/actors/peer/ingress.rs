@@ -20,10 +20,13 @@ pub enum Message<C: PublicKey> {
 impl<C: PublicKey> Policy for Message<C> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         if matches!(message, Self::Kill) {
             overflow.clear();
             overflow.push_back(message);
+            true
+        } else {
+            false
         }
     }
 }

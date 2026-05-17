@@ -22,7 +22,7 @@ pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
 impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         match message {
             Self::Send {
                 request,
@@ -65,6 +65,7 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R>
                 overflow.push_back(Self::Cancel { commitment });
             }
         }
+        true
     }
 }
 

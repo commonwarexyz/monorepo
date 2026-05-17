@@ -411,10 +411,10 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         // A closed responder cannot be served
         if message.response_closed() {
-            return;
+            return false;
         }
         match message {
             // Coalesce hints: a single entry per height with a unioned target set
@@ -431,13 +431,14 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             // Queue if the new message is still useful
             message => {
                 if message.stale(overflow.height()) {
-                    return;
+                    return true;
                 }
                 overflow
                     .messages
                     .push_back(PendingMessage::Message(message));
             }
         }
+        true
     }
 }
 

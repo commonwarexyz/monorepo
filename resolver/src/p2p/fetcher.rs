@@ -310,10 +310,10 @@ where
                         self.key_to_id.insert(key, id);
                         return;
                     }
-                    Feedback::Closed => {
+                    feedback @ (Feedback::Dropped | Feedback::Closed) => {
                         // Peer dropped message, try next peer
                         self.requests_sent.inc(Status::Dropped);
-                        debug!(?peer, "send closed");
+                        debug!(?peer, ?feedback, "send failed");
                         self.update_performance(&peer, self.timeout);
                     }
                 }

@@ -17,7 +17,9 @@ impl<T> Message<T> {
 impl<T> Policy for Message<T> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(_overflow: &mut Self::Overflow, _message: Self) {}
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
+        false
+    }
 }
 
 pub(crate) struct Receivers<T> {
@@ -50,7 +52,7 @@ impl<T> Relay<T> {
 
     /// Submits `message` to the priority channel selected by `priority`.
     ///
-    /// This never waits for capacity. [`Feedback::Backoff`] means the selected
+    /// This never waits for capacity. [`Feedback::Dropped`] means the selected
     /// channel was full, and [`Feedback::Closed`] means the receiver is gone.
     pub fn send(&self, message: T, priority: bool) -> Feedback {
         let sender = if priority { &self.high } else { &self.low };
@@ -122,7 +124,7 @@ mod tests {
         let (relay, mut receivers) = Relay::new(Metrics, NZUsize!(1));
 
         assert_eq!(relay.send(1, false), Feedback::Ok);
-        assert_eq!(relay.send(2, false), Feedback::Backoff);
+        assert_eq!(relay.send(2, false), Feedback::Dropped);
         assert_eq!(receivers.low.try_recv().map(Message::into_inner), Ok(1));
         assert!(receivers.low.try_recv().is_err());
     }
