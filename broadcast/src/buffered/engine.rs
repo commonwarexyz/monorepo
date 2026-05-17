@@ -188,7 +188,7 @@ where
                     message,
                 } => {
                     trace!("mailbox: broadcast");
-                    self.handle_broadcast(&mut sender, recipients, message).await;
+                    self.handle_broadcast(&mut sender, recipients, message);
                 }
                 Message::Subscribe { digest, responder } => {
                     trace!("mailbox: subscribe");
@@ -232,7 +232,7 @@ where
     ////////////////////////////////////////
 
     /// Handles a `broadcast` request from the application.
-    async fn handle_broadcast<Sr: Sender<PublicKey = P>>(
+    fn handle_broadcast<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, M>,
         recipients: Recipients<P>,
@@ -243,9 +243,7 @@ where
         let _ = self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
-        if let Err(err) = sender.send(recipients, msg, self.priority).await {
-            error!(?err, "failed to send message");
-        }
+        sender.send(recipients, msg, self.priority);
     }
 
     /// Handles a `subscribe` request from the application.

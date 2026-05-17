@@ -27,20 +27,17 @@ commonware_macros::stability_scope!(ALPHA {
         /// The type of request to send.
         type Request: Committable + Digestible + Codec;
 
-        /// Sends a `Request` to a set of [Recipients], returning mailbox [Feedback].
+        /// Enqueues a `Request` to a set of [Recipients].
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             request: Self::Request,
         ) -> Feedback;
 
-        /// Cancel a request by `commitment`, returning mailbox [Feedback].
+        /// Enqueues cancellation of a request by `commitment`, ignoring any future responses.
         ///
-        /// Future responses for the commitment will be ignored.
-        fn cancel(
-            &mut self,
-            commitment: <Self::Request as Committable>::Commitment,
-        ) -> Feedback;
+        /// Tracked commitments are not removed until explicitly cancelled.
+        fn cancel(&mut self, commitment: <Self::Request as Committable>::Commitment) -> Feedback;
     }
 
     /// A [Handler] receives requests and (optionally) sends replies.

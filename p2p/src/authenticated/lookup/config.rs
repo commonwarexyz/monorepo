@@ -46,9 +46,10 @@ pub struct Config<C: Signer> {
 
     /// Message backlog allowed for internal actors.
     ///
-    /// When there are more messages in the mailbox than this value, any actor
-    /// sending a message will be blocked until the mailbox is processed.
-    pub mailbox_size: usize,
+    /// When there are more messages in a mailbox than this value, messages may be rejected before
+    /// they are processed. Refer to [`commonware_actor::Feedback`] and/or metrics on
+    /// [`commonware_actor::mailbox`] for a signal this is occurring.
+    pub mailbox_size: NonZeroUsize,
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.
     ///
@@ -122,7 +123,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
@@ -154,7 +155,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
@@ -181,7 +182,7 @@ impl<C: Signer> Config<C> {
             allow_dns: true,
             bypass_ip_check: false,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),

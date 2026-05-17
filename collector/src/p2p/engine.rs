@@ -7,16 +7,13 @@ use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::wrap, Blocker, Recipients, Sender};
+use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::oneshot,
-    futures::Pool,
-};
+use commonware_utils::{channel::oneshot, futures::Pool};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
@@ -101,28 +98,16 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (
-            impl Sender<PublicKey = P>,
-            impl commonware_p2p::Receiver<PublicKey = P>,
-        ),
-        responses: (
-            impl Sender<PublicKey = P>,
-            impl commonware_p2p::Receiver<PublicKey = P>,
-        ),
+        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses))
     }
 
     async fn run(
         mut self,
-        requests: (
-            impl Sender<PublicKey = P>,
-            impl commonware_p2p::Receiver<PublicKey = P>,
-        ),
-        responses: (
-            impl Sender<PublicKey = P>,
-            impl commonware_p2p::Receiver<PublicKey = P>,
-        ),
+        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Wrap channels
         let (mut req_tx, mut req_rx) = wrap(
@@ -148,25 +133,18 @@ where
             // Command from the mailbox
             Some(command) = self.mailbox.recv() else continue => {
                 match command {
-                    Message::Send { request, recipients } => {
+                    Message::Send {
+                        request,
+                        recipients,
+                    } => {
                         let commitment = request.commitment();
-
-                        // Send the request to recipients
-                        match req_tx
-                            .send(recipients, request, self.priority_request)
-                            .await
-                        {
-                            Ok(recipients) => {
-                                // Track commitment (if not already tracked)
-                                let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                                    self.outstanding.inc();
-                                    (HashSet::new(), HashSet::new())
-                                });
-                                entry.0.extend(recipients.iter().cloned());
-                            }
-                            Err(err) => {
-                                error!(?err, ?commitment, "failed to send message");
-                            }
+                        let recipients = req_tx.send(recipients, request, self.priority_request);
+                        if !recipients.is_empty() {
+                            let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                                self.outstanding.inc();
+                                (HashSet::new(), HashSet::new())
+                            });
+                            entry.0.extend(recipients);
                         }
                     }
                     Message::Cancel { commitment } => {
@@ -184,8 +162,7 @@ where
 
                 // Send the response
                 let _ = res_tx
-                    .send(Recipients::One(peer), reply, self.priority_response)
-                    .await;
+                    .send(Recipients::One(peer), reply, self.priority_response);
             },
 
             // Request from an originator

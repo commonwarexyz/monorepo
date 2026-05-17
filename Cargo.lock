@@ -1166,7 +1166,6 @@ dependencies = [
 name = "commonware-collector"
 version = "2026.4.0"
 dependencies = [
- "anyhow",
  "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
@@ -1176,7 +1175,6 @@ dependencies = [
  "commonware-stream",
  "commonware-utils",
  "rand 0.8.5",
- "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1186,6 +1184,7 @@ name = "commonware-collector-fuzz"
 version = "2026.4.0"
 dependencies = [
  "arbitrary",
+ "commonware-actor",
  "commonware-codec",
  "commonware-collector",
  "commonware-cryptography",
@@ -1510,6 +1509,7 @@ name = "commonware-p2p"
 version = "2026.4.0"
 dependencies = [
  "arbitrary",
+ "commonware-actor",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",

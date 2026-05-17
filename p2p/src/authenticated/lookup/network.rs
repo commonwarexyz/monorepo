@@ -6,10 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::{
-    authenticated::{mailbox::UnboundedMailbox, Mailbox},
-    Channel,
-};
+use crate::Channel;
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -17,9 +14,8 @@ use commonware_runtime::{
     Resolver, Spawner,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
-use commonware_utils::{channel::mpsc, union};
+use commonware_utils::union;
 use rand_core::CryptoRngCore;
-use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
@@ -35,10 +31,10 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: tracker::Mailbox<C::PublicKey>,
     router: router::Actor<E, C::PublicKey>,
-    router_mailbox: Mailbox<router::Message<C::PublicKey>>,
-    listener: mpsc::Receiver<HashSet<IpAddr>>,
+    router_mailbox: router::Mailbox<C::PublicKey>,
+    listener: listener::Updates,
 }
 
 impl<
@@ -57,11 +53,12 @@ impl<
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
+        let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
+                mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 allow_private_ips: cfg.allow_private_ips,
@@ -118,11 +115,11 @@ impl<
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
-        let clock = self
+        let context = self
             .context
             .child("channel")
             .with_attribute("index", channel);
-        self.channels.register(channel, rate, backlog, clock)
+        self.channels.register(channel, rate, backlog, context)
     }
 
     /// Starts the network.

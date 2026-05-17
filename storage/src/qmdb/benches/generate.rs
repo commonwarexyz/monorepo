@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 const NUM_ELEMENTS: u64 = 1_000;
 const NUM_OPERATIONS: u64 = 10_000;
 const COMMITS_PER_ITERATION: u64 = 100;
+const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
@@ -60,37 +61,29 @@ define_fixed_variants! {
 
 fn bench_fixed_value_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
-    for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
-        for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
-            for &variant in FIXED_VARIANTS {
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} elements={elements} operations={operations}",
-                        module_path!(),
-                        variant.name(),
-                    ),
-                    |b| {
-                        b.to_async(&runner).iter_custom(|iters| async move {
-                            let ctx = context::get::<Context>();
-                            let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
-                            let mut total = Duration::ZERO;
-                            for _ in 0..iters {
-                                total += dispatch_fixed!(ctx.child("storage"), variant, |db| {
-                                    bench_db(
-                                        db,
-                                        elements,
-                                        operations,
-                                        commit_freq,
-                                        make_fixed_value,
-                                    )
+    for (elements, operations) in CASES {
+        for &variant in FIXED_VARIANTS {
+            c.bench_function(
+                &format!(
+                    "{}/variant={} elements={elements} operations={operations}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            total += dispatch_fixed!(ctx.child("storage"), variant, |db| {
+                                bench_db(db, elements, operations, commit_freq, make_fixed_value)
                                     .await
-                                });
-                            }
-                            total
-                        });
-                    },
-                );
-            }
+                            });
+                        }
+                        total
+                    });
+                },
+            );
         }
     }
 }
@@ -106,31 +99,29 @@ define_vec_variants! {
 
 fn bench_var_value_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
-    for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
-        for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
-            for &variant in VEC_VARIANTS {
-                c.bench_function(
-                    &format!(
-                        "{}/variant={} elements={elements} operations={operations}",
-                        module_path!(),
-                        variant.name(),
-                    ),
-                    |b| {
-                        b.to_async(&runner).iter_custom(|iters| async move {
-                            let ctx = context::get::<Context>();
-                            let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
-                            let mut total = Duration::ZERO;
-                            for _ in 0..iters {
-                                total += dispatch_var!(ctx.child("storage"), variant, |db| {
-                                    bench_db(db, elements, operations, commit_freq, make_var_value)
-                                        .await
-                                });
-                            }
-                            total
-                        });
-                    },
-                );
-            }
+    for (elements, operations) in CASES {
+        for &variant in VEC_VARIANTS {
+            c.bench_function(
+                &format!(
+                    "{}/variant={} elements={elements} operations={operations}",
+                    module_path!(),
+                    variant.name(),
+                ),
+                |b| {
+                    b.to_async(&runner).iter_custom(|iters| async move {
+                        let ctx = context::get::<Context>();
+                        let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            total += dispatch_var!(ctx.child("storage"), variant, |db| {
+                                bench_db(db, elements, operations, commit_freq, make_var_value)
+                                    .await
+                            });
+                        }
+                        total
+                    });
+                },
+            );
         }
     }
 }

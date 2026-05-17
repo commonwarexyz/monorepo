@@ -9,7 +9,6 @@ use crate::{
             },
             metrics,
         },
-        mailbox::UnboundedMailbox,
         Mailbox,
     },
     Ingress,
@@ -140,7 +139,7 @@ impl<
                 debug!(?peer, ?address, "upgraded connection");
 
                 // Start peer to handle messages
-                supervisor.spawn(connection, reservation).await;
+                let _ = supervisor.spawn(connection, reservation);
             }
         });
     }
@@ -148,7 +147,7 @@ impl<
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
         supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
@@ -156,7 +155,7 @@ impl<
 
     async fn run(
         mut self,
-        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
@@ -204,10 +203,12 @@ mod tests {
         dialing::Dialable,
         lookup::actors::tracker::{ingress::Releaser, Metadata},
     };
+    use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_stream::encrypted::Config as StreamConfig;
+    use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
         time::Duration,
@@ -240,13 +241,17 @@ mod tests {
 
             let dialer = Actor::new(context.child("dialer"), dialer_cfg);
 
-            let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
             // Create a releaser for reservations
-            let (releaser_mailbox, _releaser_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
-            let releaser = Releaser::new(releaser_mailbox);
+            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("releaser"),
+                NZUsize!(1024),
+            );
+            let releaser = Releaser::new(sender);
 
             // Generate 10 peers
             let peers: Vec<PublicKey> = (0..10)
@@ -254,14 +259,16 @@ mod tests {
                 .collect();
 
             // Create a supervisor that just drops spawn messages
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             // Start the dialer
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             // Handle messages until deadline, counting dial attempts
             let mut dial_count = 0;
@@ -319,15 +326,19 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             // Tracker reports next_query_at=100ms, which is shorter than
             // dial_frequency=500ms. The dialer should clamp to dial_frequency,
@@ -374,24 +385,30 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
 
-            let (releaser_mailbox, _releaser_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
-            let releaser = Releaser::new(releaser_mailbox);
+            let (sender, _receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("releaser"),
+                NZUsize!(1024),
+            );
+            let releaser = Releaser::new(sender);
 
             let peers: Vec<PublicKey> = (0..3)
                 .map(|i| PrivateKey::from_seed(i).public_key())
                 .collect();
 
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             let mut dial_count = 0;
             let deadline = context.current() + Duration::from_millis(250);
@@ -446,15 +463,19 @@ mod tests {
                 },
             );
 
-            let (tracker_mailbox, mut tracker_rx) =
-                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
-            let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
             context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
-            let _handle = dialer.start(tracker_mailbox, supervisor);
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
 
             let mut refresh_count = 0;
             let deadline = context.current() + Duration::from_millis(350);

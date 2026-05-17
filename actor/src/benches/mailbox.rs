@@ -92,11 +92,12 @@ impl Message {
 impl mailbox::Policy for Message {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         match message.policy {
-            Policy::Drop => {}
+            Policy::Drop => false,
             Policy::Spill => {
                 overflow.push_back(message);
+                true
             }
             Policy::Replace => {
                 if let Some(pending) = overflow
@@ -108,6 +109,7 @@ impl mailbox::Policy for Message {
                 } else {
                     overflow.push_back(message);
                 }
+                true
             }
         }
     }
@@ -256,7 +258,7 @@ fn bench_overflow_drop(c: &mut Criterion) {
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop()));
-                    assert_eq!(result, Feedback::Backoff);
+                    assert_eq!(result, Feedback::Rejected);
                     black_box(result);
                 }
             },

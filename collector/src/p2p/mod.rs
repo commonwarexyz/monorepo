@@ -51,6 +51,7 @@ mod tests {
         Config, Engine, Mailbox,
     };
     use crate::{Handler, Monitor, Originator};
+    use commonware_actor::Feedback;
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -66,12 +67,12 @@ mod tests {
         Supervisor as _,
     };
     use commonware_utils::{ordered::Set, NZUsize, NZU32};
-    use std::time::Duration;
+    use std::{num::NonZeroUsize, time::Duration};
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
-    const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(1024);
+    const MAILBOX_SIZE: NonZeroUsize = commonware_utils::NZUsize!(1024);
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
@@ -126,8 +127,7 @@ mod tests {
         }
         oracle
             .manager()
-            .track(0, Set::from_iter_dedup(peers.clone()))
-            .await;
+            .track(0, Set::from_iter_dedup(peers.clone()));
 
         (oracle, schemes, peers, connections)
     }
@@ -232,10 +232,9 @@ mod tests {
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
-            assert!(
-                mailbox1
-                    .send(Recipients::One(peers[1].clone()), request.clone())
-                    .accepted()
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
             );
 
             // Verify peer 2 received the request
@@ -298,14 +297,13 @@ mod tests {
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
             let commitment = request.commitment();
-            assert!(
-                mailbox
-                    .send(Recipients::One(peers[1].clone()), request.clone())
-                    .accepted()
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
             );
 
             // Cancel immediately
-            assert!(mailbox.cancel(commitment).accepted());
+            assert_eq!(mailbox.cancel(commitment), Feedback::Ok);
 
             // Wait a bit and verify no response collected
             select! {
@@ -379,7 +377,10 @@ mod tests {
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
-            assert!(mailbox1.send(Recipients::All, request.clone()).accepted());
+            assert_eq!(
+                mailbox1.send(Recipients::All, request.clone()),
+                Feedback::Ok
+            );
 
             // Collect responses
             let mut responses_collected = 0;
@@ -450,10 +451,9 @@ mod tests {
             // Send the same request multiple times
             let request = Request { id: 5, data: 5 };
             for _ in 0..3 {
-                assert!(
-                    mailbox1
-                        .send(Recipients::One(peers[1].clone()), request.clone())
-                        .accepted()
+                assert_eq!(
+                    mailbox1.send(Recipients::One(peers[1].clone()), request.clone()),
+                    Feedback::Ok
                 );
             }
 
@@ -522,15 +522,13 @@ mod tests {
             // Send multiple concurrent requests
             let request1 = Request { id: 10, data: 10 };
             let request2 = Request { id: 20, data: 20 };
-            assert!(
-                mailbox1
-                    .send(Recipients::One(peers[1].clone()), request1)
-                    .accepted()
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request1),
+                Feedback::Ok
             );
-            assert!(
-                mailbox1
-                    .send(Recipients::One(peers[1].clone()), request2)
-                    .accepted()
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request2),
+                Feedback::Ok
             );
 
             // Collect both responses
@@ -602,10 +600,9 @@ mod tests {
 
             // Send request
             let request = Request { id: 100, data: 100 };
-            assert!(
-                mailbox1
-                    .send(Recipients::One(peers[1].clone()), request.clone())
-                    .accepted()
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
             );
 
             // Verify handler received request but didn't respond
@@ -651,7 +648,7 @@ mod tests {
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
-            assert!(mailbox.send(Recipients::All, request.clone()).accepted());
+            assert_eq!(mailbox.send(Recipients::All, request.clone()), Feedback::Ok);
 
             // Verify no responses collected
             select! {
@@ -666,7 +663,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_send_returns_feedback_with_network_error() {
+    fn test_send_closed_does_not_collect() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (oracle, schemes, peers, connections) =
@@ -700,18 +697,17 @@ mod tests {
             // Start engine
             engine.start((sender1, receiver1), (sender2, receiver2));
 
-            // The mailbox accepts the request even if network delivery later fails.
+            // Send request
             let request = Request { id: 1, data: 1 };
-            assert!(
-                mailbox
-                    .send(Recipients::One(peers[1].clone()), request)
-                    .accepted()
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[1].clone()), request),
+                Feedback::Ok
             );
         });
     }
 
     #[test_traced]
-    fn test_send_returns_closed_after_shutdown() {
+    fn test_send_after_shutdown_returns_closed() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (oracle, schemes, peers, connections) =
@@ -744,15 +740,15 @@ mod tests {
             // Start engine
             let handle = engine.start((sender1, receiver1), (sender2, receiver2));
 
-            // Stop the engine so further requests are rejected by the mailbox.
+            // Stop the engine
             handle.abort();
-            context.sleep(Duration::from_millis(100)).await;
+            handle.await.expect_err("engine should be aborted");
 
+            // Send request
             let request = Request { id: 1, data: 1 };
-            assert!(
-                !mailbox
-                    .send(Recipients::One(peers[1].clone()), request)
-                    .accepted()
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[1].clone()), request),
+                Feedback::Closed
             );
         });
     }
@@ -807,23 +803,18 @@ mod tests {
 
             // Send request from peer 1 to peer 2 (collector records the in-flight request)
             let request_to_peer2 = Request { id: 42, data: 42 };
-            assert!(
-                mailbox1
-                    .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())
-                    .accepted()
+            assert_eq!(
+                mailbox1.send(Recipients::One(peers[1].clone()), request_to_peer2.clone()),
+                Feedback::Ok
             );
 
             // Send a response from peer 3 to peer 1
             let response_to_peer1 = Response { id: 42, result: 72 };
-            res_conn3
-                .0
-                .send(
-                    Recipients::One(peers[0].clone()),
-                    response_to_peer1.encode(),
-                    true,
-                )
-                .await
-                .unwrap();
+            res_conn3.0.send(
+                Recipients::One(peers[0].clone()),
+                response_to_peer1.encode(),
+                true,
+            );
 
             // Give some time for messages to be processed
             context.sleep(Duration::from_millis(1_000)).await;
@@ -906,23 +897,22 @@ mod tests {
                 spawn_engines_with_handles(context.child("engine"), &oracle, schemes, connections);
 
             // Abort all engines immediately
-            for handle in handles {
+            for handle in &handles {
                 handle.abort();
             }
-            context.sleep(Duration::from_millis(100)).await;
+            for handle in handles {
+                handle.await.expect_err("engine should be aborted");
+            }
 
             // All operations should not panic after shutdown
 
-            // Send should not panic.
+            // Send should not panic
             let request = Request { id: 1, data: 1 };
-            assert!(
-                !mailboxes[0]
-                    .send(Recipients::One(peers[1].clone()), request.clone())
-                    .accepted()
-            );
+            let feedback = mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone());
+            assert_eq!(feedback, Feedback::Closed);
 
             // Cancel should not panic
-            assert!(!mailboxes[0].cancel(request.commitment()).accepted());
+            assert_eq!(mailboxes[0].cancel(request.commitment()), Feedback::Closed);
         });
     }
 
@@ -952,10 +942,9 @@ mod tests {
 
             // Verify network is functional - send a request and expect a response
             let request = Request { id: 1, data: 1 };
-            assert!(
-                mailboxes[0]
-                    .send(Recipients::One(peers[1].clone()), request)
-                    .accepted()
+            assert_eq!(
+                mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
             );
 
             // Abort all engines
