@@ -142,6 +142,11 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     pruned: Counter,
 }
 
+/// Opaque token for sections unlinked from storage and ready to finish pruning.
+pub(in crate::journal) struct Unlinked {
+    min: u64,
+}
+
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Initialize a new `Manager`.
     ///
@@ -233,37 +238,51 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Prune all sections less than `min`. Returns true if any were pruned.
-    pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        // Prune any blobs that are smaller than the minimum
-        let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
-
-            // Remove blob from map
-            let blob = self.blobs.remove(&section).unwrap();
-            let size = blob.size().await;
-            drop(blob);
-
-            // Remove blob from storage
+    /// Begin pruning by removing section blobs less than `min` from storage without dropping open
+    /// handles.
+    ///
+    /// Already-open handles remain in the in-memory map, allowing readers to continue using the
+    /// sections until [Self::finish_prune] publishes the prune.
+    ///
+    /// Returns a token if any sections were unlinked.
+    pub(super) async fn begin_prune(&self, min: u64) -> Result<Option<Unlinked>, Error> {
+        let mut unlinked = false;
+        for (&section, _) in self.blobs.range(..min) {
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
-            pruned = true;
+            unlinked = true;
 
-            debug!(section, size, "pruned blob");
+            debug!(section, "unlinked blob");
+        }
+        Ok(unlinked.then_some(Unlinked { min }))
+    }
+
+    /// Finish a successful unlink by removing unlinked sections from the in-memory map.
+    pub(super) fn finish_prune(&mut self, unlinked: Unlinked) {
+        let min = unlinked.min;
+        let retained = self.blobs.split_off(&min);
+        let pruned = std::mem::replace(&mut self.blobs, retained);
+        assert!(!pruned.is_empty(), "unlinked token must prune sections");
+        for (section, blob) in pruned {
+            drop(blob);
+            debug!(section, "pruned blob");
             self.tracked.dec();
             self.pruned.inc();
         }
+        self.oldest_retained_section = min;
+    }
 
-        if pruned {
-            self.oldest_retained_section = min;
-        }
-
-        Ok(pruned)
+    /// Prune all sections less than `min`. Returns true if any were pruned.
+    ///
+    /// Callers that need concurrent readers during physical removal should use
+    /// [Self::begin_prune] and [Self::finish_prune] instead.
+    pub(super) async fn prune(&mut self, min: u64) -> Result<bool, Error> {
+        let Some(unlinked) = self.begin_prune(min).await? else {
+            return Ok(false);
+        };
+        self.finish_prune(unlinked);
+        Ok(true)
     }
 
     /// Returns the oldest section number, if any blobs exist.

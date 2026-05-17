@@ -705,6 +705,8 @@ stability_scope!(BETA {
         /// Remove a blob from a given partition.
         ///
         /// If no `name` is provided, the entire partition is removed.
+        /// If a `name` is provided, existing [Blob] handles for that blob must remain readable
+        /// until they are dropped, but the blob must be removed from future namespace lookups.
         ///
         /// An Ok result indicates the blob is durably removed.
         fn remove(
