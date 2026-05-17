@@ -28,30 +28,12 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R>
                 request,
                 recipients,
             } => {
-                // The actor tracks outbound requests by commitment, so overflow coalesces sends
-                // with the same key. Keep the first queued payload and union later recipients into
-                // that send.
-                let commitment = request.commitment();
-                if let Some(existing) = overflow.iter_mut().find(|message| {
-                    matches!(
-                        message,
-                        Self::Send { request, .. } if request.commitment() == commitment
-                    )
-                }) {
-                    let Self::Send {
-                        recipients: existing,
-                        ..
-                    } = existing
-                    else {
-                        unreachable!("matched send");
-                    };
-                    merge_recipients(existing, recipients);
-                } else {
-                    overflow.push_back(Self::Send {
-                        request,
-                        recipients,
-                    });
-                }
+                // Commitment identifies the collection, not necessarily the encoded request.
+                // Keep payloads separate so peers never receive bytes intended for another send.
+                overflow.push_back(Self::Send {
+                    request,
+                    recipients,
+                });
             }
             Self::Cancel { commitment } => {
                 // Drop queued sends that this cancel supersedes. Keep the cancel itself because
@@ -66,46 +48,6 @@ impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R>
             }
         }
         true
-    }
-}
-
-/// Merges recipients into an existing queued send without duplicating peers.
-fn merge_recipients<P: PublicKey>(existing: &mut Recipients<P>, incoming: Recipients<P>) {
-    if matches!(existing, Recipients::All) {
-        return;
-    }
-    if matches!(incoming, Recipients::All) {
-        *existing = Recipients::All;
-        return;
-    }
-
-    let previous = std::mem::replace(existing, Recipients::All);
-    *existing = union_recipients(previous, incoming);
-}
-
-/// Returns the sorted, deduplicated union of two non-`All` recipient sets.
-fn union_recipients<P: PublicKey>(
-    existing: Recipients<P>,
-    incoming: Recipients<P>,
-) -> Recipients<P> {
-    let mut peers = match existing {
-        Recipients::All => unreachable!("handled above"),
-        Recipients::One(peer) => vec![peer],
-        Recipients::Some(peers) => peers,
-    };
-
-    match incoming {
-        Recipients::All => unreachable!("handled above"),
-        Recipients::One(peer) => peers.push(peer),
-        Recipients::Some(incoming) => peers.extend(incoming),
-    }
-
-    peers.sort();
-    peers.dedup();
-    if peers.len() == 1 {
-        Recipients::One(peers.pop().expect("single peer"))
-    } else {
-        Recipients::Some(peers)
     }
 }
 
@@ -171,11 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn send_merges_recipients_for_same_commitment() {
+    fn send_same_request_keeps_recipients_separate() {
         let request = Request { id: 1, data: 10 };
         let peer1 = peer(1);
         let peer2 = peer(2);
-        let peer3 = peer(3);
         let mut overflow = VecDeque::new();
 
         handle(
@@ -189,31 +130,25 @@ mod tests {
             &mut overflow,
             Message::Send {
                 request: request.clone(),
-                recipients: Recipients::Some(vec![peer2.clone(), peer1.clone()]),
-            },
-        );
-        handle(
-            &mut overflow,
-            Message::Send {
-                request,
-                recipients: Recipients::One(peer3.clone()),
+                recipients: Recipients::One(peer2.clone()),
             },
         );
 
-        assert_eq!(overflow.len(), 1);
-        let Message::Send { recipients, .. } = &overflow[0] else {
-            panic!("expected send");
-        };
-        let Recipients::Some(peers) = recipients else {
-            panic!("expected merged recipient set");
-        };
-        let mut expected = vec![peer1, peer2, peer3];
-        expected.sort();
-        assert_eq!(peers, &expected);
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            &overflow[0],
+            Message::Send { request: queued, recipients: Recipients::One(peer), .. }
+                if queued == &request && peer == &peer1
+        ));
+        assert!(matches!(
+            &overflow[1],
+            Message::Send { request: queued, recipients: Recipients::One(peer), .. }
+                if queued == &request && peer == &peer2
+        ));
     }
 
     #[test]
-    fn send_merges_same_commitment_with_different_digest() {
+    fn send_same_commitment_different_digest_keeps_payloads_separate() {
         let request1 = Request { id: 1, data: 10 };
         let request2 = Request { id: 1, data: 20 };
         let peer1 = peer(1);
@@ -230,30 +165,26 @@ mod tests {
         handle(
             &mut overflow,
             Message::Send {
-                request: request2,
+                request: request2.clone(),
                 recipients: Recipients::One(peer2.clone()),
             },
         );
 
-        assert_eq!(overflow.len(), 1);
-        let Message::Send {
-            request,
-            recipients,
-        } = &overflow[0]
-        else {
-            panic!("expected send");
-        };
-        assert_eq!(request, &request1);
-        let Recipients::Some(peers) = recipients else {
-            panic!("expected merged recipient set");
-        };
-        let mut expected = vec![peer1, peer2];
-        expected.sort();
-        assert_eq!(peers, &expected);
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            &overflow[0],
+            Message::Send { request, recipients: Recipients::One(peer), .. }
+                if request == &request1 && peer == &peer1
+        ));
+        assert!(matches!(
+            &overflow[1],
+            Message::Send { request, recipients: Recipients::One(peer), .. }
+                if request == &request2 && peer == &peer2
+        ));
     }
 
     #[test]
-    fn send_merge_with_all_recipients_supersedes_specific_recipients() {
+    fn send_with_all_recipients_keeps_payloads_separate() {
         let request = Request { id: 1, data: 10 };
         let mut overflow = VecDeque::new();
 
@@ -272,9 +203,16 @@ mod tests {
             },
         );
 
-        assert_eq!(overflow.len(), 1);
+        assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
+            Message::Send {
+                recipients: Recipients::One(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &overflow[1],
             Message::Send {
                 recipients: Recipients::All,
                 ..

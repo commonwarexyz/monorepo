@@ -146,7 +146,10 @@ mod tests {
             Feedback::Closed
         );
         assert_eq!(combine(Feedback::Backoff, Feedback::Ok), Feedback::Backoff);
-        assert_eq!(combine(Feedback::Rejected, Feedback::Ok), Feedback::Rejected);
+        assert_eq!(
+            combine(Feedback::Rejected, Feedback::Ok),
+            Feedback::Rejected
+        );
         assert_eq!(
             combine(Feedback::Rejected, Feedback::Backoff),
             Feedback::Backoff

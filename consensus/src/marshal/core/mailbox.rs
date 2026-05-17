@@ -959,7 +959,10 @@ mod tests {
 
         let (current_closed, current_closed_rx) = subscribe_by_digest(3);
         drop(current_closed_rx);
-        assert!(<TestMessage as Policy>::handle(&mut overflow, current_closed));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            current_closed
+        ));
 
         assert!(!has_subscription(&overflow, 1));
         assert!(has_subscription(&overflow, 2));
@@ -987,7 +990,10 @@ mod tests {
 
         let (current_closed, current_closed_rx) = get_finalization(3);
         drop(current_closed_rx);
-        assert!(<TestMessage as Policy>::handle(&mut overflow, current_closed));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            current_closed
+        ));
 
         assert!(!has_get_block(&overflow, 1));
         assert!(has_get_info(&overflow, 2));

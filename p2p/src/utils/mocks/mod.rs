@@ -134,7 +134,7 @@ mod tests {
     impl<P: PublicKey> LimitedSender for RejectingSender<P> {
         type PublicKey = P;
         type Checked<'a>
-            = RejectingSender<P>
+            = Self
         where
             Self: 'a;
 
