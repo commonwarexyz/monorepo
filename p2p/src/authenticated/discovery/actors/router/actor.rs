@@ -5,7 +5,7 @@ use super::{
 use crate::{
     authenticated::{
         data::EncodedData,
-        discovery::{channels::Channels, metrics},
+        discovery::channels::Channels,
         relay::Relay,
     },
     Recipients,
@@ -14,9 +14,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{CounterFamily, MetricsExt as _},
-    BufferPooler, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::channel::ring;
 use futures::Sink;
@@ -30,8 +28,6 @@ pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     control: mailbox::Receiver<Message<P>>,
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
-
-    messages_dropped: CounterFamily<metrics::Message<P>>,
 }
 
 impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
@@ -43,9 +39,6 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             mailbox::new::<Message<P>>(context.child("mailbox"), cfg.mailbox_size);
         let pool = context.network_buffer_pool().clone();
 
-        // Create metrics
-        let messages_dropped = context.family("messages_dropped", "messages dropped");
-
         // Create actor
         (
             Self {
@@ -53,7 +46,6 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 open_subscriptions: Vec::new(),
-                messages_dropped,
             },
             Mailbox::new(control_sender.clone()),
             Messenger::new(pool, Mailbox::new(control_sender)),
@@ -62,13 +54,8 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
 
     /// Sends pre-encoded data to the given `recipient`.
     fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool) {
-        let channel = encoded.channel;
         if let Some(relay) = self.connections.get_mut(&recipient) {
             let _ = relay.send(encoded, priority);
-        } else {
-            self.messages_dropped
-                .get_or_create(&metrics::Message::new_data(&recipient, channel))
-                .inc();
         }
     }
 
