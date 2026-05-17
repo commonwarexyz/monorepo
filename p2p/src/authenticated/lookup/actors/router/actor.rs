@@ -3,19 +3,13 @@ use super::{
     Config,
 };
 use crate::{
-    authenticated::{
-        data::EncodedData,
-        lookup::channels::Channels,
-        relay::Relay,
-    },
+    authenticated::{data::EncodedData, lookup::channels::Channels, relay::Relay},
     Recipients,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Spawner,
-};
+use commonware_runtime::{spawn_cell, BufferPooler, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::channel::ring;
 use futures::Sink;
 use std::{collections::BTreeMap, pin::Pin};
