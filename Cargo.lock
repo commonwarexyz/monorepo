@@ -1242,6 +1242,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "criterion",
  "futures",
  "pin-project",
  "rand 0.8.5",

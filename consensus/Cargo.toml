@@ -49,6 +49,7 @@ commonware-conformance.workspace = true
 commonware-consensus = { path = ".", features = ["mocks"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
+criterion.workspace = true
 rand_chacha.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
@@ -58,6 +59,11 @@ development = ["commonware-consensus"]
 
 [lib]
 bench = false
+
+[[bench]]
+name = "marshal"
+harness = false
+path = "src/marshal/benches/bench.rs"
 
 [features]
 mocks = [
