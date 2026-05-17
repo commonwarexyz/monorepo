@@ -30,6 +30,7 @@ members = [
     "examples/log",
     "examples/sync",
     "examples/reshare",
+ "examples/vrf-dice",
 
     # Fuzz builds
     "broadcast/fuzz",
