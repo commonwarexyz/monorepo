@@ -241,7 +241,7 @@ where
                         saw_error = true;
                         break;
                     };
-                    Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await;
+                    Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
                 }
                 if saw_error || (receiver_closed && decode_pool.is_empty()) {
                     break;
@@ -250,7 +250,7 @@ where
             on_stopped => {},
             // Process decode completions as they arrive
             Ok(result) = decode_pool.next_completed() else break => {
-                Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await;
+                Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
             },
             // Receive raw bytes and spawn a decode task on a shared (CPU) thread
             Ok((peer, bytes)) = self.receiver.recv() else {
@@ -271,7 +271,7 @@ where
         }
     }
 
-    async fn handle_decode_result(
+    fn handle_decode_result(
         blocker: &mut B,
         sender: &mut mailbox::Sender<Decoded<P, V>>,
         result: (P, Result<V, commonware_codec::Error>),
