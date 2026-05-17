@@ -3253,9 +3253,7 @@ mod tests {
             let _ = handle.await;
             wait_for_task_count(&context, "network", |count| count == 0).await;
 
-            // All of these operations should not panic after shutdown
-
-            // Sending messages should not panic and should return empty.
+            // Sending messages should not panic and should return empty
             let msg = IoBuf::from(b"test");
             let result = sender.send(Recipients::One(pk2.clone()), msg, false);
             assert!(result.is_empty(), "send after shutdown should return empty");
