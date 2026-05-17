@@ -65,6 +65,7 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 mod tests {
     use crate::{
         marshal::{
+            core,
             coding::{
                 marshaled::genesis_coding_commitment,
                 types::{coding_config_for_participants, CodedBlock},
@@ -1021,7 +1022,10 @@ mod tests {
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
-            let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
+            let block_rx = marshal.subscribe_by_commitment(
+                missing_commitment,
+                core::Fallback::FetchByRound { round },
+            );
 
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
@@ -1566,7 +1570,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Regression: when backfilling by Request::Block(digest), a peer may return
+        // Regression: when backfilling by Request::Block { commitment }, a peer may return
         // a coded block with matching inner digest but a different coding commitment.
         // If a finalization for this digest is already cached, marshal must reject
         // the block unless V::commitment(block) matches the finalization payload.
@@ -1652,10 +1656,10 @@ mod tests {
             let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - it fetches Request::Block(digest)
+            //   - it fetches Request::Block { commitment }
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
-            //   - finalization lookup is digest-indexed, so deliver path must still
-            //     reject because cached finalization expects commitment_a
+            //   - deliver path must reject because the response commitment does not
+            //     match the request key
             CodingHarness::report_finalization(&mut v0_mailbox, finalization).await;
 
             // Wait for the fetch cycle to complete.

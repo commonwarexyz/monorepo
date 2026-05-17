@@ -39,6 +39,12 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    impl<R: Clone, S: From<R>> From<R> for Fetch<R, S> {
+        fn from(request: R) -> Self {
+            Self::new(request.clone(), S::from(request))
+        }
+    }
+
     /// Data delivered for a resolved fetch.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub struct Delivery<R, S> {
@@ -102,6 +108,9 @@ commonware_macros::stability_scope!(BETA {
         /// fetch resolves. If multiple subscribers are attached to the same
         /// request, the fetch is retained as long as at least one subscriber
         /// satisfies the latest [`retain`](Self::retain) predicate.
+        ///
+        /// Passing a bare request is supported when
+        /// `Subscriber: From<Request>`.
         ///
         /// [`cancel`](Self::cancel) cancels by subscriber.
         fn fetch<F>(

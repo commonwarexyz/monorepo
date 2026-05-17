@@ -6,7 +6,7 @@ use crate::{
     },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
-    Reporter,
+    Heightable, Reporter,
 };
 use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
@@ -15,6 +15,7 @@ use commonware_actor::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
+use futures::Stream;
 use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 
 /// Messages sent to the marshal [Actor](super::Actor).
@@ -80,9 +81,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// A request to subscribe to a block by its commitment.
     SubscribeByCommitment {
-        /// The round in which the block was notarized. This is an optimization
-        /// to help locate the block.
-        round: Option<Round>,
+        /// How marshal should behave if the block is missing locally.
+        fallback: Fallback,
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
         /// A channel to send the retrieved block.
@@ -163,6 +163,36 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The finalization.
         finalization: Finalization<S, V::Commitment>,
     },
+}
+
+/// How a commitment subscription should behave when the block is missing locally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Fallback {
+    /// Wait for local availability only.
+    ///
+    /// Use this for pending candidate proposal data. A notarization is not, by
+    /// itself, permission to ask peers for the candidate block: crash or
+    /// availability failures can leave a notarization without fetchable proposal
+    /// data. The caller may still fetch the candidate's parents after the
+    /// candidate becomes locally available, because those parents are certified.
+    Wait,
+    /// Request the certified parent proposal for `round` from peers.
+    ///
+    /// Use this only for certified parent lookups where the caller knows the
+    /// parent round and commitment but not the parent height, such as proposal
+    /// construction. Do not infer height from the finalized tip: proposals may
+    /// build on a certified parent that is not finalized locally yet.
+    ///
+    /// The returned block is heightable once decoded, but that is too late to
+    /// make height the resolver request key or the pruning bound.
+    FetchByRound { round: Round },
+    /// Request the exact commitment from peers and prune the request at
+    /// `height`.
+    ///
+    /// Use this when the expected height is known before the request, such as
+    /// walking a certified parent chain from a known child block or repairing a
+    /// finalized gap.
+    FetchByCommitment { height: Height },
 }
 
 impl<S: Scheme, V: Variant> Message<S, V> {
@@ -304,7 +334,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
     }
 
     fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
-        // Hint is already covered by floor/prune
+        // The finalized height is already covered by the floor or prune point.
         let current = self.height();
         if current.is_some_and(|current| height <= current) {
             return;
@@ -448,10 +478,37 @@ pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
 }
 
+/// Provider used by [`Mailbox::ancestor_stream`] to fetch missing certified parents.
+#[derive(Clone)]
+pub(crate) struct AncestryProvider<S: Scheme, V: Variant> {
+    mailbox: Mailbox<S, V>,
+}
+
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
     pub(crate) const fn new(sender: Sender<Message<S, V>>) -> Self {
         Self { sender }
+    }
+
+    /// Create an ancestor stream that fetches missing parents by commitment.
+    ///
+    /// This stream is always a fetching stream. Callers must only use it after
+    /// they already have a block that is safe to verify, certify, build on, or
+    /// repair from. From that point, every parent walked by the stream is part of
+    /// a certified ancestry chain, and the stream can derive each missing
+    /// parent's height from its child before issuing a height-bound request.
+    ///
+    /// Do not use this to wait for pending candidate proposal data.
+    pub(crate) fn ancestor_stream(
+        &self,
+        initial: impl IntoIterator<Item = V::Block>,
+    ) -> AncestorStream<AncestryProvider<S, V>> {
+        AncestorStream::new(
+            AncestryProvider {
+                mailbox: self.clone(),
+            },
+            initial,
+        )
     }
 
     /// A request to retrieve the information about the highest finalized block.
@@ -522,9 +579,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
-    /// If the block is not available locally, the request will be registered and the caller will
-    /// be notified when the block is available. If the block is not finalized, it's possible that
-    /// it may never become available.
+    /// If the block is not available locally, the subscription will be registered and the caller
+    /// will be notified when the block is available. If the block is not finalized, it's possible
+    /// that it may never become available.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub fn subscribe_by_digest(
@@ -545,19 +602,21 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
-    /// If the block is not available locally, the request will be registered and the caller will
-    /// be notified when the block is available. If the block is not finalized, it's possible that
-    /// it may never become available.
+    /// If the block is not available locally, the subscription will be registered and the caller
+    /// will be notified when the block is available. If the block is not finalized, it's possible
+    /// that it may never become available.
+    ///
+    /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub fn subscribe_by_commitment(
         &self,
-        round: Option<Round>,
         commitment: V::Commitment,
+        fallback: Fallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
-            round,
+            fallback,
             commitment,
             response: tx,
         });
@@ -566,17 +625,20 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
     ///
+    /// This stream may fetch missing parents because callers should only request
+    /// ancestry for data they already have locally and are willing to build on,
+    /// verify, certify, or repair from. It is not a candidate fetch path.
+    ///
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry(
         &self,
         (start_round, start_digest): (Option<Round>, <V::Block as Digestible>::Digest),
-    ) -> Option<AncestorStream<Self, V::ApplicationBlock>> {
-        let mailbox = self.clone();
-        let subscription = self.subscribe_by_digest(start_round, start_digest);
-        subscription
+    ) -> Option<impl Stream<Item = V::ApplicationBlock>> {
+        let receiver = self.subscribe_by_digest(start_round, start_digest);
+        receiver
             .await
             .ok()
-            .map(|block| AncestorStream::new(mailbox, [V::into_inner(block)]))
+            .map(|block| self.ancestor_stream([block]))
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
@@ -667,14 +729,30 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 }
 
-impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
+impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
     type Block = V::ApplicationBlock;
+    type AncestryBlock = V::Block;
 
-    async fn fetch_block(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
-        self.subscribe_by_digest(None, digest)
-            .await
-            .ok()
-            .map(V::into_inner)
+    async fn subscribe(
+        self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<Self::AncestryBlock> {
+        let subscription = self.mailbox.subscribe_by_digest(None, digest);
+        subscription.await.ok()
+    }
+
+    async fn subscribe_parent(self, block: Self::AncestryBlock) -> Option<Self::AncestryBlock> {
+        let parent_height = block.height().previous()?;
+        let commitment = V::parent_commitment(&block);
+        let fallback = Fallback::FetchByCommitment {
+            height: parent_height,
+        };
+        let subscription = self.mailbox.subscribe_by_commitment(commitment, fallback);
+        subscription.await.ok()
+    }
+
+    fn into_block(block: Self::AncestryBlock) -> Self::Block {
+        V::into_inner(block)
     }
 }
 
@@ -803,15 +881,27 @@ mod tests {
         )
     }
 
-    fn subscribe_by_commitment(height: u64) -> (TestMessage, oneshot::Receiver<harness::B>) {
+    fn subscribe_by_commitment_with_fallback(
+        height: u64,
+        fallback: Fallback,
+    ) -> (TestMessage, oneshot::Receiver<harness::B>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByCommitment {
-                round: Some(round(height)),
+                fallback,
                 commitment: block(height).digest(),
                 response,
             },
             receiver,
+        )
+    }
+
+    fn subscribe_by_commitment(height: u64) -> (TestMessage, oneshot::Receiver<harness::B>) {
+        subscribe_by_commitment_with_fallback(
+            height,
+            Fallback::FetchByRound {
+                round: round(height),
+            },
         )
     }
 
@@ -940,6 +1030,51 @@ mod tests {
         assert_eq!(targets.len().get(), 2);
         assert!(targets.contains(&first));
         assert!(targets.contains(&second));
+    }
+
+    #[test]
+    fn policy_preserves_commitment_subscription_fallbacks() {
+        let mut overflow = pending();
+
+        let (wait, _wait_rx) = subscribe_by_commitment_with_fallback(1, Fallback::Wait);
+        let (by_round, _by_round_rx) = subscribe_by_commitment_with_fallback(
+            2,
+            Fallback::FetchByRound { round: round(2) },
+        );
+        let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_with_fallback(
+            3,
+            Fallback::FetchByCommitment {
+                height: Height::new(3),
+            },
+        );
+
+        assert!(<TestMessage as Policy>::handle(&mut overflow, wait));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, by_round));
+        assert!(<TestMessage as Policy>::handle(&mut overflow, by_commitment));
+
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 3);
+        assert!(matches!(
+            &drained[0],
+            TestMessage::SubscribeByCommitment {
+                fallback: Fallback::Wait,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &drained[1],
+            TestMessage::SubscribeByCommitment {
+                fallback: Fallback::FetchByRound { round: found },
+                ..
+            } if *found == round(2)
+        ));
+        assert!(matches!(
+            &drained[2],
+            TestMessage::SubscribeByCommitment {
+                fallback: Fallback::FetchByCommitment { height },
+                ..
+            } if *height == Height::new(3)
+        ));
     }
 
     #[test]

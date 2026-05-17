@@ -15,23 +15,38 @@ use std::{
 
 /// An interface for providing blocks.
 pub trait BlockProvider: Clone + Send + 'static {
-    /// The block type the provider fetches.
+    /// The block type the provider yields.
     type Block: Block;
 
-    /// A request to retrieve a block by its digest.
+    /// The block type retained while walking ancestry.
+    type AncestryBlock: Block<Digest = <Self::Block as Digestible>::Digest> + Clone;
+
+    /// Subscribe to a block by its digest without requesting it from the network.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
-    /// If the block is not available locally, the request will be registered and the caller will
-    /// be notified when the block is available. If the block is not finalized, it's possible that
-    /// it may never become available.
+    /// If the block is not available locally, the subscription will be registered and the caller
+    /// will be notified when the block is available. If the block is not finalized, it's possible
+    /// that it may never become available.
     ///
     /// Returns `None` when the subscription is canceled or the provider can no longer deliver
     /// the block.
-    fn fetch_block(
+    fn subscribe(
         self,
         digest: <Self::Block as Digestible>::Digest,
-    ) -> impl Future<Output = Option<Self::Block>> + Send;
+    ) -> impl Future<Output = Option<Self::AncestryBlock>> + Send;
+
+    /// Subscribe to the parent of a known block.
+    fn subscribe_parent(
+        self,
+        block: Self::AncestryBlock,
+    ) -> impl Future<Output = Option<Self::AncestryBlock>> + Send {
+        let digest = block.parent();
+        self.subscribe(digest)
+    }
+
+    /// Converts an ancestry block into the block yielded by ancestry streams.
+    fn into_block(block: Self::AncestryBlock) -> Self::Block;
 }
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
@@ -39,21 +54,21 @@ pub trait BlockProvider: Clone + Send + 'static {
 // TODO(<https://github.com/commonwarexyz/monorepo/issues/2982>): Once marshal can also yield the genesis block,
 // this stream should end at block height 0 rather than 1.
 #[pin_project]
-pub struct AncestorStream<M, B: Block> {
-    buffered: Vec<B>,
+pub struct AncestorStream<M: BlockProvider> {
+    buffered: Vec<M::AncestryBlock>,
     marshal: M,
     #[pin]
-    pending: OptionFuture<BoxFuture<'static, Option<B>>>,
+    pending: OptionFuture<BoxFuture<'static, Option<M::AncestryBlock>>>,
 }
 
-impl<M, B: Block> AncestorStream<M, B> {
+impl<M: BlockProvider> AncestorStream<M> {
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous in height.
-    pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = B>) -> Self {
-        let mut buffered = initial.into_iter().collect::<Vec<B>>();
+    pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = M::AncestryBlock>) -> Self {
+        let mut buffered = initial.into_iter().collect::<Vec<M::AncestryBlock>>();
         buffered.sort_by_key(Heightable::height);
 
         // Check that the initial blocks are contiguous in height.
@@ -78,12 +93,11 @@ impl<M, B: Block> AncestorStream<M, B> {
     }
 }
 
-impl<M, B> Stream for AncestorStream<M, B>
+impl<M> Stream for AncestorStream<M>
 where
-    M: BlockProvider<Block = B>,
-    B: Block,
+    M: BlockProvider,
 {
-    type Item = B;
+    type Item = M::Block;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Because marshal cannot currently yield the genesis block, we stop at height 1.
@@ -94,11 +108,10 @@ where
         // If a result has been buffered, return it and queue the parent fetch if needed.
         if let Some(block) = this.buffered.pop() {
             let height = block.height();
-            let should_fetch_parent = height > END_BOUND;
+            let should_subscribe_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
-            if should_fetch_parent && end_of_buffered {
-                let parent_digest = block.parent();
-                let future = this.marshal.clone().fetch_block(parent_digest).boxed();
+            if should_subscribe_parent && end_of_buffered {
+                let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -112,12 +125,12 @@ where
                     }
                     Poll::Ready(None) | Poll::Pending => {}
                 }
-            } else if !should_fetch_parent {
+            } else if !should_subscribe_parent {
                 // No more parents to fetch; Finish the stream.
                 *this.pending.as_mut() = None.into();
             }
 
-            return Poll::Ready(Some(block));
+            return Poll::Ready(Some(M::into_block(block)));
         }
 
         match this.pending.as_mut().poll(cx) {
@@ -128,10 +141,9 @@ where
             }
             Poll::Ready(Some(Some(block))) => {
                 let height = block.height();
-                let should_fetch_parent = height > END_BOUND;
-                if should_fetch_parent {
-                    let parent_digest = block.parent();
-                    let future = this.marshal.clone().fetch_block(parent_digest).boxed();
+                let should_subscribe_parent = height > END_BOUND;
+                if should_subscribe_parent {
+                    let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -150,7 +162,7 @@ where
                     *this.pending.as_mut() = None.into();
                 }
 
-                Poll::Ready(Some(block))
+                Poll::Ready(Some(M::into_block(block)))
             }
         }
     }
@@ -168,9 +180,14 @@ mod test {
     struct MockProvider(Vec<Block<Sha256Digest, ()>>);
     impl BlockProvider for MockProvider {
         type Block = Block<Sha256Digest, ()>;
+        type AncestryBlock = Block<Sha256Digest, ()>;
 
-        async fn fetch_block(self, digest: Sha256Digest) -> Option<Self::Block> {
+        async fn subscribe(self, digest: Sha256Digest) -> Option<Self::AncestryBlock> {
             self.0.into_iter().find(|b| b.digest() == digest)
+        }
+
+        fn into_block(block: Self::AncestryBlock) -> Self::Block {
+            block
         }
     }
 
@@ -200,7 +217,7 @@ mod test {
 
     #[test_async]
     async fn test_empty_yields_none() {
-        let mut stream: AncestorStream<MockProvider, Block<Sha256Digest, ()>> =
+        let mut stream: AncestorStream<MockProvider> =
             AncestorStream::new(MockProvider::default(), vec![]);
         assert_eq!(stream.next().await, None);
     }
