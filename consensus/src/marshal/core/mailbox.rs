@@ -87,6 +87,20 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
+    /// A request to recover a notarized block by round without adding another local subscriber.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
+    RecoverByCommitment {
+        /// The notarized round to request.
+        round: Round,
+        /// The commitment of the block to recover.
+        commitment: V::Commitment,
+    },
     /// A request to retrieve the verified block previously persisted for `round`.
     GetVerified {
         /// The round to query.
@@ -245,6 +259,14 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             } => false,
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            Self::RecoverByCommitment { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
             | Self::GetVerified { .. }
@@ -265,6 +287,14 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            Self::RecoverByCommitment { .. } => false,
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
@@ -648,6 +678,18 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             response: tx,
         });
         rx
+    }
+
+    /// Request recovery of a notarized block without adding a new subscriber.
+    ///
+    /// This is used when certification finds an existing local-only waiter from
+    /// `verify()`: the existing waiter should receive the block, but
+    /// certification is now allowed to ask peers by notarized round.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn recover_by_commitment(&self, round: Round, commitment: V::Commitment) {
+        let _ = self
+            .sender
+            .enqueue(Message::RecoverByCommitment { round, commitment });
     }
 
     /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.

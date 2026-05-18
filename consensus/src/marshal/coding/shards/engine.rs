@@ -537,12 +537,32 @@ where
                     continue;
                 }
 
-                if let Some(state) = self.state.get_mut(&commitment) {
-                    let round = state.round();
+                if let Some(existing) = self.state.get(&commitment) {
+                    let round = existing.round();
                     let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
                         warn!(%commitment, "no scheme for epoch, ignoring shard");
                         continue;
                     };
+                    if existing.leader().is_none() {
+                        if let Some(sender_index) = scheme.participants().index(&peer) {
+                            let expected_index: u16 = sender_index
+                                .get()
+                                .try_into()
+                                .expect("participant index impossibly out of bounds");
+                            if shard.index() != expected_index {
+                                // Notarized recovery can create state before
+                                // leader discovery. Keep possible leader
+                                // assigned shards buffered until the sender's
+                                // role is known.
+                                self.buffer_peer_shard(peer, shard);
+                                continue;
+                            }
+                        }
+                    }
+                    let state = self
+                        .state
+                        .get_mut(&commitment)
+                        .expect("state checked as present");
                     let progressed = state.on_network_shard(
                         peer,
                         shard,
@@ -3237,6 +3257,54 @@ mod tests {
                 assert!(
                     oracle.blocked().await.unwrap().is_empty(),
                     "valid sender-indexed shards should not block peers"
+                );
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_leader_shard_after_notarized_is_buffered_until_discovered() {
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+
+                let leader_idx = 0usize;
+                let receiver_idx = 3usize;
+                let leader = peers[leader_idx].public_key.clone();
+                let receiver = peers[receiver_idx].public_key.clone();
+
+                peers[receiver_idx].mailbox.notarized(commitment, round);
+                let assigned = peers[receiver_idx]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+
+                let leader_shard = coded_block
+                    .shard(peers[receiver_idx].index.get() as u16)
+                    .expect("missing receiver shard")
+                    .encode();
+                peers[leader_idx]
+                    .sender
+                    .send(Recipients::One(receiver), leader_shard, true);
+
+                context.sleep(config.link.latency * 2).await;
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(commitment, leader, round);
+
+                assigned
+                    .await
+                    .expect("assigned shard should resolve after leader discovery");
+                assert!(
+                    oracle.blocked().await.unwrap().is_empty(),
+                    "valid leader shard should not block peers"
                 );
             },
         );

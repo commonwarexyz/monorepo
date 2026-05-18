@@ -575,6 +575,75 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_coding_certify_pending_verify_fetches_by_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let me = participants[0].clone();
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certify-pending-verify",
+                provider.clone(),
+                buffer,
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(genesis_block()),
+                marshal,
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let (candidate_ctx, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+            let _verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+
+            let proposal = Proposal::new(round, View::zero(), commitment);
+            let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
+            resolver.respond_to_next_fetch((notarization, candidate).encode());
+            let certify_rx = marshaled.certify(round, commitment).await;
+
+            let result = certify_rx.await.expect("certify result missing");
+            assert!(
+                result,
+                "pending verify should complete after certification recovery"
+            );
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "notarized delivery should validate"
+            );
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Request::Notarized { round: request_round },
+                        handler::Annotation::Notarization { round: subscriber_round },
+                    ) if *request_round == round && *subscriber_round == round
+                )),
+                "certify should recover a pending verify by notarized round"
+            );
+            assert!(
+                resolver.targeted().is_empty(),
+                "certify recovery must not issue targeted fetches"
+            );
+        });
+    }
+
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_coding_finalize_good_links() {

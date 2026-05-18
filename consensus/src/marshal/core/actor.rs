@@ -729,6 +729,22 @@ where
                         )
                         .await;
                     }
+                    #[cfg(not(any(
+                        commonware_stability_BETA,
+                        commonware_stability_GAMMA,
+                        commonware_stability_DELTA,
+                        commonware_stability_EPSILON,
+                        commonware_stability_RESERVED
+                    )))]
+                    Message::RecoverByCommitment { round, commitment } => {
+                        self.handle_recover_by_commitment(
+                            round,
+                            commitment,
+                            &mut resolver,
+                            &mut buffer,
+                        )
+                        .await;
+                    }
                     Message::SetFloor { height } => {
                         if self.last_processed_height >= height {
                             warn!(
@@ -1013,6 +1029,30 @@ where
                 });
             }
         }
+    }
+
+    #[commonware_macros::stability(ALPHA)]
+    async fn handle_recover_by_commitment<Buf: Buffer<V>>(
+        &mut self,
+        round: Round,
+        commitment: V::Commitment,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        buffer: &mut Buf,
+    ) {
+        if round < self.last_processed_round {
+            return;
+        }
+        if self
+            .find_block_by_commitment(buffer, commitment)
+            .await
+            .is_some()
+        {
+            return;
+        }
+        resolver.fetch(Fetch::new(
+            Request::Notarized { round },
+            Annotation::Notarization { round },
+        ));
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled

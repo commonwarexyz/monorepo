@@ -909,6 +909,12 @@ where
         // First, check for an in-progress verification task from `verify()`.
         let task = self.verification_tasks.take(round, payload);
         if let Some(task) = task {
+            // `verify()` intentionally waits only for local candidate data. Once
+            // certification starts, a notarization exists and the same pending
+            // verifier must be unblocked by round-bound recovery if local
+            // reconstruction never completes.
+            self.shards.notarized(payload, round);
+            self.marshal.recover_by_commitment(round, payload);
             return task;
         }
 
