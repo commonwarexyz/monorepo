@@ -740,7 +740,6 @@ where
 
                         // Update the processed height
                         self.update_processed_height(height, &mut resolver);
-                        self.cache.prune_by_height(height).await;
                         if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
                             return;
@@ -751,9 +750,9 @@ where
                         // updating `last_processed_height`.
                         self.pending_acks.clear();
 
-                        // Prune data in the finalized archives below the new floor.
-                        if let Err(err) = self.prune_finalized_archives(height).await {
-                            error!(?err, %height, "failed to prune finalized archives");
+                        // The floor is durable, so cache/finalized data below it can be pruned.
+                        if let Err(err) = self.prune_after_floor(height).await {
+                            error!(?err, %height, "failed to prune data below floor");
                             return;
                         }
 
@@ -1898,6 +1897,31 @@ where
             },
             async {
                 self.finalizations_by_height
+                    .prune(height)
+                    .await
+                    .map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            }
+        )?;
+        Ok(())
+    }
+
+    /// Prunes finalized archives and height-indexed certified cache data below the durable floor.
+    async fn prune_after_floor(&mut self, height: Height) -> Result<(), BoxedError> {
+        let cache = &mut self.cache;
+        let finalized_blocks = &mut self.finalized_blocks;
+        let finalizations_by_height = &mut self.finalizations_by_height;
+        try_join!(
+            async {
+                cache.prune_by_height(height).await;
+                Ok::<_, BoxedError>(())
+            },
+            async {
+                finalized_blocks.prune(height).await.map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            },
+            async {
+                finalizations_by_height
                     .prune(height)
                     .await
                     .map_err(Box::new)?;
