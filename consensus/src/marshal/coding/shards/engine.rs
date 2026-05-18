@@ -131,8 +131,10 @@
 //!
 //! _If the leader is not yet known, shards are buffered in fixed-size per-peer
 //! queues until consensus signals either the leader via [`Mailbox::discovered`]
-//! or a notarization via [`Mailbox::notarized`]. Once the commitment is active,
-//! buffered shards for that commitment are ingested into the state machine._
+//! or a notarization via [`Mailbox::notarized`]. A notarization activates
+//! reconstruction interest without a leader, so only sender-indexed gossip
+//! shards can be ingested. Assigned shard verification still requires leader
+//! discovery._
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -700,6 +702,10 @@ where
     }
 
     /// Handles notarized reconstruction interest before the leader is known.
+    ///
+    /// This is intentionally narrower than leader discovery: it may reconstruct
+    /// the block from sender-indexed gossip shards, but it cannot mark the
+    /// local assigned shard as verified.
     fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -755,6 +761,10 @@ where
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
+    ///
+    /// Without a known leader, only shards whose index matches the sender's
+    /// participant index are safe to ingest. Once the leader is known, the
+    /// leader's shard may instead match the local participant index.
     fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let Some(state) = self.state.get(&commitment) else {
             return false;
@@ -1490,7 +1500,8 @@ where
 
         // Determine expected index based on sender role. Before the leader is
         // known, only sender-indexed gossip shards are actionable; mismatched
-        // shards cannot be classified without the leader.
+        // shards cannot be classified without the leader and do not satisfy
+        // assigned shard verification.
         let leader = self.common().leader.as_ref();
         let is_from_leader = leader.is_some_and(|leader| leader == &sender);
         let expected_participant = if is_from_leader {

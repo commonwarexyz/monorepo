@@ -912,8 +912,10 @@ where
             return task;
         }
 
-        // Let the shard engine drain any sender-indexed shards already buffered
-        // for the commitment before we wait for local block availability.
+        // Certify may be reached without an earlier `verify`, so the shard
+        // engine may not know the leader yet. A notarized commitment is still
+        // enough to start reconstruction from sender-indexed gossip shards
+        // already buffered for the commitment.
         self.shards.notarized(payload, round);
 
         // No in-progress task means we never verified this proposal locally.

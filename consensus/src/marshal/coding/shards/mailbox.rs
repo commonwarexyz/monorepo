@@ -38,6 +38,10 @@ where
         round: Round,
     },
     /// A notification from consensus that a [`Commitment`] has been notarized.
+    ///
+    /// This may arrive before the engine knows the round leader. It allows the
+    /// engine to reconstruct from sender-indexed gossip shards already buffered
+    /// for the commitment, but it does not satisfy assigned shard verification.
     Notarized {
         /// The [`Commitment`] of the notarized block.
         commitment: Commitment,
@@ -227,6 +231,11 @@ where
     }
 
     /// Inform the engine that a [`Commitment`] was notarized.
+    ///
+    /// This is the leaderless reconstruction signal used by certification. It
+    /// lets the engine drain sender-indexed gossip shards from its peer buffers
+    /// for the commitment. Leader-specific validation and assigned shard
+    /// verification still require a later [`Self::discovered`] call.
     pub fn notarized(&self, commitment: Commitment, round: Round) {
         let _ = self
             .sender
