@@ -23,7 +23,7 @@ pub struct Target<F: Family, D: Digest> {
 
 impl<F: Family, D: Digest> Target<F, D> {
     /// Create a target whose database root and operation root are identical.
-    pub fn from_root(root: D, range: NonEmptyRange<Location<F>>) -> Self {
+    pub const fn from_root(root: D, range: NonEmptyRange<Location<F>>) -> Self {
         Self {
             root,
             ops_root: root,
@@ -32,7 +32,7 @@ impl<F: Family, D: Digest> Target<F, D> {
     }
 
     /// Create a target with distinct database and operation roots.
-    pub fn from_roots(root: D, ops_root: D, range: NonEmptyRange<Location<F>>) -> Self {
+    pub const fn from_roots(root: D, ops_root: D, range: NonEmptyRange<Location<F>>) -> Self {
         Self {
             root,
             ops_root,
