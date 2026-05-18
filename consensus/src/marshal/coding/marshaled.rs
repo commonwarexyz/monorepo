@@ -369,15 +369,15 @@ where
                 }
             };
 
+            // Once the candidate block is available, its parent request can be
+            // height-bound instead of round-bound. The parent is certified by
+            // the proposal context, but the child block is what gives us the
+            // parent height.
             let Some(parent_height) = block.height().previous() else {
                 debug!(height = %block.height(), "block has no possible parent height");
                 tx.send_lossy(false);
                 return;
             };
-            // Once the candidate block is available, its parent request can be
-            // height-bound instead of round-bound. The parent is certified by
-            // the proposal context, but the child block is what gives us the
-            // parent height.
             let parent_request = fetch_parent(
                 parent_commitment,
                 core::Fallback::FetchByCommitment {
@@ -595,12 +595,11 @@ where
             }
 
             let (parent_view, parent_commitment) = consensus_context.parent;
+            // Proposal context carries the certified parent view/commitment
+            // but not the parent height. The parent may be certified above the
+            // finalized tip, so this must stay round-bound until the block is returned.
             let parent_request = fetch_parent(
                 parent_commitment,
-                // Proposal context carries the certified parent
-                // view/commitment but not the parent height. The parent may be
-                // certified above the finalized tip, so this must stay
-                // round-bound until the block is returned.
                 core::Fallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },

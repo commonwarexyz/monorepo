@@ -133,13 +133,14 @@ where
     B: Block + Clone,
 {
     let (_, parent_digest) = context.parent;
+
+    // The candidate block is already available, so the parent request can be
+    // height-bound instead of round-bound. The parent is certified by the
+    // proposal context, but the child block is what gives us the parent height.
     let Some(parent_height) = block.height().previous() else {
         debug!(height = %block.height(), "block has no possible parent height");
         return Some(false);
     };
-    // The candidate block is already available, so the parent request can be
-    // height-bound instead of round-bound. The parent is certified by the
-    // proposal context, but the child block is what gives us the parent height.
     let parent_request = fetch_parent(
         parent_digest,
         Fallback::FetchByCommitment {
