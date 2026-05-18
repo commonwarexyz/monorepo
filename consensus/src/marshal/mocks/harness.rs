@@ -11,7 +11,7 @@ use crate::{
             Coding,
         },
         config::Config,
-        core::{Actor, Mailbox},
+        core::{Actor, Fallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -33,6 +33,7 @@ use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
+use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -3570,6 +3571,96 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
     });
 }
 
+/// Regression test: commitment-fetched blocks must wake subscribers and cache by
+/// decoded height even when the local pruning hint is far ahead.
+pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+        let victim = participants[0].clone();
+        let server = participants[1].clone();
+        let peers = vec![victim.clone(), server.clone()];
+        let mut oracle =
+            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
+                .await;
+
+        let victim_setup = H::setup_validator(
+            context.child("victim"),
+            &mut oracle,
+            victim.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let server_setup = H::setup_validator(
+            context.child("server"),
+            &mut oracle,
+            server.clone(),
+            ConstantProvider::new(schemes[1].clone()),
+        )
+        .await;
+
+        let victim_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: victim_setup.mailbox,
+            extra: victim_setup.extra,
+        };
+        let mut server_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: server_setup.mailbox,
+            extra: server_setup.extra,
+        };
+
+        let actual_height = Height::new(7);
+        let expected_height = Height::new(1_000_000);
+        let block = H::make_test_block(
+            Sha256::hash(b"commitment-fetch-height-hint-mismatch"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            actual_height,
+            7,
+            NUM_VALIDATORS as u16,
+        );
+        let commitment = H::commitment(&block);
+        H::propose(
+            &mut server_handle,
+            Round::new(Epoch::zero(), View::new(actual_height.get())),
+            &block,
+        )
+        .await;
+
+        let subscription = victim_handle.mailbox.subscribe_by_commitment(
+            commitment,
+            Fallback::FetchByCommitment {
+                height: expected_height,
+            },
+        );
+
+        setup_network_links(&mut oracle, &peers, LINK).await;
+
+        let received = select! {
+            result = subscription => {
+                result.expect("commitment subscription should receive the fetched block")
+            },
+            _ = context.sleep(Duration::from_secs(5)) => {
+                panic!("commitment subscription was not woken by height-hint-mismatched block");
+            },
+        };
+        assert_eq!(
+            <<H as TestHarness>::Variant as crate::marshal::core::Variant>::commitment(&received),
+            commitment
+        );
+        assert_eq!(received.height(), actual_height);
+        let cached = victim_handle
+            .mailbox
+            .get_block(&received.digest())
+            .await
+            .expect("height-hint-mismatched fetch should cache by decoded height");
+        assert_eq!(cached.height(), actual_height);
+    });
+}
+
 /// Test basic block subscription delivery.
 pub fn subscribe_basic_block_delivery<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -3616,9 +3707,12 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
 
-        let subscription_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest);
+        let subscription_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest,
+        );
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
         H::verify(
             &mut handle,
@@ -3698,15 +3792,24 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1);
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2);
-        let sub3_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1);
+        let sub1_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest1,
+        );
+        let sub2_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(2)),
+            },
+            digest2,
+        );
+        let sub3_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest1,
+        );
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
             H::propose(&mut handle, round, block).await;
@@ -3790,12 +3893,18 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1);
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2);
+        let sub1_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest1,
+        );
+        let sub2_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(2)),
+            },
+            digest2,
+        );
         drop(sub1_rx);
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
@@ -3893,11 +4002,21 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             n,
         );
 
-        let sub1_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block1));
-        let sub2_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block2));
-        let sub3_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block3));
-        let sub4_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block4));
-        let sub5_rx = handle.mailbox.subscribe_by_digest(None, H::digest(&block5));
+        let sub1_rx = handle
+            .mailbox
+            .subscribe_by_digest(Fallback::Wait, H::digest(&block1));
+        let sub2_rx = handle
+            .mailbox
+            .subscribe_by_digest(Fallback::Wait, H::digest(&block2));
+        let sub3_rx = handle
+            .mailbox
+            .subscribe_by_digest(Fallback::Wait, H::digest(&block3));
+        let sub4_rx = handle
+            .mailbox
+            .subscribe_by_digest(Fallback::Wait, H::digest(&block4));
+        let sub5_rx = handle
+            .mailbox
+            .subscribe_by_digest(Fallback::Wait, H::digest(&block5));
 
         // Block1: Broadcasted by the actor
         H::propose(
@@ -4602,7 +4721,11 @@ pub fn ancestry_stream<H: TestHarness>() {
 
         // Stream from latest -> height 1
         let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
-        let ancestry = handle.mailbox.ancestry((None, commitment)).await.unwrap();
+        let ancestry = handle
+            .mailbox
+            .ancestry((Fallback::Wait, commitment))
+            .await
+            .unwrap();
         let blocks = ancestry.collect::<Vec<_>>().await;
 
         // Ensure correct delivery order: 5,4,3,2,1
