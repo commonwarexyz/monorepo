@@ -401,7 +401,7 @@ impl Random for Summary {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for Summary {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let bytes: [u8; blake3::OUT_LEN] = u.arbitrary()?;

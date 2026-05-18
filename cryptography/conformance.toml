@@ -185,3 +185,15 @@ hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 ["commonware_cryptography::transcript::test::conformance::CodecConformance<Summary>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+
+["commonware_cryptography::zk::bulletproofs::ipa::conformance::CodecConformance<Claim<TestF,TestG>>"]
+n_cases = 65536
+hash = "96caefb248c9196a67b3abc987e738257d45b0e199717b37329ad8142aec55d3"
+
+["commonware_cryptography::zk::bulletproofs::ipa::conformance::CodecConformance<Proof<TestF,TestG>>"]
+n_cases = 65536
+hash = "de132e1ab2576fd8227c5ca2e04ca93e5f8e6f8c46369457af0d0383b3559034"
+
+["commonware_cryptography::zk::bulletproofs::ipa::conformance::CodecConformance<Setup<TestG>>"]
+n_cases = 65536
+hash = "baa7fede6bfe35a0b2bfe1195b6df3a31fb6be8f9d2f4877c65444602ef13797"

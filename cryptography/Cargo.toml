@@ -82,6 +82,7 @@ arbitrary = [
 	"dep:arbitrary",
 	"std",
 ]
+fuzz = [ "arbitrary", "std" ]
 std = [
 	"anyhow?/std",
 	"blake3/std",
