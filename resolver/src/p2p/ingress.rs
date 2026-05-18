@@ -168,7 +168,7 @@ where
 
 /// A way to send messages to the peer actor.
 #[derive(Clone)]
-pub struct Mailbox<K: Span, P: Eq, S: Eq> {
+pub struct Mailbox<K: Span, P: Eq, S: Eq = ()> {
     /// The channel that delivers messages to the peer actor.
     sender: Sender<Message<K, P, S>>,
 }

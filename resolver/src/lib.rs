@@ -14,7 +14,7 @@ commonware_macros::stability_scope!(BETA {
 
     /// A key to fetch data for a subscriber.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub struct Fetch<K, S> {
+    pub struct Fetch<K, S = ()> {
         /// The peer-visible key.
         pub key: K,
         /// Subscriber attached to the key.
