@@ -350,6 +350,77 @@ mod tests {
     type RecordedDelivery = (Delivery<Key, SubscriberTag>, Bytes);
 
     #[derive(Clone)]
+    struct BlockingSubscriberRecordingConsumer {
+        context: Arc<deterministic::Context>,
+        sender: mpsc::UnboundedSender<RecordedDelivery>,
+        started: mpsc::UnboundedSender<Delivery<Key, SubscriberTag>>,
+        gates: DeliveryGates,
+    }
+
+    impl BlockingSubscriberRecordingConsumer {
+        fn new(
+            context: deterministic::Context,
+            gates: Vec<DeliveryGate>,
+        ) -> (
+            Self,
+            mpsc::UnboundedReceiver<RecordedDelivery>,
+            mpsc::UnboundedReceiver<Delivery<Key, SubscriberTag>>,
+        ) {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            let (started, started_receiver) = mpsc::unbounded_channel();
+            (
+                Self {
+                    context: Arc::new(context),
+                    sender,
+                    started,
+                    gates: Arc::new(Mutex::new(gates.into())),
+                },
+                receiver,
+                started_receiver,
+            )
+        }
+    }
+
+    impl crate::Consumer for BlockingSubscriberRecordingConsumer {
+        type Key = Key;
+        type Subscriber = SubscriberTag;
+        type Value = Bytes;
+
+        fn deliver(
+            &mut self,
+            delivery: Delivery<Self::Key, Self::Subscriber>,
+            value: Self::Value,
+        ) -> oneshot::Receiver<bool> {
+            self.started.send_lossy(delivery.clone());
+            let (gate, valid) = self
+                .gates
+                .lock()
+                .pop_front()
+                .map_or((None, true), |(gate, valid)| (Some(gate), valid));
+            let (mut response, receiver) = oneshot::channel();
+            let sender = self.sender.clone();
+            self.context.child("delivery").spawn(move |_| async move {
+                if let Some(gate) = gate {
+                    select! {
+                        _ = response.closed() => return,
+                        result = gate => {
+                            if result.is_err() {
+                                let _ = response.send(false);
+                                return;
+                            }
+                        },
+                    }
+                }
+                if valid {
+                    sender.send_lossy((delivery, value));
+                }
+                let _ = response.send(valid);
+            });
+            receiver
+        }
+    }
+
+    #[derive(Clone)]
     struct SubscriberRecordingConsumer {
         sender: mpsc::UnboundedSender<RecordedDelivery>,
     }
@@ -2069,6 +2140,103 @@ mod tests {
                 Delivery {
                     key: key.clone(),
                     subscribers: non_empty_vec![first_subscriber, second_subscriber],
+                }
+            );
+            assert_eq!(value, Bytes::from("data for key 5"));
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_during_validation_is_delivered_after_success() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(5);
+            let data = Bytes::from("data for key 5");
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![(first_gate_receiver, true), (second_gate_receiver, true)],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let first_subscriber = SubscriberTag(49);
+            let second_subscriber = SubscriberTag(50);
+            mailbox1.fetch(Fetch::new(key.clone(), first_subscriber.clone()));
+
+            let delivery = started.recv().await.expect("delivery did not start");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![first_subscriber.clone()],
+                }
+            );
+
+            mailbox1.fetch(Fetch::new(key.clone(), second_subscriber.clone()));
+            context.sleep(Duration::from_millis(100)).await;
+
+            first_gate_sender.send(()).unwrap();
+            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![first_subscriber],
+                }
+            );
+            assert_eq!(value, data);
+
+            let delivery = select! {
+                delivery = started.recv() => delivery.expect("second delivery did not start"),
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("late subscriber was not delivered");
+                },
+            };
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![second_subscriber.clone()],
+                }
+            );
+
+            second_gate_sender.send(()).unwrap();
+            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key,
+                    subscribers: non_empty_vec![second_subscriber],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));

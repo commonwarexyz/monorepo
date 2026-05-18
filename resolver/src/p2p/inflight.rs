@@ -24,8 +24,8 @@ pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key
     entries: HashMap<Key, Entry>,
 
     /// Holds futures that resolve once the `Consumer` has validated fetched data.
-    /// Each completion yields `(peer, key, valid)`.
-    deliveries: AbortablePool<(P, Key, bool)>,
+    /// Each completion yields `(peer, delivery, valid)`.
+    deliveries: AbortablePool<(P, Delivery<Key, Con::Subscriber>, bool)>,
 
     /// Consumer cloned per delivery to validate fetched data.
     consumer: Con,
@@ -103,29 +103,31 @@ where
     /// the result for later handling.
     pub(super) fn deliver(
         &mut self,
-        key: Key,
         delivery: Delivery<Key, Con::Subscriber>,
         peer: P,
         value: Con::Value,
     ) {
-        let lookup_key = key.clone();
+        let lookup_key = delivery.key.clone();
+        let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
         let aborter = self
             .deliveries
-            .push(async move { (peer, key, receiver.await.unwrap_or(false)) });
+            .push(async move { (peer, completed, receiver.await.unwrap_or(false)) });
         let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
         assert!(entry.delivery.replace(aborter).is_none());
     }
 
-    /// Returns the next completed delivery as `(peer, key, valid)`, or [Aborted] if the
+    /// Returns the next completed delivery as `(peer, delivery, valid)`, or [Aborted] if the
     /// delivery was canceled. Clears the entry's delivery aborter so the slot is available
     /// for a retry.
-    pub(super) async fn next_delivery(&mut self) -> Result<(P, Key, bool), Aborted> {
-        let (peer, key, valid) = self.deliveries.next_completed().await?;
-        let entry = self.entries.get_mut(&key).expect("inflight entry");
+    pub(super) async fn next_delivery(
+        &mut self,
+    ) -> Result<(P, Delivery<Key, Con::Subscriber>, bool), Aborted> {
+        let (peer, delivery, valid) = self.deliveries.next_completed().await?;
+        let entry = self.entries.get_mut(&delivery.key).expect("inflight entry");
         entry.delivery = None;
-        Ok((peer, key, valid))
+        Ok((peer, delivery, valid))
     }
 }
 
@@ -279,16 +281,11 @@ mod tests {
             let value = Bytes::from("data");
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(
-                key.clone(),
-                delivery(key.clone()),
-                peer.clone(),
-                value.clone(),
-            );
+            inflight.deliver(delivery(key.clone()), peer.clone(), value.clone());
 
-            let (delivered_peer, delivered_key, valid) =
+            let (delivered_peer, delivered, valid) =
                 inflight.next_delivery().await.expect("delivery aborted");
-            assert_eq!(delivered_key, key);
+            assert_eq!(delivered.key, key);
             assert_eq!(delivered_peer, peer);
             assert!(valid);
 
@@ -310,7 +307,7 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(key.clone(), delivery(key.clone()), peer, Bytes::from("v"));
+            inflight.deliver(delivery(key.clone()), peer, Bytes::from("v"));
 
             // Drop the entry (and its aborter) before the delivery future is ever polled.
             assert!(inflight.cancel(&key));
@@ -331,11 +328,10 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(key.clone(), delivery(key.clone()), peer, Bytes::from("v"));
+            inflight.deliver(delivery(key.clone()), peer, Bytes::from("v"));
 
-            let (_, delivered_key, valid) =
-                inflight.next_delivery().await.expect("delivery completed");
-            assert_eq!(delivered_key, key);
+            let (_, delivered, valid) = inflight.next_delivery().await.expect("delivery completed");
+            assert_eq!(delivered.key, key);
             assert!(valid);
             inflight.complete(&key, &context);
 
@@ -355,7 +351,7 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(key.clone(), delivery(key.clone()), peer, Bytes::from("v"));
+            inflight.deliver(delivery(key.clone()), peer, Bytes::from("v"));
 
             // Cancel before any poll of the pool: drops the Aborter, removes the entry.
             assert!(inflight.cancel(&key));
@@ -377,7 +373,7 @@ mod tests {
             let key = MockKey(1);
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(key.clone(), delivery(key), peer, Bytes::from("v"));
+            inflight.deliver(delivery(key), peer, Bytes::from("v"));
 
             assert_eq!(inflight.drain(), 1);
 

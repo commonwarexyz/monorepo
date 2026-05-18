@@ -288,11 +288,11 @@ where
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Retain or shutdown) before the consumer finished validating.
-                let (peer, key, result) = match delivery {
+                let (peer, delivery, result) = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
                 };
-                self.handle_delivery(peer, key, result);
+                self.handle_delivery(peer, delivery, result);
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
@@ -423,16 +423,37 @@ where
         };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(key, delivery, peer, response);
+        self.inflight.deliver(delivery, peer, response);
     }
 
     /// Handle completed delivery to the consumer.
-    fn handle_delivery(&mut self, peer: P, key: Key, valid: bool) {
+    fn handle_delivery(&mut self, peer: P, delivery: Delivery<Key, Con::Subscriber>, valid: bool) {
+        let Delivery {
+            key,
+            subscribers: delivered,
+        } = delivery;
+
         if valid {
             self.metrics.fetch.inc(Status::Success);
             self.inflight.complete(&key, self.context.as_ref());
-            self.subscribers.remove(&key);
-            self.fetcher.clear_targets(&key);
+
+            let refetch = self.subscribers.get_mut(&key).is_some_and(|subscribers| {
+                for subscriber in delivered.into_vec() {
+                    subscribers.remove(&subscriber);
+                }
+                !subscribers.is_empty()
+            });
+
+            if refetch {
+                self.inflight.insert(
+                    key.clone(),
+                    self.metrics.fetch_duration.timer(self.context.as_ref()),
+                );
+                self.fetcher.add_ready(key);
+            } else {
+                self.subscribers.remove(&key);
+                self.fetcher.clear_targets(&key);
+            }
             return;
         }
 
