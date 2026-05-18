@@ -2,7 +2,7 @@ name: Fast
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "fuzzing" ]
   pull_request:
   merge_group:
 
