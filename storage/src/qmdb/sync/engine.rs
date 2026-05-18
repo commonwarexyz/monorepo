@@ -678,12 +678,12 @@ where
             return Ok(());
         }
 
-        // Look up the root to verify against using the tree size the request
+        // Look up the ops-tree proof root using the tree size the request
         // asked for. Fresh requests match the current target; retained
         // requests match a historical root that was explicitly retained.
         let is_current_target = request.target_size == self.target.range().end();
         let current_ops_root;
-        let target_root = if is_current_target {
+        let proof_root = if is_current_target {
             current_ops_root = self.target.ops_root();
             &current_ops_root
         } else {
@@ -716,10 +716,10 @@ where
                 &elements,
                 start_loc,
                 nodes,
-                target_root,
+                proof_root,
             )
         } else {
-            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
+            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, proof_root)
         };
 
         // Report success or failure to the resolver.

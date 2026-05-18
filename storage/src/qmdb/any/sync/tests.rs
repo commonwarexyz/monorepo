@@ -70,13 +70,13 @@ mod harnesses {
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
     use commonware_runtime::{deterministic::Context, BufferPooler};
-    use commonware_utils::test_rng_seeded;
+    use commonware_utils::{range::NonEmptyRange, test_rng_seeded};
     use rand::RngCore;
 
     fn target<F: merkle::Family>(
         root: Digest,
         _ops_root: Digest,
-        range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<F>>,
+        range: NonEmptyRange<crate::merkle::Location<F>>,
     ) -> crate::qmdb::any::sync::Target<F, Digest> {
         crate::qmdb::any::sync::Target::new(root, range)
     }
@@ -193,14 +193,10 @@ mod harnesses {
         type Db = crate::qmdb::any::ordered::fixed::test::AnyTest;
         type Target = crate::qmdb::any::sync::Target<crate::mmr::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -260,14 +256,10 @@ mod harnesses {
         type Db = crate::qmdb::any::ordered::variable::test::AnyTest;
         type Target = crate::qmdb::any::sync::Target<crate::mmr::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -334,14 +326,10 @@ mod harnesses {
         type Db = crate::qmdb::any::unordered::fixed::test::AnyTest;
         type Target = crate::qmdb::any::sync::Target<crate::mmr::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -401,14 +389,10 @@ mod harnesses {
         type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
         type Target = crate::qmdb::any::sync::Target<crate::mmr::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -490,14 +474,10 @@ mod harnesses {
         >;
         type Target = crate::qmdb::any::sync::Target<mmb::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -577,14 +557,10 @@ mod harnesses {
         >;
         type Target = crate::qmdb::any::sync::Target<mmb::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -673,14 +649,10 @@ mod harnesses {
         >;
         type Target = crate::qmdb::any::sync::Target<mmb::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -762,14 +734,10 @@ mod harnesses {
         >;
         type Target = crate::qmdb::any::sync::Target<mmb::Family, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            db.root()
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }

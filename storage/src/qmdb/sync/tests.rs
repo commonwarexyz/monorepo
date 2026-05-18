@@ -29,6 +29,7 @@ use commonware_runtime::{
 use commonware_utils::{
     channel::{mpsc, oneshot},
     non_empty_range,
+    range::NonEmptyRange,
     sync::{AsyncRwLock, Mutex},
     NZU64,
 };
@@ -114,25 +115,17 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     /// Target type used by the shared sync engine for this harness.
     type Target: SyncTarget<Family = Self::Family, Digest = Digest> + Eq;
 
-    /// Return the database root expected after sync completes.
-    fn target_root(db: &Self::Db) -> Digest {
-        qmdb::sync::Database::root(db)
-    }
-
-    /// Return the ops root the sync engine targets for range proof verification.
-    fn sync_target_root(db: &Self::Db) -> Digest;
-
     /// Create a sync target from database and operation roots.
     fn target(
         root: Digest,
         ops_root: Digest,
-        range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
+        range: NonEmptyRange<Location<Self::Family>>,
     ) -> Self::Target;
 
     /// Create a sync target whose database root and operation root are identical.
     fn target_from_root(
         root: Digest,
-        range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
+        range: NonEmptyRange<Location<Self::Family>>,
     ) -> Self::Target {
         Self::target(root, root, range)
     }
@@ -265,7 +258,7 @@ where
 
         let target_op_count = target_db.bounds().await.end;
         let target_inactivity_floor = target_db.inactivity_floor_loc().await;
-        let sync_root = H::sync_target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary().await;
 
@@ -344,7 +337,7 @@ where
         // commit already done in apply_ops
 
         let upper_bound = target_db.bounds().await.end;
-        let sync_root = H::sync_target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary().await;
 
@@ -430,7 +423,7 @@ where
         target_db = Box::pin(H::apply_ops(target_db, more_ops.clone())).await;
         // commit already done in apply_ops
 
-        let sync_root = H::sync_target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
@@ -532,7 +525,7 @@ where
         drop(sync_db);
 
         // Capture target state
-        let sync_root = H::sync_target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
@@ -607,8 +600,8 @@ where
             "test setup requires non-zero inactivity floor"
         );
         let initial_upper_bound = target_db.bounds().await.end;
-        let initial_root = H::sync_target_root(&target_db);
-        let initial_verification_root = H::target_root(&target_db);
+        let initial_root = qmdb::sync::Database::ops_root(&target_db);
+        let initial_verification_root = qmdb::sync::Database::root(&target_db);
 
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
@@ -679,8 +672,8 @@ where
         // Capture initial target state
         let initial_lower_bound = target_db.sync_boundary().await;
         let initial_upper_bound = target_db.bounds().await.end;
-        let initial_root = H::sync_target_root(&target_db);
-        let initial_verification_root = H::target_root(&target_db);
+        let initial_root = qmdb::sync::Database::ops_root(&target_db);
+        let initial_verification_root = qmdb::sync::Database::root(&target_db);
 
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
@@ -751,8 +744,8 @@ where
         // Capture initial target state
         let initial_lower_bound = target_db.sync_boundary().await;
         let initial_upper_bound = target_db.bounds().await.end;
-        let initial_root = H::sync_target_root(&target_db);
-        let initial_verification_root = H::target_root(&target_db);
+        let initial_root = qmdb::sync::Database::ops_root(&target_db);
+        let initial_verification_root = qmdb::sync::Database::root(&target_db);
 
         // Apply more operations to the target database
         // (use different seed to avoid key collisions)
@@ -764,7 +757,7 @@ where
             // Capture new target state
             let new_lower_bound = target_db.sync_boundary().await;
             let new_upper_bound = target_db.bounds().await.end;
-            let new_sync_root = H::sync_target_root(&target_db);
+            let new_sync_root = qmdb::sync::Database::ops_root(&target_db);
             let new_verification_root = target_db.root();
 
             // Create client with placeholder initial target (stale compared to final target)
@@ -839,7 +832,7 @@ where
         // Capture target state
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
-        let sync_root = H::sync_target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
         let verification_root = target_db.root();
 
         // Create client with target that will complete immediately
@@ -908,8 +901,8 @@ where
             "test setup requires lower bound that can advance twice"
         );
         let upper_bound = target_db.bounds().await.end;
-        let root = H::target_root(&target_db);
-        let ops_root = H::sync_target_root(&target_db);
+        let root = qmdb::sync::Database::root(&target_db);
+        let ops_root = qmdb::sync::Database::ops_root(&target_db);
 
         let (update_sender, update_receiver) = mpsc::channel(2);
         let target_db = Arc::new(target_db);
@@ -973,8 +966,8 @@ where
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10)).await;
         let initial_target = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -985,8 +978,8 @@ where
         let updated_lower_bound = target_db.sync_boundary().await;
         let updated_upper_bound = target_db.bounds().await.end;
         let updated_target = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(updated_lower_bound, updated_upper_bound),
         );
         let updated_verification_root = target_db.root();
@@ -1100,8 +1093,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops(8)).await;
         let initial_target = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1110,8 +1103,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
         let first_update = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1120,8 +1113,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 2)).await;
         let second_update = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(
                 target_db.sync_boundary().await,
                 target_db.bounds().await.end
@@ -1227,8 +1220,8 @@ where
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
         let target = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(lower_bound, upper_bound),
         );
         let verification_root = target_db.root();
@@ -1300,8 +1293,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: H::target(
-                H::target_root(&target_db),
-                H::sync_target_root(&target_db),
+                qmdb::sync::Database::root(target_db.as_ref()),
+                qmdb::sync::Database::ops_root(target_db.as_ref()),
                 non_empty_range!(lower_bound, upper_bound),
             ),
             resolver: target_db.clone(),
@@ -1351,8 +1344,8 @@ where
             db_config: H::config(&context.next_u64().to_string(), &context),
             fetch_batch_size: NZU64!(5),
             target: H::target(
-                H::target_root(&target_db),
-                H::sync_target_root(&target_db),
+                qmdb::sync::Database::root(target_db.as_ref()),
+                qmdb::sync::Database::ops_root(target_db.as_ref()),
                 non_empty_range!(lower_bound, upper_bound),
             ),
             resolver: target_db.clone(),
@@ -1400,8 +1393,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         // Capture initial target state
         let initial_lower_bound = target_db.sync_boundary().await;
         let initial_upper_bound = target_db.bounds().await.end;
-        let initial_sync_root = H::sync_target_root(&target_db);
-        let initial_verification_root = H::target_root(&target_db);
+        let initial_sync_root = qmdb::sync::Database::ops_root(&target_db);
+        let initial_verification_root = qmdb::sync::Database::root(&target_db);
 
         // Wrap target database for shared mutable access (using Option so we can take ownership)
         let target_db = Arc::new(AsyncRwLock::new(Some(target_db)));
@@ -1452,7 +1445,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             // Capture new target state
             let new_lower_bound = db.sync_boundary().await;
             let new_upper_bound = db.bounds().await.end;
-            let new_sync_root = H::sync_target_root(&db);
+            let new_sync_root = qmdb::sync::Database::ops_root(&db);
             let new_verification_root = db.root();
             *db_guard = Some(db);
 
@@ -1512,7 +1505,7 @@ where
         // commit already done in apply_ops
 
         // Capture target state
-        let sync_root = H::sync_target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
@@ -1583,8 +1576,8 @@ where
         let target_ops = H::create_ops(50);
         target_db = H::apply_ops(target_db, target_ops).await;
 
-        let sync_root = H::sync_target_root(&target_db);
-        let verification_root = H::target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
+        let verification_root = qmdb::sync::Database::root(&target_db);
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
         let target_db = Arc::new(target_db);
@@ -1930,8 +1923,8 @@ where
             .await
             .unwrap();
 
-        let sync_root = H::sync_target_root(&target_db);
-        let verification_root = H::target_root(&target_db);
+        let sync_root = qmdb::sync::Database::ops_root(&target_db);
+        let verification_root = qmdb::sync::Database::root(&target_db);
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
 
@@ -2079,8 +2072,8 @@ where
         }
 
         let old_target = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(
                 target_db.inactivity_floor_loc().await,
                 target_db.bounds().await.end
@@ -2089,8 +2082,8 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(3, seed + 1)).await;
         let new_target = H::target(
-            H::target_root(&target_db),
-            H::sync_target_root(&target_db),
+            qmdb::sync::Database::root(&target_db),
+            qmdb::sync::Database::ops_root(&target_db),
             non_empty_range!(
                 target_db.inactivity_floor_loc().await,
                 target_db.bounds().await.end

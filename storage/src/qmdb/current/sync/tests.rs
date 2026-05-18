@@ -1,10 +1,7 @@
 //! Tests for [crate::qmdb::current] state sync.
 //!
 //! This module reuses the shared sync test functions from [crate::qmdb::sync::tests] by
-//! implementing [SyncTestHarness] for current database types. The key difference from `any`
-//! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
-//! [qmdb::sync::Database::ops_root](crate::qmdb::sync::Database::ops_root)), not the database root
-//! returned by `Db::root()`.
+//! implementing [SyncTestHarness] for current database types.
 //!
 //! Harnesses are instantiated for **both** MMR and MMB merkle families across each (ordered,
 //! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
@@ -26,13 +23,13 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
 };
-use commonware_utils::non_empty_range;
+use commonware_utils::{non_empty_range, range::NonEmptyRange};
 use rand::RngCore as _;
 
 fn dummy_current_target<F: crate::merkle::Graftable>(
     root: Digest,
     ops_root: Digest,
-    range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<F>>,
+    range: NonEmptyRange<crate::merkle::Location<F>>,
 ) -> crate::qmdb::current::sync::Target<F, Digest> {
     crate::qmdb::current::sync::Target::new(
         root,
@@ -101,7 +98,7 @@ mod harnesses {
     fn target<F: merkle::Graftable>(
         root: Digest,
         ops_root: Digest,
-        range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<F>>,
+        range: NonEmptyRange<crate::merkle::Location<F>>,
     ) -> CurrentTarget<F, Digest> {
         CurrentTarget::new(
             root,
@@ -317,14 +314,10 @@ mod harnesses {
         type Db = UnorderedFixedDb<F>;
         type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -373,14 +366,10 @@ mod harnesses {
         type Db = UnorderedVariableDb<F>;
         type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -429,14 +418,10 @@ mod harnesses {
         type Db = OrderedFixedDb<F>;
         type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
@@ -485,14 +470,10 @@ mod harnesses {
         type Db = OrderedVariableDb<F>;
         type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
-        }
-
         fn target(
             root: Digest,
             ops_root: Digest,
-            range: commonware_utils::range::NonEmptyRange<crate::merkle::Location<Self::Family>>,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
         ) -> Self::Target {
             target(root, ops_root, range)
         }
