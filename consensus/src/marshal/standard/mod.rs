@@ -1501,6 +1501,181 @@ mod tests {
         }
     }
 
+    /// Regression for `Deferred::certify`'s `fetch_notarized` bump. When `verify`
+    /// has an in-progress task with the block still missing locally, `certify`
+    /// must take that task AND nudge a round-bound notarized fetch; otherwise
+    /// the shared task would wait forever on a local subscription that nothing
+    /// drives. Removing the `fetch_notarized` call makes this test hang.
+    #[test_traced("WARN")]
+    fn test_standard_deferred_certify_bumps_notarized_fetch_for_pending_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "deferred-certify-bumps-fetch",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+            )
+            .await;
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut wrapper = Wrapper::new(
+                WrapperKind::Deferred,
+                context.child("wrapper"),
+                mock_app,
+                marshal.clone(),
+            );
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::zero(), genesis.digest()),
+            };
+            let block =
+                B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
+            let digest = block.digest();
+
+            // `verify` registers a pending verification task; the optimistic
+            // task's `Wait` block subscription cannot pull from peers, so it
+            // stays parked until something delivers the block locally.
+            let verify_rx = wrapper.verify(block_context, digest).await;
+
+            // Stage the notarized response so the bump's fetch can resolve.
+            let proposal = Proposal::new(round, View::zero(), digest);
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+            resolver.respond_to_next_fetch((notarization, block).encode());
+
+            // `certify` takes the in-progress task and calls `fetch_notarized`,
+            // which issues a round-bound `Request::Notarized`. The recording
+            // resolver delivers; the marshal stores the block and wakes
+            // verify's digest subscription; deferred_verify produces the final
+            // verdict shared by both receivers.
+            let certify_rx = wrapper.certify(round, digest).await;
+
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        result.expect("verify resolves"),
+                        "optimistic verify should accept fetched block"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify must resolve after the notarized fetch delivers the block");
+                },
+            }
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify resolves"),
+                        "certify should succeed via the shared deferred_verify task"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve via the bumped notarized fetch");
+                },
+            }
+
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Request::Notarized { round: request_round },
+                        handler::Annotation::Notarization { round: subscriber_round },
+                    ) if *request_round == round && *subscriber_round == round
+                )),
+                "certify must bump a notarized round fetch when verify is in progress"
+            );
+        });
+    }
+
+    /// Regression: if consensus drops the optimistic verify receiver before the
+    /// block arrives, the registered deferred task can close. Certification must
+    /// not return that stale receiver as its final result; it should recover the
+    /// notarized block and certify through the embedded-context path.
+    #[test_traced("WARN")]
+    fn test_standard_deferred_certify_falls_back_after_canceled_verify() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "deferred-certify-canceled-verify",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+            )
+            .await;
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mut wrapper = Wrapper::new(
+                WrapperKind::Deferred,
+                context.child("wrapper"),
+                mock_app,
+                marshal.clone(),
+            );
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::zero(), genesis.digest()),
+            };
+            let block =
+                B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
+            let digest = block.digest();
+
+            let verify_rx = wrapper.verify(block_context, digest).await;
+            drop(verify_rx);
+            context.sleep(Duration::from_millis(10)).await;
+
+            let proposal = Proposal::new(round, View::zero(), digest);
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+            resolver.respond_to_next_fetch((notarization, block).encode());
+            let certify_rx = wrapper.certify(round, digest).await;
+
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify result missing"),
+                        "certify should recover after canceled optimistic verify"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should recover after canceled optimistic verify");
+                },
+            }
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "notarized delivery should validate"
+            );
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Request::Notarized { round: request_round },
+                        handler::Annotation::Notarization { round: subscriber_round },
+                    ) if *request_round == round && *subscriber_round == round
+                )),
+                "certify must recover by fetching the notarized round"
+            );
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_standard_verify_height_lie_parent_fetch_is_round_bound() {
         for kind in wrapper_kinds() {

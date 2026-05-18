@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_reproposal_verify_receiver_drop_does_not_synthesize_false() {
+    fn test_reproposal_certify_recovers_after_verify_receiver_drop() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1456,7 +1456,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone()).await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -1489,36 +1494,54 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Re-proposal payload with valid coding config, but no block available.
-            let missing_payload = Commitment::from((
-                Sha256::hash(b"missing_block"),
-                Sha256::hash(b"missing_root"),
-                Sha256::hash(b"missing_context"),
-                coding_config,
-            ));
-            let round = Round::new(Epoch::zero(), View::new(1));
+            // Build a valid boundary re-proposal, but keep it unavailable until
+            // after the optimistic verify receiver has been dropped.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+            let boundary_context = CodingCtx {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let boundary_block = make_coding_block(
+                boundary_context,
+                genesis.digest(),
+                boundary_height,
+                boundary_height.get() * 100,
+            );
+            let coded_boundary = CodedBlock::new(boundary_block, coding_config, &Sequential);
+            let boundary_commitment = coded_boundary.commitment();
+            let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = CodingCtx {
-                round,
+                round: reproposal_round,
                 leader: me,
-                parent: (View::zero(), missing_payload),
+                parent: (View::new(boundary_height.get()), boundary_commitment),
             };
 
-            // Start verify, then drop the receiver immediately.
-            let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
+            // Start verify, then drop the receiver before the block is available.
+            let verify_rx = marshaled
+                .verify(reproposal_context, boundary_commitment)
+                .await;
             drop(verify_rx);
+            context.sleep(Duration::from_millis(10)).await;
 
-            // Certify should resolve promptly from the in-progress task, but must
-            // not synthesize `false` when verification was canceled before a verdict.
-            let certify_rx = marshaled.certify(round, missing_payload).await;
+            shards.proposed(boundary_round, coded_boundary);
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Certify should not return the stale closed verification task; it
+            // should recover through the embedded-context certification path.
+            let certify_rx = marshaled
+                .certify(reproposal_round, boundary_commitment)
+                .await;
             select! {
                 result = certify_rx => {
                     assert!(
-                        result.is_err(),
-                        "certify should resolve without an explicit verdict when verify receiver is dropped"
+                        result.expect("certify result missing"),
+                        "certify should recover after verify receiver drop"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify task should resolve promptly after verify receiver drop");
+                    panic!("certify should recover after verify receiver drop");
                 },
             }
         })
@@ -1533,7 +1556,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone()).await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -1600,19 +1628,19 @@ mod tests {
                 },
             }
 
-            // Certify should consume the same unresolved verification task.
-            let certify_rx = marshaled.certify(round, missing_payload).await;
-            select! {
-                result = certify_rx => {
-                    assert!(
-                        result.is_err(),
-                        "certify should resolve without explicit false when re-proposal block is unavailable"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify should resolve promptly when re-proposal block is unavailable");
-                },
-            }
+            // Certify should not surface the closed verification task as the final result.
+            // With no block available, it remains pending on the recovery path until the
+            // certifier's caller times out or data arrives.
+            let mut certify_rx = marshaled.certify(round, missing_payload).await;
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    certify_rx.try_recv(),
+                    Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                ),
+                "certify should remain pending without explicit false or stale cancellation"
+            );
+            drop(certify_rx);
         })
     }
 
