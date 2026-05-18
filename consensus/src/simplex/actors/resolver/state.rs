@@ -75,7 +75,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 if self.encounter_view(view) {
                     self.nullifications
                         .insert(view, Certificate::Nullification(nullification));
-                    resolver.cancel(Subscriber::from(view));
+                    let request = view.into();
+                    resolver.retain(move |candidate, _| *candidate != request);
                 }
             }
             Certificate::Notarization(notarization) => {
@@ -219,7 +220,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.nullifications.retain(|view, _| *view > floor);
         self.satisfied_by.retain(|view, _| *view > floor);
         self.failed_views.retain(|view| *view > floor);
-        resolver.retain(move |subscriber| subscriber.0 > floor.into());
+        resolver.retain(move |request, _| *request > floor.into());
     }
 }
 
@@ -308,23 +309,13 @@ mod tests {
             Feedback::Ok
         }
 
-        fn cancel(&mut self, subscriber: Subscriber) -> Feedback {
-            self.outstanding.lock().remove(&subscriber.0);
-            Feedback::Ok
-        }
-
-        fn clear(&mut self) -> Feedback {
-            self.outstanding.lock().clear();
-            Feedback::Ok
-        }
-
         fn retain(
             &mut self,
-            predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
+            predicate: impl Fn(&Self::Request, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
             self.outstanding
                 .lock()
-                .retain(|key| predicate(&Subscriber::from(key.clone())));
+                .retain(|key| predicate(key, &Subscriber::from(key.clone())));
             Feedback::Ok
         }
     }

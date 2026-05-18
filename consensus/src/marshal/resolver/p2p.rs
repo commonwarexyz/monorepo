@@ -53,7 +53,7 @@ pub fn init<E, C, B, D, S, R, P>(
     backfill: (S, R),
 ) -> (
     handler::Receiver<D>,
-    p2p::Mailbox<handler::Request<D>, P, handler::ResolverSubscriber<D>>,
+    p2p::Mailbox<handler::Request<D>, P, handler::FetchContext>,
 )
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,

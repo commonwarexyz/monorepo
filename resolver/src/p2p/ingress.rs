@@ -7,7 +7,7 @@ use commonware_cryptography::PublicKey;
 use commonware_utils::{vec::NonEmptyVec, Span};
 use std::collections::VecDeque;
 
-type Predicate<S> = Box<dyn Fn(&S) -> bool + Send>;
+type Predicate<R, S> = Box<dyn Fn(&R, &S) -> bool + Send>;
 
 /// A request to fetch data, optionally with target peers.
 pub struct FetchRequest<R, P, S> {
@@ -27,32 +27,19 @@ pub enum Message<R, P, S> {
     /// Initiate fetch requests.
     Fetch(Vec<FetchRequest<R, P, S>>),
 
-    /// Cancel a subscriber's outstanding fetch interest.
-    Cancel { subscriber: S },
-
-    /// Cancel all fetch requests.
-    Clear,
-
-    /// Cancel all fetch requests without a subscriber that satisfies the predicate.
-    Retain { predicate: Predicate<S> },
-}
-
-enum Modification<S> {
-    Cancel { subscriber: S },
-    Retain { predicate: Predicate<S> },
+    /// Retain only fetch subscribers that satisfy the predicate.
+    Retain { predicate: Predicate<R, S> },
 }
 
 /// Pending resolver messages retained after the mailbox fills.
 pub struct Pending<R, P, S> {
-    clear: bool,
-    modifications: VecDeque<Modification<S>>,
+    modifications: VecDeque<Predicate<R, S>>,
     fetches: Vec<FetchRequest<R, P, S>>,
 }
 
 impl<R, P, S> Default for Pending<R, P, S> {
     fn default() -> Self {
         Self {
-            clear: false,
             modifications: VecDeque::new(),
             fetches: Vec::new(),
         }
@@ -61,28 +48,16 @@ impl<R, P, S> Default for Pending<R, P, S> {
 
 impl<R, P, S> Overflow<Message<R, P, S>> for Pending<R, P, S> {
     fn is_empty(&self) -> bool {
-        !self.clear && self.modifications.is_empty() && self.fetches.is_empty()
+        self.modifications.is_empty() && self.fetches.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
         F: FnMut(Message<R, P, S>) -> Option<Message<R, P, S>>,
     {
-        // Clear drains before later modifications and fetches.
-        if self.clear {
-            self.clear = false;
-            if let Some(message) = push(Message::Clear) {
-                self.push_front(message);
-                return;
-            }
-        }
-
-        // Drain cancels and retains in the order they were received.
-        while let Some(modification) = self.modifications.pop_front() {
-            let message = match modification {
-                Modification::Cancel { subscriber } => Message::Cancel { subscriber },
-                Modification::Retain { predicate } => Message::Retain { predicate },
-            };
+        // Drain retains in the order they were received.
+        while let Some(predicate) = self.modifications.pop_front() {
+            let message = Message::Retain { predicate };
             if let Some(message) = push(message) {
                 self.push_front(message);
                 return;
@@ -102,14 +77,8 @@ impl<R, P, S> Overflow<Message<R, P, S>> for Pending<R, P, S> {
 impl<R, P, S> Pending<R, P, S> {
     fn push_front(&mut self, message: Message<R, P, S>) {
         match message {
-            Message::Clear => self.clear = true,
             Message::Retain { predicate } => {
-                self.modifications
-                    .push_front(Modification::Retain { predicate });
-            }
-            Message::Cancel { subscriber } => {
-                self.modifications
-                    .push_front(Modification::Cancel { subscriber });
+                self.modifications.push_front(predicate);
             }
             Message::Fetch(fetches) => {
                 self.fetches.splice(0..0, fetches);
@@ -118,13 +87,12 @@ impl<R, P, S> Pending<R, P, S> {
     }
 }
 
-fn retain_fetch<S>(subscribers: &mut Vec<S>, predicate: &(dyn Fn(&S) -> bool + Send)) -> bool {
-    subscribers.retain(|subscriber| predicate(subscriber));
-    !subscribers.is_empty()
-}
-
-fn cancel_subscriber<S: Eq>(subscribers: &mut Vec<S>, canceled: &S) -> bool {
-    subscribers.retain(|subscriber| subscriber != canceled);
+fn retain_fetch<R, S>(
+    request: &R,
+    subscribers: &mut Vec<S>,
+    predicate: &(dyn Fn(&R, &S) -> bool + Send),
+) -> bool {
+    subscribers.retain(|subscriber| predicate(request, subscriber));
     !subscribers.is_empty()
 }
 
@@ -187,39 +155,12 @@ where
                     }
                 }
             }
-            Self::Cancel { subscriber } => {
-                // Cancel removes this subscriber from any pending fetches.
-                overflow
-                    .fetches
-                    .retain_mut(|fetch| cancel_subscriber(&mut fetch.subscribers, &subscriber));
-
-                // Retain only the first queued cancel for a subscriber.
-                if overflow
-                    .modifications
-                    .iter()
-                    .all(|modification| {
-                        !matches!(modification, Modification::Cancel { subscriber: cancel } if cancel == &subscriber)
-                    })
-                {
-                    overflow
-                        .modifications
-                        .push_back(Modification::Cancel { subscriber });
-                }
-            }
-            Self::Clear => {
-                // Clear supersedes pending modifications and fetches.
-                overflow.clear = true;
-                overflow.modifications.clear();
-                overflow.fetches.clear();
-            }
             Self::Retain { predicate } => {
                 // Retain prunes pending fetch subscribers before queued fetches drain.
                 overflow.fetches.retain_mut(|request| {
-                    retain_fetch(&mut request.subscribers, predicate.as_ref())
+                    retain_fetch(&request.request, &mut request.subscribers, predicate.as_ref())
                 });
-                overflow
-                    .modifications
-                    .push_back(Modification::Retain { predicate });
+                overflow.modifications.push_back(predicate);
             }
         }
         true
@@ -336,31 +277,18 @@ where
         ))
     }
 
-    /// Send a cancel request to the peer actor.
-    ///
-    /// If the engine has shut down, this is a no-op.
-    fn cancel(&mut self, subscriber: Self::Subscriber) -> Feedback {
-        self.sender.enqueue(Message::Cancel { subscriber })
-    }
-
     /// Send a retain request to the peer actor.
     ///
     /// If the engine has shut down, this is a no-op.
     fn retain(
         &mut self,
-        predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
+        predicate: impl Fn(&Self::Request, &Self::Subscriber) -> bool + Send + 'static,
     ) -> Feedback {
         self.sender.enqueue(Message::Retain {
             predicate: Box::new(predicate),
         })
     }
 
-    /// Send a clear request to the peer actor.
-    ///
-    /// If the engine has shut down, this is a no-op.
-    fn clear(&mut self) -> Feedback {
-        self.sender.enqueue(Message::Clear)
-    }
 }
 
 #[cfg(test)]
@@ -390,8 +318,8 @@ mod tests {
         }])
     }
 
-    fn subscriber_is(value: u16) -> impl Fn(&u16) -> bool + Send {
-        move |subscriber| *subscriber == value
+    fn subscriber_is(value: u16) -> impl Fn(&u8, &u16) -> bool + Send {
+        move |_, subscriber| *subscriber == value
     }
 
     fn targets(values: &[u8]) -> NonEmptyVec<u8> {
@@ -480,47 +408,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_removes_pending_subscriber_but_is_retained() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch(1, 10, None));
-        Policy::handle(&mut pending, fetch(2, 11, None));
-        Policy::handle(&mut pending, Message::Cancel { subscriber: 10 });
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Cancel { subscriber: 10 }));
-        assert_fetch(&messages[1], 2, None);
-    }
-
-    #[test]
-    fn fetch_after_cancel_is_retained() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, Message::Cancel { subscriber: 10 });
-        Policy::handle(&mut pending, fetch(1, 10, None));
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Cancel { subscriber: 10 }));
-        assert_fetch(&messages[1], 1, None);
-    }
-
-    #[test]
-    fn duplicate_cancel_keeps_original_position() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, Message::Cancel { subscriber: 10 });
-        Policy::handle(&mut pending, fetch(2, 11, None));
-        Policy::handle(&mut pending, Message::Cancel { subscriber: 10 });
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Cancel { subscriber: 10 }));
-        assert_fetch(&messages[1], 2, None);
-    }
-
-    #[test]
     fn retain_removes_fetches_for_dropped_subscribers() {
         let mut pending = TestPending::default();
 
@@ -575,28 +462,13 @@ mod tests {
     }
 
     #[test]
-    fn clear_supersedes_prior_pending_actions() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch(1, 10, None));
-        Policy::handle(&mut pending, Message::Cancel { subscriber: 11 });
-        Policy::handle(&mut pending, Message::Clear);
-        Policy::handle(&mut pending, fetch(3, 12, None));
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Clear));
-        assert_fetch(&messages[1], 3, None);
-    }
-
-    #[test]
     fn fetch_after_retain_is_retained_when_subscriber_is_dropped() {
         let mut pending = TestPending::default();
 
         Policy::handle(
             &mut pending,
             Message::Retain {
-                predicate: Box::new(|subscriber| *subscriber != 10),
+                predicate: Box::new(|_, subscriber| *subscriber != 10),
             },
         );
         Policy::handle(&mut pending, fetch(1, 10, None));
@@ -608,31 +480,4 @@ mod tests {
         assert_fetch_requests(&messages[1], &[1, 2]);
     }
 
-    #[test]
-    fn clear_supersedes_prior_modifications() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(
-            &mut pending,
-            Message::Retain {
-                predicate: Box::new(|subscriber| *subscriber != 10),
-            },
-        );
-        Policy::handle(&mut pending, Message::Clear);
-        Policy::handle(
-            &mut pending,
-            Message::Retain {
-                predicate: Box::new(|subscriber| *subscriber != 11),
-            },
-        );
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Clear));
-        let Message::Retain { predicate } = &messages[1] else {
-            panic!("expected retain");
-        };
-        assert!(predicate(&10));
-        assert!(!predicate(&11));
-    }
 }

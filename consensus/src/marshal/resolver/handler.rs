@@ -23,7 +23,7 @@ pub(crate) enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
         /// The delivery metadata attached to the resolved value.
-        delivery: Delivery<Request<D>, ResolverSubscriber<D>>,
+        delivery: Delivery<Request<D>, FetchContext>,
         /// The value being delivered.
         value: Bytes,
         /// A channel to send the result of the delivery.
@@ -128,7 +128,7 @@ impl<D: Digest> Receiver<D> {
 
 impl<D: Digest> Consumer for Handler<D> {
     type Request = Request<D>;
-    type Subscriber = ResolverSubscriber<D>;
+    type Subscriber = FetchContext;
     type Value = Bytes;
 
     fn deliver(
@@ -156,24 +156,27 @@ impl<D: Digest> Producer for Handler<D> {
     }
 }
 
-/// Local processing context for a resolved block request.
+/// Local processing context for a resolved request.
 ///
 /// The resolver request key is the peer-visible lookup. A subscriber is local
 /// metadata attached to that lookup so marshal can decide how to process the
 /// response after validating it against the request key. Multiple local
 /// subscribers may share one peer request when they depend on the same block.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum BlockFetchContext {
+pub enum FetchContext {
+    /// A finalization requested by height.
+    Finalization { height: Height },
+    /// A notarization requested by round.
+    Notarization { round: Round },
     /// A block requested only to satisfy certified ancestry verification.
     ///
     /// The expected height is known before the request from the child block.
     Ancestry { height: Height },
-    /// A block requested from a certified round whose height is not known until
-    /// the response block is decoded.
+    /// A block requested after receiving a finalization whose height is not known
+    /// until the response block is decoded.
     ///
-    /// This covers certified parent fetches by round and finalized-block fetches
-    /// where the finalization names a commitment but not a height.
-    Finalized { round: Round },
+    /// The finalization names a commitment but not a height.
+    FinalizedBlock { round: Round },
     /// A block requested while repairing an internal finalized-chain gap.
     ///
     /// The expected height is known before the request from the gap boundary.
@@ -204,87 +207,45 @@ impl<D: Digest> Request<D> {
             Self::Notarized { .. } => NOTARIZED_REQUEST,
         }
     }
-}
 
-/// A local subscriber for a resolver fetch.
-///
-/// `Request` is the default subscriber: the resolved response is valid for the
-/// peer-visible request, but there is no extra local storage context. `Block`
-/// records why marshal asked for a block so delivery can notify local waiters,
-/// populate the certified ancestry cache, or finalize repaired data without
-/// exposing that context to peers.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ResolverSubscriber<D: Digest> {
-    /// A peer-visible request.
-    Request(Request<D>),
-    /// A locally annotated block fetch.
-    Block {
-        commitment: D,
-        context: BlockFetchContext,
-    },
-}
-
-impl<D: Digest> ResolverSubscriber<D> {
     /// The predicate to use when pruning subjects related to this subject.
     ///
     /// Unrelated subjects are retained. Related subjects are pruned if they are
-    /// "less than or equal to" this subscriber's floor. This keeps pending
+    /// "less than or equal to" this request's floor. This keeps pending
     /// candidate waits out of the resolver entirely, drops height-bound block
     /// requests once the processed height reaches them, and drops round-bound
     /// certified-parent fetches once the processed round reaches them.
-    pub fn predicate(&self) -> impl Fn(&Self) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl Fn(&Self, &FetchContext) -> bool + Send + 'static {
         let cloned = *self;
-        move |s| match (&cloned, s) {
+        move |request, subscriber| match (&cloned, request, subscriber) {
             (
-                Self::Block {
-                    commitment: mine,
-                    context: mine_context,
-                },
-                Self::Block {
-                    commitment: theirs,
-                    context: their_context,
-                },
-            ) => mine != theirs || mine_context != their_context,
-            (Self::Request(Request::Block { commitment: mine }), _) => match s {
-                Self::Request(Request::Block { commitment }) | Self::Block { commitment, .. } => {
-                    commitment != mine
-                }
-                _ => true,
-            },
-            (Self::Block { .. }, _) => true,
-            (
-                Self::Request(Request::Finalized { height: mine }),
-                Self::Request(Request::Finalized { height: theirs }),
+                Self::Finalized { height: mine },
+                Self::Finalized { height: theirs },
+                _,
             ) => *theirs > *mine,
             (
-                Self::Request(Request::Finalized { height: mine }),
-                Self::Block {
-                    context:
-                        BlockFetchContext::Ancestry { height: theirs }
-                        | BlockFetchContext::Repair { height: theirs },
-                    ..
-                },
+                Self::Finalized { height: mine },
+                Self::Block { .. },
+                FetchContext::Ancestry { height: theirs }
+                | FetchContext::Repair { height: theirs },
             ) => *theirs > *mine,
-            (Self::Request(Request::Finalized { .. }), _) => true,
+            (Self::Finalized { .. }, _, _) => true,
             (
-                Self::Request(Request::Notarized { round: mine }),
-                Self::Request(Request::Notarized { round: theirs }),
+                Self::Notarized { round: mine },
+                Self::Notarized { round: theirs },
+                _,
             ) => *theirs > *mine,
             (
-                Self::Request(Request::Notarized { round: mine }),
-                Self::Block {
-                    context: BlockFetchContext::Finalized { round: theirs },
-                    ..
-                },
+                Self::Notarized { round: mine },
+                Self::Block { .. },
+                FetchContext::FinalizedBlock { round: theirs },
             ) => *theirs > *mine,
-            (Self::Request(Request::Notarized { .. }), _) => true,
+            (Self::Notarized { .. }, _, _) => true,
+            (Self::Block { commitment: mine }, Self::Block { commitment: theirs }, _) => {
+                mine != theirs
+            }
+            (Self::Block { .. }, _, _) => true,
         }
-    }
-}
-
-impl<D: Digest> From<Request<D>> for ResolverSubscriber<D> {
-    fn from(request: Request<D>) -> Self {
-        Self::Request(request)
     }
 }
 
@@ -573,62 +534,72 @@ mod tests {
 
     #[test]
     fn test_subject_predicate() {
-        let floor = ResolverSubscriber::from(Request::<D>::Finalized {
+        let floor = Request::<D>::Finalized {
             height: Height::new(100),
-        });
-        let higher_finalized = ResolverSubscriber::from(Request::<D>::Finalized {
-            height: Height::new(200),
-        });
-        let notarized = ResolverSubscriber::from(Request::<D>::Notarized {
-            round: Round::new(Epoch::new(333), View::new(150)),
-        });
-        let stale_repair = ResolverSubscriber::Block {
-            commitment: Sha256::hash(b"repair"),
-            context: BlockFetchContext::Repair {
-                height: Height::new(100),
-            },
         };
-        let fresh_ancestry = ResolverSubscriber::Block {
-            commitment: Sha256::hash(b"ancestry"),
-            context: BlockFetchContext::Ancestry {
-                height: Height::new(101),
-            },
+        let higher_finalized = Request::<D>::Finalized {
+            height: Height::new(200),
+        };
+        let notarized = Request::<D>::Notarized {
+            round: Round::new(Epoch::new(333), View::new(150)),
+        };
+        let block = Request::<D>::Block {
+            commitment: Sha256::hash(b"block"),
+        };
+        let stale_repair = FetchContext::Repair {
+            height: Height::new(100),
+        };
+        let fresh_ancestry = FetchContext::Ancestry {
+            height: Height::new(101),
         };
 
         let predicate = floor.predicate();
-        assert!(predicate(&higher_finalized));
-        assert!(predicate(&notarized));
-        assert!(predicate(&fresh_ancestry));
+        assert!(predicate(
+            &higher_finalized,
+            &FetchContext::Finalization {
+                height: Height::new(200),
+            }
+        ));
+        assert!(predicate(
+            &notarized,
+            &FetchContext::Notarization {
+                round: Round::new(Epoch::new(333), View::new(150)),
+            }
+        ));
+        assert!(predicate(&block, &fresh_ancestry));
 
-        let same_height = ResolverSubscriber::from(Request::<D>::Finalized {
+        let same_height = Request::<D>::Finalized {
             height: Height::new(100),
-        });
-        assert!(!predicate(&same_height));
-        assert!(!predicate(&stale_repair));
+        };
+        assert!(!predicate(
+            &same_height,
+            &FetchContext::Finalization {
+                height: Height::new(100),
+            }
+        ));
+        assert!(!predicate(&block, &stale_repair));
     }
 
     #[test]
-    fn test_block_subscriber_predicate_prunes_exact_context() {
+    fn test_block_request_predicate_prunes_matching_commitment() {
         let commitment = Sha256::hash(b"block");
-        let context = BlockFetchContext::Ancestry {
-            height: Height::new(7),
-        };
-        let subscriber = ResolverSubscriber::Block {
-            commitment,
-            context,
-        };
-        let predicate = subscriber.predicate();
+        let request = Request::<D>::Block { commitment };
+        let predicate = request.predicate();
 
-        assert!(!predicate(&subscriber));
-        assert!(predicate(&ResolverSubscriber::Block {
-            commitment,
-            context: BlockFetchContext::Repair {
+        assert!(!predicate(
+            &request,
+            &FetchContext::Repair {
                 height: Height::new(7),
+            }
+        ));
+        assert!(predicate(
+            &Request::<D>::Block {
+                commitment: Sha256::hash(b"other"),
             },
-        }));
-        assert!(predicate(&ResolverSubscriber::from(Request::<D>::Block {
-            commitment,
-        })));
+            &FetchContext::Repair {
+                height: Height::new(7),
+            }
+        ));
     }
 
     #[test]

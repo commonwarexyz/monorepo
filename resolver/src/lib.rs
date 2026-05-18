@@ -39,9 +39,9 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    impl<R: Clone, S: From<R>> From<R> for Fetch<R, S> {
+    impl<R, S: Default> From<R> for Fetch<R, S> {
         fn from(request: R) -> Self {
-            Self::new(request.clone(), S::from(request))
+            Self::new(request, S::default())
         }
     }
 
@@ -70,9 +70,8 @@ commonware_macros::stability_scope!(BETA {
         /// Returns a receiver that resolves to `true` if the data is valid for the request.
         ///
         /// The returned receiver may be dropped before completion if the application
-        /// cancels the fetch via [`Resolver::cancel`], [`Resolver::clear`], or
-        /// [`Resolver::retain`]. When this happens, the resolver discards the
-        /// validation result.
+        /// cancels the fetch via [`Resolver::retain`]. When this happens, the
+        /// resolver discards the validation result.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for requests that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
@@ -103,16 +102,13 @@ commonware_macros::stability_scope!(BETA {
 
         /// Initiate a fetch request.
         ///
-        /// The resolver fetches and delivers the request. The provided subscriber
-        /// is retained locally and supplied to [`Consumer::deliver`] when the
-        /// fetch resolves. If multiple subscribers are attached to the same
-        /// request, the fetch is retained as long as at least one subscriber
-        /// satisfies the latest [`retain`](Self::retain) predicate.
+        /// The resolver fetches and delivers the request. The subscriber is
+        /// retained locally and supplied to [`Consumer::deliver`] when the fetch
+        /// resolves. If multiple interests are attached to the same request,
+        /// the fetch is retained as long as at least one interest satisfies the
+        /// latest [`retain`](Self::retain) predicate.
         ///
-        /// Passing a bare request is supported when
-        /// `Subscriber: From<Request>`.
-        ///
-        /// [`cancel`](Self::cancel) cancels by subscriber.
+        /// Passing a bare request is supported when `Subscriber: Default`.
         fn fetch<F>(
             &mut self,
             request: F,
@@ -157,26 +153,17 @@ commonware_macros::stability_scope!(BETA {
         where
             F: Into<Fetch<Self::Request, Self::Subscriber>> + Send;
 
-        /// Cancel a subscriber's outstanding fetch interest.
+        /// Retain only fetch interests satisfying the predicate.
         ///
-        /// If this removes the last subscriber for a request and response
-        /// validation is in progress, cancellation may drop the
-        /// [`Consumer::deliver`] future before it reports whether the data was valid.
-        fn cancel(&mut self, subscriber: Self::Subscriber) -> Feedback;
-
-        /// Cancel all fetch requests.
+        /// The predicate receives the peer-visible request and local subscriber
+        /// for each interest.
         ///
-        /// See [`cancel`](Self::cancel) for how cancellation affects
-        /// in-progress response validation.
-        fn clear(&mut self) -> Feedback;
-
-        /// Retain only fetches with at least one subscriber satisfying the predicate.
-        ///
-        /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
-        /// how cancellation affects in-progress response validation.
+        /// Fetches not retained are canceled. If response validation is in
+        /// progress, cancellation may drop the [`Consumer::deliver`] future
+        /// before it reports whether the data was valid.
         fn retain(
             &mut self,
-            predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
+            predicate: impl Fn(&Self::Request, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback;
     }
 });

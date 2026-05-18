@@ -65,7 +65,7 @@ pub struct Engine<
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
 
-    /// Mailbox that makes and cancels fetch requests
+    /// Mailbox that makes and prunes fetch requests
     mailbox: mailbox::Receiver<Message<Key, P, Con::Subscriber>>,
 
     /// Manages outgoing fetch requests
@@ -74,7 +74,7 @@ pub struct Engine<
     /// Tracks all in-flight fetch state
     inflight: Inflight<E, Con, P, Key>,
 
-    /// Local subscribers that keep each fetch request alive.
+    /// Local interests that keep each fetch request alive.
     interests: HashMap<Key, Interests<Con::Subscriber>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
@@ -292,18 +292,13 @@ where
                             }
                         }
                     }
-                    Message::Cancel { subscriber } => {
-                        trace!("mailbox: cancel");
-                        let count = self.cancel_subscriber(&subscriber);
-                        self.record_cancellations(count);
-                    }
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.interests.retain(|_, interests| {
+                        self.interests.retain(|request, interests| {
                             interests
                                 .subscribers
-                                .retain(|subscriber| predicate(subscriber));
+                                .retain(|subscriber| predicate(request, subscriber));
                             !interests.is_empty()
                         });
                         let interests = &self.interests;
@@ -312,20 +307,12 @@ where
                             self.inflight.retain(|key| interests.contains_key(key)) as u64;
                         self.record_cancellations(count);
                     }
-                    Message::Clear => {
-                        trace!("mailbox: clear");
-
-                        self.interests.clear();
-                        self.fetcher.clear();
-                        let count = self.inflight.drain() as u64;
-                        self.record_cancellations(count);
-                    }
                 }
             },
             // Handle completed consumer deliveries
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
-                // Cancel, Retain, Clear, or shutdown) before the consumer finished validating.
+                // Retain or shutdown) before the consumer finished validating.
                 let (peer, key, result) = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
@@ -395,31 +382,6 @@ where
         }
     }
 
-    /// Remove a subscriber from all fetches and cancel any requests that no longer
-    /// have subscribers.
-    fn cancel_subscriber(&mut self, subscriber: &Con::Subscriber) -> u64 {
-        let mut requests = Vec::new();
-        self.interests.retain(|request, interests| {
-            interests.subscribers.remove(subscriber);
-            if interests.is_empty() {
-                requests.push(request.clone());
-                false
-            } else {
-                true
-            }
-        });
-
-        let mut count = 0;
-        for request in requests {
-            self.fetcher.cancel(&request);
-            self.fetcher.clear_targets(&request);
-            if self.inflight.cancel(&request) {
-                count += 1;
-            }
-        }
-        count
-    }
-
     /// Handles the case where the application responds to a request from an external peer.
     fn handle_serve(
         &mut self,
@@ -471,7 +433,7 @@ where
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
-            // It's possible that the key does not exist if the request was canceled
+            // It's possible that the key does not exist if the request was pruned.
             return;
         };
 
@@ -518,7 +480,7 @@ where
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
-            // It's possible that the key does not exist if the request was canceled
+            // It's possible that the key does not exist if the request was pruned.
             return;
         };
 

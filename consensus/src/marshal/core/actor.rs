@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, BlockFetchContext, Request, ResolverSubscriber},
+        resolver::handler::{self, FetchContext, Request},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -197,8 +197,6 @@ enum BlockSubscriptionKey<C, D> {
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
 type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
-type ResolverSubscriberFor<V> = ResolverSubscriber<<V as Variant>::Commitment>;
-
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -376,7 +374,7 @@ where
     where
         R: Resolver<
             Request = ResolverRequestFor<V>,
-            Subscriber = ResolverSubscriberFor<V>,
+            Subscriber = FetchContext,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -393,7 +391,7 @@ where
     ) where
         R: Resolver<
             Request = ResolverRequestFor<V>,
-            Subscriber = ResolverSubscriberFor<V>,
+            Subscriber = FetchContext,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -650,10 +648,7 @@ where
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver.fetch(Fetch::new(
                                 Request::Block { commitment },
-                                ResolverSubscriber::Block {
-                                    commitment,
-                                    context: BlockFetchContext::Finalized { round },
-                                },
+                                FetchContext::FinalizedBlock { round },
                             ));
                         }
                     }
@@ -696,7 +691,10 @@ where
 
                         // Trigger a targeted fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
-                        resolver.fetch_targeted(request, targets);
+                        resolver.fetch_targeted(
+                            Fetch::new(request, FetchContext::Finalization { height }),
+                            targets,
+                        );
                     }
                     Message::SubscribeByDigest {
                         round,
@@ -903,7 +901,7 @@ where
         response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<
             Request = ResolverRequestFor<V>,
-            Subscriber = ResolverSubscriberFor<V>,
+            Subscriber = FetchContext,
         >,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
@@ -949,21 +947,10 @@ where
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
                 debug!(?round, ?digest, "requested block missing");
-                let request = Request::Notarized { round };
-                match key {
-                    BlockSubscriptionKey::Digest(_) => {
-                        resolver.fetch(request);
-                    }
-                    BlockSubscriptionKey::Commitment(commitment) => {
-                        resolver.fetch(Fetch::new(
-                            request,
-                            ResolverSubscriber::Block {
-                                commitment,
-                                context: BlockFetchContext::Finalized { round },
-                            },
-                        ));
-                    }
-                }
+                resolver.fetch(Fetch::new(
+                    Request::Notarized { round },
+                    FetchContext::Notarization { round },
+                ));
             }
             Fallback::FetchByCommitment { height } => {
                 if let BlockSubscriptionKey::Commitment(commitment) = key {
@@ -981,10 +968,7 @@ where
                     debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
                     resolver.fetch(Fetch::new(
                         Request::Block { commitment },
-                        ResolverSubscriber::Block {
-                            commitment,
-                            context: BlockFetchContext::Ancestry { height },
-                        },
+                        FetchContext::Ancestry { height },
                     ));
                 }
             }
@@ -1032,7 +1016,7 @@ where
     /// Returns true if finalization archives were written and need syncing.
     async fn handle_deliver(
         &mut self,
-        delivery: Delivery<ResolverRequestFor<V>, ResolverSubscriberFor<V>>,
+        delivery: Delivery<ResolverRequestFor<V>, FetchContext>,
         mut value: Bytes,
         response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
@@ -1061,37 +1045,19 @@ where
                 let height = block.height();
                 let digest = block.digest();
                 let mut contexts = Vec::new();
-                let mut has_request_subscriber = false;
-                for subscriber in subscribers {
-                    match subscriber {
-                        ResolverSubscriber::Request(Request::Block {
-                            commitment: retained_commitment,
-                        }) => {
-                            has_request_subscriber |= retained_commitment == commitment;
+                for context in subscribers {
+                    let expected_height = match context {
+                        FetchContext::Ancestry { height } | FetchContext::Repair { height } => {
+                            Some(height)
                         }
-                        ResolverSubscriber::Request(_) => {}
-                        ResolverSubscriber::Block {
-                            commitment: retained_commitment,
-                            context,
-                        } => {
-                            let expected_height = match context {
-                                BlockFetchContext::Ancestry { height }
-                                | BlockFetchContext::Repair { height } => Some(height),
-                                BlockFetchContext::Finalized { .. } => None,
-                            };
-                            if retained_commitment == commitment
-                                && expected_height.is_none_or(|expected| expected == height)
-                            {
-                                contexts.push(context);
-                            } else {
-                                debug!(
-                                    ?commitment,
-                                    ?retained_commitment,
-                                    %height,
-                                    "ignoring stale block subscriber"
-                                );
-                            }
-                        }
+                        FetchContext::FinalizedBlock { .. }
+                        | FetchContext::Finalization { .. }
+                        | FetchContext::Notarization { .. } => None,
+                    };
+                    if expected_height.is_none_or(|expected| expected == height) {
+                        contexts.push(context);
+                    } else {
+                        debug!(?commitment, %height, "ignoring stale block subscriber");
                     }
                 }
 
@@ -1102,7 +1068,7 @@ where
                 let should_finalize = contexts.iter().any(|context| {
                     matches!(
                         context,
-                        BlockFetchContext::Repair { .. } | BlockFetchContext::Finalized { .. }
+                        FetchContext::Repair { .. } | FetchContext::FinalizedBlock { .. }
                     )
                 });
                 let wrote = if should_finalize || finalization.is_some() {
@@ -1110,7 +1076,7 @@ where
                         .await
                 } else if contexts
                     .iter()
-                    .any(|context| matches!(context, BlockFetchContext::Ancestry { .. }))
+                    .any(|context| matches!(context, FetchContext::Ancestry { .. }))
                 {
                     if height > self.last_processed_height {
                         if let Some(bounds) = self.epocher.containing(height) {
@@ -1125,9 +1091,6 @@ where
                         }
                         self.notify_subscribers(&block);
                     }
-                    false
-                } else if has_request_subscriber {
-                    self.notify_subscribers(&block);
                     false
                 } else {
                     false
@@ -1478,14 +1441,16 @@ where
         commitment: V::Commitment,
         resolver: &mut impl Resolver<
             Request = ResolverRequestFor<V>,
-            Subscriber = ResolverSubscriberFor<V>,
+            Subscriber = FetchContext,
         >,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver);
 
-        // Cancel any useless requests
-        resolver.cancel(ResolverSubscriber::from(Request::Block { commitment }));
+        // Prune any useless requests.
+        resolver.retain(move |request, _| {
+            !matches!(request, Request::Block { commitment: pending } if *pending == commitment)
+        });
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -1502,8 +1467,8 @@ where
             let round = finalization.round();
             self.last_processed_round = round;
 
-            // Cancel useless requests
-            resolver.retain(ResolverSubscriber::from(Request::Notarized { round }).predicate());
+            // Prune useless requests.
+            resolver.retain(Request::<V::Commitment>::Notarized { round }.predicate());
         }
     }
 
@@ -1785,7 +1750,7 @@ where
         buffer: &mut Buf,
         resolver: &mut impl Resolver<
             Request = ResolverRequestFor<V>,
-            Subscriber = ResolverSubscriberFor<V>,
+            Subscriber = FetchContext,
         >,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
@@ -1822,11 +1787,8 @@ where
                     // Request the missing block.
                     resolver.fetch(Fetch::new(
                         Request::Block { commitment },
-                        ResolverSubscriber::Block {
-                            commitment,
-                            context: BlockFetchContext::Repair {
-                                height: last_finalized,
-                            },
+                        FetchContext::Repair {
+                            height: last_finalized,
                         },
                     ));
                 }
@@ -1884,11 +1846,8 @@ where
                         Request::Block {
                             commitment: parent_commitment,
                         },
-                        ResolverSubscriber::Block {
-                            commitment: parent_commitment,
-                            context: BlockFetchContext::Repair {
-                                height: parent_height,
-                            },
+                        FetchContext::Repair {
+                            height: parent_height,
                         },
                     ));
                     break 'cache_repair;
@@ -1906,7 +1865,12 @@ where
             .missing_items(start, self.max_repair.get());
         let requests: Vec<_> = missing_items
             .into_iter()
-            .map(|height| Request::<V::Commitment>::Finalized { height })
+            .map(|height| {
+                Fetch::new(
+                    Request::<V::Commitment>::Finalized { height },
+                    FetchContext::Finalization { height },
+                )
+            })
             .collect();
         if !requests.is_empty() {
             resolver.fetch_all(requests);
@@ -1921,7 +1885,7 @@ where
         height: Height,
         resolver: &mut impl Resolver<
             Request = ResolverRequestFor<V>,
-            Subscriber = ResolverSubscriberFor<V>,
+            Subscriber = FetchContext,
         >,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
@@ -1930,8 +1894,8 @@ where
             .processed_height
             .try_set(self.last_processed_height.get());
 
-        // Cancel any existing requests below the new floor.
-        resolver.retain(ResolverSubscriber::from(Request::Finalized { height }).predicate());
+        // Prune any existing requests below the new floor.
+        resolver.retain(Request::<V::Commitment>::Finalized { height }.predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.

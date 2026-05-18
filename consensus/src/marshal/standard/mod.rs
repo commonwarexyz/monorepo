@@ -1822,7 +1822,7 @@ mod tests {
 
     impl Resolver for RecordingResolver {
         type Request = handler::Request<D>;
-        type Subscriber = handler::ResolverSubscriber<D>;
+        type Subscriber = handler::FetchContext;
         type PublicKey = PublicKey;
 
         fn fetch<R>(&mut self, _request: R) -> Feedback
@@ -1863,17 +1863,9 @@ mod tests {
             Feedback::Ok
         }
 
-        fn cancel(&mut self, _subscriber: Self::Subscriber) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn clear(&mut self) -> Feedback {
-            Feedback::Ok
-        }
-
         fn retain(
             &mut self,
-            _predicate: impl Fn(&Self::Subscriber) -> bool + Send + 'static,
+            _predicate: impl Fn(&Self::Request, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
             Feedback::Ok
         }
@@ -2154,11 +2146,9 @@ mod tests {
                         request: handler::Request::Finalized {
                             height: Height::new(5),
                         },
-                        subscribers: vec![handler::ResolverSubscriber::from(
-                            handler::Request::Finalized {
-                                height: Height::new(5),
-                            },
-                        )],
+                        subscribers: vec![handler::FetchContext::Finalization {
+                            height: Height::new(5),
+                        }],
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
@@ -2174,11 +2164,9 @@ mod tests {
                         request: handler::Request::Notarized {
                             round: Round::new(Epoch::zero(), View::new(1)),
                         },
-                        subscribers: vec![handler::ResolverSubscriber::from(
-                            handler::Request::Notarized {
-                                round: Round::new(Epoch::zero(), View::new(1)),
-                            },
-                        )],
+                        subscribers: vec![handler::FetchContext::Notarization {
+                            round: Round::new(Epoch::zero(), View::new(1)),
+                        }],
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
