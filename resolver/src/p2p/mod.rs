@@ -551,7 +551,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor_with_producer(
+            let _mailbox2 = setup_and_spawn_actor(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -609,7 +609,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor_with_producer(
+            let _mailbox2 = setup_and_spawn_actor(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -689,7 +689,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor_with_producer(
+            let _mailbox2 = setup_and_spawn_actor(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -760,7 +760,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor_with_producer(
+            let _mailbox2 = setup_and_spawn_actor(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
