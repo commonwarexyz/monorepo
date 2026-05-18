@@ -1,11 +1,10 @@
-use super::ingress::Subscriber;
 use crate::{
     simplex::types::{Certificate, Notarization},
     types::View,
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_resolver::{Fetch, Resolver};
+use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -67,7 +66,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         certificate: Certificate<S, D>,
         request: Option<View>,
-        resolver: &mut impl Resolver<Request = U64, Subscriber = Subscriber>,
+        resolver: &mut impl Resolver<Request = U64, Subscriber = ()>,
     ) {
         match certificate {
             Certificate::Nullification(nullification) => {
@@ -107,7 +106,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
         success: bool,
-        resolver: &mut impl Resolver<Request = U64, Subscriber = Subscriber>,
+        resolver: &mut impl Resolver<Request = U64, Subscriber = ()>,
     ) {
         if success {
             // Certification passed - set floor to notarization if we have it.
@@ -132,15 +131,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
             // Request nullification for this view (if above floor)
             let floor = self.floor_view();
             if view > floor {
-                let request = U64::from(view);
-                resolver.fetch(Fetch::new(request.clone(), Subscriber::from(request)));
+                resolver.fetch(U64::from(view));
             }
 
             // Re-request any lower views this notarization had satisfied
             if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
                 for &v in satisfied_views.iter().filter(|v| **v > floor) {
-                    let request = U64::from(v);
-                    resolver.fetch(Fetch::new(request.clone(), Subscriber::from(request)));
+                    resolver.fetch(U64::from(v));
                 }
             }
         }
@@ -188,7 +185,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Inform the [Resolver] of any missing nullifications.
-    fn fetch(&mut self, resolver: &mut impl Resolver<Request = U64, Subscriber = Subscriber>) {
+    fn fetch(&mut self, resolver: &mut impl Resolver<Request = U64, Subscriber = ()>) {
         // We must either receive a nullification at the current view or a notarization/finalization at the current
         // view or higher, so we don't need to worry about getting stuck (where peers cannot resolve our requests).
         let start = self.fetch_floor.max(self.floor_view().next());
@@ -203,18 +200,12 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
 
         // Send the requests to the resolver.
-        let requests = views
-            .into_iter()
-            .map(|view| {
-                let request = U64::from(view);
-                Fetch::new(request.clone(), Subscriber::from(request))
-            })
-            .collect();
+        let requests = views.into_iter().map(U64::from).collect();
         resolver.fetch_all(requests);
     }
 
     /// Prune stored certificates and requests that are not higher than the floor.
-    fn prune(&mut self, resolver: &mut impl Resolver<Request = U64, Subscriber = Subscriber>) {
+    fn prune(&mut self, resolver: &mut impl Resolver<Request = U64, Subscriber = ()>) {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
         self.nullifications.retain(|view, _| *view > floor);
@@ -241,6 +232,7 @@ mod tests {
         certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
+    use commonware_resolver::Fetch;
     use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec, NZUsize};
     use std::{collections::BTreeSet, sync::Arc};
 
@@ -266,7 +258,7 @@ mod tests {
 
     impl Resolver for MockResolver {
         type Request = U64;
-        type Subscriber = Subscriber;
+        type Subscriber = ();
         type PublicKey = PublicKey;
 
         fn fetch<R>(&mut self, request: R) -> Feedback
@@ -313,9 +305,7 @@ mod tests {
             &mut self,
             predicate: impl Fn(&Self::Request, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
-            self.outstanding
-                .lock()
-                .retain(|key| predicate(key, &Subscriber::from(key.clone())));
+            self.outstanding.lock().retain(|key| predicate(key, &()));
             Feedback::Ok
         }
     }

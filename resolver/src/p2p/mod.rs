@@ -1856,7 +1856,7 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1): (Consumer<Key, Bytes, Key>, _) = Consumer::new();
+            let (cons1, mut cons_out1): (Consumer<Key, Bytes>, _) = Consumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -1890,19 +1890,19 @@ mod tests {
             };
 
             // Start a fetch (no link, so fetch stays in-flight)
-            mailbox1.fetch(Fetch::new(key.clone(), key.clone()));
+            mailbox1.fetch(key.clone());
 
-            // Retain with predicate that excludes the subscriber. This must clean up
+            // Retain with predicate that excludes the request. This must clean up
             // the in-flight entry for the request.
             let key_clone = key.clone();
-            mailbox1.retain(move |_, subscriber| subscriber != &key_clone);
+            mailbox1.retain(move |request, _| request != &key_clone);
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             // Fetch same key again, if the in-flight entry wasn't cleaned up, this would
             // be treated as a duplicate and silently ignored
-            mailbox1.fetch(Fetch::new(key.clone(), key.clone()));
+            mailbox1.fetch(key.clone());
 
             // Should succeed
             let (key_actual, value) = cons_out1.recv().await.unwrap();

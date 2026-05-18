@@ -6,21 +6,6 @@ use commonware_resolver::{p2p::Producer, Consumer, Delivery};
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct Subscriber(pub(crate) U64);
-
-impl From<View> for Subscriber {
-    fn from(view: View) -> Self {
-        Self(view.into())
-    }
-}
-
-impl From<U64> for Subscriber {
-    fn from(view: U64) -> Self {
-        Self(view)
-    }
-}
-
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
     /// A certificate was received or produced.
@@ -231,7 +216,7 @@ impl Handler {
 
 impl Consumer for Handler {
     type Request = U64;
-    type Subscriber = Subscriber;
+    type Subscriber = ();
     type Value = Bytes;
 
     fn deliver(
