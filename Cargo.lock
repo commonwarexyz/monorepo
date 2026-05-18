@@ -1021,6 +1021,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-actor-fuzz"
+version = "2026.4.0"
+dependencies = [
+ "arbitrary",
+ "commonware-actor",
+ "commonware-runtime",
+ "commonware-utils",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-bridge"
 version = "2026.4.0"
 dependencies = [

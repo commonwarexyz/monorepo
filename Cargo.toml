@@ -32,6 +32,7 @@ members = [
     "examples/reshare",
 
     # Fuzz builds
+    "actor/fuzz",
     "broadcast/fuzz",
     "codec/fuzz",
     "coding/fuzz",
