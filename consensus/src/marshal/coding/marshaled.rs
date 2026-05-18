@@ -371,11 +371,12 @@ where
 
             // The context supplies the certified parent round. Do not derive a
             // height from the unverified child block for this lookup.
+            let fallback = core::CommitmentFallback::FetchByRound {
+                round: Round::new(consensus_context.epoch(), parent_view),
+            };
             let parent_request = fetch_parent(
                 parent_commitment,
-                core::CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                },
+                fallback,
                 &mut application,
                 &mut marshal,
                 cached_genesis,

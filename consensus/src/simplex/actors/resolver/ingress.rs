@@ -224,10 +224,9 @@ impl Consumer for Handler {
         delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
-        let key = delivery.key;
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
-            view: View::new(key.into()),
+            view: View::new(delivery.key.into()),
             data: value,
             response,
         });

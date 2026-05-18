@@ -97,6 +97,15 @@ fn retain_fetch<K, P, S>(
     Some(fetch)
 }
 
+// Merge subscribers for duplicate pending fetches without duplicating them.
+fn merge_subscribers<S: Eq>(existing: &mut NonEmptyVec<S>, incoming: NonEmptyVec<S>) {
+    for subscriber in incoming {
+        if !existing.contains(&subscriber) {
+            existing.push(subscriber);
+        }
+    }
+}
+
 // Merge target metadata for duplicate pending fetches.
 fn merge_targets<P: Eq>(existing: &mut Option<NonEmptyVec<P>>, incoming: Option<NonEmptyVec<P>>) {
     // An unrestricted fetch clears existing targets.
@@ -142,7 +151,7 @@ where
                         .iter_mut()
                         .find(|existing| existing.key == key)
                     {
-                        existing.subscribers.extend(subscribers);
+                        merge_subscribers(&mut existing.subscribers, subscribers);
                         merge_targets(&mut existing.targets, targets);
                     } else {
                         overflow.fetches.push(FetchKey {
@@ -377,12 +386,12 @@ mod tests {
     fn duplicate_fetches_for_same_key_merge_subscribers() {
         let mut pending = TestPending::default();
 
-        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10], None));
-        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![11], None));
+        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
+        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![11, 12], None));
 
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 1);
-        assert_fetch_subscribers(&messages[0], 1, &[10, 11]);
+        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 12]);
     }
 
     #[test]

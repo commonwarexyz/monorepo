@@ -19,7 +19,7 @@ pub trait BlockProvider: Clone + Send + 'static {
     type Block: Block;
 
     /// The block type retained while walking ancestry.
-    type AncestryBlock: Block<Digest = <Self::Block as Digestible>::Digest> + Clone;
+    type AncestryBlock: Block<Digest = <Self::Block as Digestible>::Digest>;
 
     /// Subscribe to a block by its digest without requesting it from the network.
     ///
@@ -56,7 +56,11 @@ pub trait BlockProvider: Clone + Send + 'static {
         self.subscribe(digest)
     }
 
-    /// Converts an ancestry block into the block yielded by ancestry streams.
+    /// Converts the retained ancestry block into the block yielded by ancestry streams.
+    ///
+    /// Marshal variants may need to walk a richer block type than the application consumes.
+    /// This keeps that conversion at the provider boundary instead of exposing variant internals
+    /// to the stream.
     fn into_block(block: Self::AncestryBlock) -> Self::Block;
 }
 

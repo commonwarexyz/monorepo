@@ -201,12 +201,12 @@ type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
 
 /// Processed floors used to admit or reject resolver fetches.
 #[derive(Clone, Copy)]
-struct ResolverFloor {
+struct Floor {
     height: Height,
     round: Round,
 }
 
-impl ResolverFloor {
+impl Floor {
     /// Returns true when the resolver request is above all processed floors.
     fn permits<D: commonware_cryptography::Digest>(
         self,
@@ -630,18 +630,23 @@ where
                             .put_notarization(round, digest, notarization.clone())
                             .await;
 
-                        // Search for block locally. A notarization alone is not
-                        // enough to fetch missing proposal data, so remember the
-                        // certificate and wait for local availability. Later
-                        // finalization/repair paths may backfill data that is
-                        // already finalized.
+                        // Search for block locally. If it is missing, fetch the
+                        // block by commitment and use the cached notarization
+                        // certificate when the block arrives.
                         if let Some(block) =
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
                             // If found, persist the block
                             self.cache_block(round, digest, block).await;
                         } else {
-                            debug!(?round, "notarized block unavailable locally");
+                            debug!(?round, ?commitment, "notarized block missing");
+                            self.fetch_if_permitted(
+                                &mut resolver,
+                                Fetch {
+                                    key: Request::Block(commitment),
+                                    subscriber: Annotation::Notarization { round },
+                                },
+                            );
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -659,9 +664,8 @@ where
                         {
                             // If found, persist the block
                             let height = block.height();
-                            if height <= self.last_processed_height {
-                                self.update_processed_round_floor(round, &mut resolver).await;
-                            }
+                            self.update_processed_round_floor(height, round, &mut resolver)
+                                .await;
                             if self
                                 .store_finalization(
                                     height,
@@ -906,8 +910,8 @@ where
         }
     }
 
-    const fn resolver_floor(&self) -> ResolverFloor {
-        ResolverFloor {
+    const fn floor(&self) -> Floor {
+        Floor {
             height: self.last_processed_height,
             round: self.last_processed_round,
         }
@@ -921,7 +925,7 @@ where
     where
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
-        if !self.resolver_floor().permits(&fetch.key, &fetch.subscriber) {
+        if !self.floor().permits(&fetch.key, &fetch.subscriber) {
             return false;
         }
         resolver.fetch(fetch);
@@ -937,7 +941,7 @@ where
     where
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
-        if !self.resolver_floor().permits(&fetch.key, &fetch.subscriber) {
+        if !self.floor().permits(&fetch.key, &fetch.subscriber) {
             return false;
         }
         resolver.fetch_targeted(fetch, targets);
@@ -954,7 +958,7 @@ where
     {
         let fetches = fetches
             .into_iter()
-            .filter(|fetch| self.resolver_floor().permits(&fetch.key, &fetch.subscriber))
+            .filter(|fetch| self.floor().permits(&fetch.key, &fetch.subscriber))
             .collect::<Vec<_>>();
         if fetches.is_empty() {
             return false;
@@ -1044,7 +1048,6 @@ where
                 // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
-                debug!(?round, ?digest, "requested block missing");
                 if !self.fetch_if_permitted(
                     resolver,
                     Fetch {
@@ -1054,6 +1057,7 @@ where
                 ) {
                     return;
                 }
+                debug!(?round, ?digest, "requested block missing");
             }
             CommitmentFallback::FetchByCommitment { height } => {
                 let commitment = match key {
@@ -1065,7 +1069,6 @@ where
 
                 // This path is only for accepted ancestry or finalized repair,
                 // never for a candidate block's immediate parent.
-                debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
                 if !self.fetch_if_permitted(
                     resolver,
                     Fetch {
@@ -1075,6 +1078,7 @@ where
                 ) {
                     return;
                 }
+                debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
             }
             CommitmentFallback::Wait => {}
         }
@@ -1202,34 +1206,55 @@ where
                 }
 
                 // Round-bound proposal-parent fetches are `Request::Notarized`
-                // deliveries and are handled below. In this block-keyed path,
-                // `Finalized` means the block belongs in the finalized chain.
-                let finalization = self.cache.get_finalization_for(digest).await;
-                if height <= self.last_processed_height {
-                    if let Some(finalization) = &finalization {
-                        self.update_processed_round_floor(finalization.round(), resolver)
-                            .await;
+                // deliveries and are handled below. Block-keyed notarization
+                // annotations are used only when the notarization certificate
+                // is already cached locally and the block was missing.
+                for annotation in &annotations {
+                    let Annotation::Notarization { round } = annotation else {
+                        continue;
+                    };
+                    let Some(notarization) = self.cache.get_notarization(*round).await else {
+                        debug!(?round, ?commitment, "ignoring missing notarization annotation");
+                        continue;
+                    };
+                    if notarization.proposal.payload != commitment {
+                        debug!(
+                            ?round,
+                            ?commitment,
+                            expected = ?notarization.proposal.payload,
+                            "ignoring mismatched notarization annotation"
+                        );
+                        continue;
                     }
+                    self.cache_block(*round, digest, block.clone()).await;
                 }
-                let should_finalize = annotations
-                    .iter()
-                    .any(|annotation| matches!(annotation, Annotation::Finalized(_)));
-                let wrote = if should_finalize || finalization.is_some() {
+
+                // In this block-keyed path, `Finalized` means the block belongs
+                // in the finalized chain.
+                let finalization = self.cache.get_finalization_for(digest).await;
+                if let Some(finalization) = &finalization {
+                    self.update_processed_round_floor(height, finalization.round(), resolver)
+                        .await;
+                }
+                let wrote = if finalization.is_some()
+                    || annotations
+                        .iter()
+                        .any(|annotation| matches!(annotation, Annotation::Finalized(_)))
+                {
                     self.store_finalization(height, digest, block, finalization, application)
                         .await
-                } else if annotations
-                    .iter()
-                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
-                {
-                    if height > self.last_processed_height {
+                } else {
+                    if annotations
+                        .iter()
+                        .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
+                        && height > self.last_processed_height
+                    {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
                                 .put_certified(bounds.epoch(), height, digest, block.clone().into())
                                 .await;
                         }
                     }
-                    false
-                } else {
                     false
                 };
                 debug!(?digest, %height, "received block");
@@ -1424,9 +1449,8 @@ where
                     let height = block.height();
                     let digest = block.digest();
                     debug!(?round, %height, "received finalization");
-                    if height <= self.last_processed_height {
-                        self.update_processed_round_floor(round, resolver).await;
-                    }
+                    self.update_processed_round_floor(height, round, resolver)
+                        .await;
 
                     wrote |= self
                         .store_finalization(height, digest, block, Some(finalization), application)
@@ -1450,10 +1474,8 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-                        if height <= self.last_processed_height {
-                            self.update_processed_round_floor(finalization.round(), resolver)
-                                .await;
-                        }
+                        self.update_processed_round_floor(height, finalization.round(), resolver)
+                            .await;
                         // SAFETY: `digest` identifies a unique `commitment`, so this
                         // cached finalization payload must match `V::commitment(&block)`.
                         wrote |= self
@@ -2047,20 +2069,23 @@ where
         let Some(finalization) = self.get_finalization_by_height(height).await else {
             return;
         };
-        self.update_processed_round_floor(finalization.round(), resolver)
+        self.update_processed_round_floor(height, finalization.round(), resolver)
             .await;
     }
 
     /// Buffers a processed round floor update in memory and prunes round-bound requests.
     async fn update_processed_round_floor(
         &mut self,
+        height: Height,
         round: Round,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
-        let previous = self.last_processed_round;
-        if round > self.last_processed_round {
-            self.last_processed_round = round;
+        if height > self.last_processed_height || round <= self.last_processed_round {
+            return;
         }
+
+        let previous = self.last_processed_round;
+        self.last_processed_round = round;
 
         // Retain view-indexed cache data for a window behind the previously
         // processed finalized block.
