@@ -139,23 +139,6 @@ mod tests {
         (votes, certificate)
     }
 
-    fn build_notarization_from<S: Scheme<Sha256Digest>>(
-        schemes: &[S],
-        proposal: &Proposal<Sha256Digest>,
-        signers: &[usize],
-    ) -> (
-        Vec<Notarize<S, Sha256Digest>>,
-        Notarization<S, Sha256Digest>,
-    ) {
-        let votes: Vec<_> = signers
-            .iter()
-            .map(|&idx| Notarize::sign(&schemes[idx], proposal.clone()).unwrap())
-            .collect();
-        let certificate = Notarization::from_notarizes(&schemes[0], &votes, &Sequential)
-            .expect("notarization requires a quorum of votes");
-        (votes, certificate)
-    }
-
     fn build_finalization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
         proposal: &Proposal<Sha256Digest>,
@@ -1980,6 +1963,7 @@ mod tests {
                     },
                 }
             }
+
         });
     }
 
@@ -6720,139 +6704,6 @@ mod tests {
         only_finalization_rescues_validator::<_, _>(secp256r1::fixture);
     }
 
-    /// Reproduces the liveness split where a Byzantine leader forms a notarization
-    /// with f+1 honest validators, then stops participating before the remaining f
-    /// honest validators can recover the block and certify.
-    fn byzantine_silent_after_partial_certification_deadlocks<S, F>(mut fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-    {
-        let n = 4;
-        let quorum = quorum(n);
-        assert_eq!(quorum, 3);
-        let namespace = b"byzantine_silent_partial_certification".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(20));
-        executor.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = fixture(&mut context, &namespace, n);
-
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-
-            let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<S> = elector
-                .clone()
-                .build(&participants.clone().try_into().unwrap());
-            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter_with_certifier(
-                &mut context,
-                &oracle,
-                &participants,
-                &schemes,
-                elector,
-                Duration::from_secs(2),
-                Duration::from_secs(3),
-                Duration::from_secs(1),
-                mocks::application::Certifier::Pending,
-            )
-            .await;
-
-            // With n=4 and epoch 333, view 4 is led by participant 1. Participant 0 is
-            // the local honest validator left behind; participants 2 and 3 are the f+1
-            // honest validators that did receive the proposal.
-            let target_view = View::new(4);
-            advance_to_view(
-                &mut mailbox,
-                &mut batcher_receiver,
-                &schemes,
-                quorum,
-                target_view,
-            )
-            .await;
-            assert_eq!(
-                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
-                Participant::new(1),
-                "view {target_view} should be led by the Byzantine participant"
-            );
-
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), target_view),
-                target_view.previous().unwrap(),
-                Sha256::hash(b"byzantine_silent_payload"),
-            );
-            let (_, notarization) = build_notarization_from(&schemes, &proposal, &[1, 2, 3]);
-            mailbox.resolved(Certificate::Notarization(notarization));
-
-            loop {
-                select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(nullify))
-                            if nullify.view() == target_view =>
-                            break,
-                        batcher::Message::Update { current, .. } if current > target_view => {
-                            panic!("validator advanced without certification or nullification");
-                        }
-                        batcher::Message::Update { .. } => {}
-                        _ => {}
-                    },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("expected timeout nullify for view {target_view}");
-                    },
-                }
-            }
-
-            let advanced = loop {
-                select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Update { current, .. } if current > target_view => {
-                            break true;
-                        }
-                        batcher::Message::Constructed(Vote::Nullify(nullify)) => {
-                            assert_eq!(
-                                nullify.view(),
-                                target_view,
-                                "stuck validator should only retry nullifying its current view"
-                            );
-                        }
-                        batcher::Message::Update { .. } => {}
-                        _ => {}
-                    },
-                    _ = context.sleep(Duration::from_secs(5)) => {
-                        break false;
-                    },
-                }
-            };
-
-            assert!(
-                !advanced,
-                "validator should remain stuck when the Byzantine leader withholds \
-                 participation and no nullification/finalization certificate forms"
-            );
-        });
-    }
-
-    #[test_traced]
-    fn test_byzantine_silent_after_partial_certification_deadlocks() {
-        byzantine_silent_after_partial_certification_deadlocks::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-        byzantine_silent_after_partial_certification_deadlocks::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        byzantine_silent_after_partial_certification_deadlocks::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        byzantine_silent_after_partial_certification_deadlocks::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
-        byzantine_silent_after_partial_certification_deadlocks::<_, _>(ed25519::fixture);
-        byzantine_silent_after_partial_certification_deadlocks::<_, _>(secp256r1::fixture);
-    }
-
     /// Tests that when certification explicitly fails (returns false), the voter:
     /// 1. Can vote nullify even after having voted notarize
     /// 2. Will emit a nullify vote immediately after certification failure
@@ -7108,6 +6959,28 @@ mod tests {
                     },
                 }
             }
+
+            // The local nullify vote alone is not enough to advance. Without a
+            // nullification or finalization certificate, the voter must remain in
+            // the same view while certification is still pending.
+            let advanced_without_certificate = loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Update { current, .. } if current > target_view => {
+                            break true;
+                        }
+                        batcher::Message::Update { .. } => {}
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        break false;
+                    },
+                }
+            };
+            assert!(
+                !advanced_without_certificate,
+                "voter should not advance past view {target_view} without a nullification or finalization certificate"
+            );
         });
     }
 
