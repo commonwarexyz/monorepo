@@ -1,6 +1,6 @@
 //! Tests for [crate::qmdb::current] state sync.
 //!
-//! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
+//! This module reuses the shared sync test functions from [crate::qmdb::sync::tests] by
 //! implementing [SyncTestHarness] for current database types. The key difference from `any`
 //! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
 //! [qmdb::sync::Database::ops_root](crate::qmdb::sync::Database::ops_root)), not the database root
@@ -14,9 +14,11 @@
 //! MMB round-trip, and target-update regression coverage.
 
 use crate::qmdb::{
-    any::sync::tests::{ConfigOf, SyncTestHarness},
     current::tests::{fixed_config, variable_config},
-    sync::Database as SyncDatabase,
+    sync::{
+        tests::{ConfigOf, SyncTestHarness},
+        Database as SyncDatabase,
+    },
 };
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
@@ -645,7 +647,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
 
 // ===== Test Generation Macro =====
 
-/// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
+/// Dispatches to the shared test functions in [crate::qmdb::sync::tests].
 macro_rules! current_sync_tests_for_harness {
     ($harness:ty, $mod_name:ident) => {
         mod $mod_name {
@@ -656,7 +658,7 @@ macro_rules! current_sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_resolver_fails() {
-                crate::qmdb::any::sync::tests::test_sync_resolver_fails::<$harness>();
+                crate::qmdb::sync::tests::test_sync_resolver_fails::<$harness>();
             }
 
             #[rstest]
@@ -669,7 +671,7 @@ macro_rules! current_sync_tests_for_harness {
             #[case::db_size_eq_batch_size(1000, 1000)]
             #[case::batch_size_gt_db_size(1000, 1001)]
             fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
-                crate::qmdb::any::sync::tests::test_sync::<$harness>(
+                crate::qmdb::sync::tests::test_sync::<$harness>(
                     target_db_ops,
                     NonZeroU64::new(fetch_batch_size).unwrap(),
                 );
@@ -677,67 +679,57 @@ macro_rules! current_sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_subset_of_target_database() {
-                crate::qmdb::any::sync::tests::test_sync_subset_of_target_database::<$harness>(
-                    1000,
-                );
+                crate::qmdb::sync::tests::test_sync_subset_of_target_database::<$harness>(1000);
             }
 
             #[test_traced]
             fn test_sync_use_existing_db_partial_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(
-                    1000,
-                );
+                crate::qmdb::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(1000);
             }
 
             #[test_traced]
             fn test_sync_use_existing_db_exact_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(
-                    1000,
-                );
+                crate::qmdb::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(1000);
             }
 
             #[test_traced("WARN")]
             fn test_target_update_lower_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_lower_bound_decrease::<$harness>(
-                );
+                crate::qmdb::sync::tests::test_target_update_lower_bound_decrease::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_upper_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_upper_bound_decrease::<$harness>(
-                );
+                crate::qmdb::sync::tests::test_target_update_upper_bound_decrease::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_bounds_increase() {
-                crate::qmdb::any::sync::tests::test_target_update_bounds_increase::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_bounds_increase::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_on_done_client() {
-                crate::qmdb::any::sync::tests::test_target_update_on_done_client::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_on_done_client::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_waits_for_explicit_finish() {
-                crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
+                crate::qmdb::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_handles_early_finish_signal() {
-                crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
+                crate::qmdb::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_fails_when_finish_sender_dropped() {
-                crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<
-                    $harness,
-                >();
+                crate::qmdb::sync::tests::test_sync_fails_when_finish_sender_dropped::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_allows_dropped_reached_target_receiver() {
-                crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
+                crate::qmdb::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
                     $harness,
                 >();
             }
@@ -759,7 +751,7 @@ macro_rules! current_sync_tests_for_harness {
                 #[case] initial_ops: usize,
                 #[case] additional_ops: usize,
             ) {
-                crate::qmdb::any::sync::tests::test_target_update_during_sync::<$harness>(
+                crate::qmdb::sync::tests::test_target_update_during_sync::<$harness>(
                     initial_ops,
                     additional_ops,
                 );
@@ -767,12 +759,12 @@ macro_rules! current_sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_database_persistence() {
-                crate::qmdb::any::sync::tests::test_sync_database_persistence::<$harness>();
+                crate::qmdb::sync::tests::test_sync_database_persistence::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_post_sync_usability() {
-                crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
+                crate::qmdb::sync::tests::test_sync_post_sync_usability::<$harness>();
             }
         }
     };
