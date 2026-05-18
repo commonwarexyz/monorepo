@@ -12,9 +12,9 @@ use commonware_consensus::simplex::{
         Proposal, Vote,
     },
 };
-#[cfg(feature = "mocks")]
-use commonware_consensus_fuzz::certificate_mock;
 use commonware_consensus_fuzz::id_mock;
+#[cfg(feature = "mocks")]
+use commonware_consensus_fuzz::simplex_certificate_mock;
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     certificate::Scheme as CertificateScheme,
@@ -33,7 +33,7 @@ type ThresholdSchemeMinSig = bls12381_threshold_vrf::Scheme<PublicKey, MinSig>;
 type Secp256r1Scheme = secp256r1::Scheme<PublicKey>;
 type IdScheme = id_mock::Scheme;
 #[cfg(feature = "mocks")]
-type CertificateMockScheme = certificate_mock::Scheme<PublicKey, false>;
+type CertificateMockScheme = simplex_certificate_mock::Scheme<PublicKey, false>;
 
 #[derive(Arbitrary, Debug)]
 enum StructuredScheme {

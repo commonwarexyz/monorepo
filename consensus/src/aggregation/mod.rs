@@ -78,7 +78,7 @@ cfg_if::cfg_if! {
         mod metrics;
         mod safe_tip;
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "mocks"))]
         pub mod mocks;
     }
 }

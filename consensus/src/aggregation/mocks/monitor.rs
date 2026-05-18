@@ -11,7 +11,7 @@ struct Inner {
 }
 
 impl Inner {
-    fn new(epoch: Epoch) -> Self {
+    const fn new(epoch: Epoch) -> Self {
         Self {
             epoch,
             subscribers: Vec::new(),
