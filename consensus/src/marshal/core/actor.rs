@@ -647,7 +647,7 @@ where
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver.fetch(Fetch::new(
-                                Request::Block { commitment },
+                                Request::Block(commitment),
                                 Annotation::Finalized(Finalized::ByRound { round }),
                             ));
                         }
@@ -859,7 +859,7 @@ where
         buffer: &Buf,
     ) {
         match key {
-            Request::Block { commitment } => {
+            Request::Block(commitment) => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
@@ -963,7 +963,7 @@ where
                     }
                     debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
                     resolver.fetch(Fetch::new(
-                        Request::Block { commitment },
+                        Request::Block(commitment),
                         Annotation::Certified { height },
                     ));
                 }
@@ -1020,7 +1020,7 @@ where
     ) -> bool {
         let Delivery { key, subscribers } = delivery;
         match key {
-            Request::Block { commitment } => {
+            Request::Block(commitment) => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
@@ -1434,7 +1434,7 @@ where
 
         // Prune any useless requests.
         resolver.retain(move |request, _| {
-            !matches!(request, Request::Block { commitment: pending } if *pending == commitment)
+            !matches!(request, Request::Block(pending) if *pending == commitment)
         });
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1768,7 +1768,7 @@ where
                 } else {
                     // Request the missing block.
                     resolver.fetch(Fetch::new(
-                        Request::Block { commitment },
+                        Request::Block(commitment),
                         Annotation::Finalized(Finalized::ByHeight {
                             height: last_finalized,
                         }),
@@ -1825,9 +1825,7 @@ where
                         break 'cache_repair;
                     };
                     resolver.fetch(Fetch::new(
-                        Request::Block {
-                            commitment: parent_commitment,
-                        },
+                        Request::Block(parent_commitment),
                         Annotation::Finalized(Finalized::ByHeight {
                             height: parent_height,
                         }),

@@ -449,37 +449,6 @@ mod tests {
         }
     }
 
-    type TypedRecordedDelivery = (Delivery<Key, SubscriberTag>, Bytes);
-
-    #[derive(Clone)]
-    struct TypedSubscriberRecordingConsumer {
-        sender: mpsc::UnboundedSender<TypedRecordedDelivery>,
-    }
-
-    impl TypedSubscriberRecordingConsumer {
-        fn new() -> (Self, mpsc::UnboundedReceiver<TypedRecordedDelivery>) {
-            let (sender, receiver) = mpsc::unbounded_channel();
-            (Self { sender }, receiver)
-        }
-    }
-
-    impl crate::Consumer for TypedSubscriberRecordingConsumer {
-        type Key = Key;
-        type Subscriber = SubscriberTag;
-        type Value = Bytes;
-
-        fn deliver(
-            &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
-            value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
-            let (sender, receiver) = oneshot::channel();
-            self.sender.send_lossy((delivery, value));
-            let _ = sender.send(true);
-            receiver
-        }
-    }
-
     fn dummy_consumer() -> Consumer<Key, Bytes> {
         Consumer::dummy()
     }
@@ -2254,7 +2223,7 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1) = TypedSubscriberRecordingConsumer::new();
+            let (cons1, mut cons_out1) = SubscriberRecordingConsumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(

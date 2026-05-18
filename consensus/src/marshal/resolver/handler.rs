@@ -200,9 +200,7 @@ pub enum Finalized {
 #[derive(Clone, Copy)]
 pub enum Request<D: Digest> {
     /// Fetch a block by consensus commitment.
-    Block {
-        commitment: D,
-    },
+    Block(D),
     Finalized {
         height: Height,
     },
@@ -215,7 +213,7 @@ impl<D: Digest> Request<D> {
     /// The subject of the request.
     const fn subject(&self) -> u8 {
         match self {
-            Self::Block { .. } => BLOCK_REQUEST,
+            Self::Block(_) => BLOCK_REQUEST,
             Self::Finalized { .. } => FINALIZED_REQUEST,
             Self::Notarized { .. } => NOTARIZED_REQUEST,
         }
@@ -236,7 +234,7 @@ impl<D: Digest> Request<D> {
             }
             (
                 Self::Finalized { height: mine },
-                Self::Block { .. },
+                Self::Block(_),
                 Annotation::Certified { height: theirs }
                 | Annotation::Finalized(Finalized::ByHeight { height: theirs }),
             ) => *theirs > *mine,
@@ -246,14 +244,12 @@ impl<D: Digest> Request<D> {
             }
             (
                 Self::Notarized { round: mine },
-                Self::Block { .. },
+                Self::Block(_),
                 Annotation::Finalized(Finalized::ByRound { round: theirs }),
             ) => *theirs > *mine,
             (Self::Notarized { .. }, _, _) => true,
-            (Self::Block { commitment: mine }, Self::Block { commitment: theirs }, _) => {
-                mine != theirs
-            }
-            (Self::Block { .. }, _, _) => true,
+            (Self::Block(mine), Self::Block(theirs), _) => mine != theirs,
+            (Self::Block(_), _, _) => true,
         }
     }
 }
@@ -262,7 +258,7 @@ impl<D: Digest> Write for Request<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.subject().write(buf);
         match self {
-            Self::Block { commitment } => commitment.write(buf),
+            Self::Block(commitment) => commitment.write(buf),
             Self::Finalized { height } => height.write(buf),
             Self::Notarized { round } => round.write(buf),
         }
@@ -274,9 +270,7 @@ impl<D: Digest> Read for Request<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request = match u8::read(buf)? {
-            BLOCK_REQUEST => Self::Block {
-                commitment: D::read(buf)?,
-            },
+            BLOCK_REQUEST => Self::Block(D::read(buf)?),
             FINALIZED_REQUEST => Self::Finalized {
                 height: Height::read(buf)?,
             },
@@ -292,7 +286,7 @@ impl<D: Digest> Read for Request<D> {
 impl<D: Digest> EncodeSize for Request<D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Block { commitment } => commitment.encode_size(),
+            Self::Block(commitment) => commitment.encode_size(),
             Self::Finalized { height } => height.encode_size(),
             Self::Notarized { round } => round.encode_size(),
         }
@@ -304,7 +298,7 @@ impl<D: Digest> Span for Request<D> {}
 impl<D: Digest> PartialEq for Request<D> {
     fn eq(&self, other: &Self) -> bool {
         match (&self, &other) {
-            (Self::Block { commitment: a }, Self::Block { commitment: b }) => a == b,
+            (Self::Block(a), Self::Block(b)) => a == b,
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a == b,
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a == b,
             _ => false,
@@ -317,7 +311,7 @@ impl<D: Digest> Eq for Request<D> {}
 impl<D: Digest> Ord for Request<D> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (&self, &other) {
-            (Self::Block { commitment: a }, Self::Block { commitment: b }) => a.cmp(b),
+            (Self::Block(a), Self::Block(b)) => a.cmp(b),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a.cmp(b),
             (a, b) => a.subject().cmp(&b.subject()),
@@ -335,7 +329,7 @@ impl<D: Digest> Hash for Request<D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.subject().hash(state);
         match self {
-            Self::Block { commitment } => commitment.hash(state),
+            Self::Block(commitment) => commitment.hash(state),
             Self::Finalized { height } => height.hash(state),
             Self::Notarized { round } => round.hash(state),
         }
@@ -345,7 +339,7 @@ impl<D: Digest> Hash for Request<D> {
 impl<D: Digest> Display for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block { commitment } => write!(f, "Block({commitment:?})"),
+            Self::Block(commitment) => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -355,7 +349,7 @@ impl<D: Digest> Display for Request<D> {
 impl<D: Digest> Debug for Request<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block { commitment } => write!(f, "Block({commitment:?})"),
+            Self::Block(commitment) => write!(f, "Block({commitment:?})"),
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -370,9 +364,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=2)?;
         match choice {
-            0 => Ok(Self::Block {
-                commitment: u.arbitrary()?,
-            }),
+            0 => Ok(Self::Block(u.arbitrary()?)),
             1 => Ok(Self::Finalized {
                 height: u.arbitrary()?,
             }),
@@ -465,7 +457,7 @@ mod tests {
     #[test]
     fn test_subject_block_encoding() {
         let digest = Sha256::hash(b"test");
-        let request = Request::<D>::Block { commitment: digest };
+        let request = Request::<D>::Block(digest);
 
         // Test encoding
         let encoded = request.encode();
@@ -476,7 +468,7 @@ mod tests {
         let mut buf = encoded.as_ref();
         let decoded = Request::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
-        assert_eq!(decoded, Request::Block { commitment: digest });
+        assert_eq!(decoded, Request::Block(digest));
     }
 
     #[test]
@@ -552,9 +544,7 @@ mod tests {
         let notarized = Request::<D>::Notarized {
             round: Round::new(Epoch::new(333), View::new(150)),
         };
-        let block = Request::<D>::Block {
-            commitment: Sha256::hash(b"block"),
-        };
+        let block = Request::<D>::Block(Sha256::hash(b"block"));
         let stale_finalized = Annotation::Finalized(Finalized::ByHeight {
             height: Height::new(100),
         });
@@ -609,7 +599,7 @@ mod tests {
     #[test]
     fn test_block_request_predicate_prunes_matching_commitment() {
         let commitment = Sha256::hash(b"block");
-        let request = Request::<D>::Block { commitment };
+        let request = Request::<D>::Block(commitment);
         let predicate = request.predicate();
 
         assert!(!predicate(
@@ -619,9 +609,7 @@ mod tests {
             })
         ));
         assert!(predicate(
-            &Request::<D>::Block {
-                commitment: Sha256::hash(b"other"),
-            },
+            &Request::<D>::Block(Sha256::hash(b"other")),
             &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(7),
             })
@@ -631,7 +619,7 @@ mod tests {
     #[test]
     fn test_encode_size() {
         let digest = Sha256::hash(&[0u8; 32]);
-        let r1 = Request::<D>::Block { commitment: digest };
+        let r1 = Request::<D>::Block(digest);
         let r2 = Request::<D>::Finalized {
             height: Height::new(u64::MAX),
         };
@@ -650,12 +638,8 @@ mod tests {
         // Test ordering within the same variant
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block {
-            commitment: digest1,
-        };
-        let block2 = Request::<D>::Block {
-            commitment: digest2,
-        };
+        let block1 = Request::<D>::Block(digest1);
+        let block2 = Request::<D>::Block(digest2);
 
         // Block ordering depends on digest ordering
         if digest1 < digest2 {
@@ -700,7 +684,7 @@ mod tests {
     #[test]
     fn test_request_ord_cross_variant() {
         let digest = Sha256::hash(b"test");
-        let block = Request::<D>::Block { commitment: digest };
+        let block = Request::<D>::Block(digest);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -730,12 +714,8 @@ mod tests {
     fn test_request_partial_ord() {
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block {
-            commitment: digest1,
-        };
-        let block2 = Request::<D>::Block {
-            commitment: digest2,
-        };
+        let block1 = Request::<D>::Block(digest1);
+        let block2 = Request::<D>::Block(digest2);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -773,24 +753,18 @@ mod tests {
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(300)),
             },
-            Request::<D>::Block {
-                commitment: digest2,
-            },
+            Request::<D>::Block(digest2),
             Request::<D>::Finalized {
                 height: Height::new(200),
             },
-            Request::<D>::Block {
-                commitment: digest1,
-            },
+            Request::<D>::Block(digest1),
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(250)),
             },
             Request::<D>::Finalized {
                 height: Height::new(100),
             },
-            Request::<D>::Block {
-                commitment: digest3,
-            },
+            Request::<D>::Block(digest3),
         ];
 
         // Sort using BTreeSet (uses Ord)
@@ -804,9 +778,9 @@ mod tests {
         assert_eq!(sorted.len(), 7);
 
         // Check that all blocks come first
-        assert!(matches!(sorted[0], Request::<D>::Block { commitment: _ }));
-        assert!(matches!(sorted[1], Request::<D>::Block { commitment: _ }));
-        assert!(matches!(sorted[2], Request::<D>::Block { commitment: _ }));
+        assert!(matches!(sorted[0], Request::<D>::Block(_)));
+        assert!(matches!(sorted[1], Request::<D>::Block(_)));
+        assert!(matches!(sorted[2], Request::<D>::Block(_)));
 
         // Check that finalized come next
         assert_eq!(
@@ -859,7 +833,7 @@ mod tests {
 
         // Test self-comparison
         let digest = Sha256::hash(b"self");
-        let block = Request::<D>::Block { commitment: digest };
+        let block = Request::<D>::Block(digest);
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
         assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);
