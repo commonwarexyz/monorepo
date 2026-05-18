@@ -936,7 +936,10 @@ mod test {
     fn test_keyless_fixed_sync() {
         use crate::{
             merkle::Location,
-            qmdb::sync::{self, engine::Config, Target},
+            qmdb::{
+                any::sync::Target,
+                sync::{self, engine::Config},
+            },
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use std::sync::Arc;

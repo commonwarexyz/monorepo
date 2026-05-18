@@ -107,6 +107,19 @@ pub struct Target<F: Graftable, D: Digest> {
     pub range: NonEmptyRange<Location<F>>,
 }
 
+impl<F: Graftable, D: Digest> PartialEq for Target<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.ops_root == other.ops_root
+            && self.witness.grafted_root == other.witness.grafted_root
+            && self.witness.pending_chunk_digest == other.witness.pending_chunk_digest
+            && self.witness.partial_chunk == other.witness.partial_chunk
+            && self.range == other.range
+    }
+}
+
+impl<F: Graftable, D: Digest> Eq for Target<F, D> {}
+
 impl<F: Graftable, D: Digest> Target<F, D> {
     /// Create a target anchored by a trusted database root and an authenticated ops root.
     pub const fn new(
@@ -123,20 +136,29 @@ impl<F: Graftable, D: Digest> Target<F, D> {
         }
     }
 
-    /// Verify the witness and return the ops-root target consumed by the shared sync engine.
-    pub fn to_engine_target<H: commonware_cryptography::Hasher<Digest = D>>(
+    /// Return true if the witness authenticates the ops root against the trusted root.
+    pub fn verify<H: commonware_cryptography::Hasher<Digest = D>>(
         &self,
         hasher: &StandardHasher<H>,
-    ) -> Option<qmdb_sync::Target<F, D>> {
-        if self.witness.verify(hasher, &self.ops_root, &self.root) {
-            Some(qmdb_sync::Target::from_roots(
-                self.root,
-                self.ops_root,
-                self.range.clone(),
-            ))
-        } else {
-            None
-        }
+    ) -> bool {
+        self.witness.verify(hasher, &self.ops_root, &self.root)
+    }
+}
+
+impl<F: Graftable, D: Digest> qmdb_sync::Target for Target<F, D> {
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> Self::Digest {
+        self.root
+    }
+
+    fn ops_root(&self) -> Self::Digest {
+        self.ops_root
+    }
+
+    fn range(&self) -> &NonEmptyRange<Location<Self::Family>> {
+        &self.range
     }
 }
 
@@ -181,6 +203,41 @@ impl<F: Graftable, D: Digest> commonware_codec::Read for Target<F, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let ops_root = u.arbitrary()?;
+        let witness = u.arbitrary()?;
+        let max_loc = F::MAX_LEAVES;
+        let lower = u.int_in_range(0..=*max_loc - 1)?;
+        let upper = u.int_in_range(lower + 1..=*max_loc)?;
+        Ok(Self {
+            root,
+            ops_root,
+            witness,
+            range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
+        })
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::{mmb, mmr};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Target<mmr::Family, Sha256Digest>>,
+        CodecConformance<Target<mmb::Family, Sha256Digest>>,
+    }
+}
+
 /// Configuration for syncing a `current` database from trusted database-root targets.
 pub struct Config<DB: Database, R: DbResolver<DB>>
 where
@@ -208,16 +265,15 @@ where
     /// Channel that requests sync completion once the current target is reached.
     pub finish_rx: Option<mpsc::Receiver<()>>,
     /// Channel to notify an observer when the current target is reached.
-    pub reached_target_tx: Option<mpsc::Sender<qmdb_sync::Target<DB::Family, DB::Digest>>>,
+    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
     /// Historical roots to retain for in-flight request verification.
     pub max_retained_roots: usize,
 }
 
 /// Sync a `current` database from a trusted database root.
 ///
-/// Verifies the initial target and any target update witnesses before forwarding ops-root targets
-/// to the shared sync engine, then checks the reconstructed database root for the target the
-/// engine finishes on.
+/// Verifies the initial target and any target update witnesses before giving them to the shared
+/// sync engine, then checks the reconstructed database root for the target the engine finishes on.
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, qmdb_sync::Error<DB::Family, R::Error, DB::Digest>>
@@ -229,26 +285,25 @@ where
 {
     let hasher = qmdb::hasher::<DB::Hasher>();
 
-    let engine_target = config
-        .target
-        .to_engine_target(&hasher)
-        .ok_or(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid))?;
-    let mut roots = vec![(engine_target.clone(), config.target.root)];
+    if !config.target.verify(&hasher) {
+        return Err(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid));
+    }
+    let update_rx = config.update_rx;
 
     // The caller controls the public update channel capacity. Once updates reach this wrapper,
     // keep the internal queue shallow so verified current targets cannot get far ahead of the
     // target the shared sync engine has consumed.
-    let (engine_update_tx, engine_update_rx) = if config.update_rx.is_some() {
+    let (engine_update_tx, engine_update_rx) = if update_rx.is_some() {
         let (tx, rx) = mpsc::channel(1);
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
 
-    let engine_config = EngineConfig::<DB, R> {
+    let engine_config = EngineConfig {
         context: config.context,
         resolver: config.resolver,
-        target: engine_target,
+        target: config.target,
         max_outstanding_requests: config.max_outstanding_requests,
         fetch_batch_size: config.fetch_batch_size,
         apply_batch_size: config.apply_batch_size,
@@ -262,19 +317,18 @@ where
     let engine = qmdb_sync::Engine::new(engine_config).await?;
     let engine_fut = Box::pin(engine.sync_with_target());
 
-    let (database, final_target) = if let Some(mut update_rx) = config.update_rx {
+    let (database, final_target) = if let Some(mut update_rx) = update_rx {
         let update_tx = engine_update_tx.expect("engine update sender must exist");
         let forward_fut = Box::pin(async {
             let update_tx = update_tx;
             while let Some(current_target) = update_rx.recv().await {
-                let Some(engine_target) = current_target.to_engine_target(&hasher) else {
+                if !current_target.verify(&hasher) {
                     tracing::warn!("target update witness verification failed");
                     return Err(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid));
-                };
-                if update_tx.send(engine_target.clone()).await.is_err() {
+                }
+                if update_tx.send(current_target).await.is_err() {
                     break;
                 }
-                roots.push((engine_target, current_target.root));
             }
             Ok(())
         });
@@ -290,12 +344,7 @@ where
         engine_fut.await?
     };
 
-    let expected = roots
-        .iter()
-        .rev()
-        .find(|(target, _)| target == &final_target)
-        .expect("final current sync target was verified")
-        .1;
+    let expected = final_target.root;
     let actual = database.root();
     if actual != expected {
         return Err(qmdb_sync::Error::Engine(EngineError::RootMismatch {
@@ -528,11 +577,14 @@ macro_rules! impl_current_sync_database {
                 .await
             }
 
-            async fn has_local_target_state(
+            async fn has_local_target_state<Target>(
                 context: Self::Context,
                 config: &Self::Config,
-                target: &qmdb_sync::Target<Self::Family, Self::Digest>,
-            ) -> bool {
+                target: &Target,
+            ) -> bool
+            where
+                Target: qmdb_sync::Target<Family = Self::Family, Digest = Self::Digest>,
+            {
                 let Ok(journal) = <$journal>::init(
                     context.child("local_target_journal_probe"),
                     config.journal_config(),
@@ -543,11 +595,11 @@ macro_rules! impl_current_sync_database {
                 };
                 let reader = journal.reader().await;
                 let bounds = reader.bounds();
-                if Location::new(bounds.start) > target.range.start() {
+                if Location::new(bounds.start) > target.range().start() {
                     return false;
                 }
                 let Ok(inactivity_floor) =
-                    qmdb::find_inactivity_floor_at::<F, _>(&reader, target.range.end(), |op| {
+                    qmdb::find_inactivity_floor_at::<F, _>(&reader, target.range().end(), |op| {
                         op.has_floor()
                     })
                     .await
@@ -556,10 +608,10 @@ macro_rules! impl_current_sync_database {
                 };
 
                 let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
+                    F::location_to_position(target.range().end()),
                     inactivity_floor,
                 );
-                if !qmdb::any::sync::has_local_target_state::<F, _, H, S>(
+                if !qmdb::any::sync::has_local_target_state::<F, _, H, S, _>(
                     context.child("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,

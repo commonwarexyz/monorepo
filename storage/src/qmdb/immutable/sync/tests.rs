@@ -10,12 +10,13 @@ use crate::{
     merkle::{self, full::Config as MerkleConfig, Location},
     qmdb::{
         self,
+        any::sync::Target,
         immutable::{self, variable::Operation},
         sync::{
             self,
             engine::{Config, NextStep},
             resolver::Resolver,
-            Engine, Target,
+            Engine,
         },
     },
     translator::TwoCap,
@@ -322,7 +323,8 @@ where
                 reached_target_tx: None,
                 max_retained_roots: 1,
             };
-            let mut client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+            let mut client: Engine<DbOf<H>, _, Target<H::Family, sha256::Digest>> =
+                Engine::new(config).await.unwrap();
             loop {
                 client = match client.step().await.unwrap() {
                     NextStep::Continue(new_client) => new_client,
@@ -551,7 +553,8 @@ where
             reached_target_tx: None,
             max_retained_roots: 1,
         };
-        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+        let client: Engine<DbOf<H>, _, Target<H::Family, sha256::Digest>> =
+            Engine::new(config).await.unwrap();
 
         update_sender
             .send(Target::new(
@@ -612,7 +615,8 @@ where
             reached_target_tx: None,
             max_retained_roots: 1,
         };
-        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+        let client: Engine<DbOf<H>, _, Target<H::Family, sha256::Digest>> =
+            Engine::new(config).await.unwrap();
 
         update_sender
             .send(Target::new(

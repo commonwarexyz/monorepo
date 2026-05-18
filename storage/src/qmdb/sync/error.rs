@@ -1,10 +1,8 @@
 //! Shared sync error types that can be used across different database implementations.
 
-use crate::{
-    merkle::{Family, Location},
-    qmdb::sync::Target,
-};
+use crate::merkle::{Family, Location};
 use commonware_cryptography::Digest;
+use commonware_utils::range::NonEmptyRange;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError<F: Family, D: Digest> {
@@ -38,8 +36,8 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Sync target moved backward
     #[error("sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {
-        old: Target<F, D>,
-        new: Target<F, D>,
+        old: NonEmptyRange<Location<F>>,
+        new: NonEmptyRange<Location<F>>,
     },
     /// Sync already completed
     #[error("sync already completed")]

@@ -1,10 +1,7 @@
 //! Tests for [crate::qmdb::current] state sync.
 //!
 //! This module reuses the shared sync test functions from [crate::qmdb::sync::tests] by
-//! implementing [SyncTestHarness] for current database types. The key difference from `any`
-//! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
-//! [qmdb::sync::Database::ops_root](crate::qmdb::sync::Database::ops_root)), not the database root
-//! returned by `Db::root()`.
+//! implementing [SyncTestHarness] for current database types.
 //!
 //! Harnesses are instantiated for **both** MMR and MMB merkle families across each (ordered,
 //! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
@@ -26,14 +23,34 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
 };
-use commonware_utils::non_empty_range;
+use commonware_utils::{non_empty_range, range::NonEmptyRange};
 use rand::RngCore as _;
+
+fn dummy_current_target<F: crate::merkle::Graftable>(
+    root: Digest,
+    ops_root: Digest,
+    range: NonEmptyRange<crate::merkle::Location<F>>,
+) -> crate::qmdb::current::sync::Target<F, Digest> {
+    crate::qmdb::current::sync::Target::new(
+        root,
+        ops_root,
+        crate::qmdb::current::proof::OpsRootWitness {
+            grafted_root: Digest::from([0; 32]),
+            pending_chunk_digest: None.try_into().unwrap(),
+            partial_chunk: None,
+        },
+        range,
+    )
+}
 
 // ===== Harness Implementations =====
 
 mod harnesses {
     use super::*;
-    use crate::merkle::{self, mmb, mmr};
+    use crate::{
+        merkle::{self, mmb, mmr},
+        qmdb::current::{proof::OpsRootWitness, sync::Target as CurrentTarget},
+    };
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng_seeded;
 
@@ -77,6 +94,23 @@ mod harnesses {
         32,
         Sequential,
     >;
+
+    fn target<F: merkle::Graftable>(
+        root: Digest,
+        ops_root: Digest,
+        range: NonEmptyRange<crate::merkle::Location<F>>,
+    ) -> CurrentTarget<F, Digest> {
+        CurrentTarget::new(
+            root,
+            ops_root,
+            OpsRootWitness {
+                grafted_root: Digest::from([0; 32]),
+                pending_chunk_digest: None.try_into().unwrap(),
+                partial_chunk: None,
+            },
+            range,
+        )
+    }
 
     fn create_unordered_fixed_ops<F: merkle::Family>(
         n: usize,
@@ -278,9 +312,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedFixedHarness<F> {
         type Family = F;
         type Db = UnorderedFixedDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -325,9 +364,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedVariableHarness<F> {
         type Family = F;
         type Db = UnorderedVariableDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -372,9 +416,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedFixedHarness<F> {
         type Family = F;
         type Db = OrderedFixedDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -419,9 +468,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedVariableHarness<F> {
         type Family = F;
         type Db = OrderedVariableDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -524,14 +578,13 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let client_suffix = context.next_u64().to_string();
         let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
         let target_db = std::sync::Arc::new(target_db);
-        // This uses the shared sync engine's ops-root target directly. The focused
-        // `root_sync` tests below cover the current sync wrapper that authenticates ops
-        // roots against trusted database roots.
+        // This uses the shared sync engine directly. The focused `root_sync` tests below cover the
+        // current sync wrapper that authenticates target witnesses before starting the engine.
         let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
-            target: crate::qmdb::sync::Target::from_roots(
+            target: dummy_current_target(
                 verification_root,
                 sync_root,
                 commonware_utils::non_empty_range!(lower_bound, upper_bound),
@@ -613,7 +666,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         assert!(local_start > crate::merkle::Location::new(0));
 
         let root = db.root();
-        let stale_target = crate::qmdb::sync::Target::from_roots(
+        let stale_target = dummy_current_target(
             root,
             sync_root,
             non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
@@ -627,11 +680,8 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
             .await
         );
 
-        let matching_target = crate::qmdb::sync::Target::from_roots(
-            root,
-            sync_root,
-            non_empty_range!(local_start, local_end),
-        );
+        let matching_target =
+            dummy_current_target(root, sync_root, non_empty_range!(local_start, local_end));
         assert!(
             <Db as SyncDatabase>::has_local_target_state(
                 context.child("probe_matching"),
