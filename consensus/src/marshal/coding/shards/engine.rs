@@ -67,7 +67,8 @@
 //!
 //! For each [`Commitment`] that is either leader-discovered or notarized, nodes
 //! (both participants and non-participants) maintain a [`ReconstructionState`].
-//! Before that consensus signal, shards are buffered in bounded per-peer queues:
+//! Before either consensus signal, a leader announcement or a notarization for
+//! the commitment, shards are buffered in bounded per-peer queues:
 //!
 //! ```text
 //!    +----------------------+
@@ -543,6 +544,9 @@ where
                         warn!(%commitment, "no scheme for epoch, ignoring shard");
                         continue;
                     };
+                    // Notarized recovery can create state before leader discovery. Until
+                    // the leader is known, only sender-indexed gossip shards are safe to
+                    // ingest: a participant may only gossip its own shard.
                     if existing.leader().is_none() {
                         if let Some(sender_index) = scheme.participants().index(&peer) {
                             let expected_index: u16 = sender_index
@@ -550,12 +554,9 @@ where
                                 .try_into()
                                 .expect("participant index impossibly out of bounds");
                             if shard.index() != expected_index {
-                                // Notarized recovery can create state before leader discovery. Until
-                                // the leader is known, only sender-indexed gossip shards are safe to
-                                // ingest: a participant may only gossip its own shard. A mismatched
-                                // shard is invalid for a non-leader, but it may be the assigned shard
-                                // if this peer later turns out to be the leader. Keep it buffered
-                                // until the sender's role is known.
+                                // A mismatched shard is invalid for a non-leader, but it may be
+                                // the assigned shard if this peer later turns out to be the leader.
+                                // Keep it buffered until the sender's role is known.
                                 self.buffer_peer_shard(peer, shard);
                                 continue;
                             }
@@ -677,6 +678,10 @@ where
         leader: P,
         round: Round,
     ) {
+        // A reconstructed block normally makes duplicate leader announcements
+        // redundant, unless notarized recovery created leaderless state first.
+        // In that case, the leader announcement must still populate the
+        // leader-dependent path.
         if self.reconstructed_blocks.contains_key(&commitment)
             && self
                 .state
