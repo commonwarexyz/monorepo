@@ -831,9 +831,11 @@ where
         } else {
             default_response
         };
-        let _ = self.resolver_senders[receiver_idx]
-            .send(Recipients::One(self.honest.clone()), response, true)
-            .await;
+        let _ = self.resolver_senders[receiver_idx].send(
+            Recipients::One(self.honest.clone()),
+            response,
+            true,
+        );
     }
 
     fn handle_honest_certificates(&mut self, sender: &S::PublicKey, bytes: Vec<u8>) {
@@ -1133,9 +1135,7 @@ where
     }
 
     async fn send_vote_bytes(&mut self, signer_idx: usize, msg: Bytes) {
-        let _ = self.vote_senders[signer_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
+        let _ = self.vote_senders[signer_idx].send(Recipients::One(self.honest.clone()), msg, true);
     }
 
     async fn send_malformed_vote(&mut self, signer_idx: usize) {
@@ -1165,9 +1165,11 @@ where
 
     async fn send_certificate_bytes(&mut self, msg: Bytes) {
         let sender_idx = self.next_sender();
-        let _ = self.certificate_senders[sender_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
+        let _ = self.certificate_senders[sender_idx].send(
+            Recipients::One(self.honest.clone()),
+            msg,
+            true,
+        );
     }
 
     async fn send_malformed_certificate(&mut self) {
