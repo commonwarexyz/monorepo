@@ -648,10 +648,10 @@ where
                             // not a height. Keep the request round-bound until the
                             // block is decoded.
                             debug!(?round, ?commitment, "finalized block missing");
-                            resolver.fetch(Fetch::new(
-                                Request::Block(commitment),
-                                Annotation::Finalized(Finalized::ByRound { round }),
-                            ));
+                            resolver.fetch(Fetch {
+                                key: Request::Block(commitment),
+                                subscriber: Annotation::Finalized(Finalized::ByRound { round }),
+                            });
                         }
                     }
                     Message::GetBlock {
@@ -692,10 +692,10 @@ where
                         }
 
                         resolver.fetch_targeted(
-                            Fetch::new(
-                                Request::<V::Commitment>::Finalized { height },
-                                Annotation::Finalized(Finalized::ByHeight { height }),
-                            ),
+                            Fetch {
+                                key: Request::<V::Commitment>::Finalized { height },
+                                subscriber: Annotation::Finalized(Finalized::ByHeight { height }),
+                            },
                             targets,
                         );
                     }
@@ -736,8 +736,8 @@ where
                         commonware_stability_EPSILON,
                         commonware_stability_RESERVED
                     )))]
-                    Message::RecoverByCommitment { round, commitment } => {
-                        self.handle_recover_by_commitment(
+                    Message::FetchNotarized { round, commitment } => {
+                        self.handle_fetch_notarized(
                             round,
                             commitment,
                             &mut resolver,
@@ -957,10 +957,10 @@ where
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
                 debug!(?round, ?digest, "requested block missing");
-                resolver.fetch(Fetch::new(
-                    Request::Notarized { round },
-                    Annotation::Notarization { round },
-                ));
+                resolver.fetch(Fetch {
+                    key: Request::Notarized { round },
+                    subscriber: Annotation::Notarization { round },
+                });
             }
             CommitmentFallback::FetchByCommitment { height } => {
                 let commitment = match key {
@@ -984,10 +984,10 @@ where
                     return;
                 }
                 debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
-                resolver.fetch(Fetch::new(
-                    Request::Block(commitment),
-                    Annotation::Certified { height },
-                ));
+                resolver.fetch(Fetch {
+                    key: Request::Block(commitment),
+                    subscriber: Annotation::Certified { height },
+                });
             }
             CommitmentFallback::Wait => {}
         }
@@ -1027,8 +1027,14 @@ where
         }
     }
 
-    #[commonware_macros::stability(ALPHA)]
-    async fn handle_recover_by_commitment<Buf: Buffer<V>>(
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
+    async fn handle_fetch_notarized<Buf: Buffer<V>>(
         &mut self,
         round: Round,
         commitment: V::Commitment,
@@ -1045,10 +1051,10 @@ where
         {
             return;
         }
-        resolver.fetch(Fetch::new(
-            Request::Notarized { round },
-            Annotation::Notarization { round },
-        ));
+        resolver.fetch(Fetch {
+            key: Request::Notarized { round },
+            subscriber: Annotation::Notarization { round },
+        });
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled
@@ -1816,12 +1822,12 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    resolver.fetch(Fetch::new(
-                        Request::Block(commitment),
-                        Annotation::Finalized(Finalized::ByHeight {
+                    resolver.fetch(Fetch {
+                        key: Request::Block(commitment),
+                        subscriber: Annotation::Finalized(Finalized::ByHeight {
                             height: last_finalized,
                         }),
-                    ));
+                    });
                 }
             }
         }
@@ -1874,12 +1880,12 @@ where
                         .height()
                         .previous()
                         .expect("cursor above gap start has a parent");
-                    resolver.fetch(Fetch::new(
-                        Request::Block(parent_commitment),
-                        Annotation::Finalized(Finalized::ByHeight {
+                    resolver.fetch(Fetch {
+                        key: Request::Block(parent_commitment),
+                        subscriber: Annotation::Finalized(Finalized::ByHeight {
                             height: parent_height,
                         }),
-                    ));
+                    });
                     break 'cache_repair;
                 }
             }
@@ -1895,11 +1901,9 @@ where
             .missing_items(start, self.max_repair.get());
         let requests: Vec<_> = missing_items
             .into_iter()
-            .map(|height| {
-                Fetch::new(
-                    Request::<V::Commitment>::Finalized { height },
-                    Annotation::Finalized(Finalized::ByHeight { height }),
-                )
+            .map(|height| Fetch {
+                key: Request::<V::Commitment>::Finalized { height },
+                subscriber: Annotation::Finalized(Finalized::ByHeight { height }),
             })
             .collect();
         if !requests.is_empty() {

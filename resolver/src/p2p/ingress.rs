@@ -200,8 +200,7 @@ where
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
-        let key = key.into();
-        let (key, subscriber) = key.into_parts();
+        let Fetch { key, subscriber } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
@@ -222,7 +221,7 @@ where
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
                 .map(|key| {
-                    let (key, subscriber) = key.into().into_parts();
+                    let Fetch { key, subscriber } = key.into();
                     FetchKey {
                         key,
                         subscribers: NonEmptyVec::new(subscriber),
@@ -241,8 +240,7 @@ where
         key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
-        let key = key.into();
-        let (key, subscriber) = key.into_parts();
+        let Fetch { key, subscriber } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
@@ -260,7 +258,7 @@ where
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
                 .map(|(key, targets)| {
-                    let (key, subscriber) = key.into().into_parts();
+                    let Fetch { key, subscriber } = key.into();
                     FetchKey {
                         key,
                         subscribers: NonEmptyVec::new(subscriber),

@@ -914,7 +914,7 @@ where
             // verifier must be unblocked by round-bound recovery if local
             // reconstruction never completes.
             self.shards.notarized(payload, round);
-            self.marshal.recover_by_commitment(round, payload);
+            self.marshal.fetch_notarized(round, payload);
             return task;
         }
 

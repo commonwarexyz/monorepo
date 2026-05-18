@@ -21,27 +21,12 @@ commonware_macros::stability_scope!(BETA {
         pub subscriber: S,
     }
 
-    impl<K, S> Fetch<K, S> {
-        /// Create a fetch for a key and subscriber.
-        pub const fn new(key: K, subscriber: S) -> Self {
-            Self { key, subscriber }
-        }
-
-        /// Consume the fetch into its key and subscriber.
-        pub fn into_parts(self) -> (K, S) {
-            (self.key, self.subscriber)
-        }
-    }
-
-    impl<K, S> From<(K, S)> for Fetch<K, S> {
-        fn from((key, subscriber): (K, S)) -> Self {
-            Self::new(key, subscriber)
-        }
-    }
-
     impl<K, S: Default> From<K> for Fetch<K, S> {
         fn from(key: K) -> Self {
-            Self::new(key, S::default())
+            Self {
+                key,
+                subscriber: S::default(),
+            }
         }
     }
 

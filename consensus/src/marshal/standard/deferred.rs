@@ -479,6 +479,14 @@ where
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut marshaled = self.clone();
+        let round = context.round;
+
+        // Register the verification task synchronously so `certify` finds a pending
+        // entry even while the optimistic block subscription is still waiting locally.
+        // This lets `certify` take the task and bump a round-bound notarized fetch
+        // via `fetch_notarized`.
+        let (task_tx, task_rx) = oneshot::channel();
+        self.verification_tasks.insert(round, digest, task_rx);
 
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
@@ -486,7 +494,7 @@ where
             .lock()
             .await
             .child("optimistic_verify")
-            .with_attribute("round", context.round);
+            .with_attribute("round", round);
         runtime_context.spawn(move |_| async move {
                 let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let block = select! {
@@ -530,16 +538,9 @@ where
                 };
                 let block = match decision {
                     Decision::Complete(valid) => {
-                        if valid {
-                            // A valid re-proposal needs no further ancestry validation, but
-                            // `certify` still expects a completed verification task.
-                            let round = context.round;
-                            let (task_tx, task_rx) = oneshot::channel();
-                            task_tx.send_lossy(true);
-                            marshaled.verification_tasks.insert(round, digest, task_rx);
-                        }
                         // `Complete` means either immediate rejection or successful
                         // re-proposal handling with no further ancestry validation.
+                        task_tx.send_lossy(valid);
                         tx.send_lossy(valid);
                         return;
                     }
@@ -560,18 +561,22 @@ where
                         block_context = ?block.context(),
                         "block-embedded context does not match consensus context during optimistic verification"
                     );
+                    task_tx.send_lossy(false);
                     tx.send_lossy(false);
                     return;
                 }
 
-                // Begin the rest of the verification process asynchronously.
-                let round = context.round;
-                let task = marshaled
+                // Optimistic verify returns immediately; the deferred_verify task
+                // runs in the background and forwards its final verdict to
+                // `task_tx` so `certify` observes the same result via the
+                // synchronously-registered `task_rx`.
+                let deferred_rx = marshaled
                     .deferred_verify(context, block, Stage::Verified)
                     .await;
-                marshaled.verification_tasks.insert(round, digest, task);
-
                 tx.send_lossy(true);
+                if let Ok(result) = deferred_rx.await {
+                    task_tx.send_lossy(result);
+                }
         });
         rx
     }
@@ -589,6 +594,11 @@ where
         // Attempt to retrieve the existing verification task for this (round, payload).
         let task = self.verification_tasks.take(round, digest);
         if let Some(task) = task {
+            // `verify()` waits only on local broadcast delivery; nudge a
+            // round-bound notarized fetch so the existing waiter can be
+            // unblocked if local broadcast never arrives. For the standard
+            // variant, the digest is also the variant commitment.
+            self.marshal.fetch_notarized(round, digest);
             return task;
         }
 
@@ -1068,11 +1078,11 @@ mod tests {
         })
     }
 
-    /// Regression: dropping the optimistic verify receiver before the block is available must not
-    /// leave a closed verification task that prevents `certify` from using its embedded-context
-    /// fallback.
+    /// Dropping the optimistic verify receiver before the block is available cancels the
+    /// pending verification task. `certify` should observe the cancellation via the
+    /// synchronously-registered task and resolve `Err` rather than synthesizing a verdict.
     #[test_traced("WARN")]
-    fn test_deferred_certify_falls_back_after_dropped_optimistic_verify() {
+    fn test_deferred_verify_receiver_drop_does_not_synthesize_false() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1123,18 +1133,16 @@ mod tests {
             // block subscription is still pending.
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(marshal.verified(round, block).await);
-
             let certify_rx = marshaled.certify(round, digest).await;
             select! {
                 result = certify_rx => {
                     assert!(
-                        result.unwrap(),
-                        "certify should fall back to embedded-context verification"
+                        result.is_err(),
+                        "certify should resolve without an explicit verdict when verify is canceled"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify should not be blocked by a stale verify task");
+                    panic!("certify should resolve promptly after verify drop");
                 },
             }
         });

@@ -2038,8 +2038,14 @@ mod tests {
 
             let dropped_subscriber = SubscriberTag(50);
             let kept_subscriber = SubscriberTag(51);
-            mailbox1.fetch(Fetch::new(key.clone(), dropped_subscriber));
-            mailbox1.fetch(Fetch::new(key.clone(), kept_subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: dropped_subscriber,
+            });
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: kept_subscriber.clone(),
+            });
 
             context.sleep(Duration::from_millis(100)).await;
             mailbox1.retain(move |_, subscriber| subscriber == &kept_subscriber);
@@ -2090,8 +2096,14 @@ mod tests {
 
             let first_subscriber = SubscriberTag(50);
             let second_subscriber = SubscriberTag(51);
-            mailbox1.fetch(Fetch::new(key.clone(), second_subscriber.clone()));
-            mailbox1.fetch(Fetch::new(key.clone(), first_subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: second_subscriber.clone(),
+            });
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first_subscriber.clone(),
+            });
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
@@ -2144,8 +2156,14 @@ mod tests {
 
             let first_subscriber = SubscriberTag(49);
             let second_subscriber = SubscriberTag(50);
-            mailbox1.fetch(Fetch::new(key.clone(), first_subscriber.clone()));
-            mailbox1.fetch(Fetch::new(key.clone(), second_subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first_subscriber.clone(),
+            });
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: second_subscriber.clone(),
+            });
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
@@ -2207,7 +2225,10 @@ mod tests {
 
             let first_subscriber = SubscriberTag(49);
             let second_subscriber = SubscriberTag(50);
-            mailbox1.fetch(Fetch::new(key.clone(), first_subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: first_subscriber.clone(),
+            });
 
             let delivery = started.recv().await.expect("delivery did not start");
             assert_eq!(
@@ -2218,7 +2239,10 @@ mod tests {
                 }
             );
 
-            mailbox1.fetch(Fetch::new(key.clone(), second_subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: second_subscriber.clone(),
+            });
             context.sleep(Duration::from_millis(100)).await;
 
             first_gate_sender.send(()).unwrap();
@@ -2320,7 +2344,10 @@ mod tests {
                 prod3,
             );
 
-            mailbox1.fetch(Fetch::new(blocked_key.clone(), SubscriberTag(1)));
+            mailbox1.fetch(Fetch {
+                key: blocked_key.clone(),
+                subscriber: SubscriberTag(1),
+            });
             started
                 .recv()
                 .await
@@ -2329,14 +2356,20 @@ mod tests {
             wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
 
             mailbox1.fetch_targeted(
-                Fetch::new(waiting_key, SubscriberTag(2)),
+                Fetch {
+                    key: waiting_key,
+                    subscriber: SubscriberTag(2),
+                },
                 non_empty_vec![peers[1].clone()],
             );
             context.sleep(Duration::from_millis(100)).await;
 
             let first_subscriber = SubscriberTag(3);
             let second_subscriber = SubscriberTag(4);
-            mailbox1.fetch(Fetch::new(main_key.clone(), first_subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: main_key.clone(),
+                subscriber: first_subscriber.clone(),
+            });
 
             let delivery = started.recv().await.expect("delivery did not start");
             assert_eq!(
@@ -2347,7 +2380,10 @@ mod tests {
                 }
             );
 
-            mailbox1.fetch(Fetch::new(main_key.clone(), second_subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: main_key.clone(),
+                subscriber: second_subscriber.clone(),
+            });
             context.sleep(Duration::from_millis(100)).await;
 
             second_gate_sender.send(()).unwrap();
@@ -2414,7 +2450,10 @@ mod tests {
 
             let subscriber = SubscriberTag(50);
             let retained = subscriber.clone();
-            mailbox1.fetch(Fetch::new(key.clone(), subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: subscriber.clone(),
+            });
 
             context.sleep(Duration::from_millis(100)).await;
             mailbox1.retain(move |_, subscriber| subscriber == &retained);
@@ -2470,7 +2509,10 @@ mod tests {
             );
 
             let subscriber = SubscriberTag(50);
-            mailbox1.fetch(Fetch::new(key.clone(), subscriber.clone()));
+            mailbox1.fetch(Fetch {
+                key: key.clone(),
+                subscriber: subscriber.clone(),
+            });
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
