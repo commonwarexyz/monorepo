@@ -813,8 +813,8 @@ where
                         )
                         .await;
                     }
-                    Message::FetchNotarized { round, commitment } => {
-                        self.handle_fetch_notarized(
+                    Message::HintNotarized { round, commitment } => {
+                        self.handle_hint_notarized(
                             round,
                             commitment,
                             &mut resolver,
@@ -1100,7 +1100,7 @@ where
         }
     }
 
-    async fn handle_fetch_notarized<Buf: Buffer<V>>(
+    async fn handle_hint_notarized<Buf: Buffer<V>>(
         &mut self,
         round: Round,
         commitment: V::Commitment,

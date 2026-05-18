@@ -576,7 +576,7 @@ where
         // verifier must be unblocked by round-bound recovery if local
         // reconstruction never completes.
         self.shards.notarized(payload, round);
-        self.marshal.fetch_notarized(round, payload);
+        self.marshal.hint_notarized(round, payload);
 
         let mut marshaled = self.clone();
         let (mut tx, rx) = oneshot::channel();

@@ -1501,11 +1501,11 @@ mod tests {
         }
     }
 
-    /// Regression for `Deferred::certify`'s `fetch_notarized` bump. When `verify`
+    /// Regression for `Deferred::certify`'s `hint_notarized` bump. When `verify`
     /// has an in-progress task with the block still missing locally, `certify`
     /// must take that task AND nudge a round-bound notarized fetch; otherwise
     /// the shared task would wait forever on a local subscription that nothing
-    /// drives. Removing the `fetch_notarized` call makes this test hang.
+    /// drives. Removing the `hint_notarized` call makes this test hang.
     #[test_traced("WARN")]
     fn test_standard_deferred_certify_bumps_notarized_fetch_for_pending_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1554,7 +1554,7 @@ mod tests {
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
             resolver.respond_to_next_fetch((notarization, block).encode());
 
-            // `certify` takes the in-progress task and calls `fetch_notarized`,
+            // `certify` takes the in-progress task and calls `hint_notarized`,
             // which issues a round-bound `Request::Notarized`. The recording
             // resolver delivers; the marshal stores the block and wakes
             // verify's digest subscription; deferred_verify produces the final
@@ -2951,7 +2951,7 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.fetch_notarized(round, Sha256::hash(b"missing-at-processed-round"));
+            mailbox.hint_notarized(round, Sha256::hash(b"missing-at-processed-round"));
             let subscription = mailbox.subscribe_by_commitment(
                 Sha256::hash(b"missing-subscription-at-processed-round"),
                 CommitmentFallback::FetchByRound { round },
@@ -2967,7 +2967,7 @@ mod tests {
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_before,
-                "fetch_notarized must not enqueue the already-pruned processed round"
+                "hint_notarized must not enqueue the already-pruned processed round"
             );
             select! {
                 result = subscription => {
@@ -3110,7 +3110,7 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.fetch_notarized(round, Sha256::hash(b"missing-after-restart"));
+            mailbox.hint_notarized(round, Sha256::hash(b"missing-after-restart"));
             let subscription = mailbox.subscribe_by_commitment(
                 Sha256::hash(b"missing-subscription-after-restart"),
                 CommitmentFallback::FetchByRound { round },
@@ -3202,7 +3202,7 @@ mod tests {
             );
 
             let fetches_before = resolver.fetches().len();
-            mailbox.fetch_notarized(round, Sha256::hash(b"missing-after-set-floor"));
+            mailbox.hint_notarized(round, Sha256::hash(b"missing-after-set-floor"));
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
             assert!(
                 mailbox
