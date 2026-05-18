@@ -7,8 +7,9 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
     mmr::{self, Location, Proof},
     qmdb::{
+        any::sync::Target,
         current::sync::Target as CurrentTarget,
-        sync::{compact, compact::State, Target},
+        sync::{compact, compact::State},
     },
 };
 use std::num::NonZeroU64;

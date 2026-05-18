@@ -193,12 +193,12 @@ pub async fn current_sync_target<E: Storage + Clock + Metrics>(
     let witness = db.ops_root_witness(&hasher).await?;
     let sync_boundary = db.sync_boundary();
     let size = db.bounds().await.end;
-    Ok(CurrentTarget {
-        root: db.root(),
-        ops_root: db.ops_root(),
+    Ok(CurrentTarget::new(
+        db.root(),
+        db.ops_root(),
         witness,
-        range: non_empty_range!(sync_boundary, size),
-    })
+        non_empty_range!(sync_boundary, size),
+    ))
 }
 
 #[cfg(test)]

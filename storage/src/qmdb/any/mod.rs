@@ -93,7 +93,7 @@ pub mod traits;
 pub mod value;
 pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
-pub(crate) mod sync;
+pub mod sync;
 pub mod unordered;
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;

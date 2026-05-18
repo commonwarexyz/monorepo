@@ -841,12 +841,12 @@ mod root_sync {
         let witness = db.ops_root_witness(&hasher).await.unwrap();
         let lower = db.sync_boundary();
         let upper = db.bounds().await.end;
-        CurrentTarget {
-            root: db.root(),
-            ops_root: db.ops_root(),
+        CurrentTarget::new(
+            db.root(),
+            db.ops_root(),
             witness,
-            range: non_empty_range!(lower, upper),
-        }
+            non_empty_range!(lower, upper),
+        )
     }
 
     #[test_traced("INFO")]

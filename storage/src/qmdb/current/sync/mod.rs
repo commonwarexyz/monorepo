@@ -108,6 +108,21 @@ pub struct Target<F: Graftable, D: Digest> {
 }
 
 impl<F: Graftable, D: Digest> Target<F, D> {
+    /// Create a target anchored by a trusted database root and an authenticated ops root.
+    pub const fn new(
+        root: D,
+        ops_root: D,
+        witness: OpsRootWitness<F, D>,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Self {
+        Self {
+            root,
+            ops_root,
+            witness,
+            range,
+        }
+    }
+
     /// Verify the witness and return the ops-root target consumed by the shared sync engine.
     pub fn to_engine_target<H: commonware_cryptography::Hasher<Digest = D>>(
         &self,
@@ -516,7 +531,7 @@ macro_rules! impl_current_sync_database {
             async fn has_local_target_state(
                 context: Self::Context,
                 config: &Self::Config,
-                target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+                target: &qmdb_sync::Target<Self::Family, Self::Digest>,
             ) -> bool {
                 let Ok(journal) = <$journal>::init(
                     context.child("local_target_journal_probe"),

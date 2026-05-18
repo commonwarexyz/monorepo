@@ -11,6 +11,7 @@ use commonware_storage::{
     merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
     qmdb::{
         any::{
+            sync::Target,
             unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
@@ -117,7 +118,7 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Se
 async fn test_sync<F, R>(
     context: deterministic::Context,
     resolver: R,
-    target: sync::Target<F, commonware_cryptography::sha256::Digest>,
+    target: Target<F, commonware_cryptography::sha256::Digest>,
     fetch_batch_size: u64,
     test_name: &str,
     sync_id: usize,
@@ -238,7 +239,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         .await
                         .expect("commit should not fail");
                     db.commit().await.expect("Commit should not fail");
-                    let target = sync::Target::from_root(
+                    let target = Target::new(
                         db.root(),
                         non_empty_range!(db.sync_boundary(), db.bounds().await.end),
                     );

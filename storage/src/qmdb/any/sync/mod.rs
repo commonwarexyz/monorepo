@@ -1,5 +1,5 @@
 //! Shared synchronization logic for [crate::qmdb::any] databases.
-//! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
+//! Contains implementation of `qmdb::sync::Database` for all [Db] variants
 //! (ordered/unordered, fixed/variable).
 //!
 //! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
@@ -50,12 +50,26 @@ use commonware_utils::{range::NonEmptyRange, Array};
 #[cfg(test)]
 pub(crate) mod tests;
 
+/// Sync target for `any` databases.
+pub type Target<F, D> = qmdb::sync::Target<F, D>;
+
+impl<F, D> Target<F, D>
+where
+    F: merkle::Family,
+    D: commonware_cryptography::Digest,
+{
+    /// Create a target whose database root and operation root are identical.
+    pub const fn new(root: D, range: NonEmptyRange<Location<F>>) -> Self {
+        Self::from_root(root, range)
+    }
+}
+
 /// Returns whether persisted local state already matches the requested sync target by confirming
 /// that the derived `ops_root` matches the one from the target.
-pub async fn has_local_target_state<F, E, H, S>(
+pub(crate) async fn has_local_target_state<F, E, H, S>(
     context: E,
     merkle_config: full::Config<S>,
-    target: &qmdb::sync::Target<F, H::Digest>,
+    target: &Target<F, H::Digest>,
     inactive_peaks: usize,
 ) -> bool
 where
@@ -179,7 +193,7 @@ macro_rules! impl_sync_database {
             async fn has_local_target_state(
                 context: Self::Context,
                 config: &Self::Config,
-                target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+                target: &Target<Self::Family, Self::Digest>,
             ) -> bool {
                 let Ok(journal) = <$journal>::init(
                     context.child("local_target_journal_probe"),
