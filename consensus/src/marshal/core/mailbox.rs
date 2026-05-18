@@ -1078,8 +1078,10 @@ mod tests {
         let mut overflow = pending();
 
         let (wait, _wait_rx) = subscribe_by_commitment_with_fallback(1, CommitmentFallback::Wait);
-        let (by_round, _by_round_rx) =
-            subscribe_by_commitment_with_fallback(2, CommitmentFallback::FetchByRound { round: round(2) });
+        let (by_round, _by_round_rx) = subscribe_by_commitment_with_fallback(
+            2,
+            CommitmentFallback::FetchByRound { round: round(2) },
+        );
         let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_with_fallback(
             3,
             CommitmentFallback::FetchByCommitment {

@@ -2237,10 +2237,7 @@ mod tests {
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
-                vec![
-                    (first_gate_receiver, false),
-                    (second_gate_receiver, true),
-                ],
+                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
             );
 
             let scheme = schemes.remove(0);
@@ -2277,7 +2274,10 @@ mod tests {
             );
 
             mailbox1.fetch(Fetch::new(blocked_key.clone(), SubscriberTag(1)));
-            started.recv().await.expect("blocking delivery did not start");
+            started
+                .recv()
+                .await
+                .expect("blocking delivery did not start");
             first_gate_sender.send(()).unwrap();
             wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
 

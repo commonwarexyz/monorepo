@@ -2607,8 +2607,10 @@ mod tests {
             )
             .await;
 
-            let subscription =
-                mailbox.subscribe_by_commitment(block.digest(), CommitmentFallback::FetchByRound { round });
+            let subscription = mailbox.subscribe_by_commitment(
+                block.digest(),
+                CommitmentFallback::FetchByRound { round },
+            );
 
             wait_until(
                 &context,
