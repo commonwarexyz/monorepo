@@ -39,8 +39,8 @@
 //!
 //! # Subscribers
 //!
-//! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible key and a local
-//! subscriber. This is useful when several local subscribers can share the same peer-visible
+//! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible key and a
+//! subscriber. This is useful when several subscribers can share the same peer-visible
 //! fetch. A fetch remains active while at least one attached subscriber satisfies the latest
 //! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
 //! key and currently retained subscribers are supplied to
@@ -2018,7 +2018,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_deliver_receives_multiple_local_subscribers() {
+    fn test_deliver_receives_multiple_subscribers() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =

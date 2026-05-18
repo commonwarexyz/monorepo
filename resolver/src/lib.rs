@@ -12,17 +12,17 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod p2p;
 
-    /// A key to fetch data for a local subscriber.
+    /// A key to fetch data for a subscriber.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub struct Fetch<K, S> {
         /// The peer-visible key.
         pub key: K,
-        /// Local subscriber attached to the key.
+        /// Subscriber attached to the key.
         pub subscriber: S,
     }
 
     impl<K, S> Fetch<K, S> {
-        /// Create a fetch for a key and local subscriber.
+        /// Create a fetch for a key and subscriber.
         pub const fn new(key: K, subscriber: S) -> Self {
             Self { key, subscriber }
         }
@@ -50,7 +50,7 @@ commonware_macros::stability_scope!(BETA {
     pub struct Delivery<K, S> {
         /// The peer-visible key used to validate the response.
         pub key: K,
-        /// Local subscribers that were still retained when the response arrived.
+        /// Subscribers that were still retained when the response arrived.
         pub subscribers: NonEmptyVec<S>,
     }
 
@@ -59,7 +59,7 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to key data requested from peers.
         type Key: Span;
 
-        /// Type used to track local subscribers on fetch keys.
+        /// Type used to track subscribers on fetch keys.
         type Subscriber: Clone + Eq + Send + 'static;
 
         /// Type of data to retrieve.
@@ -76,9 +76,9 @@ commonware_macros::stability_scope!(BETA {
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
         ///
-        /// `delivery` contains the peer-visible key and the retained local
-        /// subscribers for the fetch. Subscribers are local metadata for deciding
-        /// who should observe a valid response; they do not define peer validity.
+        /// `delivery` contains the peer-visible key and the retained subscribers
+        /// for the fetch. Subscribers decide who should observe a valid response;
+        /// they do not define peer validity.
         fn deliver(
             &mut self,
             delivery: Delivery<Self::Key, Self::Subscriber>,
@@ -91,7 +91,7 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to key data requested from peers.
         type Key: Span;
 
-        /// Type used to track local subscribers on fetch keys.
+        /// Type used to track subscribers on fetch keys.
         ///
         /// Implementations that also own the [`Consumer`] should supply subscribers to
         /// [`Consumer::deliver`] when a fetch resolves.
@@ -103,8 +103,8 @@ commonware_macros::stability_scope!(BETA {
         /// Initiate a fetch.
         ///
         /// The resolver fetches and delivers the key. The subscriber is
-        /// retained locally and supplied to [`Consumer::deliver`] when the fetch
-        /// resolves. If multiple subscribers are attached to the same key,
+        /// retained and supplied to [`Consumer::deliver`] when the fetch resolves.
+        /// If multiple subscribers are attached to the same key,
         /// the fetch is retained as long as at least one subscriber satisfies the
         /// latest [`retain`](Self::retain) predicate.
         ///
@@ -155,7 +155,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Retain only fetch subscribers satisfying the predicate.
         ///
-        /// The predicate receives the peer-visible key and local subscriber.
+        /// The predicate receives the peer-visible key and subscriber.
         ///
         /// Fetches not retained are canceled. If response validation is in
         /// progress, cancellation may drop the [`Consumer::deliver`] future

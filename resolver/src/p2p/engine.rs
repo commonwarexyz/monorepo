@@ -74,7 +74,7 @@ pub struct Engine<
     /// Tracks all in-flight fetch state
     inflight: Inflight<E, Con, P, Key>,
 
-    /// Local subscribers that keep each fetch alive.
+    /// Subscribers that keep each fetch alive.
     subscribers: HashMap<Key, BTreeSet<Con::Subscriber>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
