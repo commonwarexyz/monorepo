@@ -131,28 +131,26 @@ where
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            Some(command) = self.mailbox.recv() else continue => {
-                match command {
-                    Message::Send {
-                        request,
-                        recipients,
-                    } => {
-                        let commitment = request.commitment();
-                        let recipients = req_tx.send(recipients, request, self.priority_request);
-                        if !recipients.is_empty() {
-                            let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                                self.outstanding.inc();
-                                (HashSet::new(), HashSet::new())
-                            });
-                            entry.0.extend(recipients);
-                        }
+            Some(command) = self.mailbox.recv() else continue => match command {
+                Message::Send {
+                    request,
+                    recipients,
+                } => {
+                    let commitment = request.commitment();
+                    let recipients = req_tx.send(recipients, request, self.priority_request);
+                    if !recipients.is_empty() {
+                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                            self.outstanding.inc();
+                            (HashSet::new(), HashSet::new())
+                        });
+                        entry.0.extend(recipients);
                     }
-                    Message::Cancel { commitment } => {
-                        if self.tracked.remove(&commitment).is_none() {
-                            debug!(?commitment, "ignoring removal of unknown commitment");
-                        }
-                        let _ = self.outstanding.try_set(self.tracked.len());
+                }
+                Message::Cancel { commitment } => {
+                    if self.tracked.remove(&commitment).is_none() {
+                        debug!(?commitment, "ignoring removal of unknown commitment");
                     }
+                    let _ = self.outstanding.try_set(self.tracked.len());
                 }
             },
 
@@ -161,8 +159,7 @@ where
                 self.responses.inc();
 
                 // Send the response
-                let _ = res_tx
-                    .send(Recipients::One(peer), reply, self.priority_response);
+                let _ = res_tx.send(Recipients::One(peer), reply, self.priority_response);
             },
 
             // Request from an originator

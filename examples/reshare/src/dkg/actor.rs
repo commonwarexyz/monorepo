@@ -304,7 +304,7 @@ where
                 share: epoch_state.share.clone(),
                 dealers: dealers.clone(),
             };
-            orchestrator.enter(transition).await;
+            orchestrator.enter(transition);
 
             // Register a channel for this round
             let (mut round_sender, mut round_receiver) = dkg_mux
@@ -576,7 +576,7 @@ where
                         };
 
                         // Exit the engine for this epoch now that the boundary is finalized
-                        orchestrator.exit(epoch).await;
+                        orchestrator.exit(epoch);
 
                         // If the update is stop, wait forever.
                         if let PostUpdate::Stop = callback.on_update(update).await {
@@ -773,7 +773,8 @@ mod tests {
                 },
             );
             let (sender, receiver) = inert_channel(&peer_config.participants);
-            let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(4);
+            let (orchestrator_sender, mut orchestrator_receiver) =
+                mailbox::new(context.child("orchestrator_mailbox"), NZUsize!(4));
             actor.start(
                 None,
                 None,

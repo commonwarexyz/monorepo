@@ -675,7 +675,7 @@ where
                             };
                             response.send_lossy(block);
                         }
-                    }
+                    },
                     Message::GetFinalization { height, response } => {
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);
