@@ -45,13 +45,14 @@ where
 }
 
 /// Create/open a database and sync it to a target state
-pub async fn sync<DB, R>(
-    config: Config<DB, R>,
+pub async fn sync<DB, R, T>(
+    config: Config<DB, R, T>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,
     R: DbResolver<DB>,
+    T: Target<Family = DB::Family, Digest = DB::Digest>,
 {
     Engine::new(config).await?.sync().await
 }

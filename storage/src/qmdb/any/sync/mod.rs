@@ -42,34 +42,186 @@ use crate::{
     translator::Translator,
     Context, Persistable,
 };
-use commonware_codec::{Codec, CodecShared, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_codec::{
+    Codec, CodecShared, EncodeSize, Error as CodecError, Read, Read as CodecRead, ReadExt as _,
+    Write,
+};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::{range::NonEmptyRange, Array};
 
 #[cfg(test)]
 pub(crate) mod tests;
 
 /// Sync target for `any` databases.
-pub type Target<F, D> = qmdb::sync::Target<F, D>;
+#[derive(Debug)]
+pub struct Target<F: merkle::Family, D: Digest> {
+    /// The database root expected after sync completes.
+    pub root: D,
+    /// Range of operations to sync.
+    pub range: NonEmptyRange<Location<F>>,
+}
 
-impl<F, D> Target<F, D>
-where
-    F: merkle::Family,
-    D: commonware_cryptography::Digest,
-{
-    /// Create a target whose database root and operation root are identical.
+impl<F: merkle::Family, D: Digest> Target<F, D> {
+    /// Create a target from a root and operation range.
     pub const fn new(root: D, range: NonEmptyRange<Location<F>>) -> Self {
-        Self::from_root(root, range)
+        Self { root, range }
+    }
+}
+
+impl<F: merkle::Family, D: Digest> Clone for Target<F, D> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            range: self.range.clone(),
+        }
+    }
+}
+
+impl<F: merkle::Family, D: Digest> PartialEq for Target<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.range == other.range
+    }
+}
+
+impl<F: merkle::Family, D: Digest> Eq for Target<F, D> {}
+
+impl<F: merkle::Family, D: Digest> qmdb::sync::Target for Target<F, D> {
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> Self::Digest {
+        self.root
+    }
+
+    fn ops_root(&self) -> Self::Digest {
+        self.root
+    }
+
+    fn range(&self) -> &NonEmptyRange<Location<Self::Family>> {
+        &self.range
+    }
+}
+
+impl<F: merkle::Family, D: Digest> Write for Target<F, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.root.write(buf);
+        self.range.write(buf);
+    }
+}
+
+impl<F: merkle::Family, D: Digest> EncodeSize for Target<F, D> {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size() + self.range.encode_size()
+    }
+}
+
+impl<F: merkle::Family, D: Digest> Read for Target<F, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let root = D::read(buf)?;
+        let range = NonEmptyRange::<Location<F>>::read(buf)?;
+        if !range.start().is_valid() || !range.end().is_valid() {
+            return Err(CodecError::Invalid(
+                "storage::qmdb::any::sync::Target",
+                "range bounds out of valid range",
+            ));
+        }
+        Ok(Self { root, range })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: merkle::Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let max_loc = F::MAX_LEAVES;
+        let lower = u.int_in_range(0..=*max_loc - 1)?;
+        let upper = u.int_in_range(lower + 1..=*max_loc)?;
+        Ok(Self {
+            root,
+            range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
+        })
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    use crate::merkle::mmr;
+    use commonware_codec::Error as CodecError;
+    use commonware_cryptography::sha256;
+    use commonware_utils::non_empty_range;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_sync_target_serialization() {
+        let target = Target::<mmr::Family, sha256::Digest>::new(
+            sha256::Digest::from([42; 32]),
+            non_empty_range!(Location::new(100), Location::new(500)),
+        );
+
+        let mut buffer = Vec::new();
+        target.write(&mut buffer);
+
+        assert_eq!(buffer.len(), target.encode_size());
+
+        let mut cursor = Cursor::new(buffer);
+        let deserialized = Target::read(&mut cursor).unwrap();
+
+        assert_eq!(target, deserialized);
+        assert_eq!(target.root, deserialized.root);
+        assert_eq!(target.range, deserialized.range);
+    }
+
+    #[test]
+    fn test_sync_target_read_invalid_bounds() {
+        let mut buffer = Vec::new();
+        sha256::Digest::from([42; 32]).write(&mut buffer);
+        Location::<mmr::Family>::new(100).write(&mut buffer);
+        Location::<mmr::Family>::new(50).write(&mut buffer);
+
+        let mut cursor = Cursor::new(buffer);
+        assert!(matches!(
+            Target::<mmr::Family, sha256::Digest>::read(&mut cursor),
+            Err(CodecError::Invalid("Range", "start must be <= end"))
+        ));
+
+        let mut buffer = Vec::new();
+        sha256::Digest::from([42; 32]).write(&mut buffer);
+        (Location::<mmr::Family>::new(100)..Location::<mmr::Family>::new(100)).write(&mut buffer);
+
+        let mut cursor = Cursor::new(buffer);
+        assert!(matches!(
+            Target::<mmr::Family, sha256::Digest>::read(&mut cursor),
+            Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
+        ));
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::mmr;
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Target<mmr::Family, sha256::Digest>>,
     }
 }
 
 /// Returns whether persisted local state already matches the requested sync target by confirming
 /// that the derived `ops_root` matches the one from the target.
-pub(crate) async fn has_local_target_state<F, E, H, S>(
+pub(crate) async fn has_local_target_state<F, E, H, S, T>(
     context: E,
     merkle_config: full::Config<S>,
-    target: &Target<F, H::Digest>,
+    target: &T,
     inactive_peaks: usize,
 ) -> bool
 where
@@ -77,6 +229,7 @@ where
     E: Context,
     H: Hasher,
     S: Strategy,
+    T: qmdb::sync::Target<Family = F, Digest = H::Digest>,
 {
     let hasher = qmdb::hasher::<H>();
     let peek = full::Merkle::<F, _, _, S>::peek_root(
@@ -91,7 +244,7 @@ where
     matches!(
         peek,
         Ok(Some((_, journal_leaves, ops_root)))
-            if journal_leaves == target.range.end() && ops_root == target.ops_root
+            if journal_leaves == target.range().end() && ops_root == target.ops_root()
     )
 }
 
@@ -190,11 +343,14 @@ macro_rules! impl_sync_database {
                 .await
             }
 
-            async fn has_local_target_state(
+            async fn has_local_target_state<Target>(
                 context: Self::Context,
                 config: &Self::Config,
-                target: &Target<Self::Family, Self::Digest>,
-            ) -> bool {
+                target: &Target,
+            ) -> bool
+            where
+                Target: qmdb::sync::Target<Family = Self::Family, Digest = Self::Digest>,
+            {
                 let Ok(journal) = <$journal>::init(
                     context.child("local_target_journal_probe"),
                     config.journal_config.clone(),
@@ -203,15 +359,15 @@ macro_rules! impl_sync_database {
                 else {
                     return false;
                 };
-                if Location::new(journal.reader().await.bounds().start) > target.range.start() {
+                if Location::new(journal.reader().await.bounds().start) > target.range().start() {
                     return false;
                 }
 
                 let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
-                    target.range.start(),
+                    F::location_to_position(target.range().end()),
+                    target.range().start(),
                 );
-                qmdb::any::sync::has_local_target_state::<F, _, H, S>(
+                qmdb::any::sync::has_local_target_state::<F, _, H, S, _>(
                     context.child("local_target_merkle_probe"),
                     config.merkle_config.clone(),
                     target,

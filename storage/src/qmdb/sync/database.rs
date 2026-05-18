@@ -1,6 +1,6 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::sync::Journal,
+    qmdb::sync::{Journal, Target},
     translator::Translator,
 };
 use commonware_cryptography::Digest;
@@ -64,12 +64,15 @@ pub trait Database: Sized + Send {
     /// on-disk database already reflects the target. Simple append-only variants may
     /// verify only the persisted tree size and root. Variants with additional
     /// pruning-dependent state should also ensure their persisted lower bound still
-    /// covers `target.range.start()`.
-    fn has_local_target_state(
+    /// covers `target.range().start()`.
+    fn has_local_target_state<T>(
         _context: Self::Context,
         _config: &Self::Config,
-        _target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
-    ) -> impl Future<Output = bool> + Send {
+        _target: &T,
+    ) -> impl Future<Output = bool> + Send
+    where
+        T: Target<Family = Self::Family, Digest = Self::Digest>,
+    {
         async { false }
     }
 
