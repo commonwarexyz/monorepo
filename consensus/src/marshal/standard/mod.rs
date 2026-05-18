@@ -44,7 +44,7 @@ mod tests {
     use crate::{
         marshal::{
             config::Config,
-            core::{cache, Actor, Mailbox},
+            core::{cache, Actor, Fallback, Mailbox},
             mocks::{
                 application::Application,
                 harness::{
@@ -69,6 +69,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_actor::{mailbox, Feedback};
     use commonware_broadcast::buffered;
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
         ed25519::PublicKey,
@@ -2263,7 +2264,7 @@ mod tests {
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
-        _keepalive: Option<mailbox::Sender<handler::Message<D>>>,
+        sender: Option<mailbox::Sender<handler::Message<D>>>,
     }
 
     impl RecordingResolver {
@@ -2274,7 +2275,7 @@ mod tests {
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
-                    _keepalive: Some(sender),
+                    sender: Some(sender),
                 },
             )
         }
@@ -2289,6 +2290,13 @@ mod tests {
 
         fn targeted_is_empty(&self) -> bool {
             self.targeted.lock().is_empty()
+        }
+
+        fn enqueue(&self, message: handler::Message<D>) -> Feedback {
+            self.sender
+                .as_ref()
+                .expect("recording resolver sender missing")
+                .enqueue(message)
         }
     }
 
@@ -2542,6 +2550,76 @@ mod tests {
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_notarized_delivery_wakes_fetch_by_round_subscriber() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "notarized-delivery-wakes-subscriber",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+            )
+            .await;
+
+            let subscription =
+                mailbox.subscribe_by_commitment(block.digest(), Fallback::FetchByRound { round });
+
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "fetch-by-round request",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            (&fetch.key, &fetch.subscriber),
+                            (
+                                handler::Request::Notarized { round: request_round },
+                                handler::Annotation::Notarization { round: subscriber_round },
+                            ) if *request_round == round && *subscriber_round == round
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Request::Notarized { round },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
+                    },
+                    value: (notarization, block.clone()).encode().into(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "notarized delivery should validate"
+            );
+
+            select! {
+                result = subscription => {
+                    let delivered = result.expect("block subscription should resolve");
+                    assert_eq!(delivered.digest(), block.digest());
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("notarized delivery did not wake block subscriber");
+                },
+            }
+        });
     }
 
     /// When the provider has no verifier for an epoch, in-flight deliveries
