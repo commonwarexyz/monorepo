@@ -273,6 +273,86 @@ mod tests {
         harness::certify_at_later_view_survives_earlier_view_pruning::<CodingHarness>();
     }
 
+    #[test_traced("WARN")]
+    fn test_coding_certify_first_block_fetches_genesis_parent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let block = make_coding_block(block_ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            shards.proposed(round, coded_block);
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal,
+                shards,
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let shard_validity = marshaled
+                .verify(block_ctx, commitment)
+                .await
+                .await
+                .expect("verify result missing");
+            assert!(shard_validity, "shard validity should pass");
+
+            let certify_result = marshaled
+                .certify(round, commitment)
+                .await
+                .await
+                .expect("certify result missing");
+            assert!(
+                certify_result,
+                "height-1 block should certify with genesis as parent"
+            );
+        });
+    }
+
     /// Finalizing a descendant must not height-prune the shard-engine buffer before
     /// `try_repair_gaps` has consumed buffer-only ancestors.
     ///
