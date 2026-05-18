@@ -167,6 +167,11 @@ impl<D: Digest> Producer for Handler<D> {
 /// and only carries pruning metadata. [`Certified`](Annotation::Certified) and
 /// [`Finalized`](Annotation::Finalized) describe how block-bearing responses
 /// should be stored.
+///
+/// This storage role is part of the annotation because a [`Request::Block`]
+/// only names the peer-visible commitment. The same block-shaped response may
+/// need to update different local stores depending on whether it was fetched
+/// for a certified chain or for the finalized chain.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
     /// A notarization requested by round.
