@@ -71,19 +71,19 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// A request to subscribe to a block by its digest.
     SubscribeByDigest {
-        /// How marshal should behave if the block is missing locally.
-        fallback: DigestFallback,
         /// The digest of the block to retrieve.
         digest: <V::Block as Digestible>::Digest,
+        /// How marshal should behave if the block is missing locally.
+        fallback: DigestFallback,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
     /// A request to subscribe to a block by its commitment.
     SubscribeByCommitment {
-        /// How marshal should behave if the block is missing locally.
-        fallback: CommitmentFallback,
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
+        /// How marshal should behave if the block is missing locally.
+        fallback: CommitmentFallback,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
@@ -643,13 +643,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub fn subscribe_by_digest(
         &self,
-        fallback: DigestFallback,
         digest: <V::Block as Digestible>::Digest,
+        fallback: DigestFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
-            fallback,
             digest,
+            fallback,
             response: tx,
         });
         rx
@@ -703,7 +703,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         &self,
         (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
     ) -> Option<impl Stream<Item = V::ApplicationBlock>> {
-        let receiver = self.subscribe_by_digest(fallback, start_digest);
+        let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver
             .await
             .ok()
@@ -808,7 +808,7 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
     ) -> Option<Self::AncestryBlock> {
         let subscription = self
             .mailbox
-            .subscribe_by_digest(DigestFallback::Wait, digest);
+            .subscribe_by_digest(digest, DigestFallback::Wait);
         subscription.await.ok()
     }
 
@@ -948,10 +948,10 @@ mod tests {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByDigest {
+                digest: block(height).digest(),
                 fallback: DigestFallback::FetchByRound {
                     round: round(height),
                 },
-                digest: block(height).digest(),
                 response,
             },
             receiver,
@@ -965,8 +965,8 @@ mod tests {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByCommitment {
-                fallback,
                 commitment: block(height).digest(),
+                fallback,
                 response,
             },
             receiver,

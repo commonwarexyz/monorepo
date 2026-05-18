@@ -2662,7 +2662,7 @@ mod tests {
             .await;
 
             let subscription = mailbox.subscribe_by_commitment(
-                block.digest(),
+                notarization.proposal.payload,
                 CommitmentFallback::FetchByRound { round },
             );
 

@@ -700,8 +700,8 @@ where
                         );
                     }
                     Message::SubscribeByDigest {
-                        fallback,
                         digest,
+                        fallback,
                         response,
                     } => {
                         self.handle_subscribe(
@@ -715,8 +715,8 @@ where
                         .await;
                     }
                     Message::SubscribeByCommitment {
-                        fallback,
                         commitment,
+                        fallback,
                         response,
                     } => {
                         self.handle_subscribe(
@@ -965,12 +965,8 @@ where
             CommitmentFallback::FetchByCommitment { height } => {
                 let commitment = match key {
                     BlockSubscriptionKey::Commitment(commitment) => commitment,
-                    BlockSubscriptionKey::Digest(digest) => {
-                        debug!(
-                            ?digest,
-                            "dropping digest subscription with commitment-only exact-fetch fallback"
-                        );
-                        return;
+                    BlockSubscriptionKey::Digest(_) => {
+                        unreachable!("digest subscriptions cannot request commitment fallback")
                     }
                 };
 

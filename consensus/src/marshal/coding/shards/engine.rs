@@ -692,8 +692,6 @@ where
             warn!(?leader, %commitment, "leader update for non-participant, ignoring");
             return;
         }
-        let participants_len =
-            u64::try_from(participants.len()).expect("participant count impossibly out of bounds");
         if let Some(state) = self.state.get_mut(&commitment) {
             if let Some(existing) = state.leader() {
                 if existing != &leader {
@@ -710,6 +708,8 @@ where
                 .set_leader(leader)
                 .expect("leader was checked as absent");
         } else {
+            let participants_len = u64::try_from(participants.len())
+                .expect("participant count impossibly out of bounds");
             self.state.insert(
                 commitment,
                 ReconstructionState::new(Some(leader), round, participants_len),

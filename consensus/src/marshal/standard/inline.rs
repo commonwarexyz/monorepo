@@ -411,7 +411,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal.subscribe_by_digest(DigestFallback::Wait, digest);
+            let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -505,7 +505,7 @@ where
         // avoid getting stuck if Byzantine validators stop participating.
         let block_rx = self
             .marshal
-            .subscribe_by_digest(DigestFallback::FetchByRound { round }, digest);
+            .subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
