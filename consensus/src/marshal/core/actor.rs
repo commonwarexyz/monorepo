@@ -944,11 +944,11 @@ where
         // that already have a validated pruning height.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
-                if round < self.last_processed_round {
+                if round <= self.last_processed_round {
                     // `last_processed_round` only advances after the application
                     // processes the corresponding finalized block. A round-bound
-                    // proposal fetch below that floor is only assistance for
-                    // data behind the processed chain.
+                    // proposal fetch at or below that floor is only assistance
+                    // for data behind the processed chain.
                     return;
                 }
                 // Fetch the notarized proposal for this round. The response
@@ -1041,7 +1041,7 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         buffer: &mut Buf,
     ) {
-        if round < self.last_processed_round {
+        if round <= self.last_processed_round {
             return;
         }
         if self

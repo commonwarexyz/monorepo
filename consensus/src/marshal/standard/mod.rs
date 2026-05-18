@@ -2488,6 +2488,7 @@ mod tests {
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
+        retains: Arc<Mutex<usize>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
         sender: Option<mailbox::Sender<handler::Message<D>>>,
@@ -2501,6 +2502,7 @@ mod tests {
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
+                    retains: Arc::new(Mutex::new(0)),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
                     sender: Some(sender),
@@ -2555,6 +2557,10 @@ mod tests {
 
         fn targeted_is_empty(&self) -> bool {
             self.targeted.lock().is_empty()
+        }
+
+        fn retain_count(&self) -> usize {
+            *self.retains.lock()
         }
 
         fn enqueue(&self, message: handler::Message<D>) -> Feedback {
@@ -2615,6 +2621,7 @@ mod tests {
             &mut self,
             _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
+            *self.retains.lock() += 1;
             Feedback::Ok
         }
     }
@@ -2886,6 +2893,81 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("notarized delivery did not wake block subscriber");
+                },
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_round_fetches_reject_processed_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "fetch-notarized-processed-round",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                RecordingBuffer::default(),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            assert!(
+                mailbox.verified(round, block.clone()).await,
+                "verified block should persist before finalization"
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            let retain_floor = resolver.retain_count() + 3;
+            assert_eq!(
+                application.acknowledged().await,
+                Height::new(1),
+                "application should receive the finalized block"
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "processed-round pruning",
+                || resolver.retain_count() >= retain_floor,
+            )
+            .await;
+
+            let fetches_before = resolver.fetches().len();
+            mailbox.fetch_notarized(round, Sha256::hash(b"missing-at-processed-round"));
+            let subscription = mailbox.subscribe_by_commitment(
+                Sha256::hash(b"missing-subscription-at-processed-round"),
+                CommitmentFallback::FetchByRound { round },
+            );
+
+            let barrier = make_raw_block(block.digest(), Height::new(2), 200);
+            assert!(
+                mailbox
+                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .await,
+                "barrier verification should be processed"
+            );
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "fetch_notarized must not enqueue the already-pruned processed round"
+            );
+            select! {
+                result = subscription => {
+                    assert!(
+                        result.is_err(),
+                        "processed-round subscription should be canceled without a fetch"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("processed-round subscription remained open");
                 },
             }
         });
