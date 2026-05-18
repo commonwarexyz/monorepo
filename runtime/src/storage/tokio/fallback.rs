@@ -97,6 +97,15 @@ impl crate::Blob for Blob {
         }
     }
 
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        self.write_at(offset, bufs).await?;
+        self.sync().await
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.file.lock().await;
         let len = len

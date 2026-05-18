@@ -608,8 +608,7 @@ mod tests {
         let mut metadata = open_metadata(context, partition).await;
         let mut bytes = metadata.get(&key).cloned().expect("metadata entry missing");
         *bytes.last_mut().expect("metadata entry empty") ^= 0x01;
-        metadata.put(key, bytes);
-        metadata.sync().await.unwrap();
+        metadata.put_sync(key, bytes).await.unwrap();
     }
 
     async fn open_metadata(
@@ -634,8 +633,7 @@ mod tests {
         bytes: Vec<u8>,
     ) {
         let mut metadata = open_metadata(context, partition).await;
-        metadata.put(key, bytes);
-        metadata.sync().await.unwrap();
+        metadata.put_sync(key, bytes).await.unwrap();
     }
 
     #[test_traced("INFO")]

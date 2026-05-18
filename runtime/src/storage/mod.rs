@@ -293,6 +293,7 @@ pub(crate) mod tests {
         test_write_at_large_offset(&storage).await;
         test_append_data(&storage).await;
         test_vectored_write_at(&storage).await;
+        test_write_at_sync(&storage).await;
         test_vectored_write_at_large_offset(&storage).await;
         test_sequential_read_write(&storage).await;
         test_sequential_chunk_read_write(&storage).await;
@@ -571,6 +572,28 @@ pub(crate) mod tests {
             "Vectored write over batch size is incorrect",
         )
         .await;
+    }
+
+    /// Test writing and syncing data in one operation.
+    async fn test_write_at_sync<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_write_at_sync", b"test_blob")
+            .await
+            .unwrap();
+
+        blob.write_at_sync(0, b"hello").await.unwrap();
+        let read = blob.read_at(0, 5).await.unwrap().coalesce();
+        assert_eq!(read.as_ref(), b"hello");
+
+        blob.write_at_sync(5, vec![IoBuf::from(b" "), IoBuf::from(b"world")])
+            .await
+            .unwrap();
+        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        assert_eq!(read.as_ref(), b"hello world");
     }
 
     /// Test vectored writes at large offset with many chunks.

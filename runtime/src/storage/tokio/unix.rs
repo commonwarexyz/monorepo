@@ -36,6 +36,54 @@ impl Blob {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    fn write_vectored_at_with_flags(
+        file: &File,
+        mut offset: u64,
+        mut bufs: IoBufs,
+        flags: libc::c_int,
+    ) -> Result<(), Error> {
+        while bufs.has_remaining() {
+            let mut io_slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
+            let io_slices_len = bufs.chunks_vectored(&mut io_slices);
+            assert!(
+                io_slices_len > 0,
+                "chunks_vectored should produce at least one slice when bufs has remaining"
+            );
+
+            // std::os::unix::fs::FileExt::write_vectored_at is unstable:
+            // https://doc.rust-lang.org/stable/std/os/unix/fs/trait.FileExt.html#method.write_vectored_at
+            // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+            // `io_slices` points to valid readable buffers held alive for this syscall.
+            let ret = unsafe {
+                libc::pwritev2(
+                    file.as_raw_fd(),
+                    io_slices.as_ptr().cast::<libc::iovec>(),
+                    io_slices_len as i32,
+                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                    flags,
+                )
+            };
+
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err.into());
+            }
+
+            let bytes_written = ret as usize;
+            if bytes_written == 0 {
+                return Err(Error::WriteFailed);
+            }
+            bufs.advance(bytes_written);
+            offset += bytes_written as u64;
+        }
+
+        Ok(())
+    }
+
     fn write_vectored_at(file: &File, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
         while bufs.has_remaining() {
             let mut io_slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
@@ -48,7 +96,7 @@ impl Blob {
             // std::os::unix::fs::FileExt::write_vectored_at is unstable:
             // https://doc.rust-lang.org/stable/std/os/unix/fs/trait.FileExt.html#method.write_vectored_at
             // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-            // `slices` points to valid readable buffers held alive for this syscall.
+            // `io_slices` points to valid readable buffers held alive for this syscall.
             let ret = unsafe {
                 libc::pwritev(
                     file.as_raw_fd(),
@@ -75,6 +123,19 @@ impl Blob {
         }
 
         Ok(())
+    }
+
+    fn write_vectored_at_sync(file: &File, offset: u64, bufs: IoBufs) -> Result<(), Error> {
+        #[cfg(target_os = "linux")]
+        {
+            Self::write_vectored_at_with_flags(file, offset, bufs, libc::RWF_SYNC)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::write_vectored_at(file, offset, bufs)?;
+            file.sync_all()?;
+            Ok(())
+        }
     }
 }
 
@@ -123,6 +184,30 @@ impl crate::Blob for Blob {
         task::spawn_blocking(move || match bufs.try_into_single() {
             Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
             Err(bufs) => Self::write_vectored_at(&file, offset, bufs),
+        })
+        .await
+        .map_err(|_| Error::WriteFailed)?
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
+        task::spawn_blocking(move || {
+            if !bufs.has_remaining() {
+                return file
+                    .sync_all()
+                    .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e));
+            }
+            Self::write_vectored_at_sync(&file, offset, bufs)
         })
         .await
         .map_err(|_| Error::WriteFailed)?

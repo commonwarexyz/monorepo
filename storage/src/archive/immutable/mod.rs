@@ -247,8 +247,7 @@ mod tests {
 
             // Write data after restart to confirm archive is functional
             let key = Sha256::hash(b"after-restart");
-            archive.put(0, key, 42).await.unwrap();
-            archive.sync().await.unwrap();
+            archive.put_sync(0, key, 42).await.unwrap();
             drop(archive);
 
             // Third init to verify persistence

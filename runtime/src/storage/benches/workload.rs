@@ -5,7 +5,10 @@ use crate::{
     error::Result,
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
     report::Report,
-    runner::{random_blocks, run_read_loop, run_write_loop, sequential_blocks, warm_read_loop},
+    runner::{
+        random_blocks, run_read_loop, run_sync_write_loop, run_write_loop, sequential_blocks,
+        warm_read_loop,
+    },
 };
 use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
 use futures::{stream::FuturesUnordered, TryStreamExt};
@@ -34,6 +37,7 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
         Workload::ReadSeq | Workload::ReadRand => run_read(cfg, &context).await,
         Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, &context).await,
         Workload::WriteAppend => run_write_append(cfg, &context).await,
+        Workload::WriteSync => run_write_sync(cfg, &context).await,
         Workload::ReadWriteAppend => run_read_write_append(cfg, &context).await,
     };
     let _ = context.remove(PARTITION, None).await;
@@ -148,6 +152,42 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
     if cfg.sync_mode == SyncMode::End {
         blob.sync().await?;
     }
+
+    Ok(Report::new(start.elapsed(), None, Some(workers), file_size))
+}
+
+/// Run durable positioned writes on a fixed-size file.
+async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
+    let file_size = cfg.file_size();
+    let total_blocks = file_size / cfg.io_size as u64;
+    let inflight = cfg.inflight as u64;
+
+    let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
+
+    let start = Instant::now();
+    let deadline = start + cfg.duration();
+
+    let workers = (0..cfg.inflight)
+        .map(|worker| {
+            let blob = blob.clone();
+            let payload = payload.clone();
+            async move {
+                run_sync_write_loop(
+                    blob,
+                    deadline,
+                    cfg.io_size,
+                    payload,
+                    cfg.sync_method,
+                    sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
+                )
+                .await
+            }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>()
+        .await?;
 
     Ok(Report::new(start.elapsed(), None, Some(workers), file_size))
 }

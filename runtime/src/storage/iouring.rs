@@ -342,6 +342,25 @@ impl crate::Blob for Blob {
             .await
     }
 
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        if !bufs.has_remaining() {
+            return self.sync().await;
+        }
+
+        self.io_handle
+            .write_at_sync(self.file.clone(), offset, bufs)
+            .await
+    }
+
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let len = len

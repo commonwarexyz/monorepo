@@ -330,6 +330,41 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         Ok(())
     }
 
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let total_bytes = bufs.remaining() as u64;
+
+        let (should_fail, partial_rate) = self.ctx.check_write_fault();
+        if should_fail {
+            if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
+                self.inner
+                    .write_at_sync(offset, bufs.coalesce().slice(..bytes as usize))
+                    .await?;
+                self.size
+                    .fetch_max(offset.saturating_add(bytes), Ordering::Relaxed);
+                return Err(Error::Io(injected_io_error()));
+            }
+            return Err(Error::Io(injected_io_error()));
+        }
+
+        let sync_should_fail = self.ctx.should_fail(Op::Sync);
+        if sync_should_fail {
+            self.inner.write_at(offset, bufs).await?;
+            self.size
+                .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+            return Err(Error::Io(injected_io_error()));
+        }
+
+        self.inner.write_at_sync(offset, bufs).await?;
+        self.size
+            .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
+        Ok(())
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let (should_fail, partial_rate) = self.ctx.check_resize_fault();
         if should_fail {
@@ -424,6 +459,33 @@ mod tests {
             blob.write_at(0, b"data".to_vec()).await,
             Err(Error::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_write_at_sync_write_always_fails() {
+        let h = Harness::new(Config::default().write(1.0));
+
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+
+        assert!(matches!(
+            blob.write_at_sync(0, b"data".to_vec()).await,
+            Err(Error::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_write_at_sync_sync_failure_is_not_durable() {
+        let h = Harness::new(Config::default().sync(1.0));
+
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+
+        assert!(matches!(
+            blob.write_at_sync(0, b"data".to_vec()).await,
+            Err(Error::Io(_))
+        ));
+
+        let (_reopened, size) = h.inner.open("partition", b"test").await.unwrap();
+        assert_eq!(size, 0);
     }
 
     #[tokio::test]

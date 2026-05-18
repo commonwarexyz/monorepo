@@ -210,7 +210,7 @@ impl<B: Blob> Write<B> {
     pub async fn sync(&self) -> Result<(), Error> {
         let mut buffer = self.buffer.write().await;
         if let Some((buf, offset)) = buffer.take() {
-            self.blob.write_at(offset, buf).await?;
+            return self.blob.write_at_sync(offset, buf).await;
         }
         self.blob.sync().await
     }

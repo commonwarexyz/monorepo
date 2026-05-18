@@ -529,9 +529,10 @@ mod tests {
 
                 cache.put(0, 0).await.expect("Failed to put data");
                 cache.put(100, 100).await.expect("Failed to put data");
-                cache.put(1000, 1000).await.expect("Failed to put data");
-
-                cache.sync().await.expect("Failed to sync cache");
+                cache
+                    .put_sync(1000, 1000)
+                    .await
+                    .expect("Failed to put and sync data");
             }
 
             // Reopen and verify intervals are preserved

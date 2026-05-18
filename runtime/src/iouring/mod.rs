@@ -431,6 +431,30 @@ impl Handle {
             offset,
             written: 0,
             write: bufs.into(),
+            rw_flags: 0,
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| Error::WriteFailed)?;
+        rx.await.map_err(|_| Error::WriteFailed)?
+    }
+
+    /// Submit a logical positioned write with per-write sync and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn write_at_sync(
+        &self,
+        file: Arc<File>,
+        offset: u64,
+        bufs: IoBufs,
+    ) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::WriteAt(WriteAtRequest {
+            file,
+            offset,
+            written: 0,
+            write: bufs.into(),
+            rw_flags: libc::RWF_SYNC,
             result: None,
             sender: tx,
         }))

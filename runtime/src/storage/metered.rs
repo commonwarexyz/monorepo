@@ -156,6 +156,19 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         Ok(())
     }
 
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let bufs_len = bufs.remaining();
+        self.inner.write_at_sync(offset, bufs).await?;
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
+        Ok(())
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.inner.resize(len).await
     }

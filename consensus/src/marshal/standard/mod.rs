@@ -411,9 +411,8 @@ mod tests {
         )
         .await
         .expect("failed to initialize cache metadata");
-        metadata.put(0, (epoch, epoch));
         metadata
-            .sync()
+            .put_sync(0, (epoch, epoch))
             .await
             .expect("failed to sync cache metadata");
 

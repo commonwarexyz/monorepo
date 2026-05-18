@@ -390,8 +390,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 );
             }
             let result = update(&mut metadata, target_slot, witness)?;
-            metadata.put(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot]);
-            metadata.sync().await?;
+            metadata
+                .put_sync(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot])
+                .await?;
             result
         };
 
@@ -451,8 +452,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             let old_current_leaves =
                 Self::read_slot_size(&metadata, current_slot)?.unwrap_or(Location::new(0));
             Self::clear_slot(&mut metadata, current_slot, old_current_leaves);
-            metadata.put(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot]);
-            metadata.sync().await?;
+            metadata
+                .put_sync(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot])
+                .await?;
         }
 
         *self.inner.write() = new_mem;
@@ -746,13 +748,15 @@ mod tests {
             )
             .await
             .unwrap();
-            metadata.put(
-                U64::new(size_prefix(slot), 0),
-                (mmr::Family::MAX_LEAVES.as_u64() + 1)
-                    .to_be_bytes()
-                    .to_vec(),
-            );
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(
+                    U64::new(size_prefix(slot), 0),
+                    (mmr::Family::MAX_LEAVES.as_u64() + 1)
+                        .to_be_bytes()
+                        .to_vec(),
+                )
+                .await
+                .unwrap();
 
             let reopened = TestMerkle::<mmr::Family>::init(context.child("second"), cfg).await;
             assert!(matches!(
