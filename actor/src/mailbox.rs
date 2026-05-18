@@ -145,10 +145,12 @@ const OVERFLOW_MUTATION: usize = 2;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
-        use loom::future::AtomicWaker;
-        use loom::sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc, Mutex, MutexGuard,
+        use loom::{
+            future::AtomicWaker,
+            sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                Arc, Mutex, MutexGuard,
+            },
         };
 
         fn register_waker(waker: &AtomicWaker, task: &std::task::Waker) {

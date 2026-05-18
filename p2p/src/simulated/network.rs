@@ -869,7 +869,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.process_completions(completions);
             },
             Some(message) = self.ingress.recv() else break => {
-                self.handle_ordered_ingress(message, &mut high, &mut low).await;
+                self.handle_ordered_ingress(message, &mut high, &mut low)
+                    .await;
             },
         }
     }

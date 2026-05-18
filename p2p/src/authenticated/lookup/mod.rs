@@ -1440,7 +1440,7 @@ mod tests {
                             assert_eq!(msg, peer1.public_key().as_ref());
                             break;
                         },
-                        _ = context.sleep(Duration::from_millis(100)) => {}
+                        _ = context.sleep(Duration::from_millis(100)) => {},
                     }
                 }
             });

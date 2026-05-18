@@ -27,10 +27,6 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Feedback indicates whether the local broadcast request was accepted for processing. It
         /// does not indicate whether recipients received the message.
-        fn broadcast(
-            &self,
-            recipients: Self::Recipients,
-            message: Self::Message,
-        ) -> Feedback;
+        fn broadcast(&self, recipients: Self::Recipients, message: Self::Message) -> Feedback;
     }
 });
