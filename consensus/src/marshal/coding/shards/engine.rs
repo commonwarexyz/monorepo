@@ -550,10 +550,12 @@ where
                                 .try_into()
                                 .expect("participant index impossibly out of bounds");
                             if shard.index() != expected_index {
-                                // Notarized recovery can create state before
-                                // leader discovery. Keep possible leader
-                                // assigned shards buffered until the sender's
-                                // role is known.
+                                // Notarized recovery can create state before leader discovery. Until
+                                // the leader is known, only sender-indexed gossip shards are safe to
+                                // ingest: a participant may only gossip its own shard. A mismatched
+                                // shard is invalid for a non-leader, but it may be the assigned shard
+                                // if this peer later turns out to be the leader. Keep it buffered
+                                // until the sender's role is known.
                                 self.buffer_peer_shard(peer, shard);
                                 continue;
                             }
