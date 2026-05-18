@@ -3166,8 +3166,8 @@ mod tests {
             let mut mailbox = mailbox;
 
             let missing = Sha256::hash(b"missing-before-set-floor");
-            let _subscription =
-                mailbox.subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
+            let _subscription = mailbox
+                .subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
             wait_until(
                 &context,
                 Duration::from_secs(5),

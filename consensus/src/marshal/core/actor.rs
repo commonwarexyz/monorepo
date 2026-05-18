@@ -41,6 +41,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
+    vec::NonEmptyVec,
     Acknowledgement, BoxedError,
 };
 use futures::{future::join_all, try_join, FutureExt};
@@ -197,6 +198,35 @@ enum BlockSubscriptionKey<C, D> {
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
 type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
+
+/// Processed floors used to admit or reject resolver fetches.
+#[derive(Clone, Copy)]
+struct ResolverFloor {
+    height: Height,
+    round: Round,
+}
+
+impl ResolverFloor {
+    /// Returns true when the resolver request is above all processed floors.
+    fn permits<D: commonware_cryptography::Digest>(
+        self,
+        request: &Request<D>,
+        subscriber: &Annotation,
+    ) -> bool {
+        let height_floor = Request::Finalized {
+            height: self.height,
+        };
+        let height_predicate = height_floor.predicate();
+        if !height_predicate(request, subscriber) {
+            return false;
+        }
+
+        let round_floor = Request::Notarized { round: self.round };
+        let round_predicate = round_floor.predicate();
+        round_predicate(request, subscriber)
+    }
+}
+
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -653,12 +683,13 @@ where
                             // not a height. Keep the request round-bound until the
                             // block is decoded.
                             debug!(?round, ?commitment, "finalized block missing");
-                            if round > self.last_processed_round {
-                                resolver.fetch(Fetch {
+                            self.fetch_if_permitted(
+                                &mut resolver,
+                                Fetch {
                                     key: Request::Block(commitment),
                                     subscriber: Annotation::Finalized(Finalized::ByRound { round }),
-                                });
-                            }
+                                },
+                            );
                         }
                     }
                     Message::GetBlock {
@@ -688,17 +719,13 @@ where
                         response.send_lossy(finalization);
                     }
                     Message::HintFinalized { height, targets } => {
-                        // Skip if height is at or below the floor
-                        if height <= self.last_processed_height {
-                            continue;
-                        }
-
                         // Skip if finalization is already available locally
                         if self.get_finalization_by_height(height).await.is_some() {
                             continue;
                         }
 
-                        resolver.fetch_targeted(
+                        self.fetch_targeted_if_permitted(
+                            &mut resolver,
                             Fetch {
                                 key: Request::<V::Commitment>::Finalized { height },
                                 subscriber: Annotation::Finalized(Finalized::ByHeight { height }),
@@ -879,6 +906,63 @@ where
         }
     }
 
+    const fn resolver_floor(&self) -> ResolverFloor {
+        ResolverFloor {
+            height: self.last_processed_height,
+            round: self.last_processed_round,
+        }
+    }
+
+    fn fetch_if_permitted<R>(
+        &self,
+        resolver: &mut R,
+        fetch: Fetch<ResolverRequestFor<V>, Annotation>,
+    ) -> bool
+    where
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    {
+        if !self.resolver_floor().permits(&fetch.key, &fetch.subscriber) {
+            return false;
+        }
+        resolver.fetch(fetch);
+        true
+    }
+
+    fn fetch_targeted_if_permitted<R>(
+        &self,
+        resolver: &mut R,
+        fetch: Fetch<ResolverRequestFor<V>, Annotation>,
+        targets: NonEmptyVec<R::PublicKey>,
+    ) -> bool
+    where
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    {
+        if !self.resolver_floor().permits(&fetch.key, &fetch.subscriber) {
+            return false;
+        }
+        resolver.fetch_targeted(fetch, targets);
+        true
+    }
+
+    fn fetch_all_if_permitted<R>(
+        &self,
+        resolver: &mut R,
+        fetches: Vec<Fetch<ResolverRequestFor<V>, Annotation>>,
+    ) -> bool
+    where
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    {
+        let fetches = fetches
+            .into_iter()
+            .filter(|fetch| self.resolver_floor().permits(&fetch.key, &fetch.subscriber))
+            .collect::<Vec<_>>();
+        if fetches.is_empty() {
+            return false;
+        }
+        resolver.fetch_all(fetches);
+        true
+    }
+
     /// Handle a produce request from a remote peer.
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
@@ -955,23 +1039,21 @@ where
         // that already have a validated pruning height.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
-                if round <= self.last_processed_round {
-                    // `last_processed_round` only advances after the application
-                    // processes the corresponding finalized block. A round-bound
-                    // proposal fetch at or below that floor is only assistance
-                    // for data behind the processed chain.
-                    return;
-                }
                 // Fetch the notarized proposal for this round. The response
                 // must include a certificate so the commitment is tied to the
                 // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
                 debug!(?round, ?digest, "requested block missing");
-                resolver.fetch(Fetch {
-                    key: Request::Notarized { round },
-                    subscriber: Annotation::Notarization { round },
-                });
+                if !self.fetch_if_permitted(
+                    resolver,
+                    Fetch {
+                        key: Request::Notarized { round },
+                        subscriber: Annotation::Notarization { round },
+                    },
+                ) {
+                    return;
+                }
             }
             CommitmentFallback::FetchByCommitment { height } => {
                 let commitment = match key {
@@ -983,22 +1065,16 @@ where
 
                 // This path is only for accepted ancestry or finalized repair,
                 // never for a candidate block's immediate parent.
-                if height <= self.last_processed_height {
-                    // We already checked local storage. Missing ancestors at or
-                    // below the processed floor are no longer useful to request.
-                    debug!(
-                        %height,
-                        floor = %self.last_processed_height,
-                        ?commitment,
-                        "dropping commitment subscription at or below processed height floor"
-                    );
+                debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
+                if !self.fetch_if_permitted(
+                    resolver,
+                    Fetch {
+                        key: Request::Block(commitment),
+                        subscriber: Annotation::Certified { height },
+                    },
+                ) {
                     return;
                 }
-                debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
-                resolver.fetch(Fetch {
-                    key: Request::Block(commitment),
-                    subscriber: Annotation::Certified { height },
-                });
             }
             CommitmentFallback::Wait => {}
         }
@@ -1052,9 +1128,6 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         buffer: &mut Buf,
     ) {
-        if round <= self.last_processed_round {
-            return;
-        }
         if self
             .find_block_by_commitment(buffer, commitment)
             .await
@@ -1062,10 +1135,13 @@ where
         {
             return;
         }
-        resolver.fetch(Fetch {
-            key: Request::Notarized { round },
-            subscriber: Annotation::Notarization { round },
-        });
+        self.fetch_if_permitted(
+            resolver,
+            Fetch {
+                key: Request::Notarized { round },
+                subscriber: Annotation::Notarization { round },
+            },
+        );
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled
@@ -1829,12 +1905,15 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    resolver.fetch(Fetch {
-                        key: Request::Block(commitment),
-                        subscriber: Annotation::Finalized(Finalized::ByHeight {
-                            height: last_finalized,
-                        }),
-                    });
+                    self.fetch_if_permitted(
+                        resolver,
+                        Fetch {
+                            key: Request::Block(commitment),
+                            subscriber: Annotation::Finalized(Finalized::ByHeight {
+                                height: last_finalized,
+                            }),
+                        },
+                    );
                 }
             }
         }
@@ -1887,12 +1966,15 @@ where
                         .height()
                         .previous()
                         .expect("cursor above gap start has a parent");
-                    resolver.fetch(Fetch {
-                        key: Request::Block(parent_commitment),
-                        subscriber: Annotation::Finalized(Finalized::ByHeight {
-                            height: parent_height,
-                        }),
-                    });
+                    self.fetch_if_permitted(
+                        resolver,
+                        Fetch {
+                            key: Request::Block(parent_commitment),
+                            subscriber: Annotation::Finalized(Finalized::ByHeight {
+                                height: parent_height,
+                            }),
+                        },
+                    );
                     break 'cache_repair;
                 }
             }
@@ -1914,7 +1996,7 @@ where
             })
             .collect();
         if !requests.is_empty() {
-            resolver.fetch_all(requests);
+            self.fetch_all_if_permitted(resolver, requests);
         }
         wrote
     }
@@ -1984,9 +2066,7 @@ where
         // processed finalized block.
         let prune_round = Round::new(
             previous.epoch(),
-            previous
-                .view()
-                .saturating_sub(self.view_retention_timeout),
+            previous.view().saturating_sub(self.view_retention_timeout),
         );
         self.prune_view_cache(prune_round).await;
 
