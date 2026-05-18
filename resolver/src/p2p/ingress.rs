@@ -158,7 +158,11 @@ where
             Self::Retain { predicate } => {
                 // Retain prunes pending fetch subscribers before queued fetches drain.
                 overflow.fetches.retain_mut(|request| {
-                    retain_fetch(&request.request, &mut request.subscribers, predicate.as_ref())
+                    retain_fetch(
+                        &request.request,
+                        &mut request.subscribers,
+                        predicate.as_ref(),
+                    )
                 });
                 overflow.modifications.push_back(predicate);
             }
@@ -288,7 +292,6 @@ where
             predicate: Box::new(predicate),
         })
     }
-
 }
 
 #[cfg(test)]
@@ -479,5 +482,4 @@ mod tests {
         assert!(matches!(messages[0], Message::Retain { .. }));
         assert_fetch_requests(&messages[1], &[1, 2]);
     }
-
 }

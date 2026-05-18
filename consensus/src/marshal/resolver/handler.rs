@@ -218,23 +218,18 @@ impl<D: Digest> Request<D> {
     pub fn predicate(&self) -> impl Fn(&Self, &FetchContext) -> bool + Send + 'static {
         let cloned = *self;
         move |request, subscriber| match (&cloned, request, subscriber) {
-            (
-                Self::Finalized { height: mine },
-                Self::Finalized { height: theirs },
-                _,
-            ) => *theirs > *mine,
+            (Self::Finalized { height: mine }, Self::Finalized { height: theirs }, _) => {
+                *theirs > *mine
+            }
             (
                 Self::Finalized { height: mine },
                 Self::Block { .. },
-                FetchContext::Ancestry { height: theirs }
-                | FetchContext::Repair { height: theirs },
+                FetchContext::Ancestry { height: theirs } | FetchContext::Repair { height: theirs },
             ) => *theirs > *mine,
             (Self::Finalized { .. }, _, _) => true,
-            (
-                Self::Notarized { round: mine },
-                Self::Notarized { round: theirs },
-                _,
-            ) => *theirs > *mine,
+            (Self::Notarized { round: mine }, Self::Notarized { round: theirs }, _) => {
+                *theirs > *mine
+            }
             (
                 Self::Notarized { round: mine },
                 Self::Block { .. },

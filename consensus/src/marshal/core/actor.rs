@@ -899,10 +899,7 @@ where
         fallback: Fallback,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl Resolver<
-            Request = ResolverRequestFor<V>,
-            Subscriber = FetchContext,
-        >,
+        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -1439,10 +1436,7 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<
-            Request = ResolverRequestFor<V>,
-            Subscriber = FetchContext,
-        >,
+        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver);
@@ -1748,10 +1742,7 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<
-            Request = ResolverRequestFor<V>,
-            Subscriber = FetchContext,
-        >,
+        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
@@ -1883,10 +1874,7 @@ where
     fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<
-            Request = ResolverRequestFor<V>,
-            Subscriber = FetchContext,
-        >,
+        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;

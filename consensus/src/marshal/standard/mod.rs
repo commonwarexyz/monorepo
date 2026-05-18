@@ -1275,6 +1275,78 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_certify_first_block_fetches_genesis_parent() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
+
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let block_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let block =
+                    B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
+                let digest = block.digest();
+                assert!(marshal.verified(round, block).await);
+
+                context.sleep(Duration::from_millis(10)).await;
+
+                let verify_result = wrapper
+                    .verify(block_context, digest)
+                    .await
+                    .await
+                    .expect("verify result missing");
+                assert!(
+                    verify_result,
+                    "{kind:?}: height-1 block should verify with genesis as parent"
+                );
+
+                let certify_result = wrapper
+                    .certify(round, digest)
+                    .await
+                    .await
+                    .expect("certify result missing");
+                assert!(
+                    certify_result,
+                    "{kind:?}: height-1 block should certify with genesis as parent"
+                );
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
     fn test_propose_paths() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
