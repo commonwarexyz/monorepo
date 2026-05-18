@@ -328,6 +328,8 @@ where
             .get(&LATEST_KEY)
             .copied()
             .unwrap_or(Height::zero());
+        let last_processed_round =
+            Self::latest_processed_round(&finalizations_by_height, last_processed_height).await;
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
@@ -347,7 +349,7 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                last_processed_round: Round::zero(),
+                last_processed_round,
                 last_processed_height,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
@@ -627,6 +629,9 @@ where
                         {
                             // If found, persist the block
                             let height = block.height();
+                            if height <= self.last_processed_height {
+                                self.update_processed_round_floor(round, &mut resolver).await;
+                            }
                             if self
                                 .store_finalization(
                                     height,
@@ -648,10 +653,12 @@ where
                             // not a height. Keep the request round-bound until the
                             // block is decoded.
                             debug!(?round, ?commitment, "finalized block missing");
-                            resolver.fetch(Fetch {
-                                key: Request::Block(commitment),
-                                subscriber: Annotation::Finalized(Finalized::ByRound { round }),
-                            });
+                            if round > self.last_processed_round {
+                                resolver.fetch(Fetch {
+                                    key: Request::Block(commitment),
+                                    subscriber: Annotation::Finalized(Finalized::ByRound { round }),
+                                });
+                            }
                         }
                     }
                     Message::GetBlock {
@@ -755,8 +762,9 @@ where
                             continue;
                         }
 
-                        // Update the processed height
+                        // Update the processed floor
                         self.update_processed_height(height, &mut resolver);
+                        self.update_processed_round(height, &mut resolver).await;
                         if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
                             return;
@@ -832,6 +840,7 @@ where
                                     response,
                                     &mut delivers,
                                     &mut application,
+                                    &mut resolver,
                                 )
                                 .await;
                         }
@@ -842,7 +851,9 @@ where
                 }
 
                 // Batch verify and process all delivers.
-                needs_sync |= self.verify_delivered(delivers, &mut application).await;
+                needs_sync |= self
+                    .verify_delivered(delivers, &mut application, &mut resolver)
+                    .await;
 
                 // Attempt to fill gaps before handling produce requests (so we
                 // can serve data we just received).
@@ -1068,6 +1079,7 @@ where
         response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         let Delivery { key, subscribers } = delivery;
         match key {
@@ -1117,6 +1129,12 @@ where
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the block belongs in the finalized chain.
                 let finalization = self.cache.get_finalization_for(digest).await;
+                if height <= self.last_processed_height {
+                    if let Some(finalization) = &finalization {
+                        self.update_processed_round_floor(finalization.round(), resolver)
+                            .await;
+                    }
+                }
                 let should_finalize = annotations
                     .iter()
                     .any(|annotation| matches!(annotation, Annotation::Finalized(_)));
@@ -1239,6 +1257,7 @@ where
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
@@ -1329,6 +1348,9 @@ where
                     let height = block.height();
                     let digest = block.digest();
                     debug!(?round, %height, "received finalization");
+                    if height <= self.last_processed_height {
+                        self.update_processed_round_floor(round, resolver).await;
+                    }
 
                     wrote |= self
                         .store_finalization(height, digest, block, Some(finalization), application)
@@ -1352,6 +1374,10 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
+                        if height <= self.last_processed_height {
+                            self.update_processed_round_floor(finalization.round(), resolver)
+                                .await;
+                        }
                         // SAFETY: `digest` identifies a unique `commitment`, so this
                         // cached finalization payload must match `V::commitment(&block)`.
                         wrote |= self
@@ -1490,26 +1516,7 @@ where
             move |request, _| !matches!(request, Request::Block(pending) if *pending == commitment),
         );
 
-        if let Some(finalization) = self.get_finalization_by_height(height).await {
-            // Retain view-indexed cache data for a window behind the previously
-            // processed finalized block.
-            let lpr = self.last_processed_round;
-            let prune_round = Round::new(
-                lpr.epoch(),
-                lpr.view().saturating_sub(self.view_retention_timeout),
-            );
-
-            self.prune_view_cache(prune_round).await;
-
-            // This finalization is now the latest finalized block acknowledged by
-            // the application.
-            let round = finalization.round();
-            self.last_processed_round = round;
-
-            // Prune round-bound certified-parent requests at or below the
-            // processed round.
-            resolver.retain(Request::<V::Commitment>::Notarized { round }.predicate());
-        }
+        self.update_processed_round(height, resolver).await;
     }
 
     // -------------------- Prunable Storage --------------------
@@ -1927,6 +1934,65 @@ where
 
         // Prune any existing requests below the new floor.
         resolver.retain(Request::<V::Commitment>::Finalized { height }.predicate());
+    }
+
+    /// Returns the latest known finalization round at or below the processed height.
+    async fn latest_processed_round(finalizations_by_height: &FC, height: Height) -> Round {
+        let Some(finalization_height) = finalizations_by_height
+            .ranges_from(Height::zero())
+            .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
+            .max()
+        else {
+            return Round::zero();
+        };
+
+        match finalizations_by_height
+            .get(ArchiveID::Index(finalization_height.get()))
+            .await
+        {
+            Ok(Some(finalization)) => finalization.round(),
+            Ok(None) => panic!("processed finalization missing from stored range"),
+            Err(err) => panic!("failed to get processed finalization: {err}"),
+        }
+    }
+
+    /// Buffers a processed round update in memory and prunes round-bound requests.
+    async fn update_processed_round(
+        &mut self,
+        height: Height,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) {
+        let Some(finalization) = self.get_finalization_by_height(height).await else {
+            return;
+        };
+        self.update_processed_round_floor(finalization.round(), resolver)
+            .await;
+    }
+
+    /// Buffers a processed round floor update in memory and prunes round-bound requests.
+    async fn update_processed_round_floor(
+        &mut self,
+        round: Round,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) {
+        let previous = self.last_processed_round;
+        if round > self.last_processed_round {
+            self.last_processed_round = round;
+        }
+
+        // Retain view-indexed cache data for a window behind the previously
+        // processed finalized block.
+        let prune_round = Round::new(
+            previous.epoch(),
+            previous
+                .view()
+                .saturating_sub(self.view_retention_timeout),
+        );
+        self.prune_view_cache(prune_round).await;
+
+        // Prune round-bound requests at or below the processed round.
+        let round = self.last_processed_round;
+        resolver.retain(Request::<V::Commitment>::Notarized { round }.predicate());
     }
 
     /// Prunes finalized blocks and certificates below the given height.
