@@ -91,13 +91,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     ///
     /// `commitment` is used as a locality check: if the block is already
     /// available locally, the fetch is skipped.
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))]
     FetchNotarized {
         /// The notarized round to request.
         round: Round,
@@ -262,13 +255,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             } => false,
-            #[cfg(not(any(
-                commonware_stability_BETA,
-                commonware_stability_GAMMA,
-                commonware_stability_DELTA,
-                commonware_stability_EPSILON,
-                commonware_stability_RESERVED
-            )))]
             Self::FetchNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -290,13 +276,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
-            #[cfg(not(any(
-                commonware_stability_BETA,
-                commonware_stability_GAMMA,
-                commonware_stability_DELTA,
-                commonware_stability_EPSILON,
-                commonware_stability_RESERVED
-            )))]
             Self::FetchNotarized { .. } => false,
             Self::HintFinalized { .. }
             | Self::Forward { .. }
@@ -690,14 +669,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// certification is now allowed to ask peers by notarized round. The
     /// `commitment` is only a locality hint and skips the fetch if the block
     /// is already in local storage.
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))]
-    pub(crate) fn fetch_notarized(&self, round: Round, commitment: V::Commitment) {
+    pub fn fetch_notarized(&self, round: Round, commitment: V::Commitment) {
         let _ = self
             .sender
             .enqueue(Message::FetchNotarized { round, commitment });

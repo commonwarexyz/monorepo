@@ -813,13 +813,6 @@ where
                         )
                         .await;
                     }
-                    #[cfg(not(any(
-                        commonware_stability_BETA,
-                        commonware_stability_GAMMA,
-                        commonware_stability_DELTA,
-                        commonware_stability_EPSILON,
-                        commonware_stability_RESERVED
-                    )))]
                     Message::FetchNotarized { round, commitment } => {
                         self.handle_fetch_notarized(
                             round,
@@ -1107,13 +1100,6 @@ where
         }
     }
 
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))]
     async fn handle_fetch_notarized<Buf: Buffer<V>>(
         &mut self,
         round: Round,
