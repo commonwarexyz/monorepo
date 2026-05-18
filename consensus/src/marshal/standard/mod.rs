@@ -2601,7 +2601,7 @@ mod tests {
                         key: handler::Request::Notarized { round },
                         subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
                     },
-                    value: (notarization, block.clone()).encode().into(),
+                    value: (notarization, block.clone()).encode(),
                     response,
                 })
                 .accepted());
