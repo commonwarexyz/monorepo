@@ -81,7 +81,7 @@ mod tests {
         Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::Resolver;
+    use commonware_resolver::{Delivery, Fetch, Resolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
@@ -833,6 +833,121 @@ mod tests {
         });
     }
 
+    // Verifies repair when the finalized tip is far ahead of the last stored
+    // block and only the tip has a direct finalization. This forces recovery to
+    // walk the chain backwards by block commitment for more than `max_repair`
+    // missing heights.
+    #[test_traced("WARN")]
+    fn test_standard_restart_repairs_large_pending_tip_by_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(120));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let recovering_validator = participants[0].clone();
+            let peer_validator = participants[1].clone();
+            let pending_tip = 18;
+
+            let mut blocks = Vec::new();
+            let mut parent = Sha256::hash(b"");
+            for height in 1..=pending_tip {
+                let block = make_raw_block(parent, Height::new(height), height * 100);
+                parent = block.digest();
+                blocks.push(block);
+            }
+            let tip_block = blocks.last().expect("tip block exists");
+            let tip_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(pending_tip)),
+                    View::new(pending_tip - 1),
+                    tip_block.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+
+            // Give the peer every block, but the recovering validator will only
+            // know the tip finalization. The repair loop must fetch blocks
+            // 18 down to 2 by commitment.
+            let peer_mailbox = StandardHarness::setup_validator(
+                context.child("peer_validator"),
+                &mut oracle,
+                peer_validator.clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await
+            .mailbox;
+            for block in blocks.iter() {
+                assert!(
+                    peer_mailbox
+                        .verified(
+                            Round::new(Epoch::zero(), View::new(block.height().get())),
+                            block.clone(),
+                        )
+                        .await
+                );
+            }
+            context.sleep(Duration::from_millis(200)).await;
+
+            let partition_prefix = format!("validator-{recovering_validator}");
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                &partition_prefix,
+                &[blocks[0].clone()],
+                &[(Height::new(pending_tip), tip_finalization)],
+            )
+            .await;
+
+            let recovering = StandardHarness::setup_validator_with(
+                context.child("recovering_validator"),
+                &mut oracle,
+                recovering_validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                crate::marshal::mocks::application::Application::manual_ack(),
+            )
+            .await;
+
+            for _ in 0..100 {
+                if recovering.application.tip().map(|(height, _)| height)
+                    == Some(Height::new(pending_tip))
+                {
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                recovering.application.tip().map(|(height, _)| height),
+                Some(Height::new(pending_tip)),
+                "restart should surface the pending finalized tip before all blocks are repaired"
+            );
+
+            for expected_height in 1..=pending_tip {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
+            }
+
+            for height in [2, 10, pending_tip] {
+                let block = recovering
+                    .mailbox
+                    .get_block(Height::new(height))
+                    .await
+                    .unwrap_or_else(|| panic!("block {height} should be recoverable"));
+                assert_eq!(block.digest(), blocks[(height - 1) as usize].digest());
+            }
+        });
+    }
+
     // Verifies that when all finalized blocks are already present on disk,
     // restart completes normally with no repair needed. Acts as a baseline
     // to confirm the repair logic is a no-op in the consistent case.
@@ -1156,6 +1271,78 @@ mod tests {
                 Self::Inline(inline) => inline.certify(round, digest).await,
                 Self::Deferred(deferred) => deferred.certify(round, digest).await,
             }
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_certify_first_block_fetches_genesis_parent() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator").with_attribute("index", 0),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let marshal = setup.mailbox;
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
+
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let block_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let block =
+                    B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
+                let digest = block.digest();
+                assert!(marshal.verified(round, block).await);
+
+                context.sleep(Duration::from_millis(10)).await;
+
+                let verify_result = wrapper
+                    .verify(block_context, digest)
+                    .await
+                    .await
+                    .expect("verify result missing");
+                assert!(
+                    verify_result,
+                    "{kind:?}: height-1 block should verify with genesis as parent"
+                );
+
+                let certify_result = wrapper
+                    .certify(round, digest)
+                    .await
+                    .await
+                    .expect("certify result missing");
+                assert!(
+                    certify_result,
+                    "{kind:?}: height-1 block should certify with genesis as parent"
+                );
+            });
         }
     }
 
@@ -1706,43 +1893,52 @@ mod tests {
     }
 
     impl Resolver for RecordingResolver {
-        type Key = handler::Request<D>;
+        type Request = handler::Request<D>;
+        type Subscriber = handler::FetchContext;
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, _key: Self::Key) -> Feedback {
+        fn fetch<R>(&mut self, _request: R) -> Feedback
+        where
+            R: Into<Fetch<Self::Request, Self::Subscriber>> + Send,
+        {
             Feedback::Ok
         }
 
-        fn fetch_all(&mut self, _keys: Vec<Self::Key>) -> Feedback {
+        fn fetch_all<R>(&mut self, _requests: Vec<R>) -> Feedback
+        where
+            R: Into<Fetch<Self::Request, Self::Subscriber>> + Send,
+        {
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            key: Self::Key,
+            request: impl Into<Fetch<Self::Request, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((key, targets));
+            self.targeted.lock().push((request.into().request, targets));
             Feedback::Ok
         }
 
-        fn fetch_all_targeted(
+        fn fetch_all_targeted<R>(
             &mut self,
-            requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
+            requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            R: Into<Fetch<Self::Request, Self::Subscriber>> + Send,
+        {
+            self.targeted.lock().extend(
+                requests
+                    .into_iter()
+                    .map(|(request, targets)| (request.into().request, targets)),
+            );
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Request, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
-            self.targeted.lock().extend(requests);
-            Feedback::Ok
-        }
-
-        fn cancel(&mut self, _key: Self::Key) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn clear(&mut self) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
             Feedback::Ok
         }
     }
@@ -2018,8 +2214,13 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
-                    key: handler::Request::Finalized {
-                        height: Height::new(5),
+                    delivery: Delivery {
+                        request: handler::Request::Finalized {
+                            height: Height::new(5),
+                        },
+                        subscribers: vec![handler::FetchContext::Finalization {
+                            height: Height::new(5),
+                        }],
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
@@ -2031,8 +2232,13 @@ mod tests {
             let (response, response_rx) = oneshot::channel();
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
-                    key: handler::Request::Notarized {
-                        round: Round::new(Epoch::zero(), View::new(1)),
+                    delivery: Delivery {
+                        request: handler::Request::Notarized {
+                            round: Round::new(Epoch::zero(), View::new(1)),
+                        },
+                        subscribers: vec![handler::FetchContext::Notarization {
+                            round: Round::new(Epoch::zero(), View::new(1)),
+                        }],
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,

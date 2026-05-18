@@ -70,6 +70,7 @@ mod tests {
                 types::{coding_config_for_participants, CodedBlock},
                 Marshaled, MarshaledConfig,
             },
+            core,
             mocks::{
                 harness::{
                     self, default_leader, genesis_commitment, make_coding_block,
@@ -270,6 +271,86 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_certify_at_later_view_survives_earlier_view_pruning() {
         harness::certify_at_later_view_survives_earlier_view_pruning::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certify_first_block_fetches_genesis_parent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let block = make_coding_block(block_ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            shards.proposed(round, coded_block);
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal,
+                shards,
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let shard_validity = marshaled
+                .verify(block_ctx, commitment)
+                .await
+                .await
+                .expect("verify result missing");
+            assert!(shard_validity, "shard validity should pass");
+
+            let certify_result = marshaled
+                .certify(round, commitment)
+                .await
+                .await
+                .expect("certify result missing");
+            assert!(
+                certify_result,
+                "height-1 block should certify with genesis as parent"
+            );
+        });
     }
 
     /// Finalizing a descendant must not height-prune the shard-engine buffer before
@@ -1021,7 +1102,10 @@ mod tests {
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
-            let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
+            let block_rx = marshal.subscribe_by_commitment(
+                missing_commitment,
+                core::Fallback::FetchByRound { round },
+            );
 
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
@@ -1566,7 +1650,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Regression: when backfilling by Request::Block(digest), a peer may return
+        // Regression: when backfilling by Request::Block { commitment }, a peer may return
         // a coded block with matching inner digest but a different coding commitment.
         // If a finalization for this digest is already cached, marshal must reject
         // the block unless V::commitment(block) matches the finalization payload.
@@ -1652,10 +1736,10 @@ mod tests {
             let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - it fetches Request::Block(digest)
+            //   - it fetches Request::Block { commitment }
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
-            //   - finalization lookup is digest-indexed, so deliver path must still
-            //     reject because cached finalization expects commitment_a
+            //   - deliver path must reject because the response commitment does not
+            //     match the request key
             CodingHarness::report_finalization(&mut v0_mailbox, finalization).await;
 
             // Wait for the fetch cycle to complete.

@@ -237,7 +237,7 @@ impl<
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey, super::ingress::Subscriber>,
     ) {
         match message {
             HandlerMessage::Deliver {

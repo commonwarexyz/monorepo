@@ -51,7 +51,10 @@ pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
-) -> (handler::Receiver<D>, p2p::Mailbox<handler::Request<D>, P>)
+) -> (
+    handler::Receiver<D>,
+    p2p::Mailbox<handler::Request<D>, P, handler::FetchContext>,
+)
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,

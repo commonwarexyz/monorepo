@@ -355,37 +355,6 @@ where
         self.waiter = None;
     }
 
-    /// Cancels a fetch request.
-    ///
-    /// Returns `true` if the fetch was canceled.
-    pub fn cancel(&mut self, key: &Key) -> bool {
-        // Remove targets for this key
-        self.clear_targets(key);
-
-        // Check the pending queue first
-        if self.pending.remove(key) {
-            return true;
-        }
-
-        // Check the active fetches
-        if let Some(id) = self.key_to_id.remove(key) {
-            self.active.remove(&id);
-            self.requests.remove(&id);
-            return true;
-        }
-
-        false
-    }
-
-    /// Cancel all fetches.
-    pub fn clear(&mut self) {
-        self.pending.clear();
-        self.active.clear();
-        self.requests.clear();
-        self.key_to_id.clear();
-        self.targets.clear();
-    }
-
     /// Adds a key to the front of the pending queue.
     pub fn add_ready(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
@@ -798,41 +767,6 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_function() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
-
-            // Add some keys to pending and active states
-            fetcher.add_retry(MockKey(1));
-            fetcher.add_retry(MockKey(2));
-            fetcher.add_retry(MockKey(3));
-
-            // Add keys to active state
-            add_test_active(&mut fetcher, 100, MockKey(10));
-            add_test_active(&mut fetcher, 101, MockKey(20));
-            add_test_active(&mut fetcher, 102, MockKey(30));
-
-            // Verify initial state
-            assert_eq!(fetcher.len(), 6);
-            assert_eq!(fetcher.len_pending(), 3);
-            assert_eq!(fetcher.len_active(), 3);
-
-            // Clear all fetches
-            fetcher.clear();
-
-            // Verify everything is cleared
-            assert_eq!(fetcher.len(), 0);
-            assert_eq!(fetcher.len_pending(), 0);
-            assert_eq!(fetcher.len_active(), 0);
-
-            // Verify specific collections are empty
-            assert!(fetcher.pending.is_empty());
-            assert!(fetcher.requests.is_empty());
-        });
-    }
-
-    #[test]
     fn test_len_functions() {
         let runner = Runner::default();
         runner.start(|context| async {
@@ -863,8 +797,8 @@ mod tests {
             assert_eq!(fetcher.len_pending(), 1);
             assert_eq!(fetcher.len_active(), 2);
 
-            // Remove one active key via cancel
-            assert!(fetcher.cancel(&MockKey(10)));
+            // Remove one active key via retain.
+            fetcher.retain(|key| *key != MockKey(10));
             assert_eq!(fetcher.len(), 2);
             assert_eq!(fetcher.len_pending(), 1);
             assert_eq!(fetcher.len_active(), 1);
@@ -933,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cancel_function() {
+    fn test_retain_drops_selected_keys() {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
@@ -944,24 +878,23 @@ mod tests {
             add_test_active(&mut fetcher, 100, MockKey(10));
             add_test_active(&mut fetcher, 101, MockKey(20));
 
-            // Test canceling pending key
-            assert!(fetcher.cancel(&MockKey(1)));
+            // Drop a pending key.
+            fetcher.retain(|key| *key != MockKey(1));
             assert_eq!(fetcher.len_pending(), 1);
             assert!(!fetcher.contains(&MockKey(1)));
 
-            // Test canceling active key
-            assert!(fetcher.cancel(&MockKey(10)));
+            // Drop an active key.
+            fetcher.retain(|key| *key != MockKey(10));
             assert_eq!(fetcher.len_active(), 1);
             assert!(!fetcher.contains(&MockKey(10)));
 
-            // Test canceling non-existent key
-            assert!(!fetcher.cancel(&MockKey(99)));
+            // Dropping a non-existent key has no effect.
+            let len = fetcher.len();
+            fetcher.retain(|key| *key != MockKey(99));
+            assert_eq!(fetcher.len(), len);
 
-            // Test canceling already canceled key
-            assert!(!fetcher.cancel(&MockKey(1)));
-
-            // Cancel remaining pending key
-            assert!(fetcher.cancel(&MockKey(2)));
+            // Drop remaining pending key.
+            fetcher.retain(|key| *key != MockKey(2));
             assert_eq!(fetcher.len_pending(), 0);
 
             // Ensure pending deadline is None
@@ -993,8 +926,8 @@ mod tests {
             fetcher.pending.remove(&MockKey(1));
             assert!(!fetcher.contains(&MockKey(1)));
 
-            // Remove from active via cancel
-            fetcher.cancel(&MockKey(10));
+            // Remove from active via retain.
+            fetcher.retain(|key| *key != MockKey(10));
             assert!(!fetcher.contains(&MockKey(10)));
         });
     }
@@ -1156,18 +1089,21 @@ mod tests {
     }
 
     #[test]
-    fn test_cancel_edge_cases() {
+    fn test_retain_edge_cases() {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher::<FailMockSender>(context);
 
-            // Cancel from empty fetcher
-            assert!(!fetcher.cancel(&MockKey(1)));
+            // Retain on an empty fetcher is a no-op.
+            fetcher.retain(|key| *key != MockKey(1));
+            assert_eq!(fetcher.len(), 0);
 
-            // Add key, cancel it, then try to cancel again
+            // Add key, prune it, then prune it again.
             fetcher.add_retry(MockKey(1));
-            assert!(fetcher.cancel(&MockKey(1)));
-            assert!(!fetcher.cancel(&MockKey(1))); // Should return false
+            fetcher.retain(|key| *key != MockKey(1));
+            assert_eq!(fetcher.len(), 0);
+            fetcher.retain(|key| *key != MockKey(1));
+            assert_eq!(fetcher.len(), 0);
         });
     }
 
@@ -1209,9 +1145,8 @@ mod tests {
 
             assert_eq!(fetcher.len(), 4);
 
-            // Cancel one from each
-            assert!(fetcher.cancel(&MockKey(1))); // pending
-            assert!(fetcher.cancel(&MockKey(10))); // active
+            // Prune one from each collection.
+            fetcher.retain(|key| *key != MockKey(1) && *key != MockKey(10));
 
             assert_eq!(fetcher.len(), 2);
 
@@ -1223,8 +1158,8 @@ mod tests {
             assert!(fetcher.contains(&MockKey(2)));
             assert!(fetcher.contains(&MockKey(20)));
 
-            // Clear all
-            fetcher.clear();
+            // Prune all.
+            fetcher.retain(|_| false);
             assert_eq!(fetcher.len(), 0);
         });
     }
@@ -1293,8 +1228,8 @@ mod tests {
             let pending_deadline = fetcher.get_pending_deadline().unwrap();
             assert!(pending_deadline > context.current());
 
-            // Cancel key
-            assert!(fetcher.cancel(&MockKey(1)));
+            // Prune key.
+            fetcher.retain(|key| *key != MockKey(1));
             assert!(fetcher.get_pending_deadline().is_none());
 
             // Advance time past previous deadline
@@ -1474,27 +1409,27 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
 
-            // cancel() clears targets for key
+            // retain() clears targets for pruned keys.
             fetcher.add_targets(MockKey(1), [peer1.clone()]);
             fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_retry(MockKey(1));
             fetcher.add_retry(MockKey(2));
             assert_eq!(fetcher.targets.len(), 2);
 
-            assert!(fetcher.cancel(&MockKey(1)));
+            fetcher.retain(|key| *key != MockKey(1));
             assert!(!fetcher.targets.contains_key(&MockKey(1)));
             assert!(fetcher.targets.contains_key(&MockKey(2)));
 
-            assert!(fetcher.cancel(&MockKey(2)));
+            fetcher.retain(|key| *key != MockKey(2));
             assert!(fetcher.targets.is_empty());
 
-            // clear() clears all targets
+            // Retaining nothing clears all targets.
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
             fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_targets(MockKey(3), [peer2]);
             assert_eq!(fetcher.targets.len(), 3);
 
-            fetcher.clear();
+            fetcher.retain(|_| false);
             assert!(fetcher.targets.is_empty());
 
             // retain() filters targets

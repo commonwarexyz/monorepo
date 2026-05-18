@@ -77,7 +77,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         self.propose_result.clone()
     }
@@ -85,7 +85,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> bool {
         self.verify_result
     }
@@ -138,7 +138,7 @@ where
     async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> Option<Self::Block> {
         None
     }
@@ -146,7 +146,7 @@ where
     async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A, Self::Block>,
+        _ancestry: AncestorStream<A>,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());

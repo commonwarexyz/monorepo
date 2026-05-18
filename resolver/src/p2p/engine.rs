@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchRequest, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::Consumer;
+use crate::{Consumer, Delivery};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -22,7 +22,10 @@ use commonware_runtime::{
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
 use futures::future::{self, Either};
 use rand::Rng;
-use std::marker::PhantomData;
+use std::{
+    collections::{BTreeSet, HashMap},
+    marker::PhantomData,
+};
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
@@ -40,11 +43,13 @@ pub struct Engine<
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
-    Con: Consumer<Key = Key, Value = Bytes>,
-    Pro: Producer<Key = Key>,
+    Con: Consumer<Request = Key, Value = Bytes>,
+    Pro: Producer<Request = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
-> {
+> where
+    Con::Subscriber: Eq,
+{
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
 
@@ -60,14 +65,17 @@ pub struct Engine<
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
 
-    /// Mailbox that makes and cancels fetch requests
-    mailbox: mailbox::Receiver<Message<Key, P>>,
+    /// Mailbox that makes and prunes fetch requests
+    mailbox: mailbox::Receiver<Message<Key, P, Con::Subscriber>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Tracks all in-flight fetch state
     inflight: Inflight<E, Con, P, Key>,
+
+    /// Local interests that keep each fetch request alive.
+    interests: HashMap<Key, Interests<Con::Subscriber>>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -85,22 +93,45 @@ pub struct Engine<
     _r: PhantomData<NetR>,
 }
 
+struct Interests<S> {
+    subscribers: BTreeSet<S>,
+}
+
+impl<S> Default for Interests<S> {
+    fn default() -> Self {
+        Self {
+            subscribers: BTreeSet::new(),
+        }
+    }
+}
+
+impl<S> Interests<S> {
+    fn is_empty(&self) -> bool {
+        self.subscribers.is_empty()
+    }
+}
+
 impl<
         E: BufferPooler + Clock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
-        Con: Consumer<Key = Key, Value = Bytes>,
-        Pro: Producer<Key = Key>,
+        Con: Consumer<Request = Key, Value = Bytes>,
+        Pro: Producer<Request = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
+where
+    Con::Subscriber: Clone + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
+    pub fn new(
+        context: E,
+        cfg: Config<P, D, B, Key, Con, Pro>,
+    ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
@@ -124,6 +155,7 @@ impl<
                 mailbox: receiver,
                 fetcher,
                 inflight: Inflight::new(cfg.consumer),
+                interests: HashMap::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -183,6 +215,7 @@ impl<
             on_stopped => {
                 debug!("shutdown");
                 self.inflight.drain();
+                self.interests.clear();
                 self.serves.cancel_all();
             },
             // Handle peer set updates
@@ -214,11 +247,25 @@ impl<
             } => {
                 match msg {
                     Message::Fetch(requests) => {
-                        for FetchRequest { key, targets } in requests {
-                            trace!(?key, "mailbox: fetch");
+                        for FetchRequest {
+                            request,
+                            subscribers,
+                            targets,
+                        } in requests
+                        {
+                            trace!(?request, "mailbox: fetch");
+                            if subscribers.is_empty() {
+                                trace!(?request, "fetch has no retained subscribers");
+                                continue;
+                            }
 
                             // Check if the fetch is already in progress
-                            let is_new = !self.inflight.contains(&key);
+                            let is_new = !self.inflight.contains(&request);
+                            let interests = self
+                                .interests
+                                .entry(request.clone())
+                                .or_default();
+                            interests.subscribers.extend(subscribers);
 
                             // Update targets
                             match targets {
@@ -226,45 +273,38 @@ impl<
                                     // Only add targets if this is a new fetch OR the existing
                                     // fetch already has targets. Don't restrict an "all" fetch
                                     // (no targets) to specific targets.
-                                    if is_new || self.fetcher.has_targets(&key) {
-                                        self.fetcher.add_targets(key.clone(), targets);
+                                    if is_new || self.fetcher.has_targets(&request) {
+                                        self.fetcher.add_targets(request.clone(), targets);
                                     }
                                 }
-                                None => self.fetcher.clear_targets(&key),
+                                None => self.fetcher.clear_targets(&request),
                             }
 
                             // Only start new fetch if not already in progress
                             if is_new {
                                 self.inflight.insert(
-                                    key.clone(),
+                                    request.clone(),
                                     self.metrics.fetch_duration.timer(self.context.as_ref()),
                                 );
-                                self.fetcher.add_ready(key);
+                                self.fetcher.add_ready(request);
                             } else {
-                                trace!(?key, "updated targets for existing fetch");
+                                trace!(?request, "updated targets for existing fetch");
                             }
-                        }
-                    }
-                    Message::Cancel { key } => {
-                        trace!(?key, "mailbox: cancel");
-                        let mut guard = self.metrics.cancel.guard(Status::Dropped);
-                        self.fetcher.cancel(&key);
-                        if self.inflight.cancel(&key) {
-                            guard.set(Status::Success);
                         }
                     }
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.fetcher.retain(&predicate);
-                        let count = self.inflight.retain(predicate) as u64;
-                        self.record_cancellations(count);
-                    }
-                    Message::Clear => {
-                        trace!("mailbox: clear");
-
-                        self.fetcher.clear();
-                        let count = self.inflight.drain() as u64;
+                        self.interests.retain(|request, interests| {
+                            interests
+                                .subscribers
+                                .retain(|subscriber| predicate(request, subscriber));
+                            !interests.is_empty()
+                        });
+                        let interests = &self.interests;
+                        self.fetcher.retain(|key| interests.contains_key(key));
+                        let count =
+                            self.inflight.retain(|key| interests.contains_key(key)) as u64;
                         self.record_cancellations(count);
                     }
                 }
@@ -272,12 +312,12 @@ impl<
             // Handle completed consumer deliveries
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
-                // Cancel, Retain, Clear, or shutdown) before the consumer finished validating.
-                let (peer, key, valid) = match delivery {
+                // Retain or shutdown) before the consumer finished validating.
+                let (peer, key, result) = match delivery {
                     Ok(delivery) => delivery,
                     Err(_) => continue,
                 };
-                self.handle_delivery(peer, key, valid);
+                self.handle_delivery(peer, key, result);
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
@@ -393,12 +433,27 @@ impl<
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, true) else {
-            // It's possible that the key does not exist if the request was canceled
+            // It's possible that the key does not exist if the request was pruned.
             return;
         };
 
+        let Some(interests) = self.interests.get(&key) else {
+            warn!(?key, "response for fetch with no interests");
+            self.inflight.cancel(&key);
+            return;
+        };
+        if interests.is_empty() {
+            warn!(?key, "response for fetch with no interests");
+            self.inflight.cancel(&key);
+            return;
+        }
+        let delivery = Delivery {
+            request: key.clone(),
+            subscribers: interests.subscribers.iter().cloned().collect(),
+        };
+
         // The peer had the data, so deliver it to the consumer without blocking the engine.
-        self.inflight.deliver(key, peer, response);
+        self.inflight.deliver(key, delivery, peer, response);
     }
 
     /// Handle completed delivery to the consumer.
@@ -406,12 +461,13 @@ impl<
         if valid {
             self.metrics.fetch.inc(Status::Success);
             self.inflight.complete(&key, self.context.as_ref());
+            self.interests.remove(&key);
             self.fetcher.clear_targets(&key);
             return;
         }
 
-        // If the data is invalid, we need to block the peer and try again
-        // (blocking the peer also removes any targets associated with it)
+        // If the data is invalid, block the peer and try again. Blocking the
+        // peer also removes any targets associated with it.
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
@@ -424,7 +480,7 @@ impl<
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_by_id(id, &peer, false) else {
-            // It's possible that the key does not exist if the request was canceled
+            // It's possible that the key does not exist if the request was pruned.
             return;
         };
 

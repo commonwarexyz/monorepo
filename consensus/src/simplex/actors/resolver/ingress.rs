@@ -2,9 +2,24 @@ use crate::{simplex::types::Certificate, types::View, Viewable};
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{p2p::Producer, Consumer, Delivery};
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct Subscriber(pub(crate) U64);
+
+impl From<View> for Subscriber {
+    fn from(view: View) -> Self {
+        Self(view.into())
+    }
+}
+
+impl From<U64> for Subscriber {
+    fn from(view: U64) -> Self {
+        Self(view)
+    }
+}
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
@@ -215,10 +230,16 @@ impl Handler {
 }
 
 impl Consumer for Handler {
-    type Key = U64;
+    type Request = U64;
+    type Subscriber = Subscriber;
     type Value = Bytes;
 
-    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+    fn deliver(
+        &mut self,
+        delivery: Delivery<Self::Request, Self::Subscriber>,
+        value: Self::Value,
+    ) -> oneshot::Receiver<bool> {
+        let key = delivery.request;
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
             view: View::new(key.into()),
@@ -230,9 +251,9 @@ impl Consumer for Handler {
 }
 
 impl Producer for Handler {
-    type Key = U64;
+    type Request = U64;
 
-    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Request) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Produce {
             view: View::new(key.into()),

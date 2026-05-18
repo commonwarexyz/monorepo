@@ -80,7 +80,6 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::{
             validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
             verification_tasks::VerificationTasks,
@@ -122,7 +121,7 @@ use commonware_utils::{
     sync::AsyncMutex,
     NZU16,
 };
-use futures::future::{ready, try_join, Either, Ready};
+use futures::future::{ready, Either, Ready};
 use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
@@ -339,46 +338,16 @@ where
             .with_attribute("round", consensus_context.round);
         context.spawn(move |runtime_context| async move {
             let round = consensus_context.round;
+            let (_, parent_commitment) = consensus_context.parent;
 
-            // Fetch parent block
-            let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request = fetch_parent(
-                parent_commitment,
-                // We are guaranteed that the parent round for any `consensus_context` is
-                // in the same epoch (recall, the boundary block of the previous epoch
-                // is the genesis block of the current epoch).
-                Some(Round::new(consensus_context.epoch(), parent_view)),
-                &mut application,
-                &mut marshal,
-                cached_genesis,
-            )
-            .await;
-
-            // Get block either from prefetched or by subscribing
-            let (parent, block) = if let Some(block) = prefetched_block {
-                // We have a prefetched block, just fetch the parent
-                let parent = select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    },
-                    result = parent_request => match result {
-                        Ok(parent) => parent,
-                        Err(_) => {
-                            debug!(reason = "failed to fetch parent", "skipping verification");
-                            return;
-                        }
-                    },
-                };
-                (parent, block)
+            // Get the candidate block either from the caller or by waiting for
+            // local reconstruction. Candidate data remains local-only: a
+            // notarization is not sufficient reason to request it from peers.
+            let block = if let Some(block) = prefetched_block {
+                block
             } else {
-                // No prefetched block, fetch both parent and block
-                let block_request = marshal.subscribe_by_commitment(Some(round), commitment);
-                let block_requests = try_join(parent_request, block_request);
-
+                let block_request =
+                    marshal.subscribe_by_commitment(commitment, core::Fallback::Wait);
                 select! {
                     _ = tx.closed() => {
                         debug!(
@@ -387,17 +356,53 @@ where
                         );
                         return;
                     },
-                    result = block_requests => match result {
-                        Ok(results) => results,
+                    result = block_request => match result {
+                        Ok(block) => block,
                         Err(_) => {
                             debug!(
-                                reason = "failed to fetch parent or block",
+                                reason = "block unavailable",
                                 "skipping verification"
                             );
                             return;
                         }
                     },
                 }
+            };
+
+            let Some(parent_height) = block.height().previous() else {
+                debug!(height = %block.height(), "block has no possible parent height");
+                tx.send_lossy(false);
+                return;
+            };
+            // Once the candidate block is available, its parent request can be
+            // height-bound instead of round-bound. The parent is certified by
+            // the proposal context, but the child block is what gives us the
+            // parent height.
+            let parent_request = fetch_parent(
+                parent_commitment,
+                core::Fallback::FetchByCommitment {
+                    height: parent_height,
+                },
+                &mut application,
+                &mut marshal,
+                cached_genesis,
+            )
+            .await;
+            let parent = select! {
+                _ = tx.closed() => {
+                    debug!(
+                        reason = "consensus dropped receiver",
+                        "skipping verification"
+                    );
+                    return;
+                },
+                result = parent_request => match result {
+                    Ok(parent) => parent,
+                    Err(_) => {
+                        debug!(reason = "failed to fetch parent", "skipping verification");
+                        return;
+                    }
+                },
             };
 
             if let Err(err) = validate_block::<H, _, _>(
@@ -424,10 +429,7 @@ where
                 return;
             }
 
-            let ancestry_stream = AncestorStream::new(
-                marshal.clone(),
-                [block.clone().into_inner(), parent.into_inner()],
-            );
+            let ancestry_stream = marshal.ancestor_stream([block.clone(), parent]);
             let validity_request = application.verify(
                 (
                     runtime_context.child("app_verify"),
@@ -595,10 +597,13 @@ where
             let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_commitment,
-                // We are guaranteed that the parent round for any `consensus_context` is
-                // in the same epoch (recall, the boundary block of the previous epoch
-                // is the genesis block of the current epoch).
-                Some(Round::new(consensus_context.epoch(), parent_view)),
+                // Proposal context carries the certified parent
+                // view/commitment but not the parent height. The parent may be
+                // certified above the finalized tip, so this must stay
+                // round-bound until the block is returned.
+                core::Fallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
                 &mut application,
                 &mut marshal,
                 cached_genesis,
@@ -652,7 +657,7 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent.into_inner()]);
+            let ancestor_stream = marshal.ancestor_stream([parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -772,7 +777,7 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(Some(consensus_context.round), payload);
+                .subscribe_by_commitment(payload, core::Fallback::Wait);
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
@@ -922,7 +927,9 @@ where
             ?payload,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe_by_commitment(Some(round), payload);
+        let block_rx = self
+            .marshal
+            .subscribe_by_commitment(payload, core::Fallback::Wait);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -1059,21 +1066,18 @@ where
     }
 }
 
-/// Fetches the parent block given its digest and optional round.
+/// Fetches the parent block given its commitment and missing-block behavior.
 ///
 /// This is a helper function used during proposal and verification to retrieve the parent
-/// block. If the parent digest matches the genesis block, it returns the genesis block
+/// block. If the parent commitment matches the genesis block, it returns the genesis block
 /// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
-/// the parent block's availability.
-///
-/// `parent_round` is an optional resolver hint. Callers should only provide a hint when
-/// the source context is trusted/validated. Untrusted paths should pass `None`.
+/// the parent block's availability according to `fallback`.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[allow(clippy::type_complexity)]
 async fn fetch_parent<E, S, A, B, C, H>(
     parent_commitment: Commitment,
-    parent_round: Option<Round>,
+    fallback: core::Fallback,
     application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
@@ -1099,7 +1103,7 @@ where
     if parent_commitment == *genesis_commitment {
         Either::Left(ready(Ok(coded_genesis.clone())))
     } else {
-        Either::Right(marshal.subscribe_by_commitment(parent_round, parent_commitment))
+        Either::Right(marshal.subscribe_by_commitment(parent_commitment, fallback))
     }
 }
 
