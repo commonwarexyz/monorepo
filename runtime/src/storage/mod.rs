@@ -305,6 +305,7 @@ pub(crate) mod tests {
         test_read_at_buf_returns_same_buffer(&storage).await;
         test_read_at_buf_insufficient_capacity(&storage).await;
         test_read_at_buf_larger_capacity(&storage).await;
+        test_read_after_remove(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -340,6 +341,25 @@ pub(crate) mod tests {
 
         let blobs = storage.scan("partition").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
+    }
+
+    /// Test that existing blob handles remain readable after the blob is removed from storage.
+    async fn test_read_after_remove<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage.open("read_after_remove", b"blob").await.unwrap();
+        blob.write_at(0, b"still here").await.unwrap();
+        blob.sync().await.unwrap();
+
+        storage
+            .remove("read_after_remove", Some(b"blob"))
+            .await
+            .unwrap();
+
+        let read = blob.read_at(0, 10).await.unwrap();
+        assert_eq!(read.coalesce(), b"still here");
     }
 
     /// Test scanning a partition for blobs.
