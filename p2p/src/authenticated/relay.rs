@@ -78,8 +78,12 @@ pub async fn recv_prioritized<C: Policy, D>(
 ) -> Prioritized<C, D> {
     select! {
         msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
-        msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
-        msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+        msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
+            msg.into_inner()
+        )),
+        msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
+            msg.into_inner()
+        )),
     }
 }
 

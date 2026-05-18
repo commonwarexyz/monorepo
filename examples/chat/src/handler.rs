@@ -275,8 +275,8 @@ pub async fn run(
                             if input.is_empty() {
                                 continue;
                             }
-                            let mut successful = sender
-                                .send(Recipients::All, input.as_bytes().to_vec(), false);
+                            let mut successful =
+                                sender.send(Recipients::All, input.as_bytes().to_vec(), false);
                             if !successful.is_empty() {
                                 successful.sort();
                                 let mut friends = String::from_str("[").unwrap();

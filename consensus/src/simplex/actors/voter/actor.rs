@@ -921,8 +921,7 @@ impl<
                         // cancels in-flight certification and suppresses late reporting.
                         resolver.certified(view, certified);
                         if certified {
-                            self.reporter
-                                .report(Activity::Certification(notarization));
+                            self.reporter.report(Activity::Certification(notarization));
                         }
                     }
                     Err(err) => {

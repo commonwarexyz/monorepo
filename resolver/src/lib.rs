@@ -95,9 +95,6 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
         /// how cancellation affects in-progress response validation.
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
-        ) -> Feedback;
+        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback;
     }
 });

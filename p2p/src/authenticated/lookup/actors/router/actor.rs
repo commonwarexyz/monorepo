@@ -91,33 +91,31 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
             Some(msg) = self.control.recv() else {
                 debug!("mailbox closed, stopping router");
                 break;
-            } => {
-                match msg {
-                    Message::Ready {
-                        peer,
-                        relay,
-                        channels,
-                    } => {
-                        debug!(?peer, "peer ready");
-                        self.connections.insert(peer, relay);
-                        let _ = channels.send(routing.clone());
-                        self.notify_subscribers();
-                    }
-                    Message::Release { peer } => {
-                        debug!(?peer, "peer released");
-                        self.connections.remove(&peer);
-                        self.notify_subscribers();
-                    }
-                    Message::Content {
-                        recipients,
-                        encoded,
-                        priority,
-                    } => {
-                        self.route(recipients, encoded, priority);
-                    }
-                    Message::SubscribePeers { sender } => {
-                        self.subscribe_peers(sender);
-                    }
+            } => match msg {
+                Message::Ready {
+                    peer,
+                    relay,
+                    channels,
+                } => {
+                    debug!(?peer, "peer ready");
+                    self.connections.insert(peer, relay);
+                    let _ = channels.send(routing.clone());
+                    self.notify_subscribers();
+                }
+                Message::Release { peer } => {
+                    debug!(?peer, "peer released");
+                    self.connections.remove(&peer);
+                    self.notify_subscribers();
+                }
+                Message::Content {
+                    recipients,
+                    encoded,
+                    priority,
+                } => {
+                    self.route(recipients, encoded, priority);
+                }
+                Message::SubscribePeers { sender } => {
+                    self.subscribe_peers(sender);
                 }
             },
         }
