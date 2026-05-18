@@ -172,9 +172,7 @@ pub enum DigestFallback {
     /// Request the notarized proposal for `round` from peers.
     ///
     /// Use this only when the caller has a trusted round for the digest. Digest-keyed
-    /// subscriptions cannot request exact commitment fetches; use
-    /// [`Mailbox::subscribe_by_commitment`] with [`CommitmentFallback::FetchByCommitment`]
-    /// when the full commitment is known.
+    /// subscriptions intentionally cannot request exact commitment fetches.
     FetchByRound { round: Round },
 }
 
@@ -196,9 +194,9 @@ pub enum CommitmentFallback {
     Wait,
     /// Request the notarized proposal for `round` from peers.
     ///
-    /// Use this when the caller knows the certified round and commitment but
-    /// not the proposal height, such as proposal construction, verification of
-    /// a known child, or certification of a notarized candidate. Do not infer
+    /// Use this when the caller knows a trusted notarized or certified round and
+    /// commitment but not the proposal height, such as proposal construction,
+    /// verification of a known child, or certification of a notarized candidate. Do not infer
     /// height from the finalized tip or another block: proposals may build on
     /// a certified parent that is not finalized locally yet, and an unverified
     /// child may lie about its height.

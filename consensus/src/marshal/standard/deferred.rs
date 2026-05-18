@@ -598,6 +598,13 @@ where
         // the f+1 honest validators from the notarizing quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
+        // We must fetch here rather than only wait for local broadcast delivery. A Byzantine
+        // leader can send a proposal to just f+1 honest validators, collect enough honest
+        // notarize votes to form a notarization, and leave the remaining honest validators
+        // without the block. Those validators need the notarized round to recover the block
+        // and certify; otherwise they can remain stuck if the Byzantine validators stop
+        // participating in the next view.
+        //
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
             ?round,

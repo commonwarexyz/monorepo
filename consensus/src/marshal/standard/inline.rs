@@ -499,7 +499,10 @@ where
         }
 
         // Otherwise, wait for local block availability and recover from peers by
-        // notarized round if necessary.
+        // notarized round if necessary. A Byzantine leader can form a notarization
+        // after sending the proposal to only f+1 honest validators; the honest
+        // validators left without the block must fetch it here to certify and
+        // avoid getting stuck if Byzantine validators stop participating.
         let block_rx = self
             .marshal
             .subscribe_by_digest(DigestFallback::FetchByRound { round }, digest);

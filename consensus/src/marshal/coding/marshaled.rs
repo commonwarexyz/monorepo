@@ -924,6 +924,13 @@ where
         // will verify against the proper context and reject the mismatch, preventing a 2f+1
         // finalization quorum.
         //
+        // We must fetch here rather than only wait for local reconstruction. A Byzantine
+        // leader can send enough shards to just f+1 honest validators, collect enough honest
+        // notarize votes to form a notarization, and leave the remaining honest validators
+        // unable to reconstruct the block. Those validators need the notarized round to
+        // recover and certify; otherwise they can remain stuck if the Byzantine validators
+        // stop participating in the next view.
+        //
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
             ?round,
