@@ -949,26 +949,35 @@ where
                 ));
             }
             Fallback::FetchByCommitment { height } => {
-                if let BlockSubscriptionKey::Commitment(commitment) = key {
-                    // This path is only for accepted ancestry or finalized repair,
-                    // never for a candidate block's immediate parent.
-                    if height <= self.last_processed_height {
-                        // We already checked local storage. Missing ancestors at or
-                        // below the processed floor are no longer useful to request.
+                let commitment = match key {
+                    BlockSubscriptionKey::Commitment(commitment) => commitment,
+                    BlockSubscriptionKey::Digest(digest) => {
                         debug!(
-                            %height,
-                            floor = %self.last_processed_height,
-                            ?commitment,
-                            "dropping commitment subscription at or below processed height floor"
+                            ?digest,
+                            "dropping digest subscription with commitment-only exact-fetch fallback"
                         );
                         return;
                     }
-                    debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
-                    resolver.fetch(Fetch::new(
-                        Request::Block(commitment),
-                        Annotation::Certified { height },
-                    ));
+                };
+
+                // This path is only for accepted ancestry or finalized repair,
+                // never for a candidate block's immediate parent.
+                if height <= self.last_processed_height {
+                    // We already checked local storage. Missing ancestors at or
+                    // below the processed floor are no longer useful to request.
+                    debug!(
+                        %height,
+                        floor = %self.last_processed_height,
+                        ?commitment,
+                        "dropping commitment subscription at or below processed height floor"
+                    );
+                    return;
                 }
+                debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
+                resolver.fetch(Fetch::new(
+                    Request::Block(commitment),
+                    Annotation::Certified { height },
+                ));
             }
             Fallback::Wait => {}
         }

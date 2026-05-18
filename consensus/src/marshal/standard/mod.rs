@@ -1371,7 +1371,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("missing-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1390,12 +1390,27 @@ mod tests {
                     parent: (View::zero(), genesis.digest()),
                 };
                 let missing = Sha256::hash(b"missing candidate");
-                let verify = wrapper.verify(consensus_context, missing).await;
+                let mut verify = wrapper.verify(consensus_context, missing).await;
 
                 context.sleep(Duration::from_millis(50)).await;
                 assert!(
+                    buffer.subscription_count() > 0,
+                    "{kind:?}: unavailable candidate verification must register a local wait"
+                );
+                assert!(
                     resolver.fetches().is_empty(),
                     "{kind:?}: unavailable candidate verification must not fetch from peers"
+                );
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "{kind:?}: unavailable candidate verification must not issue targeted fetches"
+                );
+                assert!(
+                    matches!(
+                        verify.try_recv(),
+                        Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "{kind:?}: unavailable candidate verification must remain pending"
                 );
 
                 drop(verify);
@@ -1424,7 +1439,7 @@ mod tests {
                 );
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("missing-certify-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1438,12 +1453,27 @@ mod tests {
 
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let missing = Sha256::hash(b"missing certify candidate");
-                let certify = wrapper.certify(round, missing).await;
+                let mut certify = wrapper.certify(round, missing).await;
 
                 context.sleep(Duration::from_millis(50)).await;
                 assert!(
+                    buffer.subscription_count() > 0,
+                    "{kind:?}: unavailable candidate certification must register a local wait"
+                );
+                assert!(
                     resolver.fetches().is_empty(),
                     "{kind:?}: certification must not fetch an unavailable candidate from peers"
+                );
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "{kind:?}: certification must not issue targeted fetches"
+                );
+                assert!(
+                    matches!(
+                        certify.try_recv(),
+                        Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "{kind:?}: unavailable candidate certification must remain pending"
                 );
 
                 drop(certify);
@@ -2218,6 +2248,10 @@ mod tests {
         fn sends(&self) -> Vec<BufferSend> {
             self.sends.lock().clone()
         }
+
+        fn subscription_count(&self) -> usize {
+            self.subscriptions.lock().len()
+        }
     }
 
     impl crate::marshal::core::Buffer<Standard<B>> for RecordingBuffer {
@@ -2619,6 +2653,55 @@ mod tests {
                     panic!("notarized delivery did not wake block subscriber");
                 },
             }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_digest_fetch_by_commitment_is_rejected() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let digest = Sha256::hash(b"digest-fetch-by-commitment");
+
+            let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "digest-fetch-by-commitment",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+            )
+            .await;
+
+            let subscription = mailbox.subscribe_by_digest(
+                Fallback::FetchByCommitment {
+                    height: Height::new(7),
+                },
+                digest,
+            );
+
+            select! {
+                result = subscription => {
+                    assert!(result.is_err(), "digest exact fetch must close");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("digest exact fetch remained pending");
+                },
+            }
+            assert_eq!(
+                buffer.subscription_count(),
+                0,
+                "digest exact fetch must not register a local wait"
+            );
+            assert!(
+                resolver.fetches().is_empty(),
+                "digest exact fetch must not fetch from peers"
+            );
+            assert!(
+                resolver.targeted_is_empty(),
+                "digest exact fetch must not issue targeted fetches"
+            );
         });
     }
 

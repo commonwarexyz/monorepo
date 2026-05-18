@@ -190,10 +190,12 @@ pub enum Fallback {
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
-    /// Use this only when no certified parent round is available and the caller
-    /// has a locally validated pruning bound, such as repairing a finalized gap
-    /// or walking an accepted ancestry stream. Do not use it for a candidate's
-    /// immediate parent when the consensus context supplies the parent round.
+    /// Use this only with commitment-keyed subscriptions when no certified
+    /// parent round is available and the caller has a locally validated pruning
+    /// bound, such as repairing a finalized gap or walking an accepted ancestry
+    /// stream. Digest-keyed subscriptions with a trusted round should use
+    /// [`Fallback::FetchByRound`]. Do not use it for a candidate's immediate
+    /// parent when the consensus context supplies the parent round.
     ///
     /// The height is not sent to peers. It is a local pruning hint for request
     /// retention, not part of response validity: a fetched block is delivered

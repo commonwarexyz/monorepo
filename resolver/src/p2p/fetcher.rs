@@ -358,6 +358,7 @@ where
     /// Adds a key to the front of the pending queue.
     pub fn add_ready(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
+        self.waiter = None;
         self.pending.put(key, (self.context.current(), false));
     }
 

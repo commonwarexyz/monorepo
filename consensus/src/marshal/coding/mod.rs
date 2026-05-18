@@ -514,6 +514,58 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_coding_digest_fetch_by_commitment_is_rejected() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-digest-fetch-by-commitment",
+                provider,
+                buffer.clone(),
+            )
+            .await;
+            let (_, commitment) = missing_candidate(participants[0].clone());
+            let digest = commitment.block::<D>();
+
+            let subscription = marshal.subscribe_by_digest(
+                core::Fallback::FetchByCommitment {
+                    height: Height::new(1),
+                },
+                digest,
+            );
+
+            select! {
+                result = subscription => {
+                    assert!(result.is_err(), "unsupported digest exact fetch must close");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("unsupported digest exact fetch remained pending");
+                },
+            }
+            assert_eq!(
+                buffer.subscription_count(),
+                0,
+                "unsupported digest exact fetch must not register a local wait"
+            );
+            assert!(
+                resolver.fetches().is_empty(),
+                "unsupported digest exact fetch must not fetch from peers"
+            );
+            assert!(
+                resolver.targeted().is_empty(),
+                "unsupported digest exact fetch must not issue targeted fetches"
+            );
+        });
+    }
+
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_coding_finalize_good_links() {

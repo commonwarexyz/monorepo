@@ -2213,6 +2213,124 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_late_subscriber_refetch_ignores_unrelated_waiter() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let blocked_key = Key(4);
+            let waiting_key = Key(5);
+            let main_key = Key(6);
+            let data = Bytes::from("data for key 6");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(blocked_key.clone(), Bytes::from("bad data"));
+
+            let mut prod3 = Producer::default();
+            prod3.insert(main_key.clone(), data.clone());
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![
+                    (first_gate_receiver, false),
+                    (second_gate_receiver, true),
+                ],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            mailbox1.fetch(Fetch::new(blocked_key.clone(), SubscriberTag(1)));
+            started.recv().await.expect("blocking delivery did not start");
+            first_gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            mailbox1.fetch_targeted(
+                Fetch::new(waiting_key, SubscriberTag(2)),
+                non_empty_vec![peers[1].clone()],
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let first_subscriber = SubscriberTag(3);
+            let second_subscriber = SubscriberTag(4);
+            mailbox1.fetch(Fetch::new(main_key.clone(), first_subscriber.clone()));
+
+            let delivery = started.recv().await.expect("delivery did not start");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: main_key.clone(),
+                    subscribers: non_empty_vec![first_subscriber.clone()],
+                }
+            );
+
+            mailbox1.fetch(Fetch::new(main_key.clone(), second_subscriber.clone()));
+            context.sleep(Duration::from_millis(100)).await;
+
+            second_gate_sender.send(()).unwrap();
+            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: main_key.clone(),
+                    subscribers: non_empty_vec![first_subscriber],
+                }
+            );
+            assert_eq!(value, data);
+
+            let delivery = select! {
+                delivery = started.recv() => delivery.expect("second delivery did not start"),
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("late subscriber was not refetched while an unrelated waiter was armed");
+                },
+            };
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: main_key,
+                    subscribers: non_empty_vec![second_subscriber],
+                }
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_deliver_receives_distinct_subscriber_type() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
