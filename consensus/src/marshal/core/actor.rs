@@ -329,7 +329,7 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Processed floors used to admit or reject resolver fetches
+    // Last processed height and round
     floor: Floor,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
