@@ -163,15 +163,12 @@ impl<D: Digest> Producer for Handler<D> {
 /// response after validating it against the key. Multiple local annotations
 /// may share one peer key when they depend on the same block.
 ///
-/// [`Finalization`](Annotation::Finalization) and
-/// [`Notarization`](Annotation::Notarization) mirror non-block request types and
-/// only carry pruning metadata. [`Certified`](Annotation::Certified) and
-/// [`Finalized`](Annotation::Finalized) describe how a [`Request::Block`]
-/// delivery should be stored.
+/// [`Notarization`](Annotation::Notarization) mirrors a non-block request type
+/// and only carries pruning metadata. [`Certified`](Annotation::Certified) and
+/// [`Finalized`](Annotation::Finalized) describe how block-bearing responses
+/// should be stored.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
-    /// A finalization requested by height.
-    Finalization { height: Height },
     /// A notarization requested by round.
     Notarization { round: Round },
     /// A block requested by commitment for a certified chain.
@@ -185,7 +182,7 @@ pub enum Annotation {
 /// Metadata for a finalized block requested by commitment.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Finalized {
-    /// The finalized block's height is known before the request.
+    /// The finalized height is known before the request.
     ByHeight { height: Height },
     /// Only the finalization round is known before the request.
     ///
@@ -563,9 +560,9 @@ mod tests {
         let predicate = floor.predicate();
         assert!(predicate(
             &higher_finalized,
-            &Annotation::Finalization {
+            &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(200),
-            }
+            })
         ));
         assert!(predicate(
             &notarized,
@@ -580,9 +577,9 @@ mod tests {
         };
         assert!(!predicate(
             &same_height,
-            &Annotation::Finalization {
+            &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(100),
-            }
+            })
         ));
         assert!(!predicate(&block, &stale_finalized));
 

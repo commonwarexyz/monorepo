@@ -2217,9 +2217,11 @@ mod tests {
                         key: handler::Request::Finalized {
                             height: Height::new(5),
                         },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Finalization {
-                            height: Height::new(5),
-                        }),
+                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
+                            handler::Finalized::ByHeight {
+                                height: Height::new(5),
+                            },
+                        )),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,

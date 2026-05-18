@@ -692,7 +692,7 @@ where
                         // Trigger a targeted fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
                         resolver.fetch_targeted(
-                            Fetch::new(request, Annotation::Finalization { height }),
+                            Fetch::new(request, Annotation::Finalized(Finalized::ByHeight { height })),
                             targets,
                         );
                     }
@@ -1043,7 +1043,6 @@ where
                         Annotation::Certified { height }
                         | Annotation::Finalized(Finalized::ByHeight { height }) => Some(height),
                         Annotation::Finalized(Finalized::ByRound { .. })
-                        | Annotation::Finalization { .. }
                         | Annotation::Notarization { .. } => None,
                     };
                     if expected_height.is_none_or(|expected| expected == height) {
@@ -1851,7 +1850,7 @@ where
             .map(|height| {
                 Fetch::new(
                     Request::<V::Commitment>::Finalized { height },
-                    Annotation::Finalization { height },
+                    Annotation::Finalized(Finalized::ByHeight { height }),
                 )
             })
             .collect();
