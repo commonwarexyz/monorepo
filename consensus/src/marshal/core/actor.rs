@@ -1187,6 +1187,9 @@ where
                 for annotation in subscribers {
                     let keep = match annotation {
                         Annotation::Finalized(Finalized::ByHeight { height: expected }) => {
+                            // Height-bound finalization requests are derived from
+                            // finalized-chain state, so a matching commitment
+                            // must decode at the expected height.
                             assert_eq!(expected, height);
                             true
                         }
