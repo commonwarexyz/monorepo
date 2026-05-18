@@ -76,7 +76,7 @@ use crate::{
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
         },
-        core::{Fallback, Mailbox},
+        core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -371,7 +371,7 @@ where
             let (parent_view, parent_digest) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_digest,
-                Fallback::FetchByRound {
+                CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
@@ -488,7 +488,7 @@ where
             .child("optimistic_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
-                let block_request = marshal.subscribe_by_digest(Fallback::Wait, digest);
+                let block_request = marshal.subscribe_by_digest(DigestFallback::Wait, digest);
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -604,7 +604,9 @@ where
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe_by_digest(Fallback::Wait, digest);
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(DigestFallback::Wait, digest);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();

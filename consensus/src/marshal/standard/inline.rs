@@ -45,7 +45,7 @@
 use crate::{
     marshal::{
         application::validation::Stage,
-        core::{Fallback, Mailbox},
+        core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -284,7 +284,7 @@ where
             let (parent_view, parent_digest) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_digest,
-                Fallback::FetchByRound {
+                CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
@@ -411,7 +411,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal.subscribe_by_digest(Fallback::Wait, digest);
+            let block_request = marshal.subscribe_by_digest(DigestFallback::Wait, digest);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -500,7 +500,9 @@ where
 
         // Otherwise, wait for local block availability. Certification must not
         // fetch the candidate block from peers.
-        let block_rx = self.marshal.subscribe_by_digest(Fallback::Wait, digest);
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(DigestFallback::Wait, digest);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self

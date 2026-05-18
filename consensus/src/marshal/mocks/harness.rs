@@ -11,7 +11,7 @@ use crate::{
             Coding,
         },
         config::Config,
-        core::{Actor, Fallback, Mailbox},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -3632,7 +3632,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
 
         let subscription = victim_handle.mailbox.subscribe_by_commitment(
             commitment,
-            Fallback::FetchByCommitment {
+            CommitmentFallback::FetchByCommitment {
                 height: expected_height,
             },
         );
@@ -3708,7 +3708,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         let commitment = H::commitment(&block);
 
         let subscription_rx = handle.mailbox.subscribe_by_digest(
-            Fallback::FetchByRound {
+            DigestFallback::FetchByRound {
                 round: Round::new(Epoch::zero(), View::new(1)),
             },
             digest,
@@ -3793,19 +3793,19 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         let digest2 = H::digest(&block2);
 
         let sub1_rx = handle.mailbox.subscribe_by_digest(
-            Fallback::FetchByRound {
+            DigestFallback::FetchByRound {
                 round: Round::new(Epoch::zero(), View::new(1)),
             },
             digest1,
         );
         let sub2_rx = handle.mailbox.subscribe_by_digest(
-            Fallback::FetchByRound {
+            DigestFallback::FetchByRound {
                 round: Round::new(Epoch::zero(), View::new(2)),
             },
             digest2,
         );
         let sub3_rx = handle.mailbox.subscribe_by_digest(
-            Fallback::FetchByRound {
+            DigestFallback::FetchByRound {
                 round: Round::new(Epoch::zero(), View::new(1)),
             },
             digest1,
@@ -3894,13 +3894,13 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         let digest2 = H::digest(&block2);
 
         let sub1_rx = handle.mailbox.subscribe_by_digest(
-            Fallback::FetchByRound {
+            DigestFallback::FetchByRound {
                 round: Round::new(Epoch::zero(), View::new(1)),
             },
             digest1,
         );
         let sub2_rx = handle.mailbox.subscribe_by_digest(
-            Fallback::FetchByRound {
+            DigestFallback::FetchByRound {
                 round: Round::new(Epoch::zero(), View::new(2)),
             },
             digest2,
@@ -4004,19 +4004,19 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(Fallback::Wait, H::digest(&block1));
+            .subscribe_by_digest(DigestFallback::Wait, H::digest(&block1));
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(Fallback::Wait, H::digest(&block2));
+            .subscribe_by_digest(DigestFallback::Wait, H::digest(&block2));
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_digest(Fallback::Wait, H::digest(&block3));
+            .subscribe_by_digest(DigestFallback::Wait, H::digest(&block3));
         let sub4_rx = handle
             .mailbox
-            .subscribe_by_digest(Fallback::Wait, H::digest(&block4));
+            .subscribe_by_digest(DigestFallback::Wait, H::digest(&block4));
         let sub5_rx = handle
             .mailbox
-            .subscribe_by_digest(Fallback::Wait, H::digest(&block5));
+            .subscribe_by_digest(DigestFallback::Wait, H::digest(&block5));
 
         // Block1: Broadcasted by the actor
         H::propose(
@@ -4723,7 +4723,7 @@ pub fn ancestry_stream<H: TestHarness>() {
         let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
         let ancestry = handle
             .mailbox
-            .ancestry((Fallback::Wait, commitment))
+            .ancestry((DigestFallback::Wait, commitment))
             .await
             .unwrap();
         let blocks = ancestry.collect::<Vec<_>>().await;

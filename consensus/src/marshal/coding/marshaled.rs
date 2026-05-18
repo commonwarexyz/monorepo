@@ -347,7 +347,7 @@ where
                 block
             } else {
                 let block_request =
-                    marshal.subscribe_by_commitment(commitment, core::Fallback::Wait);
+                    marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
                 select! {
                     _ = tx.closed() => {
                         debug!(
@@ -373,7 +373,7 @@ where
             // height from the unverified child block for this lookup.
             let parent_request = fetch_parent(
                 parent_commitment,
-                core::Fallback::FetchByRound {
+                core::CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
@@ -598,7 +598,7 @@ where
             let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_commitment,
-                core::Fallback::FetchByRound {
+                core::CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
@@ -774,7 +774,7 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(payload, core::Fallback::Wait);
+                .subscribe_by_commitment(payload, core::CommitmentFallback::Wait);
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
@@ -926,7 +926,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(payload, core::Fallback::Wait);
+            .subscribe_by_commitment(payload, core::CommitmentFallback::Wait);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -1075,7 +1075,7 @@ where
 #[allow(clippy::type_complexity)]
 async fn fetch_parent<E, S, A, B, C, H>(
     parent_commitment: Commitment,
-    fallback: core::Fallback,
+    fallback: core::CommitmentFallback,
     application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,

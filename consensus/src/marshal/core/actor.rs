@@ -1,6 +1,6 @@
 use super::{
     cache,
-    mailbox::{Fallback, Mailbox, Message},
+    mailbox::{CommitmentFallback, Mailbox, Message},
     Buffer, Variant,
 };
 use crate::{
@@ -705,7 +705,7 @@ where
                         response,
                     } => {
                         self.handle_subscribe(
-                            fallback,
+                            fallback.into(),
                             BlockSubscriptionKey::Digest(digest),
                             response,
                             &mut resolver,
@@ -896,7 +896,7 @@ where
     /// Handle a local subscription request for a block.
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
-        fallback: Fallback,
+        fallback: CommitmentFallback,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -920,15 +920,14 @@ where
             return;
         }
 
-        // We don't have the block locally. Pending candidate data uses
-        // `Fallback::Wait` and reaches this point without a round or
-        // height, so it only registers a local subscriber below.
+        // We don't have the block locally. Local-only waits reach this point
+        // without a round or height, so they only register a subscriber below.
         //
         // Round-based fetching is for certified parent lookups whose height is
         // not known before the request. Height-based fetching is only for
         // callers that already have a validated pruning height.
         match fallback {
-            Fallback::FetchByRound { round } => {
+            CommitmentFallback::FetchByRound { round } => {
                 if round < self.last_processed_round {
                     // `last_processed_round` only advances after the application
                     // processes the corresponding finalized block. A round-bound
@@ -948,7 +947,7 @@ where
                     Annotation::Notarization { round },
                 ));
             }
-            Fallback::FetchByCommitment { height } => {
+            CommitmentFallback::FetchByCommitment { height } => {
                 let commitment = match key {
                     BlockSubscriptionKey::Commitment(commitment) => commitment,
                     BlockSubscriptionKey::Digest(digest) => {
@@ -979,12 +978,12 @@ where
                     Annotation::Certified { height },
                 ));
             }
-            Fallback::Wait => {}
+            CommitmentFallback::Wait => {}
         }
 
         let round = match fallback {
-            Fallback::FetchByRound { round } => Some(round),
-            Fallback::Wait | Fallback::FetchByCommitment { .. } => None,
+            CommitmentFallback::FetchByRound { round } => Some(round),
+            CommitmentFallback::Wait | CommitmentFallback::FetchByCommitment { .. } => None,
         };
 
         // Register subscriber.

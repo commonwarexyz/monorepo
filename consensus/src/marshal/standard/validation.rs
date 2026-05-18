@@ -3,7 +3,7 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::{Fallback, Mailbox},
+        core::{CommitmentFallback, Mailbox},
         standard::Standard,
     },
     simplex::types::Context,
@@ -135,7 +135,7 @@ where
     let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
         parent_digest,
-        Fallback::FetchByRound {
+        CommitmentFallback::FetchByRound {
             round: Round::new(context.epoch(), parent_view),
         },
         application,
@@ -220,7 +220,7 @@ where
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
-    fallback: Fallback,
+    fallback: CommitmentFallback,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>

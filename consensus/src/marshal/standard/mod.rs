@@ -44,7 +44,7 @@ mod tests {
     use crate::{
         marshal::{
             config::Config,
-            core::{cache, Actor, Fallback, Mailbox},
+            core::{cache, Actor, CommitmentFallback, Mailbox},
             mocks::{
                 application::Application,
                 harness::{
@@ -2608,7 +2608,7 @@ mod tests {
             .await;
 
             let subscription =
-                mailbox.subscribe_by_commitment(block.digest(), Fallback::FetchByRound { round });
+                mailbox.subscribe_by_commitment(block.digest(), CommitmentFallback::FetchByRound { round });
 
             wait_until(
                 &context,
@@ -2653,55 +2653,6 @@ mod tests {
                     panic!("notarized delivery did not wake block subscriber");
                 },
             }
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_digest_fetch_by_commitment_is_rejected() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let digest = Sha256::hash(b"digest-fetch-by-commitment");
-
-            let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "digest-fetch-by-commitment",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
-            )
-            .await;
-
-            let subscription = mailbox.subscribe_by_digest(
-                Fallback::FetchByCommitment {
-                    height: Height::new(7),
-                },
-                digest,
-            );
-
-            select! {
-                result = subscription => {
-                    assert!(result.is_err(), "digest exact fetch must close");
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("digest exact fetch remained pending");
-                },
-            }
-            assert_eq!(
-                buffer.subscription_count(),
-                0,
-                "digest exact fetch must not register a local wait"
-            );
-            assert!(
-                resolver.fetches().is_empty(),
-                "digest exact fetch must not fetch from peers"
-            );
-            assert!(
-                resolver.targeted_is_empty(),
-                "digest exact fetch must not issue targeted fetches"
-            );
         });
     }
 
