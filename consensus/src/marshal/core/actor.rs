@@ -662,7 +662,7 @@ where
                         response,
                     } => match identifier {
                         BlockID::Digest(digest) => {
-                            let result = self.find_block_by_digest(&mut buffer, digest).await;
+                            let result = self.find_block_by_digest(&buffer, digest).await;
                             response.send_lossy(result);
                         }
                         BlockID::Height(height) => {
@@ -672,7 +672,7 @@ where
                         BlockID::Latest => {
                             let block = match self.get_latest().await {
                                 Some((_, digest, _)) => {
-                                    self.find_block_by_digest(&mut buffer, digest).await
+                                    self.find_block_by_digest(&buffer, digest).await
                                 }
                                 None => None,
                             };
@@ -704,8 +704,9 @@ where
                         response,
                     } => {
                         self.handle_subscribe(
-                            round,
-                            None,
+                            round.map_or(Fallback::Wait, |round| Fallback::FetchByRound {
+                                round,
+                            }),
                             BlockSubscriptionKey::Digest(digest),
                             response,
                             &mut resolver,
@@ -719,14 +720,8 @@ where
                         commitment,
                         response,
                     } => {
-                        let (round, height) = match fallback {
-                            Fallback::Wait => (None, None),
-                            Fallback::FetchByRound { round } => (Some(round), None),
-                            Fallback::FetchByCommitment { height } => (None, Some(height)),
-                        };
                         self.handle_subscribe(
-                            round,
-                            height,
+                            fallback,
                             BlockSubscriptionKey::Commitment(commitment),
                             response,
                             &mut resolver,
@@ -903,8 +898,7 @@ where
     /// Handle a local subscription request for a block.
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
-        round: Option<Round>,
-        height: Option<Height>,
+        fallback: Fallback,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<
@@ -939,57 +933,68 @@ where
         // height is not known before the request. Height-based fetching is used
         // once the caller has a child block, which makes the expected parent
         // height known before the request.
-        if let Some(round) = round {
-            if round <= self.last_processed_round {
-                // `last_processed_round` only advances after the application
-                // processes the corresponding finalized block. A round-bound
-                // certified-parent fetch at or below that floor is only
-                // proposal-construction assistance for data behind the
-                // processed chain.
-                return;
-            }
-            // Fetch the certified parent proposal for this round. The response
-            // must include a certificate so the commitment is tied to the
-            // certified parent context. The decoded block is heightable, but
-            // that height is not known soon enough to key, coalesce, or prune
-            // the in-flight resolver request.
-            debug!(?round, ?digest, "requested block missing");
-            let request = Request::Notarized { round };
-            match key {
-                BlockSubscriptionKey::Digest(_) => {
-                    resolver.fetch(request);
+        match fallback {
+            Fallback::FetchByRound { round } => {
+                if round <= self.last_processed_round {
+                    // `last_processed_round` only advances after the application
+                    // processes the corresponding finalized block. A round-bound
+                    // certified-parent fetch at or below that floor is only
+                    // proposal-construction assistance for data behind the
+                    // processed chain.
+                    return;
                 }
-                BlockSubscriptionKey::Commitment(commitment) => {
+                // Fetch the certified parent proposal for this round. The response
+                // must include a certificate so the commitment is tied to the
+                // certified parent context. The decoded block is heightable, but
+                // that height is not known soon enough to key, coalesce, or prune
+                // the in-flight resolver request.
+                debug!(?round, ?digest, "requested block missing");
+                let request = Request::Notarized { round };
+                match key {
+                    BlockSubscriptionKey::Digest(_) => {
+                        resolver.fetch(request);
+                    }
+                    BlockSubscriptionKey::Commitment(commitment) => {
+                        resolver.fetch(Fetch::new(
+                            request,
+                            ResolverSubscriber::Block {
+                                commitment,
+                                context: BlockFetchContext::Finalized { round },
+                            },
+                        ));
+                    }
+                }
+            }
+            Fallback::FetchByCommitment { height } => {
+                if let BlockSubscriptionKey::Commitment(commitment) = key {
+                    if height <= self.last_processed_height {
+                        // We already checked local storage. Missing ancestors at or
+                        // below the processed floor are no longer useful to request.
+                        debug!(
+                            %height,
+                            floor = %self.last_processed_height,
+                            ?commitment,
+                            "dropping commitment subscription at or below processed height floor"
+                        );
+                        return;
+                    }
+                    debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
                     resolver.fetch(Fetch::new(
-                        request,
+                        Request::Block { commitment },
                         ResolverSubscriber::Block {
                             commitment,
-                            context: BlockFetchContext::Finalized { round },
+                            context: BlockFetchContext::Ancestry { height },
                         },
                     ));
                 }
             }
-        } else if let (Some(height), BlockSubscriptionKey::Commitment(commitment)) = (height, key) {
-            if height <= self.last_processed_height {
-                // We already checked local storage. Missing ancestors at or
-                // below the processed floor are no longer useful to request.
-                debug!(
-                    %height,
-                    floor = %self.last_processed_height,
-                    ?commitment,
-                    "dropping commitment subscription at or below processed height floor"
-                );
-                return;
-            }
-            debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
-            resolver.fetch(Fetch::new(
-                Request::Block { commitment },
-                ResolverSubscriber::Block {
-                    commitment,
-                    context: BlockFetchContext::Ancestry { height },
-                },
-            ));
+            Fallback::Wait => {}
         }
+
+        let round = match fallback {
+            Fallback::FetchByRound { round } => Some(round),
+            Fallback::Wait | Fallback::FetchByCommitment { .. } => None,
+        };
 
         // Register subscriber.
         match key {
