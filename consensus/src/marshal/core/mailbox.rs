@@ -922,7 +922,7 @@ mod tests {
         )
     }
 
-    fn subscribe_by_commitment_with_fallback(
+    fn subscribe_by_commitment_message(
         height: u64,
         fallback: CommitmentFallback,
     ) -> (TestMessage, oneshot::Receiver<harness::B>) {
@@ -934,15 +934,6 @@ mod tests {
                 response,
             },
             receiver,
-        )
-    }
-
-    fn subscribe_by_commitment(height: u64) -> (TestMessage, oneshot::Receiver<harness::B>) {
-        subscribe_by_commitment_with_fallback(
-            height,
-            CommitmentFallback::FetchByRound {
-                round: round(height),
-            },
         )
     }
 
@@ -1077,12 +1068,12 @@ mod tests {
     fn policy_preserves_commitment_subscription_fallbacks() {
         let mut overflow = pending();
 
-        let (wait, _wait_rx) = subscribe_by_commitment_with_fallback(1, CommitmentFallback::Wait);
-        let (by_round, _by_round_rx) = subscribe_by_commitment_with_fallback(
+        let (wait, _wait_rx) = subscribe_by_commitment_message(1, CommitmentFallback::Wait);
+        let (by_round, _by_round_rx) = subscribe_by_commitment_message(
             2,
             CommitmentFallback::FetchByRound { round: round(2) },
         );
-        let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_with_fallback(
+        let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_message(
             3,
             CommitmentFallback::FetchByCommitment {
                 height: Height::new(3),
@@ -1131,7 +1122,10 @@ mod tests {
             .messages
             .push_back(PendingMessage::Message(pending_closed));
 
-        let (pending_open, mut pending_open_rx) = subscribe_by_commitment(2);
+        let (pending_open, mut pending_open_rx) = subscribe_by_commitment_message(
+            2,
+            CommitmentFallback::FetchByRound { round: round(2) },
+        );
         overflow
             .messages
             .push_back(PendingMessage::Message(pending_open));
