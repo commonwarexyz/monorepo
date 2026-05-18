@@ -31,12 +31,23 @@ pub trait BlockProvider: Clone + Send + 'static {
     ///
     /// Returns `None` when the subscription is canceled or the provider can no longer deliver
     /// the block.
+    ///
+    /// This is intentionally narrower than [`Self::subscribe_parent`]. A digest is enough to
+    /// identify a block in local storage, but it may not be enough to form the network request
+    /// used by a marshal variant. Variants whose consensus commitment contains extra context
+    /// should keep that logic in [`Self::subscribe_parent`], where the known child block is
+    /// still available.
     fn subscribe(
         self,
         digest: <Self::Block as Digestible>::Digest,
     ) -> impl Future<Output = Option<Self::AncestryBlock>> + Send;
 
     /// Subscribe to the parent of a known block.
+    ///
+    /// This is a separate hook from [`Self::subscribe`] because the child block can carry
+    /// variant-specific context needed to retrieve its parent. The default implementation
+    /// follows the digest link and waits locally, but providers may override this to derive a
+    /// full parent commitment and issue a fetching subscription.
     fn subscribe_parent(
         self,
         block: Self::AncestryBlock,
