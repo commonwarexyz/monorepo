@@ -112,12 +112,13 @@ mod tests {
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
 
     /// A coding buffer that records subscriptions and never resolves them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
         subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
-        sends: Arc<Mutex<Vec<(Round, TestCodedBlock, Recipients<K>)>>>,
+        sends: Arc<Mutex<Vec<CodingSendRecord>>>,
     }
 
     impl RecordingCodingBuffer {
