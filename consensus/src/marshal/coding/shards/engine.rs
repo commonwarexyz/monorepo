@@ -762,9 +762,13 @@ where
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
     ///
-    /// Without a known leader, only shards whose index matches the sender's
-    /// participant index are safe to ingest. Once the leader is known, the
-    /// leader's shard may instead match the local participant index.
+    /// The buffers are per sender and may contain shards from many peers. Before
+    /// the leader is known, the only actionable shard from each sender is the
+    /// one at that sender's participant index, because that is the shard a
+    /// non-leader is allowed to gossip. This still lets a notarized commitment
+    /// reconstruct from many peer-gossiped shards. The local assigned shard is
+    /// different: it is only valid when it came from the leader, and the leader's
+    /// identity is needed before it can be accepted as assigned-shard evidence.
     fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let Some(state) = self.state.get(&commitment) else {
             return false;
