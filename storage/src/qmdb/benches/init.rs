@@ -23,9 +23,8 @@ cfg_if::cfg_if! {
     if #[cfg(not(full_bench))] {
         const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
     } else {
-        const CASES: [(u64, u64); 3] = [
+        const CASES: [(u64, u64); 2] = [
             (NUM_ELEMENTS, NUM_OPERATIONS),
-            (NUM_ELEMENTS * 10, NUM_OPERATIONS),
             (NUM_ELEMENTS * 3, NUM_OPERATIONS * 3),
         ];
     }

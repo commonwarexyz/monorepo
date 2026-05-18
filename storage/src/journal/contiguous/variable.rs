@@ -576,6 +576,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
         }
 
+        // After a same-section crash during a previous clear_to_size, the journal may recover to a
+        // stale position ahead of the requested start.
+        let bounds = journal.reader().await.bounds();
+        if bounds.is_empty() && bounds.start > range.start {
+            journal.clear_to_size(range.start).await?;
+            return Ok(journal);
+        }
+
         // Check if data exceeds the sync range
         if size > range.end {
             return Err(Error::ItemOutOfRange(size));
@@ -593,7 +601,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         }
 
         // Prune to lower bound if needed
-        let bounds = journal.reader().await.bounds();
         if !bounds.is_empty() && bounds.start < range.start {
             debug!(
                 oldest_pos = bounds.start,
@@ -3010,6 +3017,103 @@ mod tests {
                 // Should return ItemOutOfRange error since data exists beyond upper_bound
                 assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
             }
+        });
+    }
+
+    /// Test `init_sync` repairs an empty journal recovered at a stale position beyond the range.
+    #[test_traced]
+    fn test_init_sync_empty_stale_position_beyond_upper_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-empty-stale-position".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let stale_size = 30;
+            let journal = Journal::<deterministic::Context, u64>::init_at_size(
+                context.child("first"),
+                cfg.clone(),
+                stale_size,
+            )
+            .await
+            .expect("Failed to create stale empty journal");
+            assert_eq!(journal.size().await, stale_size);
+            assert!(journal.bounds().await.is_empty());
+            drop(journal);
+
+            let lower_bound = 10;
+            let upper_bound = 26;
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.child("second"),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to repair stale empty journal");
+
+            assert_eq!(journal.size().await, lower_bound);
+            assert!(journal.bounds().await.is_empty());
+
+            let pos = journal.append(&999).await.unwrap();
+            assert_eq!(pos, lower_bound);
+            assert_eq!(journal.read(pos).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` repairs an empty journal recovered after a `clear_to_size` crash.
+    #[test_traced]
+    fn test_init_sync_recovers_from_stale_clear_to_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-stale-clear-to-size".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            let journal = Journal::<deterministic::Context, u64>::init_at_size(
+                context.child("first"),
+                cfg.clone(),
+                9,
+            )
+            .await
+            .expect("Failed to create stale empty journal");
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Simulate clear_to_size(7) crashing after clearing data, but before offsets were
+            // re-cleared. Recovery will initially see the old empty offsets boundary at 9.
+            match context.remove(&cfg.data_partition(), None).await {
+                Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+                Err(error) => panic!("failed to clear data partition: {error}"),
+            }
+
+            let lower_bound = 7;
+            let upper_bound = 20;
+            let journal = Journal::<deterministic::Context, u64>::init_sync(
+                context.child("second"),
+                cfg.clone(),
+                lower_bound..upper_bound,
+            )
+            .await
+            .expect("Failed to repair stale empty journal");
+
+            assert_eq!(journal.size().await, lower_bound);
+            let bounds = journal.bounds().await;
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, lower_bound);
+
+            journal.destroy().await.unwrap();
         });
     }
 

@@ -139,7 +139,7 @@ fn merge_targets<P: Eq>(existing: &mut Option<NonEmptyVec<P>>, incoming: Option<
 impl<K: Eq, P: Eq> Policy for Message<K, P> {
     type Overflow = Pending<K, P>;
 
-    fn handle(overflow: &mut Pending<K, P>, message: Self) {
+    fn handle(overflow: &mut Pending<K, P>, message: Self) -> bool {
         match message {
             Self::Fetch(requests) => {
                 for request in requests {
@@ -186,6 +186,7 @@ impl<K: Eq, P: Eq> Policy for Message<K, P> {
                     .push_back(Modification::Retain { predicate });
             }
         }
+        true
     }
 }
 

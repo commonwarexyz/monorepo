@@ -243,7 +243,7 @@ impl NetworkScheme for Discovery {
             MAX_MSG_SIZE,
         );
         // Override some settings for fuzzing environment
-        config.mailbox_size = 100; // Small mailbox to encourage backpressure
+        config.mailbox_size = NZUsize!(100); // Small mailbox to encourage backpressure
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = peer.topo.tracked_peer_sets;
 
@@ -261,7 +261,7 @@ impl NetworkScheme for Discovery {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.track(index as u64, subset).await;
+            oracle.track(index as u64, subset);
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -290,7 +290,7 @@ impl NetworkScheme for Discovery {
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.track(index, peer_pks).await;
+        let _ = oracle.track(index, peer_pks);
     }
 }
 
@@ -332,12 +332,10 @@ impl NetworkScheme for Lookup {
         // Register multiple peer sets to seed the network
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets.get() {
-            oracle
-                .track(
-                    index as u64,
-                    Map::<_, Address>::try_from(peer_list.clone()).expect("public keys are unique"),
-                )
-                .await;
+            oracle.track(
+                index as u64,
+                Map::<_, Address>::try_from(peer_list.clone()).expect("public keys are unique"),
+            );
         }
 
         // Register randomized subsets of 3 peers for indices TRACKED_PEER_SETS..2*TRACKED_PEER_SETS
@@ -349,7 +347,7 @@ impl NetworkScheme for Lookup {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.track(index as u64, subset).await;
+            oracle.track(index as u64, subset);
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -381,7 +379,7 @@ impl NetworkScheme for Lookup {
             })
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.track(index, peer_list).await;
+        oracle.track(index, peer_list);
     }
 }
 
@@ -515,29 +513,26 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     // Attempt to send the message
                     // Note: Always use low priority (false) to ensure FIFO ordering
-                    let send_result = peers[from_idx]
+                    let accepted_recipients = peers[from_idx]
                         .network
                         .sender
-                        .send(recipients, message.clone(), false)
-                        .await;
+                        .send(recipients, message.clone(), false);
 
                     // Track message as expected only if send was accepted
-                    if let Ok(accepted_recipients) = send_result {
-                        // Map accepted recipient public keys to indices
-                        for pk in accepted_recipients.into_iter() {
-                            if let Some(&to_idx) = topology.pk_to_id.get(&pk) {
-                                // Add message to the queue for this (receiver, sender) pair
-                                expected_msgs
-                                    .entry((to_idx, from_idx as u8))
-                                    .or_default()
-                                    .push_back(message.clone());
+                    // Map accepted recipient public keys to indices
+                    for pk in accepted_recipients {
+                        if let Some(&to_idx) = topology.pk_to_id.get(&pk) {
+                            // Add message to the queue for this (receiver, sender) pair
+                            expected_msgs
+                                .entry((to_idx, from_idx as u8))
+                                .or_default()
+                                .push_back(message.clone());
 
-                                // Track that this receiver has pending messages from this sender
-                                pending_by_receiver
-                                    .entry(to_idx)
-                                    .or_default()
-                                    .insert(from_idx as u8);
-                            }
+                            // Track that this receiver has pending messages from this sender
+                            pending_by_receiver
+                                .entry(to_idx)
+                                .or_default()
+                                .insert(from_idx as u8);
                         }
                     }
                 }
@@ -637,7 +632,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
                     let blocked_pk = peers[blocked_idx].info.public_key.clone();
                     #[allow(clippy::disallowed_methods, reason = "fuzz harness without tracing")]
-                    peers[blocker_idx].network.oracle.block(blocked_pk).await;
+                    peers[blocker_idx].network.oracle.block(blocked_pk);
                 }
             }
         }

@@ -235,22 +235,18 @@ fn fuzz(input: FuzzInput) {
 
                     // Attempt to send the message
                     // Note: Success only means accepted for transmission, not guaranteed delivery
-                    let accepted = sender
-                        .send(
-                            Recipients::One(peer_pks[to_idx].clone()),
-                            message.clone(),
-                            true,
-                        )
-                        .await;
+                    let accepted = sender.send(
+                        Recipients::One(peer_pks[to_idx].clone()),
+                        message.clone(),
+                        true,
+                    );
 
                     // Track the message only if the network accepted this recipient.
-                    if let Ok(accepted) = accepted {
-                        if accepted.iter().any(|pk| pk == &peer_pks[to_idx]) {
-                            expected_msgs
-                                .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
-                                .or_default()
-                                .push_back(message);
-                        }
+                    if accepted.iter().any(|pk| pk == &peer_pks[to_idx]) {
+                        expected_msgs
+                            .entry((to_idx, peer_pks[from_idx].clone(), channel_id))
+                            .or_default()
+                            .push_back(message);
                     }
                 }
 
@@ -365,7 +361,7 @@ fn fuzz(input: FuzzInput) {
                     let primary = mask_to_set(primary_mask, &peer_pks);
                     let secondary = mask_to_set(secondary_mask, &peer_pks);
                     let mut manager = oracle.manager();
-                    manager.track(id, TrackedPeers::new(primary, secondary)).await;
+                    let _ = manager.track(id, TrackedPeers::new(primary, secondary));
                 }
 
                 Operation::TrackSocketManager {
@@ -376,9 +372,8 @@ fn fuzz(input: FuzzInput) {
                     let primary = mask_to_address_map(primary_mask, &peer_pks);
                     let secondary = mask_to_address_map(secondary_mask, &peer_pks);
                     let mut socket_manager = oracle.socket_manager();
-                    socket_manager
-                        .track(id, AddressableTrackedPeers::new(primary, secondary))
-                        .await;
+                    let _ =
+                        socket_manager.track(id, AddressableTrackedPeers::new(primary, secondary));
                 }
 
                 Operation::PeerSetLookup { id } => {

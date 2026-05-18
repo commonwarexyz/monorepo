@@ -12,5 +12,5 @@ pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;
 mod mailbox;
-pub use mailbox::{Mailbox, UnboundedMailbox};
+pub use mailbox::Mailbox;
 mod relay;

@@ -2,9 +2,9 @@
 
 use crate::authenticated::{
     lookup::actors::{spawner, tracker},
-    mailbox::UnboundedMailbox,
-    Mailbox,
+    Mailbox as SpawnerMailbox,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -14,12 +14,15 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
-use commonware_utils::{channel::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};
+use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
+use futures::{Sink, StreamExt};
 use rand_core::CryptoRngCore;
 use std::{
     collections::HashSet,
+    fmt,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
+    pin::Pin,
 };
 use tracing::debug;
 
@@ -28,6 +31,32 @@ const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
+
+pub(crate) type Updates = ring::Receiver<HashSet<IpAddr>>;
+
+#[derive(Clone)]
+pub(crate) struct Mailbox(ring::Sender<HashSet<IpAddr>>);
+
+impl fmt::Debug for Mailbox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Mailbox").finish()
+    }
+}
+
+impl Mailbox {
+    pub(crate) fn new() -> (Self, Updates) {
+        let (sender, receiver) = ring::channel(NZUsize!(1));
+        (Self(sender), receiver)
+    }
+
+    pub(crate) fn set(&mut self, registered_ips: HashSet<IpAddr>) -> Feedback {
+        if Pin::new(&mut self.0).start_send(registered_ips).is_ok() {
+            Feedback::Ok
+        } else {
+            Feedback::Closed
+        }
+    }
+}
 
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
@@ -51,7 +80,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
     registered_ips: HashSet<IpAddr>,
-    mailbox: mpsc::Receiver<HashSet<IpAddr>>,
+    updates: Updates,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -59,7 +88,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
+    pub fn new(context: E, cfg: Config<C>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -89,7 +118,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
             registered_ips: HashSet::new(),
-            mailbox,
+            updates,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
@@ -104,8 +133,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
+        mut supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Perform handshake
         let source_ip = address.ip();
@@ -134,14 +163,14 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
-        supervisor.spawn((send, recv), reservation).await;
+        let _ = supervisor.spawn((send, recv), reservation);
     }
 
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
+        supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
     }
@@ -149,8 +178,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: tracker::Mailbox<C::PublicKey>,
+        supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Setup the rate limiters
         let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
@@ -176,8 +205,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             on_stopped => {
                 debug!("context shutdown, stopping listener");
             },
-            Some(registered_ips) = self.mailbox.recv() else {
-                debug!("mailbox closed");
+            Some(registered_ips) = self.updates.next() else {
+                debug!("listener updates closed");
                 break;
             } => {
                 self.registered_ips = registered_ips;
@@ -269,16 +298,34 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::ed25519::PrivateKey;
+    use commonware_actor::mailbox;
+    use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, Error as RuntimeError, Runner as _, Stream, Supervisor as _,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{NZUsize, NZU32};
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
+
+    #[test]
+    fn mailbox_keeps_latest_registered_ips() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (mut mailbox, mut receiver) = Mailbox::new();
+            let first = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]);
+            let second = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
+            let third = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3))]);
+
+            assert_eq!(mailbox.set(first), Feedback::Ok);
+            assert_eq!(mailbox.set(second), Feedback::Ok);
+            assert_eq!(mailbox.set(third.clone()), Feedback::Ok);
+
+            assert_eq!(receiver.next().await, Some(third));
+        });
+    }
 
     fn check_rate_limits<CheckMetrics>(
         allowed_handshake_rate_per_ip: Quota,
@@ -299,7 +346,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (updates_tx, updates_rx) = mpsc::channel(1);
+            let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -316,12 +363,12 @@ mod tests {
 
             let mut allowed = HashSet::new();
             allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            updates_tx
-                .send(allowed)
-                .await
-                .expect("update registered ips");
+            assert_eq!(updates_tx.set(allowed), Feedback::Ok);
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -337,11 +384,13 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) =
+                SpawnerMailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener
             let (sink, mut stream) = loop {
@@ -465,7 +514,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -480,7 +529,10 @@ mod tests {
                 updates_rx,
             );
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -496,11 +548,13 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) =
+                SpawnerMailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener
             let (sink, mut stream) = loop {
@@ -545,7 +599,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = mpsc::channel(1);
+            let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -560,7 +614,10 @@ mod tests {
                 updates_rx,
             );
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -576,11 +633,13 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) =
+                SpawnerMailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener
             let (sink, mut stream) = loop {
@@ -625,7 +684,7 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (updates_tx, updates_rx) = mpsc::channel(1);
+            let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -643,12 +702,12 @@ mod tests {
             // Register the IP so it would be allowed if not for the private IP check
             let mut allowed = HashSet::new();
             allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            updates_tx
-                .send(allowed)
-                .await
-                .expect("update registered ips");
+            assert_eq!(updates_tx.set(allowed), Feedback::Ok);
 
-            let (tracker_mailbox, mut tracker_rx) = UnboundedMailbox::new();
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
@@ -664,11 +723,13 @@ mod tests {
                 }
             });
 
-            let (supervisor_mailbox, mut supervisor_rx) = Mailbox::new(1);
+            let (supervisor_mailbox, mut supervisor_rx) =
+                SpawnerMailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
-            let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
+            let listener_handle =
+                actor.start(tracker::Mailbox::new(tracker_mailbox), supervisor_mailbox);
 
             // Connect to the listener from a private IP
             let (sink, mut stream) = loop {

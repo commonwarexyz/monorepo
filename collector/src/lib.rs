@@ -10,23 +10,14 @@
 )]
 
 commonware_macros::stability_scope!(ALPHA {
+    use commonware_actor::Feedback;
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, Digestible, PublicKey};
     use commonware_p2p::Recipients;
     use commonware_utils::channel::oneshot;
     use std::future::Future;
-    use thiserror::Error;
 
     pub mod p2p;
-
-    /// Errors that can occur when interacting with a [Originator].
-    #[derive(Error, Debug)]
-    pub enum Error {
-        #[error("send failed: {0}")]
-        SendFailed(anyhow::Error),
-        #[error("canceled")]
-        Canceled,
-    }
 
     /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
     pub trait Originator: Clone + Send + 'static {
@@ -36,21 +27,17 @@ commonware_macros::stability_scope!(ALPHA {
         /// The type of request to send.
         type Request: Committable + Digestible + Codec;
 
-        /// Sends a `Request` to a set of [Recipients], returning the list of handlers that we
-        /// tried to send to.
+        /// Enqueues a `Request` to a set of [Recipients].
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             request: Self::Request,
-        ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Error>> + Send;
+        ) -> Feedback;
 
-        /// Cancel a request by `commitment`, ignoring any future responses.
+        /// Enqueues cancellation of a request by `commitment`, ignoring any future responses.
         ///
         /// Tracked commitments are not removed until explicitly cancelled.
-        fn cancel(
-            &mut self,
-            commitment: <Self::Request as Committable>::Commitment,
-        ) -> impl Future<Output = ()> + Send;
+        fn cancel(&mut self, commitment: <Self::Request as Committable>::Commitment) -> Feedback;
     }
 
     /// A [Handler] receives requests and (optionally) sends replies.

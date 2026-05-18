@@ -1,19 +1,12 @@
 //! Mock sender implementations for testing.
 
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
 use commonware_runtime::IoBufs;
 use std::time::SystemTime;
-use thiserror::Error;
 
-/// Errors that can be returned by [Failing].
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("send failed")]
-    Failed,
-}
-
-/// A sender that always fails with [Error::Canceled].
+/// A sender that always returns [Feedback::Closed].
 #[derive(Clone, Debug)]
 pub struct Failing<P: PublicKey> {
     _phantom: std::marker::PhantomData<P>,
@@ -32,7 +25,7 @@ impl<P: PublicKey> LimitedSender for Failing<P> {
     type PublicKey = P;
     type Checked<'a> = CheckedFailing<P>;
 
-    async fn check(&mut self, _recipients: Recipients<P>) -> Result<Self::Checked<'_>, SystemTime> {
+    fn check(&mut self, _recipients: Recipients<P>) -> Result<Self::Checked<'_>, SystemTime> {
         Ok(CheckedFailing {
             _phantom: std::marker::PhantomData,
         })
@@ -45,13 +38,12 @@ pub struct CheckedFailing<P: PublicKey> {
 
 impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
     type PublicKey = P;
-    type Error = Error;
 
-    async fn send(
-        self,
-        _message: impl Into<IoBufs> + Send,
-        _priority: bool,
-    ) -> Result<Vec<P>, Self::Error> {
-        Err(Error::Failed)
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        Vec::new()
+    }
+
+    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
+        Feedback::Closed
     }
 }

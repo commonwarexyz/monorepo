@@ -6,6 +6,7 @@ use commonware_flood::Config;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
 use rand::{rngs::OsRng, seq::IteratorRandom};
+use std::num::NonZeroUsize;
 use tracing::info;
 use uuid::Uuid;
 
@@ -75,7 +76,7 @@ fn main() {
             Arg::new("mailbox-size")
                 .long("mailbox-size")
                 .required(true)
-                .value_parser(value_parser!(usize)),
+                .value_parser(value_parser!(NonZeroUsize)),
         )
         .arg(
             Arg::new("dashboard")
@@ -141,7 +142,7 @@ fn main() {
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
     let message_size = *matches.get_one::<u32>("message-size").unwrap();
     let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
-    let mailbox_size = *matches.get_one::<usize>("mailbox-size").unwrap();
+    let mailbox_size = *matches.get_one::<NonZeroUsize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();
     let mut instance_configs = Vec::new();
     let mut peer_configs = Vec::new();

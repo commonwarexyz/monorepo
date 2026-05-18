@@ -7,7 +7,7 @@ use commonware_actor::mailbox::{self, Receiver};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use rand::Rng;
 use tracing::info;
 
@@ -15,20 +15,20 @@ use tracing::info;
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, H: Hasher> {
+pub struct Application<R: Rng + Spawner + Metrics, H: Hasher> {
     context: ContextCell<R>,
     hasher: H,
     mailbox: Receiver<Message<H::Digest>>,
 }
 
-impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
+impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
     /// Create a new application actor.
     #[allow(clippy::type_complexity)]
     pub fn new(
         context: R,
         config: Config<H>,
     ) -> (Self, Scheme, Reporter<H::Digest>, Mailbox<H::Digest>) {
-        let (sender, receiver) = mailbox::new(config.mailbox_size);
+        let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let mailbox = Mailbox::new(sender);
         let reporter = Reporter::new();
         (

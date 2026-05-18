@@ -148,7 +148,8 @@ impl<
             context.histogram("finalization_latency", "finalization latency", LATENCY);
 
         // Initialize store
-        let (mailbox_sender, mailbox_receiver) = mailbox::new(cfg.mailbox_size);
+        let (mailbox_sender, mailbox_receiver) =
+            mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(
@@ -241,7 +242,7 @@ impl<
     }
 
     /// Send a vote to every peer.
-    async fn broadcast_vote<T: Sender>(
+    fn broadcast_vote<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
@@ -255,11 +256,11 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast vote
-        sender.send(Recipients::All, vote, true).await.unwrap();
+        sender.send(Recipients::All, vote, true);
     }
 
     /// Send a certificate to every peer.
-    async fn broadcast_certificate<T: Sender>(
+    fn broadcast_certificate<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Certificate<S, D>>,
         certificate: Certificate<S, D>,
@@ -273,14 +274,11 @@ impl<
         self.outbound_messages.get_or_create(metric).inc();
 
         // Broadcast certificate
-        sender
-            .send(Recipients::All, certificate, true)
-            .await
-            .unwrap();
+        sender.send(Recipients::All, certificate, true);
     }
 
     /// Blocks an equivocator.
-    async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
+    fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
         let Some(equivocator) = equivocator else {
             return;
         };
@@ -337,8 +335,7 @@ impl<
 
         // Broadcast nullify vote (regardless)
         debug!(round=?nullify.round(), "broadcasting nullify");
-        self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
-            .await;
+        self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
     }
 
     /// Handle a timeout.
@@ -366,8 +363,7 @@ impl<
             .previous()
             .expect("we should never be in the genesis view");
         if let Some(certificate) = self.state.get_best_certificate(past_view) {
-            self.broadcast_certificate(certificate_sender, certificate)
-                .await;
+            self.broadcast_certificate(certificate_sender, certificate);
         }
     }
 
@@ -410,7 +406,7 @@ impl<
         if added {
             self.append_journal(view, artifact).await;
         }
-        self.block_equivocator(equivocator).await;
+        self.block_equivocator(equivocator);
     }
 
     /// Handles the certification of a proposal.
@@ -447,7 +443,7 @@ impl<
         if added {
             self.append_journal(view, artifact).await;
         }
-        self.block_equivocator(equivocator).await;
+        self.block_equivocator(equivocator);
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
@@ -474,8 +470,7 @@ impl<
             proposal=?notarize.proposal,
             "broadcasting notarize"
         );
-        self.broadcast_vote(vote_sender, Vote::Notarize(notarize))
-            .await;
+        self.broadcast_vote(vote_sender, Vote::Notarize(notarize));
     }
 
     /// Share a notarization certificate once we can assemble it locally.
@@ -510,8 +505,7 @@ impl<
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Notarization(notarization.clone()),
-        )
-        .await;
+        );
         // Surface the event to the application for observability.
         self.reporter.report(Activity::Notarization(notarization));
     }
@@ -550,7 +544,7 @@ impl<
         // Track the certificate locally to avoid rebuilding it.
         if let Some(floor) = self.handle_nullification(nullification.clone()).await {
             warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_certificate(certificate_sender, floor).await;
+            self.broadcast_certificate(certificate_sender, floor);
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
@@ -559,8 +553,7 @@ impl<
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Nullification(nullification.clone()),
-        )
-        .await;
+        );
         // Surface the event to the application for observability.
         self.reporter.report(Activity::Nullification(nullification));
     }
@@ -589,8 +582,7 @@ impl<
             proposal=?finalize.proposal,
             "broadcasting finalize"
         );
-        self.broadcast_vote(vote_sender, Vote::Finalize(finalize))
-            .await;
+        self.broadcast_vote(vote_sender, Vote::Finalize(finalize));
     }
 
     /// Share a finalization certificate and notify observers of the new height.
@@ -625,8 +617,7 @@ impl<
         self.broadcast_certificate(
             certificate_sender,
             Certificate::Finalization(finalization.clone()),
-        )
-        .await;
+        );
         // Surface the event to the application for observability.
         self.reporter.report(Activity::Finalization(finalization));
     }
@@ -981,8 +972,7 @@ impl<
                                 if let Some(floor) = self.handle_nullification(nullification).await
                                 {
                                     warn!(?floor, "broadcasting nullification floor");
-                                    self.broadcast_certificate(&mut certificate_sender, floor)
-                                        .await;
+                                    self.broadcast_certificate(&mut certificate_sender, floor);
                                 }
                                 if from_resolver {
                                     resolved = Resolved::Nullification;

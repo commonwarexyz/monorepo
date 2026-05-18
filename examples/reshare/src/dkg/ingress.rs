@@ -47,8 +47,9 @@ where
 {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
         overflow.push_back(message);
+        true
     }
 }
 

@@ -1,26 +1,28 @@
 //! Rate-limited [`UnlimitedSender`] wrapper.
 
 use crate::{Recipients, UnlimitedSender};
+use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
 use commonware_utils::{channel::ring, sync::Mutex};
-use futures::{Future, FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
-/// Provides peer subscriptions for resolving [`Recipients::All`].
-///
-/// Implementations must be clonable so that each clone of [`LimitedSender`]
-/// can establish its own peer subscription.
+/// Provides peer snapshots for resolving [`Recipients::All`].
 pub trait Connected: Clone + Send + Sync + 'static {
     type PublicKey: PublicKey;
 
+    /// Return the current peer snapshot.
+    fn peers(&self) -> Vec<Self::PublicKey> {
+        Vec::new()
+    }
+
     /// Subscribe to peer updates.
     ///
-    /// Returns a receiver that yields the current set of known peers whenever it changes.
-    ///
-    /// It is assumed that when a new subscription is created, the current set of known peers
-    /// is sent immediately.
-    fn subscribe(&mut self) -> impl Future<Output = ring::Receiver<Vec<Self::PublicKey>>> + Send;
+    /// The receiver yields the current set of known peers whenever it changes.
+    /// New subscriptions should publish the current set promptly so callers do
+    /// not have to wait for the next membership change.
+    fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>>;
 }
 
 /// A wrapper around a [`UnlimitedSender`] that provides rate limiting with retry-time feedback.
@@ -31,10 +33,17 @@ where
     P: Connected<PublicKey = S::PublicKey>,
 {
     sender: S,
-    rate_limit: Arc<Mutex<KeyedRateLimiter<S::PublicKey, E>>>,
+    state: Arc<Mutex<State<S::PublicKey, E>>>,
     peers: P,
-    peer_subscription: Option<ring::Receiver<Vec<S::PublicKey>>>,
-    known_peers: Vec<S::PublicKey>,
+}
+
+struct State<P: PublicKey, E: Clock> {
+    // Per-peer rate limiter shared by all clones
+    rate_limit: KeyedRateLimiter<P, E>,
+    // Latest peer updates from the source used for Recipients::All
+    peer_subscription: ring::Receiver<Vec<P>>,
+    // Snapshot used until the subscription yields a newer peer list
+    known_peers: Vec<P>,
 }
 
 impl<E, S, P> Clone for LimitedSender<E, S, P>
@@ -46,10 +55,8 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            rate_limit: self.rate_limit.clone(),
+            state: self.state.clone(),
             peers: self.peers.clone(),
-            peer_subscription: None,
-            known_peers: Vec::new(),
         }
     }
 }
@@ -61,8 +68,9 @@ where
     P: Connected<PublicKey = S::PublicKey>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let known_peers = self.state.lock().known_peers.len();
         f.debug_struct("LimitedSender")
-            .field("known_peers", &self.known_peers.len())
+            .field("known_peers", &known_peers)
             .finish_non_exhaustive()
     }
 }
@@ -75,15 +83,15 @@ where
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
-        let rate_limit = Arc::new(Mutex::new(KeyedRateLimiter::hashmap_with_clock(
-            quota, clock,
-        )));
+        let state = Arc::new(Mutex::new(State {
+            rate_limit: KeyedRateLimiter::hashmap_with_clock(quota, clock),
+            peer_subscription: peers.subscribe(),
+            known_peers: peers.peers(),
+        }));
         Self {
             sender,
-            rate_limit,
+            state,
             peers,
-            peer_subscription: None,
-            known_peers: Vec::new(),
         }
     }
 
@@ -92,36 +100,29 @@ where
     /// Returns a [`CheckedSender`] with only the recipients that are not
     /// currently rate-limited. If _all_ recipients are rate-limited, returns
     /// the earliest instant at which all recipients will be available.
-    pub async fn check(
+    pub fn check(
         &mut self,
         recipients: Recipients<S::PublicKey>,
     ) -> Result<CheckedSender<'_, S>, SystemTime> {
-        // Lazily establish peer subscription on first use
-        if self.peer_subscription.is_none() {
-            self.peer_subscription = Some(self.peers.subscribe().await);
-        }
-
-        let rate_limit = self.rate_limit.lock();
-
-        // Update known peers from subscription if available (non-blocking)
-        if let Some(ref mut subscription) = self.peer_subscription {
-            if let Some(peers) = subscription.next().now_or_never().flatten() {
-                self.known_peers = peers;
-                rate_limit.retain_recent();
+        let mut state = self.state.lock();
+        if matches!(&recipients, Recipients::All) {
+            if let Some(peers) = state.peer_subscription.next().now_or_never().flatten() {
+                state.known_peers = peers;
+                state.rate_limit.retain_recent();
             }
         }
 
         let recipients = match recipients {
-            Recipients::One(ref peer) => match rate_limit.check_key(peer) {
-                Ok(()) => recipients,
+            Recipients::One(peer) => match state.rate_limit.check_key(&peer) {
+                Ok(()) => Recipients::One(peer),
                 Err(not_until) => return Err(not_until.earliest_possible()),
             },
-            Recipients::Some(ref peers) => {
-                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &rate_limit);
+            Recipients::Some(peers) => {
+                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &state.rate_limit);
                 if allowed.is_empty() {
                     match max_retry {
                         Some(retry) => return Err(retry),
-                        None => recipients,
+                        None => Recipients::Some(Vec::new()),
                     }
                 } else {
                     Recipients::Some(allowed)
@@ -129,7 +130,7 @@ where
             }
             Recipients::All => {
                 let (allowed, max_retry) =
-                    filter_rate_limited(self.known_peers.iter(), &rate_limit);
+                    filter_rate_limited(state.known_peers.iter(), &state.rate_limit);
                 if allowed.is_empty() {
                     match max_retry {
                         Some(retry) => return Err(retry),
@@ -140,6 +141,7 @@ where
                 }
             }
         };
+        drop(state);
 
         Ok(CheckedSender {
             recipients,
@@ -199,14 +201,17 @@ impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
 
 impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
     type PublicKey = S::PublicKey;
-    type Error = S::Error;
 
-    async fn send(
-        self,
-        message: impl Into<IoBufs> + Send,
-        priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        self.sender.send(self.recipients, message, priority).await
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        match &self.recipients {
+            Recipients::All => Vec::new(),
+            Recipients::Some(peers) => peers.clone(),
+            Recipients::One(peer) => vec![peer.clone()],
+        }
+    }
+
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
+        self.sender.send(self.recipients, message, priority)
     }
 }
 
@@ -217,14 +222,10 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic::Runner, IoBuf, Quota, Runner as _};
     use commonware_utils::{channel::ring, NZUsize, NZU32};
-    use thiserror::Error;
+    use futures::SinkExt;
 
     type PublicKey = ed25519::PublicKey;
     type SentMessage = (Recipients<PublicKey>, IoBuf, bool);
-
-    #[derive(Debug, Error)]
-    #[error("mock send error")]
-    struct MockError;
 
     #[derive(Debug, Clone)]
     struct MockSender {
@@ -243,50 +244,75 @@ mod tests {
         }
     }
 
+    fn assert_sent_to(sender: &MockSender, index: usize, expected: &[PublicKey]) {
+        let messages = sender.sent_messages();
+        let Recipients::Some(sent) = &messages[index].0 else {
+            panic!("expected Recipients::Some");
+        };
+        assert_eq!(sent, expected);
+    }
+
     impl UnlimitedSender for MockSender {
-        type Error = MockError;
         type PublicKey = PublicKey;
 
-        async fn send(
+        fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-            let sent_to = match &recipients {
-                Recipients::One(pk) => vec![pk.clone()],
-                Recipients::Some(pks) => pks.clone(),
-                Recipients::All => Vec::new(),
-            };
+        ) -> Feedback {
             let message = message.into().coalesce();
             self.sent.lock().push((recipients, message, priority));
-            Ok(sent_to)
+            Feedback::Ok
         }
     }
 
     #[derive(Clone)]
     struct MockPeers {
-        sender: ring::Sender<Vec<PublicKey>>,
+        peers: Vec<PublicKey>,
+    }
+
+    #[derive(Clone)]
+    struct UpdatingPeers {
+        peers: Vec<PublicKey>,
+        receiver: Arc<Mutex<Option<ring::Receiver<Vec<PublicKey>>>>>,
     }
 
     impl MockPeers {
-        fn new() -> (Self, ring::Sender<Vec<PublicKey>>) {
-            let (sender, _receiver) = ring::channel(NZUsize!(16));
-            let peers = Self {
-                sender: sender.clone(),
-            };
-            (peers, sender)
+        fn new() -> Self {
+            Self { peers: Vec::new() }
+        }
+
+        fn with_peers(peers: Vec<PublicKey>) -> Self {
+            Self { peers }
         }
     }
 
     impl Connected for MockPeers {
         type PublicKey = PublicKey;
 
-        async fn subscribe(&mut self) -> ring::Receiver<Vec<Self::PublicKey>> {
-            let (sender, receiver) = ring::channel(NZUsize!(16));
-            // Replace our sender with a new one connected to the returned receiver
-            self.sender = sender;
+        fn peers(&self) -> Vec<Self::PublicKey> {
+            self.peers.clone()
+        }
+
+        fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
+            let (_sender, receiver) = ring::channel(NZUsize!(16));
             receiver
+        }
+    }
+
+    impl Connected for UpdatingPeers {
+        type PublicKey = PublicKey;
+
+        fn peers(&self) -> Vec<Self::PublicKey> {
+            self.peers.clone()
+        }
+
+        fn subscribe(&self) -> ring::Receiver<Vec<Self::PublicKey>> {
+            self.receiver
+                .lock()
+                .take()
+                .expect("subscription should only be created once")
         }
     }
 
@@ -302,13 +328,11 @@ mod tests {
     fn check_one_not_rate_limited() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _peer_sender) = MockPeers::new();
+            let peers = MockPeers::new();
             let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
-            let peer = key(1);
-            let checked = limited.check(Recipients::One(peer.clone())).await.unwrap();
-            let sent_to = checked.send(IoBuf::from(b"hello"), false).await.unwrap();
-            assert_eq!(sent_to, vec![peer]);
+            let checked = limited.check(Recipients::One(key(1))).unwrap();
+            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
         });
     }
 
@@ -316,18 +340,17 @@ mod tests {
     fn check_one_rate_limited() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _peer_sender) = MockPeers::new();
-            let mut limited =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let peers = MockPeers::new();
+            let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
 
             let peer = key(1);
 
             // First check should succeed and consume the quota
-            let checked = limited.check(Recipients::One(peer.clone())).await.unwrap();
-            checked.send(IoBuf::from(b"first"), false).await.unwrap();
+            let checked = limited.check(Recipients::One(peer.clone())).unwrap();
+            checked.send(IoBuf::from(b"first"), false);
 
             // Second check should fail (rate limited)
-            let result = limited.check(Recipients::One(peer)).await;
+            let result = limited.check(Recipients::One(peer));
             assert!(result.is_err());
         });
     }
@@ -336,16 +359,14 @@ mod tests {
     fn check_some_all_not_rate_limited() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _peer_sender) = MockPeers::new();
-            let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
+            let peers = MockPeers::new();
+            let mut limited =
+                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
 
             let peers_list = vec![key(1), key(2), key(3)];
-            let checked = limited
-                .check(Recipients::Some(peers_list.clone()))
-                .await
-                .unwrap();
-            let sent_to = checked.send(IoBuf::from(b"hello"), false).await.unwrap();
-            assert_eq!(sent_to.len(), 3);
+            let checked = limited.check(Recipients::Some(peers_list)).unwrap();
+            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
+            assert_sent_to(&sender, 0, &[key(1), key(2), key(3)]);
         });
     }
 
@@ -353,7 +374,7 @@ mod tests {
     fn check_some_filters_rate_limited_peers() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _peer_sender) = MockPeers::new();
+            let peers = MockPeers::new();
             let mut limited =
                 LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
 
@@ -362,25 +383,16 @@ mod tests {
             let peer3 = key(3);
 
             // Rate limit peer1 by sending to it first
-            let checked = limited.check(Recipients::One(peer1.clone())).await.unwrap();
-            checked.send(IoBuf::from(b"limit"), false).await.unwrap();
+            let checked = limited.check(Recipients::One(peer1.clone())).unwrap();
+            checked.send(IoBuf::from(b"limit"), false);
 
             // Now check with all three peers - peer1 should be filtered out
+            let expected = vec![peer2.clone(), peer3.clone()];
             let checked = limited
-                .check(Recipients::Some(vec![
-                    peer1.clone(),
-                    peer2.clone(),
-                    peer3.clone(),
-                ]))
-                .await
+                .check(Recipients::Some(vec![peer1, peer2, peer3]))
                 .unwrap();
-            let sent_to = checked.send(IoBuf::from(b"filtered"), false).await.unwrap();
-
-            // peer1 should be filtered out since it's rate limited
-            assert_eq!(sent_to.len(), 2);
-            assert!(!sent_to.contains(&peer1));
-            assert!(sent_to.contains(&peer2));
-            assert!(sent_to.contains(&peer3));
+            checked.send(IoBuf::from(b"filtered"), false);
+            assert_sent_to(&sender, 1, &expected);
         });
     }
 
@@ -388,9 +400,8 @@ mod tests {
     fn check_some_all_rate_limited_returns_error() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _peer_sender) = MockPeers::new();
-            let mut limited =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let peers = MockPeers::new();
+            let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
 
             let peer1 = key(1);
             let peer2 = key(2);
@@ -398,25 +409,16 @@ mod tests {
             // Rate limit both peers
             limited
                 .check(Recipients::One(peer1.clone()))
-                .await
                 .unwrap()
-                .send(IoBuf::from(b"limit1"), false)
-                .await
-                .unwrap();
+                .send(IoBuf::from(b"limit1"), false);
 
             limited
                 .check(Recipients::One(peer2.clone()))
-                .await
                 .unwrap()
-                .send(IoBuf::from(b"limit2"), false)
-                .await
-                .unwrap();
+                .send(IoBuf::from(b"limit2"), false);
 
             // Now both are rate limited - should return error with retry time
-            assert!(limited
-                .check(Recipients::Some(vec![peer1, peer2]))
-                .await
-                .is_err());
+            assert!(limited.check(Recipients::Some(vec![peer1, peer2])).is_err());
         });
     }
 
@@ -424,11 +426,11 @@ mod tests {
     fn check_some_empty_returns_as_is() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _peer_sender) = MockPeers::new();
+            let peers = MockPeers::new();
             let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
             // Empty recipients should pass through
-            limited.check(Recipients::Some(Vec::new())).await.unwrap();
+            limited.check(Recipients::Some(Vec::new())).unwrap();
         });
     }
 
@@ -436,22 +438,17 @@ mod tests {
     fn check_all_uses_known_peers() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _) = MockPeers::new();
+            let peers = MockPeers::new();
             let mut limited =
                 LimitedSender::new(sender.clone(), quota_per_second(10), context, peers);
 
-            // First call establishes subscription - no known peers yet
-            let checked = limited.check(Recipients::All).await.unwrap();
-            let sent_to = checked.send(IoBuf::from(b"empty"), false).await.unwrap();
-            assert!(sent_to.is_empty());
+            // No known peers yet
+            let checked = limited.check(Recipients::All).unwrap();
+            assert!(crate::CheckedSender::recipients(&checked).is_empty());
+            checked.send(IoBuf::from(b"empty"), false);
 
-            // Verify that the sender received the message with empty Recipients::Some
-            let messages = sender.sent_messages();
-            assert_eq!(messages.len(), 1);
-            match &messages[0].0 {
-                Recipients::Some(pks) => assert!(pks.is_empty()),
-                _ => panic!("expected Recipients::Some"),
-            }
+            // Verify that the sender received the message with empty Recipients::Some.
+            assert_sent_to(&sender, 0, &[]);
         });
     }
 
@@ -459,35 +456,22 @@ mod tests {
     fn check_all_filters_rate_limited_known_peers() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _) = MockPeers::new();
+            let peer1 = key(1);
+            let peer2 = key(2);
+            let peers = MockPeers::with_peers(vec![peer1.clone(), peer2.clone()]);
             let mut limited =
                 LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
 
-            let peer1 = key(1);
-            let peer2 = key(2);
-
-            // First call to establish subscription
-            let _ = limited.check(Recipients::All).await;
-
-            // Manually set known peers (simulating peer updates)
-            limited.known_peers = vec![peer1.clone(), peer2.clone()];
-
             // Rate limit peer1
             limited
-                .check(Recipients::One(peer1.clone()))
-                .await
+                .check(Recipients::One(peer1))
                 .unwrap()
-                .send(IoBuf::from(b"limit"), false)
-                .await
-                .unwrap();
+                .send(IoBuf::from(b"limit"), false);
 
             // Check All should filter out peer1
-            let checked = limited.check(Recipients::All).await.unwrap();
-            let sent_to = checked.send(IoBuf::from(b"filtered"), false).await.unwrap();
-
-            assert_eq!(sent_to.len(), 1);
-            assert!(!sent_to.contains(&peer1));
-            assert!(sent_to.contains(&peer2));
+            let checked = limited.check(Recipients::All).unwrap();
+            checked.send(IoBuf::from(b"filtered"), false);
+            assert_sent_to(&sender, 1, &[peer2]);
         });
     }
 
@@ -495,56 +479,49 @@ mod tests {
     fn check_all_returns_error_when_all_known_peers_rate_limited() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _) = MockPeers::new();
-            let mut limited =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
-
             let peer1 = key(1);
             let peer2 = key(2);
-
-            // First call to establish subscription
-            let _ = limited.check(Recipients::All).await;
-
-            // Set known peers
-            limited.known_peers = vec![peer1.clone(), peer2.clone()];
+            let peers = MockPeers::with_peers(vec![peer1.clone(), peer2.clone()]);
+            let mut limited = LimitedSender::new(sender, quota_per_second(1), context, peers);
 
             // Rate limit both peers
             limited
-                .check(Recipients::One(peer1.clone()))
-                .await
+                .check(Recipients::One(peer1))
                 .unwrap()
-                .send(IoBuf::from(b"limit1"), false)
-                .await
-                .unwrap();
+                .send(IoBuf::from(b"limit1"), false);
 
             limited
-                .check(Recipients::One(peer2.clone()))
-                .await
+                .check(Recipients::One(peer2))
                 .unwrap()
-                .send(IoBuf::from(b"limit2"), false)
-                .await
-                .unwrap();
+                .send(IoBuf::from(b"limit2"), false);
 
             // Check All should fail since all known peers are rate limited
-            assert!(limited.check(Recipients::All).await.is_err());
+            assert!(limited.check(Recipients::All).is_err());
         });
     }
 
     #[test]
-    fn clone_creates_independent_subscription() {
+    fn clone_shares_peer_updates() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _) = MockPeers::new();
+            let initial = key(1);
+            let updated = key(2);
+            let (updates, receiver) = ring::channel(NZUsize!(1));
+            let peers = UpdatingPeers {
+                peers: vec![initial],
+                receiver: Arc::new(Mutex::new(Some(receiver))),
+            };
             let mut limited1 = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
-            // Establish subscription on first instance
-            let _ = limited1.check(Recipients::All).await;
-            limited1.known_peers = vec![key(1)];
+            let mut limited2 = limited1.clone();
+            let mut updates = updates;
+            updates.send(vec![updated.clone()]).await.unwrap();
 
-            // Clone should not have a subscription or known peers
-            let limited2 = limited1.clone();
-            assert!(limited2.peer_subscription.is_none());
-            assert!(limited2.known_peers.is_empty());
+            let checked = limited2.check(Recipients::All).unwrap();
+            assert_eq!(crate::CheckedSender::recipients(&checked), vec![updated]);
+
+            let checked = limited1.check(Recipients::All).unwrap();
+            assert_eq!(crate::CheckedSender::recipients(&checked), vec![key(2)]);
         });
     }
 
@@ -552,18 +529,15 @@ mod tests {
     fn checked_sender_sends_with_priority() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _peer_sender) = MockPeers::new();
+            let peers = MockPeers::new();
             let mut limited =
                 LimitedSender::new(sender.clone(), quota_per_second(10), context, peers);
 
             let peer = key(1);
             limited
                 .check(Recipients::One(peer))
-                .await
                 .unwrap()
-                .send(IoBuf::from(b"priority"), true)
-                .await
-                .unwrap();
+                .send(IoBuf::from(b"priority"), true);
 
             let messages = sender.sent_messages();
             assert_eq!(messages.len(), 1);
@@ -575,9 +549,8 @@ mod tests {
     fn rate_limit_shared_across_clones() {
         Runner::default().start(|context| async move {
             let sender = MockSender::new();
-            let (peers, _) = MockPeers::new();
-            let mut limited1 =
-                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let peers = MockPeers::new();
+            let mut limited1 = LimitedSender::new(sender, quota_per_second(1), context, peers);
             let mut limited2 = limited1.clone();
 
             let peer = key(1);
@@ -585,14 +558,11 @@ mod tests {
             // Rate limit peer via first instance
             limited1
                 .check(Recipients::One(peer.clone()))
-                .await
                 .unwrap()
-                .send(IoBuf::from(b"limit"), false)
-                .await
-                .unwrap();
+                .send(IoBuf::from(b"limit"), false);
 
             // Second instance should see the rate limit
-            assert!(limited2.check(Recipients::One(peer)).await.is_err());
+            assert!(limited2.check(Recipients::One(peer)).is_err());
         });
     }
 }

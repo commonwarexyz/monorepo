@@ -193,7 +193,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.track(0, validators.clone()).await;
+        oracle.track(0, validators.clone());
 
         // Register consensus channels
         //

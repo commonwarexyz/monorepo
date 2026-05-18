@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 cfg-if.workspace = true
 commonware-macros.workspace = true
+commonware-runtime.workspace = true
 crossbeam-queue.workspace = true
 futures-util.workspace = true
 loom = { workspace = true, features = ["futures"], optional = true }

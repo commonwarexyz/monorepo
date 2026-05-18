@@ -8,9 +8,9 @@ use crate::authenticated::{
         metrics,
         types::InfoVerifier,
     },
-    mailbox::UnboundedMailbox,
     Mailbox,
 };
+use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -18,7 +18,6 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
 };
-use commonware_utils::channel::mpsc;
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
@@ -31,18 +30,17 @@ pub struct Actor<
 > {
     context: ContextCell<E>,
 
-    mailbox_size: usize,
+    mailbox_size: NonZeroUsize,
     send_batch_size: NonZeroUsize,
     gossip_bit_vec_frequency: Duration,
     max_peer_set_size: u64,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
 
-    receiver: mpsc::Receiver<Message<O, I, C>>,
+    receiver: mailbox::Receiver<Message<O, I, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
-    dropped_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
@@ -57,12 +55,8 @@ impl<
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
-        let dropped_messages = context.family(
-            "messages_dropped",
-            "messages dropped due to full application buffer",
-        );
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");
-        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         (
             Self {
@@ -76,26 +70,17 @@ impl<
                 receiver,
                 sent_messages,
                 received_messages,
-                dropped_messages,
                 rate_limited,
             },
             sender,
         )
     }
 
-    pub fn start(
-        mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
-        router: Mailbox<router::Message<C>>,
-    ) -> Handle<()> {
+    pub fn start(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, router))
     }
 
-    async fn run(
-        mut self,
-        tracker: UnboundedMailbox<tracker::Message<C>>,
-        router: Mailbox<router::Message<C>>,
-    ) {
+    async fn run(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) {
         select_loop! {
             self.context,
             on_stopped => {
@@ -115,10 +100,9 @@ impl<
                         self.context.child("peer").spawn({
                             let sent_messages = self.sent_messages.clone();
                             let received_messages = self.received_messages.clone();
-                            let dropped_messages = self.dropped_messages.clone();
                             let rate_limited = self.rate_limited.clone();
-                            let mut tracker = tracker.clone();
-                            let mut router = router.clone();
+                            let tracker = tracker.clone();
+                            let router = router.clone();
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
                             let info_verifier = self.info_verifier.clone();
                             move |context| async move {
@@ -137,7 +121,6 @@ impl<
                                     peer::Config {
                                         sent_messages,
                                         received_messages,
-                                        dropped_messages,
                                         rate_limited,
                                         mailbox_size: self.mailbox_size,
                                         send_batch_size: self.send_batch_size,
@@ -165,7 +148,7 @@ impl<
                                     Ok(()) => debug!(?peer, "peer shutdown gracefully"),
                                     Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
                                 }
-                                router.release(peer).await;
+                                let _ = router.release(peer);
                                 // Release the reservation
                                 drop(reservation);
                             }

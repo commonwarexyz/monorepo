@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_actor::Feedback;
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, ReadRangeExt, Write,
 };
@@ -26,6 +27,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroUsize,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -48,6 +50,25 @@ enum RecipientsType {
 enum ChannelKind {
     Requests,
     Responses,
+}
+
+#[derive(Clone, Copy, Debug, Arbitrary)]
+enum FeedbackKind {
+    Ok,
+    Backoff,
+    Rejected,
+    Closed,
+}
+
+impl From<FeedbackKind> for Feedback {
+    fn from(kind: FeedbackKind) -> Self {
+        match kind {
+            FeedbackKind::Ok => Feedback::Ok,
+            FeedbackKind::Backoff => Feedback::Backoff,
+            FeedbackKind::Rejected => Feedback::Rejected,
+            FeedbackKind::Closed => Feedback::Closed,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Arbitrary)]
@@ -285,7 +306,9 @@ struct FuzzBlocker;
 impl Blocker for FuzzBlocker {
     type PublicKey = PublicKey;
 
-    async fn block(&mut self, _peer: Self::PublicKey) {}
+    fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+        Feedback::Ok
+    }
 }
 
 #[derive(Debug)]
@@ -301,23 +324,24 @@ struct MockSender {
     origin: PublicKey,
     peers: Arc<Vec<PublicKey>>,
     routes: MockRoutes,
-    fail: bool,
+    feedback: FeedbackKind,
 }
 
 impl MockSender {
-    fn new(origin: PublicKey, peers: Arc<Vec<PublicKey>>, routes: MockRoutes, fail: bool) -> Self {
+    fn new(
+        origin: PublicKey,
+        peers: Arc<Vec<PublicKey>>,
+        routes: MockRoutes,
+        feedback: FeedbackKind,
+    ) -> Self {
         Self {
             origin,
             peers,
             routes,
-            fail,
+            feedback,
         }
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("mock send error")]
-struct MockSendError;
 
 impl LimitedSender for MockSender {
     type PublicKey = PublicKey;
@@ -326,7 +350,7 @@ impl LimitedSender for MockSender {
     where
         Self: 'a;
 
-    async fn check(
+    fn check(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
@@ -335,7 +359,7 @@ impl LimitedSender for MockSender {
             peers: self.peers.clone(),
             routes: self.routes.clone(),
             recipients,
-            fail: self.fail,
+            feedback: self.feedback,
         })
     }
 }
@@ -345,50 +369,45 @@ struct MockCheckedSender {
     peers: Arc<Vec<PublicKey>>,
     routes: MockRoutes,
     recipients: Recipients<PublicKey>,
-    fail: bool,
+    feedback: FeedbackKind,
 }
 
 impl CheckedSender for MockCheckedSender {
     type PublicKey = PublicKey;
-    type Error = MockSendError;
 
-    async fn send(
-        self,
-        message: impl Into<IoBufs> + Send,
-        _priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        if self.fail {
-            return Err(MockSendError);
-        }
-
-        let message = message.into().coalesce();
-        let recipients = match self.recipients {
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        match &self.recipients {
             Recipients::All => self.peers.iter().cloned().collect(),
-            Recipients::One(peer) => vec![peer],
-            Recipients::Some(peers) => peers,
-        };
+            Recipients::One(peer) => vec![peer.clone()],
+            Recipients::Some(peers) => peers.clone(),
+        }
+        .into_iter()
+        .filter(|recipient| *recipient != self.origin)
+        .collect()
+    }
+
+    fn send(self, message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
+        let feedback = Feedback::from(self.feedback);
+        if !feedback.accepted() {
+            return feedback;
+        }
+        let message = message.into().coalesce();
+        let recipients = self.recipients();
         let deliveries = {
             let routes = self.routes.lock();
             recipients
                 .into_iter()
-                .filter(|recipient| *recipient != self.origin)
-                .filter_map(|recipient| routes.get(&recipient).cloned().map(|tx| (recipient, tx)))
+                .filter_map(|recipient| routes.get(&recipient).cloned())
                 .collect::<Vec<_>>()
         };
 
-        let mut delivered = Vec::new();
-        for (recipient, tx) in deliveries {
-            if tx
-                .send(MockInbound::Message(
-                    Box::new(self.origin.clone()),
-                    message.clone(),
-                ))
-                .is_ok()
-            {
-                delivered.push(recipient);
-            }
+        for tx in deliveries {
+            let _ = tx.send(MockInbound::Message(
+                Box::new(self.origin.clone()),
+                message.clone(),
+            ));
         }
-        Ok(delivered)
+        feedback
     }
 }
 
@@ -431,6 +450,22 @@ fn send_inbound(routes: &MockRoutes, recipient: &PublicKey, message: MockInbound
     }
 }
 
+// Mirrors MockCheckedSender::recipients without consuming the checked sender.
+fn model_recipients(
+    recipients: &Recipients<PublicKey>,
+    origin: &PublicKey,
+    peers: &[PublicKey],
+) -> Vec<PublicKey> {
+    match recipients {
+        Recipients::All => peers.to_vec(),
+        Recipients::One(peer) => vec![peer.clone()],
+        Recipients::Some(peers) => peers.clone(),
+    }
+    .into_iter()
+    .filter(|recipient| recipient != origin)
+    .collect()
+}
+
 #[derive(Arbitrary, Debug)]
 enum CollectorOperation {
     SendRequest {
@@ -464,8 +499,8 @@ enum CollectorOperation {
         priority_request: bool,
         priority_response: bool,
         handler_responds: bool,
-        fail_request: bool,
-        fail_response: bool,
+        request_feedback: FeedbackKind,
+        response_feedback: FeedbackKind,
     },
 }
 
@@ -519,8 +554,8 @@ struct EngineParams {
     priority_request: bool,
     priority_response: bool,
     handler_responds: bool,
-    fail_request: bool,
-    fail_response: bool,
+    request_feedback: FeedbackKind,
+    response_feedback: FeedbackKind,
 }
 
 fn start_engine(
@@ -536,7 +571,7 @@ fn start_engine(
         blocker: FuzzBlocker,
         monitor: FuzzMonitor::new(model.clone()),
         handler: FuzzHandler::new(params.handler_responds, context),
-        mailbox_size: params.mailbox_size.max(MIN_BUFFER_SIZE as usize),
+        mailbox_size: NonZeroUsize::new(params.mailbox_size.max(MIN_BUFFER_SIZE as usize)).unwrap(),
         priority_request: params.priority_request,
         request_codec: (),
         priority_response: params.priority_response,
@@ -565,12 +600,17 @@ fn start_engine(
                 origin.clone(),
                 public_keys.clone(),
                 request_routes,
-                params.fail_request,
+                params.request_feedback,
             ),
             MockReceiver { rx: request_rx },
         ),
         (
-            MockSender::new(origin, public_keys, response_routes, params.fail_response),
+            MockSender::new(
+                origin,
+                public_keys,
+                response_routes,
+                params.response_feedback,
+            ),
             MockReceiver { rx: response_rx },
         ),
     );
@@ -614,8 +654,8 @@ fn fuzz(input: FuzzInput) {
                     priority_request: false,
                     priority_response: false,
                     handler_responds: true,
-                    fail_request: false,
-                    fail_response: false,
+                    request_feedback: FeedbackKind::Ok,
+                    response_feedback: FeedbackKind::Ok,
                 },
             );
         }
@@ -648,9 +688,11 @@ fn fuzz(input: FuzzInput) {
                                 Recipients::Some(peers)
                             }
                         };
-                        if let Ok(recipients) = mailbox.send(recipients, request).await {
+                        let recorded =
+                            model_recipients(&recipients, &public_keys[idx], &public_keys);
+                        if mailbox.send(recipients, request).accepted() {
                             if let Some(model) = state.models.get(&idx) {
-                                record_request(model, commitment, recipients);
+                                record_request(model, commitment, recorded);
                             }
                         }
                     }
@@ -667,8 +709,9 @@ fn fuzz(input: FuzzInput) {
                     .commitment();
                     if let Some(mailbox) = state.mailboxes.get(&idx) {
                         let mut mailbox = mailbox.clone();
-                        mailbox.cancel(commitment).await;
-                        processed_cancel = Some((idx, commitment));
+                        if mailbox.cancel(commitment).accepted() {
+                            processed_cancel = Some((idx, commitment));
+                        }
                     }
                 }
                 CollectorOperation::InjectRequest {
@@ -729,8 +772,8 @@ fn fuzz(input: FuzzInput) {
                     priority_request,
                     priority_response,
                     handler_responds,
-                    fail_request,
-                    fail_response,
+                    request_feedback,
+                    response_feedback,
                 } => {
                     let idx = peer_idx as usize % public_keys.len();
                     if let Some(handle) = state.handles.remove(&idx) {
@@ -753,8 +796,8 @@ fn fuzz(input: FuzzInput) {
                             priority_request,
                             priority_response,
                             handler_responds,
-                            fail_request,
-                            fail_response,
+                            request_feedback,
+                            response_feedback,
                         },
                     );
                 }

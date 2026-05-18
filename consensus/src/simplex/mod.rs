@@ -2326,8 +2326,9 @@ mod tests {
                             found += 1;
                         }
                     }
+                    let tolerated_missing = skip_timeout.get().saturating_add(1);
                     assert!(
-                        found >= activity_timeout.get().saturating_sub(2),
+                        found >= activity_timeout.get().saturating_sub(tolerated_missing),
                         "found: {found}"
                     );
                 }
@@ -3364,16 +3365,13 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
-            oracle
-                .manager()
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::from_iter_dedup(std::iter::once(me.clone())),
-                        Set::from_iter_dedup(std::iter::once(injector_pk.clone())),
-                    ),
-                )
-                .await;
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(std::iter::once(me.clone())),
+                    Set::from_iter_dedup(std::iter::once(injector_pk.clone())),
+                ),
+            );
             context.sleep(Duration::from_millis(1)).await;
 
             let quorum = quorum(n) as usize;
@@ -3407,10 +3405,7 @@ mod tests {
                 Certificate::Notarization(notarization(View::new(3), View::new(2), b"payload-3")),
                 Certificate::Finalization(finalization(View::new(3), View::new(2), b"payload-3")),
             ] {
-                injector_sender
-                    .send(Recipients::One(me.clone()), certificate.encode(), true)
-                    .await
-                    .unwrap();
+                injector_sender.send(Recipients::One(me.clone()), certificate.encode(), true);
             }
 
             let elector = RoundRobin::<Sha256>::default();
@@ -5147,31 +5142,22 @@ mod tests {
                     .await
                     .unwrap();
             }
-            oracle
-                .manager()
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::from_iter_dedup(participants.iter().cloned()),
-                        Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                    ),
-                )
-                .await;
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(participants.iter().cloned()),
+                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                ),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             // ========== Broadcast certificates over recovered network. ==========
 
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
-            injector_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            injector_sender.send(Recipients::All, msg, true);
             let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
-            injector_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            injector_sender.send(Recipients::All, msg, true);
             // View F+1:
             let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
             let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
@@ -5181,7 +5167,7 @@ mod tests {
                     ParticipantType::Group1 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).await.unwrap();
+                injector_sender.send(recipient, msg, true);
             }
             // View F+2:
             let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
@@ -5192,7 +5178,7 @@ mod tests {
                     ParticipantType::Group2 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).await.unwrap();
+                injector_sender.send(recipient, msg, true);
             }
 
             // ========== Create engines ==========

@@ -65,7 +65,7 @@ where
                     // Sign and broadcast
                     let n = Notarize::sign(&self.scheme, proposal).unwrap();
                     let msg = Vote::Notarize(n).encode();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    sender.send(Recipients::All, msg, true);
                 }
                 Vote::Finalize(finalize) => {
                     // Build identical proposal but with epoch incremented by 1
@@ -77,7 +77,7 @@ where
                     // Sign and broadcast
                     let f = Finalize::sign(&self.scheme, proposal).unwrap();
                     let msg = Vote::Finalize(f).encode();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    sender.send(Recipients::All, msg, true);
                 }
                 Vote::Nullify(nullify) => {
                     // Re-sign nullify for the next epoch
@@ -87,7 +87,7 @@ where
 
                     let n = Nullify::sign(&self.scheme, new_round).unwrap();
                     let msg = Vote::<S, H::Digest>::Nullify(n).encode();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    sender.send(Recipients::All, msg, true);
                 }
             }
         }

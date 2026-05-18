@@ -82,11 +82,12 @@ impl<D: Digest> Overflow<Message<D>> for Pending<D> {
 impl<D: Digest> Policy for Message<D> {
     type Overflow = Pending<D>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
+    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
         if message.response_closed() {
-            return;
+            return true;
         }
         overflow.0.push_back(message);
+        true
     }
 }
 
