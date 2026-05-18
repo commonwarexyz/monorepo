@@ -1,7 +1,7 @@
 //! Position-based journal for variable-length items.
 //!
-//! The data journal is the source of truth. The offsets journal provides indexed access and a
-//! recovery watermark that identifies the suffix which may require replay after a crash.
+//! The data journal is the source of truth. The offsets journal provides indexed access and records
+//! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::Reader as _;
 use crate::{
@@ -215,9 +215,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
-/// The offsets journal's recovery watermark records the logical size that can be reopened without
-/// replay. Items appended after that point may still survive a crash, but init may need to replay
-/// the data journal suffix and rebuild matching offset entries.
+/// The offsets journal's recovery watermark records a preferred point for replaying data to rebuild
+/// offset entries after a crash. If that point falls outside the recovered offsets bounds, init
+/// falls back to the offsets start. Items appended after the replay point may still survive, but
+/// matching offsets may need to be rebuilt.
 pub struct Journal<E: Context, V: Codec> {
     /// Inner state for data journal metadata.
     ///
@@ -1059,7 +1060,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 recovery_watermark,
                 start = offsets_bounds.start,
                 end = offsets_bounds.end,
-                "crash repair: offsets recovery watermark is inconsistent, rebuilding from offsets start"
+                "crash repair: offsets recovery watermark outside recovered offsets bounds, rebuilding from offsets start"
             );
             offsets_bounds.start
         } else {
@@ -1080,7 +1081,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 warn!(
                     recovery_watermark = recovery_start,
                     pruning_boundary = offsets_bounds.start,
-                    "crash repair: data journal shorter than recovery watermark, rebuilding from pruning boundary"
+                    "crash repair: data journal shorter than offsets recovery watermark, rebuilding from pruning boundary"
                 );
                 Self::rebuild_offsets_from_anchor(
                     data,
@@ -1124,7 +1125,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok((pruning_boundary, data_size))
     }
 
-    /// Rebuild the offsets suffix by replaying the data journal from a trusted anchor.
+    /// Rebuild the offsets suffix by replaying the data journal from a recovery anchor.
     ///
     /// Returns `Ok(None)` if the anchor is ahead of the data journal and callers should retry
     /// from an earlier point.
@@ -2132,14 +2133,13 @@ mod tests {
         });
     }
 
-    /// Test recovery from crash during rewind operation.
+    /// Test recovery when the offsets journal is behind the data journal.
     ///
-    /// Simulates a crash after offsets.rewind() completes but before data.rewind() completes.
-    /// This creates a situation where offsets journal has been rewound but data journal still
-    /// contains items across multiple sections. Verifies that init() correctly rebuilds the
-    /// offsets index across all sections to match the data journal.
+    /// This creates a situation where offsets are missing while the data journal still contains
+    /// items across multiple sections. Verifies that init() rebuilds the offsets suffix across all
+    /// remaining data sections.
     #[test_traced]
-    fn test_variable_recovery_rewind_crash_multi_section() {
+    fn test_variable_recovery_offsets_behind_data_multi_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data across multiple sections ===
@@ -2163,10 +2163,8 @@ mod tests {
 
             assert_eq!(variable.size().await, 25);
 
-            // === Simulate crash during rewind(5) ===
-            // Rewind offsets journal to size 5 (keeps positions 0-4)
+            // Keep offsets for positions 0-4, while data still contains all 25 items.
             variable.test_rewind_offsets(5).await.unwrap();
-            // CRASH before data.rewind() completes - data still has all 3 sections
 
             variable.sync().await.unwrap();
             drop(variable);

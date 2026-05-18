@@ -29,9 +29,9 @@ use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 pub type Digest = <Sha256 as Hasher>::Digest;
 
-/// Default items per blob for benchmarks. This is small enough that blob boundary crossings
-/// (which trigger fsync) can dominate benchmark time. Benchmarks that don't want to measure
-/// that cost should override via the `_with` config generators.
+/// Default items per blob for benchmarks. This is small enough that blob boundary crossings can
+/// affect benchmark time. Benchmarks that don't want to measure that cost should override via the
+/// `_with` config generators.
 pub const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 pub const CHUNK_SIZE: usize = 32;
 pub const THREADS: NonZeroUsize = NZUsize!(8);
