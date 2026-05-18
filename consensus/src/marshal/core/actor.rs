@@ -5,7 +5,9 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, Annotation, Finalized, Request},
+        resolver::handler::{
+            self, above_height_floor, above_round_floor, Annotation, Finalized, Request,
+        },
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -213,16 +215,12 @@ impl Floor {
         request: &Request<D>,
         subscriber: &Annotation,
     ) -> bool {
-        let height_floor = Request::Finalized {
-            height: self.height,
-        };
-        let height_predicate = height_floor.predicate();
+        let height_predicate = above_height_floor::<D>(self.height);
         if !height_predicate(request, subscriber) {
             return false;
         }
 
-        let round_floor = Request::Notarized { round: self.round };
-        let round_predicate = round_floor.predicate();
+        let round_predicate = above_round_floor::<D>(self.round);
         round_predicate(request, subscriber)
     }
 }
@@ -2021,7 +2019,7 @@ where
             .try_set(self.last_processed_height.get());
 
         // Prune any existing requests below the new floor.
-        resolver.retain(Request::<V::Commitment>::Finalized { height }.predicate());
+        resolver.retain(above_height_floor::<V::Commitment>(height));
     }
 
     /// Returns the latest known finalization round at or below the processed height.
@@ -2081,7 +2079,7 @@ where
 
         // Prune round-bound requests at or below the processed round.
         let round = self.last_processed_round;
-        resolver.retain(Request::<V::Commitment>::Notarized { round }.predicate());
+        resolver.retain(above_round_floor::<V::Commitment>(round));
     }
 
     /// Prunes finalized blocks and certificates below the given height.
