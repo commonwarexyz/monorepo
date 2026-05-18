@@ -78,10 +78,11 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{self, Network},
+        Manager as _,
         Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Resolver};
+    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
@@ -93,6 +94,7 @@ mod tests {
     use commonware_utils::{
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, oneshot},
+        ordered::Set,
         sync::Mutex,
         vec::NonEmptyVec,
         NZUsize, NZU16, NZU64,
@@ -1353,6 +1355,334 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_verify_missing_candidate_waits_without_fetching() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("missing-candidate-{kind:?}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::manual_ack(),
+                    RecordingBuffer::default(),
+                )
+                .await;
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
+
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let consensus_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let missing = Sha256::hash(b"missing candidate");
+                let verify = wrapper.verify(consensus_context, missing).await;
+
+                context.sleep(Duration::from_millis(50)).await;
+                assert!(
+                    resolver.fetches().is_empty(),
+                    "{kind:?}: unavailable candidate verification must not fetch from peers"
+                );
+
+                drop(verify);
+                context.sleep(Duration::from_millis(10)).await;
+                assert!(
+                    resolver.fetches().is_empty(),
+                    "{kind:?}: canceling a missing candidate wait must not fetch from peers"
+                );
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_verify_height_lie_parent_fetch_is_round_bound() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let me = participants[0].clone();
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("height-lie-{kind:?}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::manual_ack(),
+                    RecordingBuffer::default(),
+                )
+                .await;
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
+
+                let parent_round = Round::new(Epoch::zero(), View::new(1));
+                let parent_context = Ctx {
+                    round: parent_round,
+                    leader: me.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let parent =
+                    B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
+                let parent_digest = parent.digest();
+
+                let child_round = Round::new(Epoch::zero(), View::new(2));
+                let child_context = Ctx {
+                    round: child_round,
+                    leader: me,
+                    parent: (View::new(1), parent_digest),
+                };
+                let child = B::new::<Sha256>(
+                    child_context.clone(),
+                    parent_digest,
+                    Height::new(3),
+                    200,
+                );
+                let child_digest = child.digest();
+                assert!(marshal.verified(child_round, child).await);
+
+                let verify = wrapper.verify(child_context, child_digest).await;
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "round-bound parent fetch",
+                    || {
+                        resolver.fetches().iter().any(|fetch| {
+                            matches!(
+                                fetch.key,
+                                handler::Request::Notarized { round } if round == parent_round
+                            ) && matches!(
+                                fetch.subscriber,
+                                handler::Annotation::Notarization { round }
+                                    if round == parent_round
+                            )
+                        })
+                    },
+                )
+                .await;
+
+                let fetches = resolver.fetches();
+                assert!(
+                    fetches.iter().all(|fetch| {
+                        !matches!(fetch.key, handler::Request::Block(_))
+                            && !matches!(
+                                fetch.subscriber,
+                                handler::Annotation::Certified { height }
+                                    if height == Height::new(2)
+                            )
+                    }),
+                    "{kind:?}: malicious child height must not drive parent fetches"
+                );
+
+                assert!(marshal.verified(parent_round, parent).await);
+                let verify_result = verify.await.expect("verify result missing");
+                if kind == WrapperKind::Inline {
+                    assert!(
+                        !verify_result,
+                        "inline verify should reject non-contiguous ancestry"
+                    );
+                } else {
+                    assert!(
+                        verify_result,
+                        "deferred verify should optimistically pass pre-checks"
+                    );
+                    let certify = wrapper.certify(child_round, child_digest).await;
+                    assert!(
+                        !certify.await.expect("certify result missing"),
+                        "deferred certify should reject non-contiguous ancestry"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_verify_parent_fetch_invalid_first_retries() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(
+                &mut context,
+                NAMESPACE,
+                NUM_VALIDATORS,
+            );
+            let victim = participants[0].clone();
+            let malicious = participants[1].clone();
+            let honest = participants[2].clone();
+
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(2),
+                [victim.clone(), malicious.clone()],
+            )
+            .await;
+            setup_network_links(
+                &mut oracle,
+                &[victim.clone(), malicious.clone()],
+                LINK,
+            )
+            .await;
+
+            let victim_setup = StandardHarness::setup_validator(
+                context.child("victim").with_attribute("index", 0),
+                &mut oracle,
+                victim.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let victim_mailbox = victim_setup.mailbox;
+
+            let honest_setup = StandardHarness::setup_validator(
+                context.child("honest").with_attribute("index", 2),
+                &mut oracle,
+                honest.clone(),
+                ConstantProvider::new(schemes[2].clone()),
+            )
+            .await;
+            let mut honest_mailbox = honest_setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_context = Ctx {
+                round: parent_round,
+                leader: victim.clone(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+
+            let parent_proposal =
+                Proposal::new(parent_round, View::zero(), parent_digest);
+            let parent_notarization =
+                StandardHarness::make_notarization(parent_proposal, &schemes, QUORUM);
+            assert!(honest_mailbox.verified(parent_round, parent.clone()).await);
+            StandardHarness::report_notarization(&mut honest_mailbox, parent_notarization).await;
+            assert!(honest_mailbox.get_block(&parent_digest).await.is_some());
+
+            let malicious_backfill = oracle
+                .control(malicious.clone())
+                .register(1, Quota::per_second(NonZeroU32::MAX))
+                .await
+                .unwrap();
+            let (malicious_engine, _malicious_mailbox) =
+                commonware_resolver::p2p::Engine::new(
+                    context.child("malicious_resolver"),
+                    commonware_resolver::p2p::Config {
+                        peer_provider: oracle.manager(),
+                        blocker: oracle.control(malicious.clone()),
+                        consumer: NoopConsumer,
+                        producer: StaticProducer::new(
+                            handler::Request::Notarized {
+                                round: parent_round,
+                            },
+                            Bytes::from_static(b"not a valid notarization"),
+                        ),
+                        mailbox_size: NZUsize!(100),
+                        me: Some(malicious.clone()),
+                        initial: Duration::from_secs(1),
+                        timeout: Duration::from_secs(2),
+                        fetch_retry_timeout: Duration::from_millis(100),
+                        priority_requests: false,
+                        priority_responses: false,
+                    },
+                );
+            malicious_engine.start(malicious_backfill);
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_context = Ctx {
+                round: child_round,
+                leader: victim.clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let child =
+                B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(2), 200);
+            let child_digest = child.digest();
+            assert!(victim_mailbox.verified(child_round, child).await);
+
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis);
+            let mut wrapper = Wrapper::new(
+                WrapperKind::Inline,
+                context.child("wrapper"),
+                mock_app,
+                victim_mailbox.clone(),
+            );
+            let verify = wrapper.verify(child_context, child_digest).await;
+
+            let start = context.current();
+            loop {
+                let blocked = oracle.blocked().await.unwrap();
+                if blocked
+                    .iter()
+                    .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious)
+                {
+                    break;
+                }
+                if context.current().duration_since(start).unwrap_or_default()
+                    > Duration::from_secs(5)
+                {
+                    panic!("malicious peer was not blocked");
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            oracle
+                .add_link(victim.clone(), honest.clone(), LINK)
+                .await
+                .unwrap();
+            oracle
+                .add_link(honest.clone(), victim.clone(), LINK)
+                .await
+                .unwrap();
+            let mut manager = oracle.manager();
+            manager.track(1, Set::from_iter_dedup([honest.clone()]));
+
+            select! {
+                result = verify => {
+                    assert!(
+                        result.expect("verify result missing"),
+                        "verify should retry against the honest peer and complete"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {
+                    panic!("verify did not complete after honest retry");
+                },
+            }
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked
+                    .iter()
+                    .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious),
+                "malicious peer should remain blocked"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_propose_paths() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1823,9 +2153,11 @@ mod tests {
     /// Recorded `send` call on the [`RecordingBuffer`].
     type BufferSend = (Round, B, Recipients<PublicKey>);
 
-    /// A buffer that records each `send` invocation; other methods are no-ops.
+    /// A buffer that records each `send` invocation and keeps subscriptions open;
+    /// other methods are no-ops.
     #[derive(Clone, Default)]
     struct RecordingBuffer {
+        subscriptions: Arc<Mutex<Vec<oneshot::Sender<B>>>>,
         sends: Arc<Mutex<Vec<BufferSend>>>,
     }
 
@@ -1847,12 +2179,14 @@ mod tests {
         }
 
         fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
-            let (_sender, receiver) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
+            self.subscriptions.lock().push(sender);
             receiver
         }
 
         fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
-            let (_sender, receiver) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel();
+            self.subscriptions.lock().push(sender);
             receiver
         }
 
@@ -1866,13 +2200,16 @@ mod tests {
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
     type TargetedFetch = (handler::Request<D>, NonEmptyVec<PublicKey>);
 
-    /// A resolver that records each `fetch_targeted` invocation; other
-    /// methods are no-ops.
+    /// Recorded `fetch` call on the [`RecordingResolver`].
+    type FetchRecord = Fetch<handler::Request<D>, handler::Annotation>;
+
+    /// A resolver that records each fetch invocation; other methods are no-ops.
     ///
     /// `_keepalive` optionally retains a resolver-message sender so the
     /// actor's corresponding receiver stays alive when nothing else owns it.
     #[derive(Clone, Default)]
     struct RecordingResolver {
+        fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         _keepalive: Option<mailbox::Sender<handler::Message<D>>>,
     }
@@ -1883,10 +2220,15 @@ mod tests {
             (
                 handler::Receiver::new(receiver),
                 Self {
+                    fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     _keepalive: Some(sender),
                 },
             )
+        }
+
+        fn fetches(&self) -> Vec<FetchRecord> {
+            self.fetches.lock().clone()
         }
 
         fn targeted(&self) -> Vec<TargetedFetch> {
@@ -1903,17 +2245,21 @@ mod tests {
         type Subscriber = handler::Annotation;
         type PublicKey = PublicKey;
 
-        fn fetch<R>(&mut self, _key: R) -> Feedback
+        fn fetch<R>(&mut self, key: R) -> Feedback
         where
             R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
+            self.fetches.lock().push(key.into());
             Feedback::Ok
         }
 
-        fn fetch_all<R>(&mut self, _keys: Vec<R>) -> Feedback
+        fn fetch_all<R>(&mut self, keys: Vec<R>) -> Feedback
         where
             R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
+            self.fetches
+                .lock()
+                .extend(keys.into_iter().map(Into::into));
             Feedback::Ok
         }
 
@@ -1945,6 +2291,49 @@ mod tests {
             _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
             Feedback::Ok
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopConsumer;
+
+    impl Consumer for NoopConsumer {
+        type Key = handler::Request<D>;
+        type Subscriber = handler::Annotation;
+        type Value = Bytes;
+
+        fn deliver(
+            &mut self,
+            _delivery: Delivery<Self::Key, Self::Subscriber>,
+            _value: Self::Value,
+        ) -> oneshot::Receiver<bool> {
+            let (sender, receiver) = oneshot::channel();
+            sender.send_lossy(false);
+            receiver
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticProducer {
+        key: handler::Request<D>,
+        value: Bytes,
+    }
+
+    impl StaticProducer {
+        fn new(key: handler::Request<D>, value: Bytes) -> Self {
+            Self { key, value }
+        }
+    }
+
+    impl commonware_resolver::p2p::Producer for StaticProducer {
+        type Key = handler::Request<D>;
+
+        fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+            let (sender, receiver) = oneshot::channel();
+            if key == self.key {
+                sender.send_lossy(self.value.clone());
+            }
+            receiver
         }
     }
 

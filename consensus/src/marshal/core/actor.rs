@@ -697,14 +697,12 @@ where
                         );
                     }
                     Message::SubscribeByDigest {
-                        round,
+                        fallback,
                         digest,
                         response,
                     } => {
                         self.handle_subscribe(
-                            round.map_or(Fallback::Wait, |round| Fallback::FetchByRound {
-                                round,
-                            }),
+                            fallback,
                             BlockSubscriptionKey::Digest(digest),
                             response,
                             &mut resolver,

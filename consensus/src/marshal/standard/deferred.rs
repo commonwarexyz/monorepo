@@ -483,8 +483,7 @@ where
             .child("optimistic_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
-                let block_request = marshal
-                    .subscribe_by_digest(Some(context.round), digest);
+                let block_request = marshal.subscribe_by_digest(Fallback::Wait, digest);
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -600,7 +599,9 @@ where
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest);
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(Fallback::FetchByRound { round }, digest);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
