@@ -371,7 +371,7 @@ mod tests {
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
-            background_channel_capacity: 1024,
+            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
