@@ -1037,10 +1037,8 @@ mod tests {
         let mut overflow = pending();
 
         let (wait, _wait_rx) = subscribe_by_commitment_with_fallback(1, Fallback::Wait);
-        let (by_round, _by_round_rx) = subscribe_by_commitment_with_fallback(
-            2,
-            Fallback::FetchByRound { round: round(2) },
-        );
+        let (by_round, _by_round_rx) =
+            subscribe_by_commitment_with_fallback(2, Fallback::FetchByRound { round: round(2) });
         let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_with_fallback(
             3,
             Fallback::FetchByCommitment {
@@ -1050,7 +1048,10 @@ mod tests {
 
         assert!(<TestMessage as Policy>::handle(&mut overflow, wait));
         assert!(<TestMessage as Policy>::handle(&mut overflow, by_round));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, by_commitment));
+        assert!(<TestMessage as Policy>::handle(
+            &mut overflow,
+            by_commitment
+        ));
 
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);

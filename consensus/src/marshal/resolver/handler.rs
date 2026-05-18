@@ -246,8 +246,9 @@ impl<D: Digest> ResolverSubscriber<D> {
                 },
             ) => mine != theirs || mine_context != their_context,
             (Self::Request(Request::Block { commitment: mine }), _) => match s {
-                Self::Request(Request::Block { commitment })
-                | Self::Block { commitment, .. } => commitment != mine,
+                Self::Request(Request::Block { commitment }) | Self::Block { commitment, .. } => {
+                    commitment != mine
+                }
                 _ => true,
             },
             (Self::Block { .. }, _) => true,
@@ -652,8 +653,12 @@ mod tests {
         // Test ordering within the same variant
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block { commitment: digest1 };
-        let block2 = Request::<D>::Block { commitment: digest2 };
+        let block1 = Request::<D>::Block {
+            commitment: digest1,
+        };
+        let block2 = Request::<D>::Block {
+            commitment: digest2,
+        };
 
         // Block ordering depends on digest ordering
         if digest1 < digest2 {
@@ -728,8 +733,12 @@ mod tests {
     fn test_request_partial_ord() {
         let digest1 = Sha256::hash(b"test1");
         let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block { commitment: digest1 };
-        let block2 = Request::<D>::Block { commitment: digest2 };
+        let block1 = Request::<D>::Block {
+            commitment: digest1,
+        };
+        let block2 = Request::<D>::Block {
+            commitment: digest2,
+        };
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -767,18 +776,24 @@ mod tests {
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(300)),
             },
-            Request::<D>::Block { commitment: digest2 },
+            Request::<D>::Block {
+                commitment: digest2,
+            },
             Request::<D>::Finalized {
                 height: Height::new(200),
             },
-            Request::<D>::Block { commitment: digest1 },
+            Request::<D>::Block {
+                commitment: digest1,
+            },
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(250)),
             },
             Request::<D>::Finalized {
                 height: Height::new(100),
             },
-            Request::<D>::Block { commitment: digest3 },
+            Request::<D>::Block {
+                commitment: digest3,
+            },
         ];
 
         // Sort using BTreeSet (uses Ord)

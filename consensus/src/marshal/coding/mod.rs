@@ -65,12 +65,12 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 mod tests {
     use crate::{
         marshal::{
-            core,
             coding::{
                 marshaled::genesis_coding_commitment,
                 types::{coding_config_for_participants, CodedBlock},
                 Marshaled, MarshaledConfig,
             },
+            core,
             mocks::{
                 harness::{
                     self, default_leader, genesis_commitment, make_coding_block,
