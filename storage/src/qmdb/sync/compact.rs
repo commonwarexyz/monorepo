@@ -92,6 +92,11 @@ pub struct Target<F: Family, D: Digest> {
 impl<F: Family, D: Digest> Target<F, D> {
     const INVALID_LEAF_COUNT: &'static str = "leaf_count must be in 1..=MAX_LEAVES";
 
+    /// Create a compact-sync target.
+    pub const fn new(root: D, leaf_count: Location<F>) -> Self {
+        Self { root, leaf_count }
+    }
+
     /// Validate a compact target that may have been constructed programmatically.
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self.leaf_count.is_valid() || self.leaf_count == 0 {
@@ -421,12 +426,7 @@ macro_rules! impl_compact_resolver_keyless {
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: self.root(),
-                            leaf_count: self.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(self.root(), self.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -460,12 +460,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -500,12 +495,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -547,12 +537,7 @@ macro_rules! impl_compact_resolver_immutable {
             ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: self.root(),
-                            leaf_count: self.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(self.root(), self.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -589,12 +574,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -632,12 +612,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,

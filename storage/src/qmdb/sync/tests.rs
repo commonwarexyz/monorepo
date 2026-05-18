@@ -159,7 +159,7 @@ where
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(10),
-            target: Target::from_root(
+            target: Target::new(
                 Digest::from([1u8; 32]),
                 non_empty_range!(Location::new(0), Location::new(10)),
             ),
@@ -203,7 +203,7 @@ where
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let engine_config = Config {
             context: context.child("client"),
-            target: Target::from_root(
+            target: Target::new(
                 target_root,
                 non_empty_range!(Location::new(0), Location::new(5)),
             ),
@@ -848,7 +848,7 @@ where
         // Attempt to apply a target update after sync is complete to verify
         // we don't panic
         let _ = update_sender
-            .send(Target::from_root(
+            .send(Target::new(
                 Digest::from([2u8; 32]),
                 non_empty_range!(lower_bound + 1, upper_bound + 1),
             ))
