@@ -3,7 +3,7 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::{CommitmentFallback, Mailbox},
+        core::{CommitmentFallback, Mailbox, Variant},
         standard::Standard,
     },
     simplex::types::Context,
@@ -132,9 +132,9 @@ where
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
-    let (parent_view, parent_digest) = context.parent;
+    let (parent_view, parent_commitment) = context.parent;
     let parent_request = fetch_parent(
-        parent_digest,
+        parent_commitment,
         CommitmentFallback::FetchByRound {
             round: Round::new(context.epoch(), parent_view),
         },
@@ -155,7 +155,7 @@ where
             Ok(parent) => parent,
             Err(_) => {
                 debug!(
-                    ?parent_digest,
+                    ?parent_commitment,
                     reason = "failed to fetch parent block",
                     "skipping verification"
                 );
@@ -164,8 +164,8 @@ where
         },
     };
 
-    // Validate parent digest and contiguous child height before application logic.
-    if let Err(err) = validate_block(&block, &parent, parent_digest) {
+    // Validate parent linkage and contiguous child height before application logic.
+    if let Err(err) = validate_block(&block, &parent, parent_commitment) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -202,9 +202,9 @@ where
     Some(application_valid)
 }
 
-/// Fetches the parent block given its digest and missing-block behavior.
+/// Fetches the parent block given its commitment and missing-block behavior.
 ///
-/// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
+/// If the commitment matches genesis, returns genesis directly. Otherwise, subscribes
 /// to marshal for parent availability according to `fallback`.
 ///
 /// Use `FetchByRound` for certified parent lookups when the caller knows the
@@ -219,7 +219,7 @@ where
 /// cancels the request.
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
-    parent_digest: B::Digest,
+    parent_commitment: B::Digest,
     fallback: CommitmentFallback,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
@@ -231,10 +231,10 @@ where
     B: Block + Clone,
 {
     let genesis = application.genesis().await;
-    if parent_digest == genesis.digest() {
+    if parent_commitment == <Standard<B> as Variant>::commitment(&genesis) {
         Either::Left(ready(Ok(genesis)))
     } else {
-        let receiver = marshal.subscribe_by_commitment(parent_digest, fallback);
+        let receiver = marshal.subscribe_by_commitment(parent_commitment, fallback);
         Either::Right(receiver)
     }
 }

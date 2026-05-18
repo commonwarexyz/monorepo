@@ -368,9 +368,9 @@ where
             // not the parent height. The parent may be certified above the
             // finalized tip, so this must stay round-bound until the block is
             // returned.
-            let (parent_view, parent_digest) = consensus_context.parent;
+            let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
-                parent_digest,
+                parent_commitment,
                 CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
@@ -388,7 +388,7 @@ where
                     Ok(parent) => parent,
                     Err(_) => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "failed to fetch parent block",
                             "skipping proposal"
                         );
@@ -442,7 +442,7 @@ where
                     Some(block) => block,
                     None => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "block building failed",
                             "skipping proposal"
                         );
@@ -693,12 +693,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
+    fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients)
+        self.marshal.forward(round, commitment, recipients)
     }
 }
 
@@ -803,7 +803,7 @@ mod tests {
                 parent: (View::new(1), parent_digest),
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
-            let commitment_a = block_a.digest();
+            let commitment_a = StandardHarness::commitment(&block_a);
             assert!(marshal.verified(round_a, block_a.clone()).await);
 
             // Block B at view 10 (height 2, different block same height)
@@ -814,7 +814,7 @@ mod tests {
                 parent: (View::new(1), parent_digest),
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
-            let commitment_b = block_b.digest();
+            let commitment_b = StandardHarness::commitment(&block_b);
             assert!(marshal.verified(round_b, block_b.clone()).await);
 
             context.sleep(Duration::from_millis(10)).await;
@@ -949,7 +949,7 @@ mod tests {
                 Height::new(20),
                 2000,
             );
-            let block_commitment = block.digest();
+            let block_commitment = StandardHarness::commitment(&block);
             assert!(
                 marshal
                     .clone()
@@ -1024,7 +1024,7 @@ mod tests {
                 parent: (View::zero(), genesis.digest()),
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let parent_commitment = parent.digest();
+            let parent_commitment = StandardHarness::commitment(&parent);
             assert!(
                 marshal
                     .clone()
@@ -1040,7 +1040,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
-            let commitment_a = block_a.digest();
+            let commitment_a = StandardHarness::commitment(&block_a);
             assert!(marshal.verified(round_a, block_a).await);
 
             context.sleep(Duration::from_millis(10)).await;

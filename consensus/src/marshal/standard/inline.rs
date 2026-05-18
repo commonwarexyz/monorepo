@@ -281,9 +281,9 @@ where
             // not the parent height. The parent may be certified above the
             // finalized tip, so this must stay round-bound until the block is
             // returned.
-            let (parent_view, parent_digest) = consensus_context.parent;
+            let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
-                parent_digest,
+                parent_commitment,
                 CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
@@ -301,7 +301,7 @@ where
                     Ok(parent) => parent,
                     Err(_) => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "failed to fetch parent block",
                             "skipping proposal"
                         );
@@ -353,7 +353,7 @@ where
                     Some(block) => block,
                     None => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "block building failed",
                             "skipping proposal"
                         );
@@ -550,12 +550,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
+    fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients)
+        self.marshal.forward(round, commitment, recipients)
     }
 }
 

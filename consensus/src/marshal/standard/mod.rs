@@ -481,7 +481,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -572,7 +572,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -581,7 +581,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(3)),
                     View::new(2),
-                    block_three.digest(),
+                    StandardHarness::commitment(&block_three),
                 ),
                 &schemes,
                 3,
@@ -681,7 +681,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
-                    block_one.digest(),
+                    StandardHarness::commitment(&block_one),
                 ),
                 &schemes,
                 3,
@@ -778,7 +778,11 @@ mod tests {
                     View::new(blocks[i - 1].height().get())
                 };
                 finalizations.push(StandardHarness::make_finalization(
-                    Proposal::new(Round::new(Epoch::zero(), view), parent_view, block.digest()),
+                    Proposal::new(
+                        Round::new(Epoch::zero(), view),
+                        parent_view,
+                        StandardHarness::commitment(&block),
+                    ),
                     &schemes,
                     3,
                 ));
@@ -878,7 +882,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(pending_tip)),
                     View::new(pending_tip - 1),
-                    tip_block.digest(),
+                    StandardHarness::commitment(&tip_block),
                 ),
                 &schemes,
                 QUORUM,
@@ -985,7 +989,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
-                    block_one.digest(),
+                    StandardHarness::commitment(&block_one),
                 ),
                 &schemes,
                 3,
@@ -994,7 +998,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -1061,7 +1065,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -2649,7 +2653,7 @@ mod tests {
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -2880,7 +2884,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), block.digest()),
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
                 QUORUM,
             );
@@ -3293,7 +3297,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), block.digest()),
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
                 QUORUM,
             );
@@ -3382,7 +3386,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), block.digest()),
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
                 QUORUM,
             );
