@@ -37,6 +37,13 @@ where
         /// The round in which the commitment was proposed.
         round: Round,
     },
+    /// A notification from consensus that a [`Commitment`] has been notarized.
+    Notarized {
+        /// The [`Commitment`] of the notarized block.
+        commitment: Commitment,
+        /// The round in which the commitment was notarized.
+        round: Round,
+    },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
         /// The [`Commitment`] of the block to get.
@@ -105,7 +112,10 @@ where
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
-            Self::Proposed { .. } | Self::Discovered { .. } | Self::Prune { .. } => false,
+            Self::Proposed { .. }
+            | Self::Discovered { .. }
+            | Self::Notarized { .. }
+            | Self::Prune { .. } => false,
         }
     }
 }
@@ -214,6 +224,13 @@ where
             leader,
             round,
         });
+    }
+
+    /// Inform the engine that a [`Commitment`] was notarized.
+    pub fn notarized(&self, commitment: Commitment, round: Round) {
+        let _ = self
+            .sender
+            .enqueue(Message::Notarized { commitment, round });
     }
 
     /// Request a reconstructed block by its [`Commitment`].

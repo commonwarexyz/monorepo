@@ -912,6 +912,10 @@ where
             return task;
         }
 
+        // Let the shard engine drain any sender-indexed shards already buffered
+        // for the commitment before we wait for local block availability.
+        self.shards.notarized(payload, round);
+
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
         // proposer embedded a malicious context, the f+1 honest validators from the notarizing quorum
