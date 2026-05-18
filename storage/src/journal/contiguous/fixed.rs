@@ -1300,6 +1300,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let inner = self.inner.read().await;
         inner.journal.newest_section()
     }
+
+    /// Test helper: Set and persist the recovery watermark directly.
+    #[cfg(test)]
+    pub(crate) async fn test_set_recovery_watermark(&self, watermark: u64) -> Result<(), Error> {
+        let mut inner = self.inner.write().await;
+        inner
+            .metadata
+            .put(RECOVERY_WATERMARK_KEY, watermark.to_be_bytes().to_vec());
+        inner.metadata.sync().await?;
+        Ok(())
+    }
 }
 
 // Implement Contiguous trait for fixed-length journals
@@ -2218,6 +2229,59 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_journal_stale_pruning_metadata_without_watermark_walks_lengths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .expect("failed to initialize journal at size");
+
+            for i in 0..10u64 {
+                journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            journal.sync().await.expect("failed to sync journal");
+            assert_eq!(journal.bounds().await, 7..17);
+
+            {
+                let mut inner = journal.inner.write().await;
+                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
+                inner
+                    .metadata
+                    .sync()
+                    .await
+                    .expect("failed to remove recovery watermark");
+            }
+            drop(journal);
+
+            // Remove the metadata's oldest section so PRUNING_BOUNDARY_KEY=7 is stale. Without a
+            // recovery watermark, recovery must still walk lengths from the recovered blob boundary.
+            context
+                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
+                .await
+                .expect("failed to remove stale oldest section");
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to recover journal");
+            assert_eq!(journal.bounds().await, 10..17);
+            assert_eq!(journal.recovery_watermark().await, 17);
+            assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
+            assert_eq!(journal.read(16).await.unwrap(), test_digest(9));
+            assert!(matches!(
+                journal.read(17).await,
+                Err(Error::ItemOutOfRange(17))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_legacy_recovery_installs_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2273,6 +2337,88 @@ mod tests {
             assert_eq!(journal.bounds().await, 0..12);
             assert_eq!(journal.recovery_watermark().await, 12);
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_update_metadata_watermark_before_clear_lowers_only() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+                    .await
+                    .expect("failed to initialize metadata");
+            metadata.put(RECOVERY_WATERMARK_KEY, 7u64.to_be_bytes().to_vec());
+
+            let changed =
+                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 9)
+                    .expect("failed to update metadata watermark");
+            assert!(!changed);
+            let raw_watermark = metadata
+                .get(&RECOVERY_WATERMARK_KEY)
+                .expect("missing recovery watermark");
+            let persisted_watermark =
+                u64::from_be_bytes(raw_watermark.as_slice().try_into().unwrap());
+            assert_eq!(persisted_watermark, 7);
+
+            let changed =
+                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 5)
+                    .expect("failed to update metadata watermark");
+            assert!(changed);
+            let raw_watermark = metadata
+                .get(&RECOVERY_WATERMARK_KEY)
+                .expect("missing recovery watermark");
+            let persisted_watermark =
+                u64::from_be_bytes(raw_watermark.as_slice().try_into().unwrap());
+            assert_eq!(persisted_watermark, 5);
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_prune_to_blob_boundary_removes_pruning_metadata() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .expect("failed to initialize journal at size");
+
+            for i in 0..8u64 {
+                journal
+                    .append(&test_digest(i))
+                    .await
+                    .expect("failed to append data");
+            }
+            journal.sync().await.expect("failed to sync journal");
+            assert_eq!(journal.bounds().await, 7..15);
+
+            journal.prune(10).await.expect("failed to prune journal");
+            journal.sync().await.expect("failed to sync pruned journal");
+            assert_eq!(journal.bounds().await, 10..15);
+            drop(journal);
+
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+                .await
+                .expect("failed to reopen metadata");
+            assert!(metadata.get(&PRUNING_BOUNDARY_KEY).is_none());
+            drop(metadata);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to reopen journal");
+            assert_eq!(journal.bounds().await, 10..15);
+            assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
             journal.destroy().await.unwrap();
         });
     }

@@ -1156,10 +1156,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let start_section = position_to_section(anchor, items_per_section);
         let first_position = pruning_boundary.max(start_section * items_per_section);
 
-        if anchor < first_position {
-            return Ok(None);
-        }
-
         let skip = anchor - first_position;
         let stream = data.replay(start_section, 0, REPLAY_BUFFER_SIZE).await?;
         futures::pin_mut!(stream);
@@ -1301,9 +1297,28 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.offsets.rewind(position).await
     }
 
+    /// Test helper: Set and persist the offsets recovery watermark directly.
+    pub(crate) async fn test_set_offsets_recovery_watermark(
+        &self,
+        watermark: u64,
+    ) -> Result<(), Error> {
+        self.offsets.test_set_recovery_watermark(watermark).await
+    }
+
     /// Test helper: Get the size of the internal offsets journal.
     pub(crate) async fn test_offsets_size(&self) -> u64 {
         self.offsets.size().await
+    }
+
+    /// Test helper: Rewind the internal data journal to the item at `position`.
+    pub(crate) async fn test_rewind_data_to_position(&self, position: u64) -> Result<(), Error> {
+        let offset = {
+            let offsets_reader = self.offsets.reader().await;
+            offsets_reader.read(position).await?
+        };
+        let section = position_to_section(position, self.items_per_section);
+        let mut inner = self.inner.write().await;
+        inner.data.rewind_to_offset(section, offset).await
     }
 
     /// Test helper: Append directly to the internal data journal (simulates crash scenario).
@@ -2193,6 +2208,137 @@ mod tests {
             assert_eq!(variable.read(25).await.unwrap(), 2500);
 
             variable.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_offsets_watermark_outside_bounds_rebuilds_from_start() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-watermark-outside-bounds".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..15u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Simulate stale metadata that points past the recovered offsets bounds.
+            journal
+                .test_set_offsets_recovery_watermark(30)
+                .await
+                .unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..15);
+            assert_eq!(journal.test_offsets_size().await, 15);
+            for i in 0..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_rebuild_offsets_anchor_outside_bounds_returns_none() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let data_cfg = variable::Config {
+                partition: "rebuild-anchor-outside-data".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let offsets_cfg = fixed::Config {
+                partition: "rebuild-anchor-outside-offsets".into(),
+                items_per_blob: NZU64!(10),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut data = variable::Journal::<_, u64>::init(context.child("data"), data_cfg)
+                .await
+                .unwrap();
+            let mut offsets = fixed::Journal::<_, u64>::init(context.child("offsets"), offsets_cfg)
+                .await
+                .unwrap();
+
+            let (offset, _) = data.append(0, &100).await.unwrap();
+            offsets.append(&offset).await.unwrap();
+
+            let result =
+                Journal::<_, u64>::rebuild_offsets_from_anchor(&data, &mut offsets, 10, 0, 2)
+                    .await
+                    .unwrap();
+            assert!(result.is_none());
+
+            data.destroy().await.unwrap();
+            offsets.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_retries_from_pruning_boundary_when_anchor_too_far() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-anchor-too-far".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // The offsets watermark is in-bounds, but the data journal is shorter than that
+            // anchor. Recovery should retry from the pruning boundary and rebuild only the
+            // retained data prefix.
+            journal
+                .test_set_offsets_recovery_watermark(15)
+                .await
+                .unwrap();
+            journal.test_rewind_data_to_position(12).await.unwrap();
+            journal.test_sync_data().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..12);
+            assert_eq!(journal.test_offsets_size().await, 12);
+            for i in 0..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(12).await,
+                Err(Error::ItemOutOfRange(12))
+            ));
+
+            journal.destroy().await.unwrap();
         });
     }
 
