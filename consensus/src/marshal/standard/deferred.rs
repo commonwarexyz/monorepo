@@ -606,7 +606,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_digest(DigestFallback::Wait, digest);
+            .subscribe_by_digest(DigestFallback::FetchByRound { round }, digest);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();

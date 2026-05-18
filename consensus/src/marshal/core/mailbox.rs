@@ -169,7 +169,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
 pub enum DigestFallback {
     /// Wait for local availability only.
     Wait,
-    /// Request the certified proposal for `round` from peers.
+    /// Request the notarized proposal for `round` from peers.
     ///
     /// Use this only when the caller has a trusted round for the digest. Digest-keyed
     /// subscriptions cannot request exact commitment fetches; use
@@ -192,20 +192,16 @@ impl From<DigestFallback> for CommitmentFallback {
 pub enum CommitmentFallback {
     /// Wait for local availability only.
     ///
-    /// Use this for pending candidate proposal data. A notarization is not, by
-    /// itself, permission to ask peers for the candidate block: crash or
-    /// availability failures can leave a notarization without fetchable proposal
-    /// data. The caller may still fetch the candidate's parents after the
-    /// candidate becomes locally available, because those parents are certified.
+    /// Use this for pending candidate proposal data before notarization.
     Wait,
-    /// Request the certified parent proposal for `round` from peers.
+    /// Request the notarized proposal for `round` from peers.
     ///
-    /// Use this only for certified parent lookups where the caller knows the
-    /// parent round and commitment but not the parent height, such as proposal
-    /// construction or verification of a known child. Do not infer height from
-    /// the finalized tip or the child block: proposals may build on a certified
-    /// parent that is not finalized locally yet, and an unverified child may
-    /// lie about its height.
+    /// Use this when the caller knows the certified round and commitment but
+    /// not the proposal height, such as proposal construction, verification of
+    /// a known child, or certification of a notarized candidate. Do not infer
+    /// height from the finalized tip or another block: proposals may build on
+    /// a certified parent that is not finalized locally yet, and an unverified
+    /// child may lie about its height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or pruning bound.

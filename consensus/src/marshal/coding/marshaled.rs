@@ -932,7 +932,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(payload, core::CommitmentFallback::Wait);
+            .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();

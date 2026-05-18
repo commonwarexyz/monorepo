@@ -923,22 +923,21 @@ where
         // We don't have the block locally. Local-only waits reach this point
         // without a round or height, so they only register a subscriber below.
         //
-        // Round-based fetching is for certified parent lookups whose height is
-        // not known before the request. Height-based fetching is only for
-        // callers that already have a validated pruning height.
+        // Round-based fetching is for notarized proposal lookups whose height is
+        // not known before the request. Height-based fetching is only for callers
+        // that already have a validated pruning height.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
                 if round < self.last_processed_round {
                     // `last_processed_round` only advances after the application
                     // processes the corresponding finalized block. A round-bound
-                    // certified-parent fetch below that floor is only
-                    // proposal-construction assistance for data behind the
-                    // processed chain.
+                    // proposal fetch below that floor is only assistance for
+                    // data behind the processed chain.
                     return;
                 }
-                // Fetch the certified parent proposal for this round. The response
+                // Fetch the notarized proposal for this round. The response
                 // must include a certificate so the commitment is tied to the
-                // certified parent context. The decoded block is heightable, but
+                // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
                 debug!(?round, ?digest, "requested block missing");

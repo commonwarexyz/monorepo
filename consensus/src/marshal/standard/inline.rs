@@ -498,11 +498,11 @@ where
             return rx;
         }
 
-        // Otherwise, wait for local block availability. Certification must not
-        // fetch the candidate block from peers.
+        // Otherwise, wait for local block availability and recover from peers by
+        // notarized round if necessary.
         let block_rx = self
             .marshal
-            .subscribe_by_digest(DigestFallback::Wait, digest);
+            .subscribe_by_digest(DigestFallback::FetchByRound { round }, digest);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
