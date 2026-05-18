@@ -230,11 +230,7 @@ where
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
-        target: Target {
-            root: ops_root,
-            ops_root,
-            range: non_empty_range!(sync_boundary, size),
-        },
+        target: Target::from_root(ops_root, non_empty_range!(sync_boundary, size)),
     };
 
     debug!(?response, "serving target update");

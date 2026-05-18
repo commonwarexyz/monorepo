@@ -529,11 +529,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
-            target: crate::qmdb::sync::Target {
-                root: verification_root,
-                ops_root: sync_root,
-                range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
-            },
+            target: crate::qmdb::sync::Target::from_roots(verification_root, sync_root, commonware_utils::non_empty_range!(lower_bound, upper_bound)),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 4,
@@ -611,11 +607,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         assert!(local_start > crate::merkle::Location::new(0));
 
         let root = db.root();
-        let stale_target = crate::qmdb::sync::Target {
-            root,
-            ops_root: sync_root,
-            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
-        };
+        let stale_target = crate::qmdb::sync::Target::from_roots(root, sync_root, non_empty_range!(local_start.checked_sub(1).unwrap(), local_end));
         assert!(
             !<Db as SyncDatabase>::has_local_target_state(
                 context.child("probe_stale"),
@@ -625,11 +617,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
             .await
         );
 
-        let matching_target = crate::qmdb::sync::Target {
-            root,
-            ops_root: sync_root,
-            range: non_empty_range!(local_start, local_end),
-        };
+        let matching_target = crate::qmdb::sync::Target::from_roots(root, sync_root, non_empty_range!(local_start, local_end));
         assert!(
             <Db as SyncDatabase>::has_local_target_state(
                 context.child("probe_matching"),
