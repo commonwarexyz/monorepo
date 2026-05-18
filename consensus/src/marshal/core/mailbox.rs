@@ -870,6 +870,10 @@ mod tests {
         harness::make_raw_block(harness::D::EMPTY, Height::new(height), height)
     }
 
+    fn commitment(height: u64) -> harness::D {
+        <Standard<harness::B> as Variant>::commitment(&block(height))
+    }
+
     fn get_info(height: u64) -> (TestMessage, oneshot::Receiver<Option<(Height, harness::D)>>) {
         let (response, receiver) = oneshot::channel();
         (
@@ -965,7 +969,7 @@ mod tests {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByCommitment {
-                commitment: block(height).digest(),
+                commitment: commitment(height),
                 fallback,
                 response,
             },
@@ -1066,19 +1070,20 @@ mod tests {
     }
 
     fn has_subscription(overflow: &TestPending, height: u64) -> bool {
-        let expected = block(height).digest();
+        let expected_digest = block(height).digest();
+        let expected_commitment = commitment(height);
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
                 PendingMessage::Message(TestMessage::SubscribeByDigest { digest, response, .. })
-                    if *digest == expected && !response.is_closed()
+                    if *digest == expected_digest && !response.is_closed()
             ) || matches!(
                 message,
                 PendingMessage::Message(TestMessage::SubscribeByCommitment {
                     commitment,
                     response,
                     ..
-                }) if *commitment == expected && !response.is_closed()
+                }) if *commitment == expected_commitment && !response.is_closed()
             )
         })
     }
