@@ -1187,11 +1187,19 @@ where
                 for annotation in subscribers {
                     let keep = match annotation {
                         Annotation::Finalized(Finalized::ByHeight { height: expected }) => {
-                            expected == height
+                            assert_eq!(expected, height);
+                            true
                         }
                         Annotation::Certified { .. }
                         | Annotation::Finalized(Finalized::ByRound { .. }) => true,
-                        Annotation::Notarization { .. } => false,
+                        // Notarization annotations are only meaningful on
+                        // `Request::Notarized` deliveries. They tag
+                        // round-bound fetches for resolver pruning, while
+                        // notarized delivery validation uses the request key
+                        // and should not drive block-keyed storage.
+                        Annotation::Notarization { .. } => {
+                            unreachable!("notarization annotation on block delivery")
+                        }
                     };
                     if keep {
                         annotations.push(annotation);
