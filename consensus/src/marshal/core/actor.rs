@@ -604,8 +604,7 @@ where
                             self.cache_block(round, digest, block).await;
                         } else {
                             debug!(?round, "notarized block missing");
-                            resolver
-                                .fetch(Request::<V::Commitment>::Notarized { round });
+                            resolver.fetch(Request::<V::Commitment>::Notarized { round });
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -642,8 +641,7 @@ where
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
-                            resolver
-                                .fetch(Request::<V::Commitment>::Block(commitment));
+                            resolver.fetch(Request::<V::Commitment>::Block(commitment));
                         }
                     }
                     Message::GetBlock {
@@ -667,7 +665,7 @@ where
                             };
                             response.send_lossy(block);
                         }
-                    }
+                    },
                     Message::GetFinalization { height, response } => {
                         let finalization = self.get_finalization_by_height(height).await;
                         response.send_lossy(finalization);

@@ -135,8 +135,7 @@ impl<
                         self.state.handle(certificate, None, &mut resolver);
                     }
                     MailboxMessage::Certified { view, success } => {
-                        self.state
-                            .handle_certified(view, success, &mut resolver)
+                        self.state.handle_certified(view, success, &mut resolver)
                     }
                 }
             },

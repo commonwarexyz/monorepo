@@ -132,8 +132,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     ) -> Prioritized<Message, EncodedData> {
         select! {
             msg = control.next() => msg.map_or(Prioritized::Closed, Prioritized::Control),
-            msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
-            msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(msg.into_inner())),
+            msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
+                msg.into_inner()
+            )),
+            msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
+                msg.into_inner()
+            )),
         }
     }
 

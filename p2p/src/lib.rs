@@ -121,11 +121,7 @@ stability_scope!(BETA {
         ///
         /// Feedback from submitting the message for delivery.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
-        fn send(
-            self,
-            message: impl Into<IoBufs> + Send,
-            priority: bool,
-        ) -> Feedback;
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback;
     }
 
     /// Interface for sending messages to a set of recipients.
@@ -357,10 +353,7 @@ stability_scope!(BETA {
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address
-        fn overwrite(
-            &mut self,
-            peers: Map<Self::PublicKey, Address>,
-        ) -> Feedback;
+        fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) -> Feedback;
     }
 
     /// Interface for blocking other peers.
