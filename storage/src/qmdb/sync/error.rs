@@ -2,6 +2,7 @@
 
 use crate::merkle::{Family, Location};
 use commonware_cryptography::Digest;
+use commonware_utils::range::NonEmptyRange;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError<F: Family, D: Digest> {
@@ -33,14 +34,10 @@ pub enum EngineError<F: Family, D: Digest> {
     #[error("sync target root unchanged")]
     SyncTargetRootUnchanged,
     /// Sync target moved backward
-    #[error(
-        "sync target moved backward: {old_lower_bound_pos}..{old_upper_bound_pos} -> {new_lower_bound_pos}..{new_upper_bound_pos}"
-    )]
+    #[error("sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {
-        old_lower_bound_pos: Location<F>,
-        old_upper_bound_pos: Location<F>,
-        new_lower_bound_pos: Location<F>,
-        new_upper_bound_pos: Location<F>,
+        old: NonEmptyRange<Location<F>>,
+        new: NonEmptyRange<Location<F>>,
     },
     /// Sync already completed
     #[error("sync already completed")]

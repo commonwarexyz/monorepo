@@ -46,10 +46,8 @@ where
         || new_target.range().end() <= old_target.range().end()
     {
         return Err(sync::Error::Engine(EngineError::SyncTargetMovedBackward {
-            old_lower_bound_pos: old_target.range().start(),
-            old_upper_bound_pos: old_target.range().end(),
-            new_lower_bound_pos: new_target.range().start(),
-            new_upper_bound_pos: new_target.range().end(),
+            old: old_target.range().clone(),
+            new: new_target.range().clone(),
         }));
     }
 
@@ -120,20 +118,16 @@ mod tests {
         target(sha256::Digest::from([0; 32]), 0, 100),
         target(sha256::Digest::from([1; 32]), 50, 100),
         Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
-            old_lower_bound_pos: Location::new(0),
-            old_upper_bound_pos: Location::new(100),
-            new_lower_bound_pos: Location::new(50),
-            new_upper_bound_pos: Location::new(100),
+            old: non_empty_range!(Location::new(0), Location::new(100)),
+            new: non_empty_range!(Location::new(50), Location::new(100)),
         }))
     )]
     #[case::moves_backward(
         target(sha256::Digest::from([0; 32]), 0, 100),
         target(sha256::Digest::from([1; 32]), 0, 50),
         Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
-            old_lower_bound_pos: Location::new(0),
-            old_upper_bound_pos: Location::new(100),
-            new_lower_bound_pos: Location::new(0),
-            new_upper_bound_pos: Location::new(50),
+            old: non_empty_range!(Location::new(0), Location::new(100)),
+            new: non_empty_range!(Location::new(0), Location::new(50)),
         }))
     )]
     #[case::same_root(
@@ -170,9 +164,18 @@ mod tests {
                     assert_eq!(a_upper, e_upper);
                 }
                 (
-                    TestError::Engine(EngineError::SyncTargetMovedBackward { .. }),
-                    TestError::Engine(EngineError::SyncTargetMovedBackward { .. }),
-                ) => {}
+                    TestError::Engine(EngineError::SyncTargetMovedBackward {
+                        old: a_old,
+                        new: a_new,
+                    }),
+                    TestError::Engine(EngineError::SyncTargetMovedBackward {
+                        old: e_old,
+                        new: e_new,
+                    }),
+                ) => {
+                    assert_eq!(a_old, e_old);
+                    assert_eq!(a_new, e_new);
+                }
                 (
                     TestError::Engine(EngineError::SyncTargetRootUnchanged),
                     TestError::Engine(EngineError::SyncTargetRootUnchanged),
