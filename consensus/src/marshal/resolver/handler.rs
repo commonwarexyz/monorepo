@@ -255,7 +255,6 @@ impl<D: Digest> Request<D> {
             (Self::Block(_), _, _) => true,
         }
     }
-
 }
 
 impl<D: Digest> Write for Request<D> {
