@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr,
-    qmdb::sync::{compact, Target},
+    qmdb::{any::sync::Target, sync::compact},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
@@ -230,11 +230,7 @@ where
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
-        target: Target {
-            root: ops_root,
-            ops_root,
-            range: non_empty_range!(sync_boundary, size),
-        },
+        target: Target::new(ops_root, non_empty_range!(sync_boundary, size)),
     };
 
     debug!(?response, "serving target update");

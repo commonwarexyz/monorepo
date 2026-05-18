@@ -12,6 +12,7 @@ use commonware_runtime::{
 use commonware_storage::{
     mmr,
     qmdb::{
+        any::sync::Target,
         current as current_qmdb,
         sync::{self, compact},
     },
@@ -73,9 +74,9 @@ struct Config {
 async fn target_update_task<E, Op, D>(
     context: E,
     resolver: Resolver<Op, D>,
-    update_tx: mpsc::Sender<sync::Target<mmr::Family, D>>,
+    update_tx: mpsc::Sender<Target<mmr::Family, D>>,
     interval_duration: Duration,
-    initial_target: sync::Target<mmr::Family, D>,
+    initial_target: Target<mmr::Family, D>,
 ) -> Result<(), Error>
 where
     E: Clock,
@@ -135,8 +136,8 @@ where
         E,
         Config,
         Resolver<Op, Key>,
-        sync::Target<mmr::Family, Key>,
-        mpsc::Receiver<sync::Target<mmr::Family, Key>>,
+        Target<mmr::Family, Key>,
+        mpsc::Receiver<Target<mmr::Family, Key>>,
         u32,
     ) -> SyncFut,
     SyncFut: Future<Output = Result<DB, Box<dyn std::error::Error>>>,
@@ -191,7 +192,7 @@ where
         |context, config, resolver, initial_target, update_receiver, iteration| async move {
             let db_config = any::create_config(&context);
             let sync_config =
-                sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Key>> {
+                sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Key>, _> {
                     context,
                     db_config,
                     fetch_batch_size: config.batch_size,
@@ -323,6 +324,7 @@ where
             let sync_config = sync::engine::Config::<
                 immutable::Database<_>,
                 Resolver<immutable::Operation, Key>,
+                _,
             > {
                 context,
                 db_config,
@@ -360,20 +362,23 @@ where
         config,
         |context, config, resolver, initial_target, update_receiver, iteration| async move {
             let db_config = keyless::create_config(&context);
-            let sync_config =
-                sync::engine::Config::<keyless::Database<_>, Resolver<keyless::Operation, Key>> {
-                    context,
-                    db_config,
-                    fetch_batch_size: config.batch_size,
-                    target: initial_target,
-                    resolver,
-                    apply_batch_size: 1024,
-                    max_outstanding_requests: config.max_outstanding_requests,
-                    update_rx: Some(update_receiver),
-                    finish_rx: None,
-                    reached_target_tx: None,
-                    max_retained_roots: 8,
-                };
+            let sync_config = sync::engine::Config::<
+                keyless::Database<_>,
+                Resolver<keyless::Operation, Key>,
+                _,
+            > {
+                context,
+                db_config,
+                fetch_batch_size: config.batch_size,
+                target: initial_target,
+                resolver,
+                apply_batch_size: 1024,
+                max_outstanding_requests: config.max_outstanding_requests,
+                update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            };
             let database: keyless::Database<_> = sync::sync(sync_config).await?;
             info!(
                 sync_iteration = iteration,

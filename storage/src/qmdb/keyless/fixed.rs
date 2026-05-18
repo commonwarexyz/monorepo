@@ -936,7 +936,10 @@ mod test {
     fn test_keyless_fixed_sync() {
         use crate::{
             merkle::Location,
-            qmdb::sync::{self, engine::Config, Target},
+            qmdb::{
+                any::sync::Target,
+                sync::{self, engine::Config},
+            },
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use std::sync::Arc;
@@ -966,11 +969,7 @@ mod test {
             let config = Config {
                 db_config: client_config,
                 fetch_batch_size: NZU64!(5),
-                target: Target {
-                    root: target_root,
-                    ops_root: target_root,
-                    range: non_empty_range!(lower_bound, upper_bound),
-                },
+                target: Target::new(target_root, non_empty_range!(lower_bound, upper_bound)),
                 context: ctx.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,

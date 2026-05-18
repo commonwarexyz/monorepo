@@ -6,6 +6,7 @@ use commonware_runtime::{Network, Spawner};
 use commonware_storage::{
     mmr::{self, Location},
     qmdb::{
+        any::sync::Target,
         current::sync::Target as CurrentTarget,
         sync::{self, compact},
     },
@@ -48,7 +49,7 @@ where
     }
 
     /// Returns the current sync target from the server.
-    pub async fn get_sync_target(&self) -> Result<sync::Target<mmr::Family, D>, crate::Error> {
+    pub async fn get_sync_target(&self) -> Result<Target<mmr::Family, D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request =
             wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id });

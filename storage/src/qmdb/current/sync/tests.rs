@@ -1,10 +1,7 @@
 //! Tests for [crate::qmdb::current] state sync.
 //!
-//! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
-//! implementing [SyncTestHarness] for current database types. The key difference from `any`
-//! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
-//! [qmdb::sync::Database::ops_root](crate::qmdb::sync::Database::ops_root)), not the database root
-//! returned by `Db::root()`.
+//! This module reuses the shared sync test functions from [crate::qmdb::sync::tests] by
+//! implementing [SyncTestHarness] for current database types.
 //!
 //! Harnesses are instantiated for **both** MMR and MMB merkle families across each (ordered,
 //! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
@@ -14,9 +11,11 @@
 //! MMB round-trip, and target-update regression coverage.
 
 use crate::qmdb::{
-    any::sync::tests::{ConfigOf, SyncTestHarness},
     current::tests::{fixed_config, variable_config},
-    sync::Database as SyncDatabase,
+    sync::{
+        tests::{ConfigOf, SyncTestHarness},
+        Database as SyncDatabase,
+    },
 };
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
@@ -24,14 +23,34 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
 };
-use commonware_utils::non_empty_range;
+use commonware_utils::{non_empty_range, range::NonEmptyRange};
 use rand::RngCore as _;
+
+fn dummy_current_target<F: crate::merkle::Graftable>(
+    root: Digest,
+    ops_root: Digest,
+    range: NonEmptyRange<crate::merkle::Location<F>>,
+) -> crate::qmdb::current::sync::Target<F, Digest> {
+    crate::qmdb::current::sync::Target::new(
+        root,
+        ops_root,
+        crate::qmdb::current::proof::OpsRootWitness {
+            grafted_root: Digest::from([0; 32]),
+            pending_chunk_digest: None.try_into().unwrap(),
+            partial_chunk: None,
+        },
+        range,
+    )
+}
 
 // ===== Harness Implementations =====
 
 mod harnesses {
     use super::*;
-    use crate::merkle::{self, mmb, mmr};
+    use crate::{
+        merkle::{self, mmb, mmr},
+        qmdb::current::{proof::OpsRootWitness, sync::Target as CurrentTarget},
+    };
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng_seeded;
 
@@ -75,6 +94,23 @@ mod harnesses {
         32,
         Sequential,
     >;
+
+    fn target<F: merkle::Graftable>(
+        root: Digest,
+        ops_root: Digest,
+        range: NonEmptyRange<crate::merkle::Location<F>>,
+    ) -> CurrentTarget<F, Digest> {
+        CurrentTarget::new(
+            root,
+            ops_root,
+            OpsRootWitness {
+                grafted_root: Digest::from([0; 32]),
+                pending_chunk_digest: None.try_into().unwrap(),
+                partial_chunk: None,
+            },
+            range,
+        )
+    }
 
     fn create_unordered_fixed_ops<F: merkle::Family>(
         n: usize,
@@ -276,9 +312,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedFixedHarness<F> {
         type Family = F;
         type Db = UnorderedFixedDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -323,9 +364,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedVariableHarness<F> {
         type Family = F;
         type Db = UnorderedVariableDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -370,9 +416,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedFixedHarness<F> {
         type Family = F;
         type Db = OrderedFixedDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -417,9 +468,14 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedVariableHarness<F> {
         type Family = F;
         type Db = OrderedVariableDb<F>;
+        type Target = CurrentTarget<F, Digest>;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::ops_root(db)
+        fn target(
+            root: Digest,
+            ops_root: Digest,
+            range: NonEmptyRange<crate::merkle::Location<Self::Family>>,
+        ) -> Self::Target {
+            target(root, ops_root, range)
         }
 
         fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
@@ -522,18 +578,17 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let client_suffix = context.next_u64().to_string();
         let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
         let target_db = std::sync::Arc::new(target_db);
-        // This uses the shared sync engine's ops-root target directly. The focused
-        // `root_sync` tests below cover the current sync wrapper that authenticates ops
-        // roots against trusted database roots.
+        // This uses the shared sync engine directly. The focused `root_sync` tests below cover the
+        // current sync wrapper that authenticates target witnesses before starting the engine.
         let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
-            target: crate::qmdb::sync::Target {
-                root: verification_root,
-                ops_root: sync_root,
-                range: commonware_utils::non_empty_range!(lower_bound, upper_bound),
-            },
+            target: dummy_current_target(
+                verification_root,
+                sync_root,
+                commonware_utils::non_empty_range!(lower_bound, upper_bound),
+            ),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 4,
@@ -611,11 +666,11 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
         assert!(local_start > crate::merkle::Location::new(0));
 
         let root = db.root();
-        let stale_target = crate::qmdb::sync::Target {
+        let stale_target = dummy_current_target(
             root,
-            ops_root: sync_root,
-            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
-        };
+            sync_root,
+            non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+        );
         assert!(
             !<Db as SyncDatabase>::has_local_target_state(
                 context.child("probe_stale"),
@@ -625,11 +680,8 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
             .await
         );
 
-        let matching_target = crate::qmdb::sync::Target {
-            root,
-            ops_root: sync_root,
-            range: non_empty_range!(local_start, local_end),
-        };
+        let matching_target =
+            dummy_current_target(root, sync_root, non_empty_range!(local_start, local_end));
         assert!(
             <Db as SyncDatabase>::has_local_target_state(
                 context.child("probe_matching"),
@@ -645,7 +697,7 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
 
 // ===== Test Generation Macro =====
 
-/// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
+/// Dispatches to the shared test functions in [crate::qmdb::sync::tests].
 macro_rules! current_sync_tests_for_harness {
     ($harness:ty, $mod_name:ident) => {
         mod $mod_name {
@@ -656,7 +708,7 @@ macro_rules! current_sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_resolver_fails() {
-                crate::qmdb::any::sync::tests::test_sync_resolver_fails::<$harness>();
+                crate::qmdb::sync::tests::test_sync_resolver_fails::<$harness>();
             }
 
             #[rstest]
@@ -669,7 +721,7 @@ macro_rules! current_sync_tests_for_harness {
             #[case::db_size_eq_batch_size(1000, 1000)]
             #[case::batch_size_gt_db_size(1000, 1001)]
             fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
-                crate::qmdb::any::sync::tests::test_sync::<$harness>(
+                crate::qmdb::sync::tests::test_sync::<$harness>(
                     target_db_ops,
                     NonZeroU64::new(fetch_batch_size).unwrap(),
                 );
@@ -677,67 +729,57 @@ macro_rules! current_sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_subset_of_target_database() {
-                crate::qmdb::any::sync::tests::test_sync_subset_of_target_database::<$harness>(
-                    1000,
-                );
+                crate::qmdb::sync::tests::test_sync_subset_of_target_database::<$harness>(1000);
             }
 
             #[test_traced]
             fn test_sync_use_existing_db_partial_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(
-                    1000,
-                );
+                crate::qmdb::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(1000);
             }
 
             #[test_traced]
             fn test_sync_use_existing_db_exact_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(
-                    1000,
-                );
+                crate::qmdb::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(1000);
             }
 
             #[test_traced("WARN")]
             fn test_target_update_lower_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_lower_bound_decrease::<$harness>(
-                );
+                crate::qmdb::sync::tests::test_target_update_lower_bound_decrease::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_upper_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_upper_bound_decrease::<$harness>(
-                );
+                crate::qmdb::sync::tests::test_target_update_upper_bound_decrease::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_bounds_increase() {
-                crate::qmdb::any::sync::tests::test_target_update_bounds_increase::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_bounds_increase::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_on_done_client() {
-                crate::qmdb::any::sync::tests::test_target_update_on_done_client::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_on_done_client::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_waits_for_explicit_finish() {
-                crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
+                crate::qmdb::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_handles_early_finish_signal() {
-                crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
+                crate::qmdb::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_fails_when_finish_sender_dropped() {
-                crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<
-                    $harness,
-                >();
+                crate::qmdb::sync::tests::test_sync_fails_when_finish_sender_dropped::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_allows_dropped_reached_target_receiver() {
-                crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
+                crate::qmdb::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
                     $harness,
                 >();
             }
@@ -759,7 +801,7 @@ macro_rules! current_sync_tests_for_harness {
                 #[case] initial_ops: usize,
                 #[case] additional_ops: usize,
             ) {
-                crate::qmdb::any::sync::tests::test_target_update_during_sync::<$harness>(
+                crate::qmdb::sync::tests::test_target_update_during_sync::<$harness>(
                     initial_ops,
                     additional_ops,
                 );
@@ -767,12 +809,12 @@ macro_rules! current_sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_database_persistence() {
-                crate::qmdb::any::sync::tests::test_sync_database_persistence::<$harness>();
+                crate::qmdb::sync::tests::test_sync_database_persistence::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_post_sync_usability() {
-                crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
+                crate::qmdb::sync::tests::test_sync_post_sync_usability::<$harness>();
             }
         }
     };
@@ -849,12 +891,12 @@ mod root_sync {
         let witness = db.ops_root_witness(&hasher).await.unwrap();
         let lower = db.sync_boundary();
         let upper = db.bounds().await.end;
-        CurrentTarget {
-            root: db.root(),
-            ops_root: db.ops_root(),
+        CurrentTarget::new(
+            db.root(),
+            db.ops_root(),
             witness,
-            range: non_empty_range!(lower, upper),
-        }
+            non_empty_range!(lower, upper),
+        )
     }
 
     #[test_traced("INFO")]
