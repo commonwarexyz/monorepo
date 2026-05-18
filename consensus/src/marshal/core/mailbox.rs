@@ -71,21 +71,35 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// A request to subscribe to a block by its digest.
     SubscribeByDigest {
-        /// How marshal should behave if the block is missing locally.
-        fallback: Fallback,
         /// The digest of the block to retrieve.
         digest: <V::Block as Digestible>::Digest,
+        /// How marshal should behave if the block is missing locally.
+        fallback: DigestFallback,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
     /// A request to subscribe to a block by its commitment.
     SubscribeByCommitment {
-        /// How marshal should behave if the block is missing locally.
-        fallback: Fallback,
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
+        /// How marshal should behave if the block is missing locally.
+        fallback: CommitmentFallback,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
+    },
+    /// A request to recover a notarized block by round without adding another local subscriber.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))]
+    RecoverByCommitment {
+        /// The notarized round to request.
+        round: Round,
+        /// The commitment of the block to recover.
+        commitment: V::Commitment,
     },
     /// A request to retrieve the verified block previously persisted for `round`.
     GetVerified {
@@ -164,25 +178,42 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
 }
 
-/// How a block subscription should behave when the block is missing locally.
+/// How a digest-keyed block subscription should behave when the block is missing locally.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Fallback {
+pub enum DigestFallback {
+    /// Wait for local availability only.
+    Wait,
+    /// Request the notarized proposal for `round` from peers.
+    ///
+    /// Use this only when the caller has a trusted round for the digest. Digest-keyed
+    /// subscriptions intentionally cannot request exact commitment fetches.
+    FetchByRound { round: Round },
+}
+
+impl From<DigestFallback> for CommitmentFallback {
+    fn from(fallback: DigestFallback) -> Self {
+        match fallback {
+            DigestFallback::Wait => Self::Wait,
+            DigestFallback::FetchByRound { round } => Self::FetchByRound { round },
+        }
+    }
+}
+
+/// How a commitment-keyed block subscription should behave when the block is missing locally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitmentFallback {
     /// Wait for local availability only.
     ///
-    /// Use this for pending candidate proposal data. A notarization is not, by
-    /// itself, permission to ask peers for the candidate block: crash or
-    /// availability failures can leave a notarization without fetchable proposal
-    /// data. The caller may still fetch the candidate's parents after the
-    /// candidate becomes locally available, because those parents are certified.
+    /// Use this for pending candidate proposal data before notarization.
     Wait,
-    /// Request the certified parent proposal for `round` from peers.
+    /// Request the notarized proposal for `round` from peers.
     ///
-    /// Use this only for certified parent lookups where the caller knows the
-    /// parent round and commitment but not the parent height, such as proposal
-    /// construction or verification of a known child. Do not infer height from
-    /// the finalized tip or the child block: proposals may build on a certified
-    /// parent that is not finalized locally yet, and an unverified child may
-    /// lie about its height.
+    /// Use this when the caller knows a trusted notarized or certified round and
+    /// commitment but not the proposal height, such as proposal construction,
+    /// verification of a known child, or certification of a notarized candidate. Do not infer
+    /// height from the finalized tip or another block: proposals may build on
+    /// a certified parent that is not finalized locally yet, and an unverified
+    /// child may lie about its height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or pruning bound.
@@ -228,6 +259,14 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             } => false,
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            Self::RecoverByCommitment { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
             | Self::GetVerified { .. }
@@ -248,6 +287,14 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            Self::RecoverByCommitment { .. } => false,
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
@@ -591,17 +638,18 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// that it may never become available.
     ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
+    /// Digest-keyed subscriptions only support waiting locally or fetching by round.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub fn subscribe_by_digest(
         &self,
-        fallback: Fallback,
         digest: <V::Block as Digestible>::Digest,
+        fallback: DigestFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
-            fallback,
             digest,
+            fallback,
             response: tx,
         });
         rx
@@ -621,7 +669,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub fn subscribe_by_commitment(
         &self,
         commitment: V::Commitment,
-        fallback: Fallback,
+        fallback: CommitmentFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
@@ -630,6 +678,18 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             response: tx,
         });
         rx
+    }
+
+    /// Request recovery of a notarized block without adding a new subscriber.
+    ///
+    /// This is used when certification finds an existing local-only waiter from
+    /// `verify()`: the existing waiter should receive the block, but
+    /// certification is now allowed to ask peers by notarized round.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn recover_by_commitment(&self, round: Round, commitment: V::Commitment) {
+        let _ = self
+            .sender
+            .enqueue(Message::RecoverByCommitment { round, commitment });
     }
 
     /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
@@ -641,9 +701,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry(
         &self,
-        (fallback, start_digest): (Fallback, <V::Block as Digestible>::Digest),
+        (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
     ) -> Option<impl Stream<Item = V::ApplicationBlock>> {
-        let receiver = self.subscribe_by_digest(fallback, start_digest);
+        let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver
             .await
             .ok()
@@ -746,7 +806,9 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
         self,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<Self::AncestryBlock> {
-        let subscription = self.mailbox.subscribe_by_digest(Fallback::Wait, digest);
+        let subscription = self
+            .mailbox
+            .subscribe_by_digest(digest, DigestFallback::Wait);
         subscription.await.ok()
     }
 
@@ -757,7 +819,7 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
         // response validity condition.
         let parent_height = block.height().previous()?;
         let commitment = V::parent_commitment(&block);
-        let fallback = Fallback::FetchByCommitment {
+        let fallback = CommitmentFallback::FetchByCommitment {
             height: parent_height,
         };
         let subscription = self.mailbox.subscribe_by_commitment(commitment, fallback);
@@ -806,6 +868,10 @@ mod tests {
 
     fn block(height: u64) -> harness::B {
         harness::make_raw_block(harness::D::EMPTY, Height::new(height), height)
+    }
+
+    fn commitment(height: u64) -> harness::D {
+        <Standard<harness::B> as Variant>::commitment(&block(height))
     }
 
     fn get_info(height: u64) -> (TestMessage, oneshot::Receiver<Option<(Height, harness::D)>>) {
@@ -886,37 +952,28 @@ mod tests {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByDigest {
-                fallback: Fallback::FetchByRound {
+                digest: block(height).digest(),
+                fallback: DigestFallback::FetchByRound {
                     round: round(height),
                 },
-                digest: block(height).digest(),
                 response,
             },
             receiver,
         )
     }
 
-    fn subscribe_by_commitment_with_fallback(
+    fn subscribe_by_commitment_message(
         height: u64,
-        fallback: Fallback,
+        fallback: CommitmentFallback,
     ) -> (TestMessage, oneshot::Receiver<harness::B>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByCommitment {
+                commitment: commitment(height),
                 fallback,
-                commitment: block(height).digest(),
                 response,
             },
             receiver,
-        )
-    }
-
-    fn subscribe_by_commitment(height: u64) -> (TestMessage, oneshot::Receiver<harness::B>) {
-        subscribe_by_commitment_with_fallback(
-            height,
-            Fallback::FetchByRound {
-                round: round(height),
-            },
         )
     }
 
@@ -1013,19 +1070,20 @@ mod tests {
     }
 
     fn has_subscription(overflow: &TestPending, height: u64) -> bool {
-        let expected = block(height).digest();
+        let expected_digest = block(height).digest();
+        let expected_commitment = commitment(height);
         overflow.messages.iter().any(|message| {
             matches!(
                 message,
                 PendingMessage::Message(TestMessage::SubscribeByDigest { digest, response, .. })
-                    if *digest == expected && !response.is_closed()
+                    if *digest == expected_digest && !response.is_closed()
             ) || matches!(
                 message,
                 PendingMessage::Message(TestMessage::SubscribeByCommitment {
                     commitment,
                     response,
                     ..
-                }) if *commitment == expected && !response.is_closed()
+                }) if *commitment == expected_commitment && !response.is_closed()
             )
         })
     }
@@ -1051,12 +1109,14 @@ mod tests {
     fn policy_preserves_commitment_subscription_fallbacks() {
         let mut overflow = pending();
 
-        let (wait, _wait_rx) = subscribe_by_commitment_with_fallback(1, Fallback::Wait);
-        let (by_round, _by_round_rx) =
-            subscribe_by_commitment_with_fallback(2, Fallback::FetchByRound { round: round(2) });
-        let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_with_fallback(
+        let (wait, _wait_rx) = subscribe_by_commitment_message(1, CommitmentFallback::Wait);
+        let (by_round, _by_round_rx) = subscribe_by_commitment_message(
+            2,
+            CommitmentFallback::FetchByRound { round: round(2) },
+        );
+        let (by_commitment, _by_commitment_rx) = subscribe_by_commitment_message(
             3,
-            Fallback::FetchByCommitment {
+            CommitmentFallback::FetchByCommitment {
                 height: Height::new(3),
             },
         );
@@ -1073,21 +1133,21 @@ mod tests {
         assert!(matches!(
             &drained[0],
             TestMessage::SubscribeByCommitment {
-                fallback: Fallback::Wait,
+                fallback: CommitmentFallback::Wait,
                 ..
             }
         ));
         assert!(matches!(
             &drained[1],
             TestMessage::SubscribeByCommitment {
-                fallback: Fallback::FetchByRound { round: found },
+                fallback: CommitmentFallback::FetchByRound { round: found },
                 ..
             } if *found == round(2)
         ));
         assert!(matches!(
             &drained[2],
             TestMessage::SubscribeByCommitment {
-                fallback: Fallback::FetchByCommitment { height },
+                fallback: CommitmentFallback::FetchByCommitment { height },
                 ..
             } if *height == Height::new(3)
         ));
@@ -1103,7 +1163,10 @@ mod tests {
             .messages
             .push_back(PendingMessage::Message(pending_closed));
 
-        let (pending_open, mut pending_open_rx) = subscribe_by_commitment(2);
+        let (pending_open, mut pending_open_rx) = subscribe_by_commitment_message(
+            2,
+            CommitmentFallback::FetchByRound { round: round(2) },
+        );
         overflow
             .messages
             .push_back(PendingMessage::Message(pending_open));

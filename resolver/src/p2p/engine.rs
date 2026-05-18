@@ -435,33 +435,46 @@ where
         } = delivery;
 
         if valid {
-            self.metrics.fetch.inc(Status::Success);
-            self.inflight.complete(&key, self.context.as_ref());
+            let already_accepted = self.inflight.response_accepted(&key);
 
             // Remove only the subscribers that accepted this response. If other
-            // subscribers still need the key, issue another fetch with the
-            // remaining annotations.
-            let refetch = self.subscribers.get_mut(&key).is_some_and(|subscribers| {
+            // subscribers still need the key, deliver the same accepted response
+            // locally with the remaining annotations.
+            let remaining = self.subscribers.get_mut(&key).and_then(|subscribers| {
                 for subscriber in delivered.into_vec() {
                     subscribers.remove(&subscriber);
                 }
-                !subscribers.is_empty()
+                NonEmptyVec::try_from(subscribers.iter().cloned().collect::<Vec<_>>()).ok()
             });
 
-            if refetch {
-                // Keep the request active so the fetcher can select a peer for the
-                // remaining subscribers on its next pass.
-                self.inflight.insert(
-                    key.clone(),
-                    self.metrics.fetch_duration.timer(self.context.as_ref()),
-                );
-                self.fetcher.add_ready(key);
+            if let Some(subscribers) = remaining {
+                if !already_accepted {
+                    self.metrics.fetch.inc(Status::Success);
+                    self.inflight.accept_response(&key, self.context.as_ref());
+                }
+                self.inflight.redeliver(Delivery { key, subscribers });
             } else {
                 // All subscribers observed a valid response; clear any targeting
                 // state retained for this key.
+                if !already_accepted {
+                    self.metrics.fetch.inc(Status::Success);
+                }
+                self.inflight.complete(&key, self.context.as_ref());
                 self.subscribers.remove(&key);
                 self.fetcher.clear_targets(&key);
             }
+            return;
+        }
+
+        if self.inflight.response_accepted(&key) {
+            warn!(
+                ?key,
+                "previously accepted response was rejected during local redelivery"
+            );
+            self.metrics.fetch.inc(Status::Failure);
+            self.inflight.complete(&key, self.context.as_ref());
+            self.subscribers.remove(&key);
+            self.fetcher.clear_targets(&key);
             return;
         }
 
@@ -470,6 +483,7 @@ where
         commonware_p2p::block!(self.blocker, peer.clone(), "invalid data received");
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
+        self.inflight.discard_response(&key);
         self.fetcher.add_retry(key);
     }
 

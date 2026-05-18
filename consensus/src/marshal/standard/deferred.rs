@@ -76,7 +76,7 @@ use crate::{
             validation::{is_inferred_reproposal_at_certify, Stage},
             verification_tasks::VerificationTasks,
         },
-        core::{Fallback, Mailbox},
+        core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -368,10 +368,10 @@ where
             // not the parent height. The parent may be certified above the
             // finalized tip, so this must stay round-bound until the block is
             // returned.
-            let (parent_view, parent_digest) = consensus_context.parent;
+            let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
-                parent_digest,
-                Fallback::FetchByRound {
+                parent_commitment,
+                CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
@@ -388,7 +388,7 @@ where
                     Ok(parent) => parent,
                     Err(_) => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "failed to fetch parent block",
                             "skipping proposal"
                         );
@@ -442,7 +442,7 @@ where
                     Some(block) => block,
                     None => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "block building failed",
                             "skipping proposal"
                         );
@@ -488,7 +488,7 @@ where
             .child("optimistic_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |_| async move {
-                let block_request = marshal.subscribe_by_digest(Fallback::Wait, digest);
+                let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -598,13 +598,22 @@ where
         // the f+1 honest validators from the notarizing quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
+        // We must fetch here rather than only wait for local broadcast delivery. A Byzantine
+        // leader can send a proposal to just f+1 honest validators, collect enough honest
+        // notarize votes to form a notarization, and leave the remaining honest validators
+        // without the block. Those validators need the notarized round to recover the block
+        // and certify; otherwise they can remain stuck if the Byzantine validators stop
+        // participating in the next view.
+        //
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
             ?round,
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe_by_digest(Fallback::Wait, digest);
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -684,12 +693,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
+    fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients)
+        self.marshal.forward(round, commitment, recipients)
     }
 }
 
@@ -794,7 +803,7 @@ mod tests {
                 parent: (View::new(1), parent_digest),
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
-            let commitment_a = block_a.digest();
+            let commitment_a = StandardHarness::commitment(&block_a);
             assert!(marshal.verified(round_a, block_a.clone()).await);
 
             // Block B at view 10 (height 2, different block same height)
@@ -805,7 +814,7 @@ mod tests {
                 parent: (View::new(1), parent_digest),
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
-            let commitment_b = block_b.digest();
+            let commitment_b = StandardHarness::commitment(&block_b);
             assert!(marshal.verified(round_b, block_b.clone()).await);
 
             context.sleep(Duration::from_millis(10)).await;
@@ -940,7 +949,7 @@ mod tests {
                 Height::new(20),
                 2000,
             );
-            let block_commitment = block.digest();
+            let block_commitment = StandardHarness::commitment(&block);
             assert!(
                 marshal
                     .clone()
@@ -1015,7 +1024,7 @@ mod tests {
                 parent: (View::zero(), genesis.digest()),
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let parent_commitment = parent.digest();
+            let parent_commitment = StandardHarness::commitment(&parent);
             assert!(
                 marshal
                     .clone()
@@ -1031,7 +1040,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
-            let commitment_a = block_a.digest();
+            let commitment_a = StandardHarness::commitment(&block_a);
             assert!(marshal.verified(round_a, block_a).await);
 
             context.sleep(Duration::from_millis(10)).await;

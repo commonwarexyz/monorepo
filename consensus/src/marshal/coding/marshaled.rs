@@ -347,7 +347,7 @@ where
                 block
             } else {
                 let block_request =
-                    marshal.subscribe_by_commitment(commitment, core::Fallback::Wait);
+                    marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
                 select! {
                     _ = tx.closed() => {
                         debug!(
@@ -373,7 +373,7 @@ where
             // height from the unverified child block for this lookup.
             let parent_request = fetch_parent(
                 parent_commitment,
-                core::Fallback::FetchByRound {
+                core::CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
@@ -598,7 +598,7 @@ where
             let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
                 parent_commitment,
-                core::Fallback::FetchByRound {
+                core::CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
@@ -774,7 +774,7 @@ where
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
                 .marshal
-                .subscribe_by_commitment(payload, core::Fallback::Wait);
+                .subscribe_by_commitment(payload, core::CommitmentFallback::Wait);
             let marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
@@ -909,14 +909,33 @@ where
         // First, check for an in-progress verification task from `verify()`.
         let task = self.verification_tasks.take(round, payload);
         if let Some(task) = task {
+            // `verify()` intentionally waits only for local candidate data. Once
+            // certification starts, a notarization exists and the same pending
+            // verifier must be unblocked by round-bound recovery if local
+            // reconstruction never completes.
+            self.shards.notarized(payload, round);
+            self.marshal.recover_by_commitment(round, payload);
             return task;
         }
+
+        // Certify may be reached without an earlier `verify`, so the shard
+        // engine may not know the leader yet. A notarized commitment is still
+        // enough to start reconstruction from sender-indexed gossip shards
+        // already buffered for the commitment.
+        self.shards.notarized(payload, round);
 
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
         // proposer embedded a malicious context, the f+1 honest validators from the notarizing quorum
         // will verify against the proper context and reject the mismatch, preventing a 2f+1
         // finalization quorum.
+        //
+        // We must fetch here rather than only wait for local reconstruction. A Byzantine
+        // leader can send enough shards to just f+1 honest validators, collect enough honest
+        // notarize votes to form a notarization, and leave the remaining honest validators
+        // unable to reconstruct the block. Those validators need the notarized round to
+        // recover and certify; otherwise they can remain stuck if the Byzantine validators
+        // stop participating in the next view.
         //
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
@@ -926,7 +945,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe_by_commitment(payload, core::Fallback::Wait);
+            .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -1075,7 +1094,7 @@ where
 #[allow(clippy::type_complexity)]
 async fn fetch_parent<E, S, A, B, C, H>(
     parent_commitment: Commitment,
-    fallback: core::Fallback,
+    fallback: core::CommitmentFallback,
     application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,

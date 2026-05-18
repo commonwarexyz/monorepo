@@ -358,6 +358,10 @@ where
     /// Adds a key to the front of the pending queue.
     pub fn add_ready(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
+        // A previous pending key may have pushed the waiter far into the future
+        // because no eligible peer could serve it. A new ready key can still be
+        // fetchable, so wake pending processing immediately.
+        self.waiter = None;
         self.pending.put(key, (self.context.current(), false));
     }
 
@@ -1297,6 +1301,43 @@ mod tests {
             // clear_targets should clear the waiter
             fetcher.clear_targets(&MockKey(1));
             assert!(fetcher.waiter.is_none());
+        });
+    }
+
+    #[test]
+    fn test_add_ready_clears_waiter_for_new_fetch() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer = PrivateKey::from_seed(1).public_key();
+            let missing_peer = PrivateKey::from_seed(2).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, SuccessMockSender> =
+                Fetcher::new(context.child("fetcher"), config);
+            fetcher.reconcile(&[public_key, peer]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
+
+            fetcher.add_targets(MockKey(1), [missing_peer]);
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.waiter.is_some());
+
+            fetcher.add_ready(MockKey(2));
+            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
+
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.pending.contains(&MockKey(1)));
+            assert!(!fetcher.pending.contains(&MockKey(2)));
+            assert_eq!(fetcher.len_active(), 1);
         });
     }
 

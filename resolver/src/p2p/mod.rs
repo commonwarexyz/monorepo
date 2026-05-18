@@ -44,7 +44,8 @@
 //! fetch. A fetch remains active while at least one attached subscriber satisfies the latest
 //! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
 //! key and currently retained subscribers are supplied to
-//! [`Consumer::deliver`](crate::Consumer::deliver).
+//! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
+//! is in progress are delivered the same accepted response locally.
 //!
 //! # Peer Selection
 //!
@@ -231,6 +232,29 @@ mod tests {
             .unwrap();
     }
 
+    #[derive(Clone, Default)]
+    struct SequencedProducer {
+        data: Arc<Mutex<HashMap<Key, VecDeque<Bytes>>>>,
+    }
+
+    impl SequencedProducer {
+        fn insert(&mut self, key: Key, values: impl IntoIterator<Item = Bytes>) {
+            self.data.lock().insert(key, values.into_iter().collect());
+        }
+    }
+
+    impl crate::p2p::Producer for SequencedProducer {
+        type Key = Key;
+
+        fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+            let (sender, receiver) = oneshot::channel();
+            if let Some(value) = self.data.lock().get_mut(&key).and_then(VecDeque::pop_front) {
+                let _ = sender.send(value);
+            }
+            receiver
+        }
+    }
+
     fn setup_and_spawn_actor<C, R>(
         context: &deterministic::Context,
         provider: impl Provider<PublicKey = PublicKey>,
@@ -245,6 +269,28 @@ mod tests {
     ) -> Mailbox<Key, PublicKey, R>
     where
         C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
+        R: Clone + Ord + Send + 'static,
+    {
+        setup_and_spawn_actor_with_producer(
+            context, provider, blocker, signer, connection, consumer, producer,
+        )
+    }
+
+    fn setup_and_spawn_actor_with_producer<C, R, Pro>(
+        context: &deterministic::Context,
+        provider: impl Provider<PublicKey = PublicKey>,
+        blocker: impl Blocker<PublicKey = PublicKey>,
+        signer: impl Signer<PublicKey = PublicKey>,
+        connection: (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+        consumer: C,
+        producer: Pro,
+    ) -> Mailbox<Key, PublicKey, R>
+    where
+        C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
+        Pro: crate::p2p::Producer<Key = Key>,
         R: Clone + Ord + Send + 'static,
     {
         let public_key = signer.public_key();
@@ -2116,7 +2162,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fetch_during_validation_is_delivered_after_success() {
+    fn test_fetch_during_validation_reuses_response_after_success() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2125,9 +2171,10 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let key = Key(5);
-            let data = Bytes::from("data for key 5");
-            let mut prod2 = Producer::default();
-            prod2.insert(key.clone(), data.clone());
+            let first_response = Bytes::from("data for key 5");
+            let second_response = Bytes::from("refetched data for key 5");
+            let mut prod2 = SequencedProducer::default();
+            prod2.insert(key.clone(), [first_response.clone(), second_response]);
 
             let (first_gate_sender, first_gate_receiver) = oneshot::channel();
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
@@ -2148,7 +2195,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -2183,7 +2230,7 @@ mod tests {
                     subscribers: non_empty_vec![first_subscriber],
                 }
             );
-            assert_eq!(value, data);
+            assert_eq!(value, first_response);
 
             let delivery = select! {
                 delivery = started.recv() => delivery.expect("second delivery did not start"),
@@ -2208,7 +2255,125 @@ mod tests {
                     subscribers: non_empty_vec![second_subscriber],
                 }
             );
-            assert_eq!(value, Bytes::from("data for key 5"));
+            assert_eq!(value, first_response);
+        });
+    }
+
+    #[test_traced]
+    fn test_late_subscriber_delivery_ignores_unrelated_waiter() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let blocked_key = Key(4);
+            let waiting_key = Key(5);
+            let main_key = Key(6);
+            let data = Bytes::from("data for key 6");
+
+            let mut prod2 = Producer::default();
+            prod2.insert(blocked_key.clone(), Bytes::from("bad data"));
+
+            let mut prod3 = Producer::default();
+            prod3.insert(main_key.clone(), data.clone());
+
+            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
+            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
+            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
+                context.child("consumer"),
+                vec![(first_gate_receiver, false), (second_gate_receiver, true)],
+            );
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod2,
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            mailbox1.fetch(Fetch::new(blocked_key.clone(), SubscriberTag(1)));
+            started
+                .recv()
+                .await
+                .expect("blocking delivery did not start");
+            first_gate_sender.send(()).unwrap();
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+
+            mailbox1.fetch_targeted(
+                Fetch::new(waiting_key, SubscriberTag(2)),
+                non_empty_vec![peers[1].clone()],
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let first_subscriber = SubscriberTag(3);
+            let second_subscriber = SubscriberTag(4);
+            mailbox1.fetch(Fetch::new(main_key.clone(), first_subscriber.clone()));
+
+            let delivery = started.recv().await.expect("delivery did not start");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: main_key.clone(),
+                    subscribers: non_empty_vec![first_subscriber.clone()],
+                }
+            );
+
+            mailbox1.fetch(Fetch::new(main_key.clone(), second_subscriber.clone()));
+            context.sleep(Duration::from_millis(100)).await;
+
+            second_gate_sender.send(()).unwrap();
+            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: main_key.clone(),
+                    subscribers: non_empty_vec![first_subscriber],
+                }
+            );
+            assert_eq!(value, data);
+
+            let delivery = select! {
+                delivery = started.recv() => delivery.expect("second delivery did not start"),
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("late subscriber was not delivered while an unrelated waiter was armed");
+                },
+            };
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key: main_key,
+                    subscribers: non_empty_vec![second_subscriber],
+                }
+            );
         });
     }
 

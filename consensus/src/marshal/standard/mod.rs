@@ -44,7 +44,7 @@ mod tests {
     use crate::{
         marshal::{
             config::Config,
-            core::{cache, Actor, Fallback, Mailbox},
+            core::{cache, Actor, CommitmentFallback, Mailbox},
             mocks::{
                 application::Application,
                 harness::{
@@ -481,7 +481,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -572,7 +572,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -581,7 +581,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(3)),
                     View::new(2),
-                    block_three.digest(),
+                    StandardHarness::commitment(&block_three),
                 ),
                 &schemes,
                 3,
@@ -681,7 +681,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
-                    block_one.digest(),
+                    StandardHarness::commitment(&block_one),
                 ),
                 &schemes,
                 3,
@@ -778,7 +778,11 @@ mod tests {
                     View::new(blocks[i - 1].height().get())
                 };
                 finalizations.push(StandardHarness::make_finalization(
-                    Proposal::new(Round::new(Epoch::zero(), view), parent_view, block.digest()),
+                    Proposal::new(
+                        Round::new(Epoch::zero(), view),
+                        parent_view,
+                        StandardHarness::commitment(block),
+                    ),
                     &schemes,
                     3,
                 ));
@@ -878,7 +882,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(pending_tip)),
                     View::new(pending_tip - 1),
-                    tip_block.digest(),
+                    StandardHarness::commitment(tip_block),
                 ),
                 &schemes,
                 QUORUM,
@@ -985,7 +989,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(1)),
                     View::zero(),
-                    block_one.digest(),
+                    StandardHarness::commitment(&block_one),
                 ),
                 &schemes,
                 3,
@@ -994,7 +998,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -1061,7 +1065,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(2)),
                     View::new(1),
-                    block_two.digest(),
+                    StandardHarness::commitment(&block_two),
                 ),
                 &schemes,
                 3,
@@ -1371,7 +1375,7 @@ mod tests {
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("missing-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1390,12 +1394,27 @@ mod tests {
                     parent: (View::zero(), genesis.digest()),
                 };
                 let missing = Sha256::hash(b"missing candidate");
-                let verify = wrapper.verify(consensus_context, missing).await;
+                let mut verify = wrapper.verify(consensus_context, missing).await;
 
                 context.sleep(Duration::from_millis(50)).await;
                 assert!(
+                    buffer.subscription_count() > 0,
+                    "{kind:?}: unavailable candidate verification must register a local wait"
+                );
+                assert!(
                     resolver.fetches().is_empty(),
                     "{kind:?}: unavailable candidate verification must not fetch from peers"
+                );
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "{kind:?}: unavailable candidate verification must not issue targeted fetches"
+                );
+                assert!(
+                    matches!(
+                        verify.try_recv(),
+                        Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                    ),
+                    "{kind:?}: unavailable candidate verification must remain pending"
                 );
 
                 drop(verify);
@@ -1409,12 +1428,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_certify_missing_candidate_waits_without_fetching() {
+    fn test_standard_certify_missing_candidate_fetches_by_round() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
                 let Fixture {
-                    participants: _,
+                    participants,
                     schemes,
                     ..
                 } = bls12381_threshold_vrf::fixture::<V, _>(
@@ -1422,9 +1441,10 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
                     &format!("missing-certify-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
@@ -1432,25 +1452,50 @@ mod tests {
                     RecordingBuffer::default(),
                 )
                 .await;
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis);
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
                 let round = Round::new(Epoch::zero(), View::new(1));
-                let missing = Sha256::hash(b"missing certify candidate");
-                let certify = wrapper.certify(round, missing).await;
+                let block_context = Ctx {
+                    round,
+                    leader: me,
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let block = B::new::<Sha256>(block_context, genesis.digest(), Height::new(1), 100);
+                let digest = block.digest();
+                let proposal = Proposal::new(round, View::zero(), digest);
+                let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+                resolver.respond_to_next_fetch((notarization, block).encode());
+                let certify = wrapper.certify(round, digest).await;
 
-                context.sleep(Duration::from_millis(50)).await;
+                let result = certify.await.expect("certify result missing");
                 assert!(
-                    resolver.fetches().is_empty(),
-                    "{kind:?}: certification must not fetch an unavailable candidate from peers"
+                    result,
+                    "{kind:?}: fetched notarized candidate should certify"
+                );
+                assert!(
+                    resolver.wait_for_delivery_response().await,
+                    "{kind:?}: notarized delivery should validate"
+                );
+                assert!(
+                    resolver.fetches().iter().any(|fetch| matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Request::Notarized { round: request_round },
+                            handler::Annotation::Notarization { round: subscriber_round },
+                        ) if *request_round == round && *subscriber_round == round
+                    )),
+                    "{kind:?}: certify should fetch notarized block by round"
                 );
 
-                drop(certify);
-                context.sleep(Duration::from_millis(10)).await;
                 assert!(
-                    resolver.fetches().is_empty(),
-                    "{kind:?}: canceling a missing certify wait must not fetch from peers"
+                    buffer.subscription_count() > 0,
+                    "{kind:?}: unavailable candidate certification must register a local wait"
+                );
+                assert!(
+                    resolver.targeted_is_empty(),
+                    "{kind:?}: certification must not issue targeted fetches"
                 );
             });
         }
@@ -2218,6 +2263,10 @@ mod tests {
         fn sends(&self) -> Vec<BufferSend> {
             self.sends.lock().clone()
         }
+
+        fn subscription_count(&self) -> usize {
+            self.subscriptions.lock().len()
+        }
     }
 
     impl crate::marshal::core::Buffer<Standard<B>> for RecordingBuffer {
@@ -2264,6 +2313,8 @@ mod tests {
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
+        auto_delivery: Arc<Mutex<Option<Bytes>>>,
+        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
         sender: Option<mailbox::Sender<handler::Message<D>>>,
     }
 
@@ -2275,9 +2326,48 @@ mod tests {
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
+                    auto_delivery: Arc::new(Mutex::new(None)),
+                    delivery_responses: Arc::new(Mutex::new(Vec::new())),
                     sender: Some(sender),
                 },
             )
+        }
+
+        fn record_fetch(&self, fetch: FetchRecord) {
+            self.fetches.lock().push(fetch.clone());
+            let Some(value) = self.auto_delivery.lock().take() else {
+                return;
+            };
+            let Some(sender) = &self.sender else {
+                return;
+            };
+            let (response, response_rx) = oneshot::channel();
+            self.delivery_responses.lock().push(response_rx);
+            let _ = sender.enqueue(handler::Message::Deliver {
+                delivery: Delivery {
+                    key: fetch.key,
+                    subscribers: NonEmptyVec::new(fetch.subscriber),
+                },
+                value,
+                response,
+            });
+        }
+
+        fn respond_to_next_fetch(&self, value: Bytes) {
+            let replaced = self.auto_delivery.lock().replace(value);
+            assert!(
+                replaced.is_none(),
+                "recording resolver already has an automatic delivery"
+            );
+        }
+
+        async fn wait_for_delivery_response(&self) -> bool {
+            let response = self
+                .delivery_responses
+                .lock()
+                .pop()
+                .expect("delivery response missing");
+            response.await.expect("delivery response sender dropped")
         }
 
         fn fetches(&self) -> Vec<FetchRecord> {
@@ -2309,7 +2399,7 @@ mod tests {
         where
             R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            self.fetches.lock().push(key.into());
+            self.record_fetch(key.into());
             Feedback::Ok
         }
 
@@ -2317,7 +2407,9 @@ mod tests {
         where
             R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            self.fetches.lock().extend(keys.into_iter().map(Into::into));
+            for key in keys {
+                self.record_fetch(key.into());
+            }
             Feedback::Ok
         }
 
@@ -2561,7 +2653,7 @@ mod tests {
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -2573,8 +2665,10 @@ mod tests {
             )
             .await;
 
-            let subscription =
-                mailbox.subscribe_by_commitment(block.digest(), Fallback::FetchByRound { round });
+            let subscription = mailbox.subscribe_by_commitment(
+                notarization.proposal.payload,
+                CommitmentFallback::FetchByRound { round },
+            );
 
             wait_until(
                 &context,
@@ -2790,7 +2884,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), block.digest()),
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
                 QUORUM,
             );
@@ -3203,7 +3297,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), block.digest()),
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
                 QUORUM,
             );
@@ -3292,7 +3386,7 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), block.digest()),
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
                 &schemes,
                 QUORUM,
             );

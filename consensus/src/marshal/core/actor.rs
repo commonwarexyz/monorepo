@@ -1,6 +1,6 @@
 use super::{
     cache,
-    mailbox::{Fallback, Mailbox, Message},
+    mailbox::{CommitmentFallback, Mailbox, Message},
     Buffer, Variant,
 };
 use crate::{
@@ -700,12 +700,12 @@ where
                         );
                     }
                     Message::SubscribeByDigest {
-                        fallback,
                         digest,
+                        fallback,
                         response,
                     } => {
                         self.handle_subscribe(
-                            fallback,
+                            fallback.into(),
                             BlockSubscriptionKey::Digest(digest),
                             response,
                             &mut resolver,
@@ -715,8 +715,8 @@ where
                         .await;
                     }
                     Message::SubscribeByCommitment {
-                        fallback,
                         commitment,
+                        fallback,
                         response,
                     } => {
                         self.handle_subscribe(
@@ -725,6 +725,22 @@ where
                             response,
                             &mut resolver,
                             &mut waiters,
+                            &mut buffer,
+                        )
+                        .await;
+                    }
+                    #[cfg(not(any(
+                        commonware_stability_BETA,
+                        commonware_stability_GAMMA,
+                        commonware_stability_DELTA,
+                        commonware_stability_EPSILON,
+                        commonware_stability_RESERVED
+                    )))]
+                    Message::RecoverByCommitment { round, commitment } => {
+                        self.handle_recover_by_commitment(
+                            round,
+                            commitment,
+                            &mut resolver,
                             &mut buffer,
                         )
                         .await;
@@ -896,7 +912,7 @@ where
     /// Handle a local subscription request for a block.
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
-        fallback: Fallback,
+        fallback: CommitmentFallback,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -920,26 +936,24 @@ where
             return;
         }
 
-        // We don't have the block locally. Pending candidate data uses
-        // `Fallback::Wait` and reaches this point without a round or
-        // height, so it only registers a local subscriber below.
+        // We don't have the block locally. Local-only waits reach this point
+        // without a round or height, so they only register a subscriber below.
         //
-        // Round-based fetching is for certified parent lookups whose height is
-        // not known before the request. Height-based fetching is only for
-        // callers that already have a validated pruning height.
+        // Round-based fetching is for notarized proposal lookups whose height is
+        // not known before the request. Height-based fetching is only for callers
+        // that already have a validated pruning height.
         match fallback {
-            Fallback::FetchByRound { round } => {
+            CommitmentFallback::FetchByRound { round } => {
                 if round < self.last_processed_round {
                     // `last_processed_round` only advances after the application
                     // processes the corresponding finalized block. A round-bound
-                    // certified-parent fetch below that floor is only
-                    // proposal-construction assistance for data behind the
-                    // processed chain.
+                    // proposal fetch below that floor is only assistance for
+                    // data behind the processed chain.
                     return;
                 }
-                // Fetch the certified parent proposal for this round. The response
+                // Fetch the notarized proposal for this round. The response
                 // must include a certificate so the commitment is tied to the
-                // certified parent context. The decoded block is heightable, but
+                // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
                 debug!(?round, ?digest, "requested block missing");
@@ -948,34 +962,39 @@ where
                     Annotation::Notarization { round },
                 ));
             }
-            Fallback::FetchByCommitment { height } => {
-                if let BlockSubscriptionKey::Commitment(commitment) = key {
-                    // This path is only for accepted ancestry or finalized repair,
-                    // never for a candidate block's immediate parent.
-                    if height <= self.last_processed_height {
-                        // We already checked local storage. Missing ancestors at or
-                        // below the processed floor are no longer useful to request.
-                        debug!(
-                            %height,
-                            floor = %self.last_processed_height,
-                            ?commitment,
-                            "dropping commitment subscription at or below processed height floor"
-                        );
-                        return;
+            CommitmentFallback::FetchByCommitment { height } => {
+                let commitment = match key {
+                    BlockSubscriptionKey::Commitment(commitment) => commitment,
+                    BlockSubscriptionKey::Digest(_) => {
+                        unreachable!("digest subscriptions cannot request commitment fallback")
                     }
-                    debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
-                    resolver.fetch(Fetch::new(
-                        Request::Block(commitment),
-                        Annotation::Certified { height },
-                    ));
+                };
+
+                // This path is only for accepted ancestry or finalized repair,
+                // never for a candidate block's immediate parent.
+                if height <= self.last_processed_height {
+                    // We already checked local storage. Missing ancestors at or
+                    // below the processed floor are no longer useful to request.
+                    debug!(
+                        %height,
+                        floor = %self.last_processed_height,
+                        ?commitment,
+                        "dropping commitment subscription at or below processed height floor"
+                    );
+                    return;
                 }
+                debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
+                resolver.fetch(Fetch::new(
+                    Request::Block(commitment),
+                    Annotation::Certified { height },
+                ));
             }
-            Fallback::Wait => {}
+            CommitmentFallback::Wait => {}
         }
 
         let round = match fallback {
-            Fallback::FetchByRound { round } => Some(round),
-            Fallback::Wait | Fallback::FetchByCommitment { .. } => None,
+            CommitmentFallback::FetchByRound { round } => Some(round),
+            CommitmentFallback::Wait | CommitmentFallback::FetchByCommitment { .. } => None,
         };
 
         // Register subscriber.
@@ -1006,6 +1025,30 @@ where
                 });
             }
         }
+    }
+
+    #[commonware_macros::stability(ALPHA)]
+    async fn handle_recover_by_commitment<Buf: Buffer<V>>(
+        &mut self,
+        round: Round,
+        commitment: V::Commitment,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        buffer: &mut Buf,
+    ) {
+        if round < self.last_processed_round {
+            return;
+        }
+        if self
+            .find_block_by_commitment(buffer, commitment)
+            .await
+            .is_some()
+        {
+            return;
+        }
+        resolver.fetch(Fetch::new(
+            Request::Notarized { round },
+            Annotation::Notarization { round },
+        ));
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled
