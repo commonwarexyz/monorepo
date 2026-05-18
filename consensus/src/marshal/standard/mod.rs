@@ -2909,77 +2909,6 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_cached_notarization_block_delivery_caches_notarized_block() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
-            let commitment = StandardHarness::commitment(&block);
-            let proposal = Proposal::new(round, View::zero(), commitment);
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "cached-notarization-block-delivery",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
-            )
-            .await;
-            let mut mailbox = mailbox;
-
-            StandardHarness::report_notarization(&mut mailbox, notarization).await;
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "block request for cached notarization",
-                || {
-                    resolver.fetches().iter().any(|fetch| {
-                        matches!(
-                            (&fetch.key, &fetch.subscriber),
-                            (
-                                handler::Request::Block(request_commitment),
-                                handler::Annotation::Notarization { round: subscriber_round },
-                            ) if *request_commitment == commitment && *subscriber_round == round
-                        )
-                    })
-                },
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Request::Block(commitment),
-                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
-                    },
-                    value: block.clone().encode(),
-                    response,
-                })
-                .accepted());
-            assert!(
-                response_rx.await.expect("delivery response missing"),
-                "block delivery should validate against the requested commitment"
-            );
-
-            let subscription = mailbox.subscribe_by_commitment(commitment, CommitmentFallback::Wait);
-            select! {
-                result = subscription => {
-                    let delivered = result.expect("block subscription should resolve");
-                    assert_eq!(delivered.digest(), block.digest());
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("block delivery with cached notarization did not cache the block");
-                },
-            }
-        });
-    }
-
-    #[test_traced("WARN")]
     fn test_standard_round_fetches_reject_processed_round() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -3239,32 +3168,14 @@ mod tests {
             let missing = Sha256::hash(b"missing-before-set-floor");
             let _subscription = mailbox
                 .subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
-            let notarized_missing = Sha256::hash(b"notarized-missing-before-set-floor");
-            let missing_notarization = StandardHarness::make_notarization(
-                Proposal::new(round, View::zero(), notarized_missing),
-                &schemes,
-                QUORUM,
-            );
-            StandardHarness::report_notarization(&mut mailbox, missing_notarization).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
                 "round-bound fetch",
                 || {
-                    let active = resolver.active_fetches();
-                    let notarized_fetch = active.iter().any(|fetch| {
+                    resolver.active_fetches().iter().any(|fetch| {
                         matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
-                    });
-                    let block_fetch = active.iter().any(|fetch| {
-                        matches!(
-                            (&fetch.key, &fetch.subscriber),
-                            (
-                                handler::Request::Block(commitment),
-                                handler::Annotation::Notarization { round: r },
-                            ) if *commitment == notarized_missing && *r == round
-                        )
-                    });
-                    notarized_fetch && block_fetch
+                    })
                 },
             )
             .await;
@@ -3279,13 +3190,6 @@ mod tests {
                 || {
                     resolver.active_fetches().iter().all(|fetch| {
                         !matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
-                            && !matches!(
-                                (&fetch.key, &fetch.subscriber),
-                                (
-                                    handler::Request::Block(commitment),
-                                    handler::Annotation::Notarization { round: r },
-                                ) if *commitment == notarized_missing && *r == round
-                            )
                     })
                 },
             )
@@ -3293,13 +3197,6 @@ mod tests {
             assert!(
                 resolver.active_fetches().iter().all(|fetch| {
                     !matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
-                        && !matches!(
-                            (&fetch.key, &fetch.subscriber),
-                            (
-                                handler::Request::Block(commitment),
-                                handler::Annotation::Notarization { round: r },
-                            ) if *commitment == notarized_missing && *r == round
-                        )
                 }),
                 "processed finalization after set_floor must prune existing round-bound fetches"
             );

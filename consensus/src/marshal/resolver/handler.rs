@@ -163,10 +163,10 @@ impl<D: Digest> Producer for Handler<D> {
 /// response after validating it against the key. Multiple local annotations
 /// may share one peer key when they depend on the same block.
 ///
-/// [`Notarization`](Annotation::Notarization) can describe a round-keyed
-/// notarization response, or a block response when the notarization certificate
-/// is already cached locally. [`Certified`](Annotation::Certified) and
-/// [`Finalized`](Annotation::Finalized) describe other block storage roles.
+/// [`Notarization`](Annotation::Notarization) mirrors a non-block request type
+/// and only carries pruning metadata. [`Certified`](Annotation::Certified) and
+/// [`Finalized`](Annotation::Finalized) describe how block-bearing responses
+/// should be stored.
 ///
 /// This storage role is part of the annotation because a [`Request::Block`]
 /// only names the peer-visible commitment. The same block-shaped response may
@@ -228,7 +228,7 @@ impl<D: Digest> Request<D> {
     /// "less than or equal to" this request's floor. This keeps pending
     /// candidate waits out of the resolver entirely, drops height-bound block
     /// requests once the processed height reaches them, and drops round-bound
-    /// round-bound fetches once the processed round reaches them.
+    /// requests once the processed round reaches them.
     pub fn predicate(&self) -> impl Fn(&Self, &Annotation) -> bool + Send + 'static {
         let cloned = *self;
         move |request, annotation| match (&cloned, request, annotation) {
@@ -248,8 +248,7 @@ impl<D: Digest> Request<D> {
             (
                 Self::Notarized { round: mine },
                 Self::Block(_),
-                Annotation::Finalized(Finalized::ByRound { round: theirs })
-                | Annotation::Notarization { round: theirs },
+                Annotation::Finalized(Finalized::ByRound { round: theirs }),
             ) => *theirs > *mine,
             (Self::Notarized { .. }, _, _) => true,
             (Self::Block(mine), Self::Block(theirs), _) => mine != theirs,
@@ -593,23 +592,11 @@ mod tests {
                 round: Round::new(Epoch::new(1), View::new(11)),
             })
         ));
-        assert!(predicate(
-            &block,
-            &Annotation::Notarization {
-                round: Round::new(Epoch::new(1), View::new(11)),
-            }
-        ));
         assert!(!predicate(
             &block,
             &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(10)),
             })
-        ));
-        assert!(!predicate(
-            &block,
-            &Annotation::Notarization {
-                round: Round::new(Epoch::new(1), View::new(10)),
-            }
         ));
     }
 

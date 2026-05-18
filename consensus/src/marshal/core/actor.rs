@@ -630,23 +630,18 @@ where
                             .put_notarization(round, digest, notarization.clone())
                             .await;
 
-                        // Search for block locally. If it is missing, fetch the
-                        // block by commitment and use the cached notarization
-                        // certificate when the block arrives.
+                        // Search for block locally. A notarization alone is not
+                        // enough to fetch missing proposal data, so remember the
+                        // certificate and wait for local availability. Later
+                        // finalization/repair paths may backfill data that is
+                        // already finalized.
                         if let Some(block) =
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
                             // If found, persist the block
                             self.cache_block(round, digest, block).await;
                         } else {
-                            debug!(?round, ?commitment, "notarized block missing");
-                            self.fetch_if_permitted(
-                                &mut resolver,
-                                Fetch {
-                                    key: Request::Block(commitment),
-                                    subscriber: Annotation::Notarization { round },
-                                },
-                            );
+                            debug!(?round, "notarized block unavailable locally");
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -1195,8 +1190,8 @@ where
                             expected == height
                         }
                         Annotation::Certified { .. }
-                        | Annotation::Finalized(Finalized::ByRound { .. })
-                        | Annotation::Notarization { .. } => true,
+                        | Annotation::Finalized(Finalized::ByRound { .. }) => true,
+                        Annotation::Notarization { .. } => false,
                     };
                     if keep {
                         annotations.push(annotation);
@@ -1206,31 +1201,8 @@ where
                 }
 
                 // Round-bound proposal-parent fetches are `Request::Notarized`
-                // deliveries and are handled below. Block-keyed notarization
-                // annotations are used only when the notarization certificate
-                // is already cached locally and the block was missing.
-                for annotation in &annotations {
-                    let Annotation::Notarization { round } = annotation else {
-                        continue;
-                    };
-                    let Some(notarization) = self.cache.get_notarization(*round).await else {
-                        debug!(?round, ?commitment, "ignoring missing notarization annotation");
-                        continue;
-                    };
-                    if notarization.proposal.payload != commitment {
-                        debug!(
-                            ?round,
-                            ?commitment,
-                            expected = ?notarization.proposal.payload,
-                            "ignoring mismatched notarization annotation"
-                        );
-                        continue;
-                    }
-                    self.cache_block(*round, digest, block.clone()).await;
-                }
-
-                // In this block-keyed path, `Finalized` means the block belongs
-                // in the finalized chain.
+                // deliveries and are handled below. In this block-keyed path,
+                // `Finalized` means the block belongs in the finalized chain.
                 let finalization = self.cache.get_finalization_for(digest).await;
                 if let Some(finalization) = &finalization {
                     self.update_processed_round_floor(height, finalization.round(), resolver)
