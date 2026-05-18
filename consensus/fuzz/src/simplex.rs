@@ -1,6 +1,6 @@
-#[cfg(feature = "mocks")]
-use crate::certificate_mock as cert_mock;
 use crate::id_mock;
+#[cfg(feature = "mocks")]
+use crate::simplex_certificate_mock as cert_mock;
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, Random, RoundRobin},

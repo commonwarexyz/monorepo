@@ -67,7 +67,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ pub struct Application {
 }
 
 impl Application {
-    pub fn new(strategy: Strategy) -> Self {
+    pub const fn new(strategy: Strategy) -> Self {
         Self { strategy }
     }
 
