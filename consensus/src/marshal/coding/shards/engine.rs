@@ -4875,7 +4875,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_empty_peer_buffer_is_retained_until_peer_leaves_latest_primary() {
+    fn test_peer_buffer_is_retained_until_peer_leaves_latest_primary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -4943,9 +4943,8 @@ mod tests {
                 "peer buffer should contain the buffered shard"
             );
 
-            // No reconstruction state yet: `ingest_buffered_shards` drains matching shards from the
-            // per-peer queues then returns without applying them, leaving an empty deque under the
-            // same map key while the sender stays in `latest.primary`.
+            // No reconstruction state yet: `ingest_buffered_shards` has nowhere to apply the shard,
+            // so it leaves the buffered shard staged while the sender remains in `latest.primary`.
             let progressed = engine.ingest_buffered_shards(commitment);
             assert!(
                 !progressed,
@@ -4959,8 +4958,8 @@ mod tests {
                 engine
                     .peer_buffers
                     .get(&sender_pk)
-                    .is_some_and(VecDeque::is_empty),
-                "retained peer buffer should now be empty"
+                    .is_some_and(|queue| queue.len() == 1),
+                "retained peer buffer should still contain the staged shard"
             );
 
             // Empty primary: no peer may retain buffers; `update_latest_primary_peers` drops the
