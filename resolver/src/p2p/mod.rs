@@ -44,7 +44,8 @@
 //! fetch. A fetch remains active while at least one attached subscriber satisfies the latest
 //! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
 //! key and currently retained subscribers are supplied to
-//! [`Consumer::deliver`](crate::Consumer::deliver).
+//! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
+//! is in progress are delivered the same accepted response locally.
 //!
 //! # Peer Selection
 //!
