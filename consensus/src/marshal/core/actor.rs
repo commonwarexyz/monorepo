@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, FetchContext, Request},
+        resolver::handler::{self, Annotation, Request},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -373,8 +373,8 @@ where
     ) -> Handle<()>
     where
         R: Resolver<
-            Request = ResolverRequestFor<V>,
-            Subscriber = FetchContext,
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -390,8 +390,8 @@ where
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: Resolver<
-            Request = ResolverRequestFor<V>,
-            Subscriber = FetchContext,
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -648,7 +648,7 @@ where
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver.fetch(Fetch::new(
                                 Request::Block { commitment },
-                                FetchContext::FinalizedBlock { round },
+                                Annotation::Finalized { round },
                             ));
                         }
                     }
@@ -692,7 +692,7 @@ where
                         // Trigger a targeted fetch via the resolver
                         let request = Request::<V::Commitment>::Finalized { height };
                         resolver.fetch_targeted(
-                            Fetch::new(request, FetchContext::Finalization { height }),
+                            Fetch::new(request, Annotation::Finalization { height }),
                             targets,
                         );
                     }
@@ -898,7 +898,7 @@ where
         fallback: Fallback,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -945,7 +945,7 @@ where
                 debug!(?round, ?digest, "requested block missing");
                 resolver.fetch(Fetch::new(
                     Request::Notarized { round },
-                    FetchContext::Notarization { round },
+                    Annotation::Notarization { round },
                 ));
             }
             Fallback::FetchByCommitment { height } => {
@@ -964,7 +964,7 @@ where
                     debug!(%height, ?commitment, ?digest, "requested certified ancestry block missing");
                     resolver.fetch(Fetch::new(
                         Request::Block { commitment },
-                        FetchContext::Ancestry { height },
+                        Annotation::Certified { height },
                     ));
                 }
             }
@@ -1012,16 +1012,13 @@ where
     /// Returns true if finalization archives were written and need syncing.
     async fn handle_deliver(
         &mut self,
-        delivery: Delivery<ResolverRequestFor<V>, FetchContext>,
+        delivery: Delivery<ResolverRequestFor<V>, Annotation>,
         mut value: Bytes,
         response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
-        let Delivery {
-            request: key,
-            subscribers,
-        } = delivery;
+        let Delivery { key, subscribers } = delivery;
         match key {
             Request::Block { commitment } => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
@@ -1035,25 +1032,25 @@ where
                 }
 
                 // The peer-visible request only says "give me this block".
-                // Local subscribers explain why the block was requested and
+                // Local annotations explain why the block was requested and
                 // therefore where, if anywhere, it should be stored. A stale
-                // subscriber is ignored rather than allowed to drive storage.
+                // annotation is ignored rather than allowed to drive storage.
                 let height = block.height();
                 let digest = block.digest();
-                let mut contexts = Vec::new();
-                for context in subscribers {
-                    let expected_height = match context {
-                        FetchContext::Ancestry { height } | FetchContext::Repair { height } => {
+                let mut annotations = Vec::new();
+                for annotation in subscribers {
+                    let expected_height = match annotation {
+                        Annotation::Certified { height } | Annotation::Repair { height } => {
                             Some(height)
                         }
-                        FetchContext::FinalizedBlock { .. }
-                        | FetchContext::Finalization { .. }
-                        | FetchContext::Notarization { .. } => None,
+                        Annotation::Finalized { .. }
+                        | Annotation::Finalization { .. }
+                        | Annotation::Notarization { .. } => None,
                     };
                     if expected_height.is_none_or(|expected| expected == height) {
-                        contexts.push(context);
+                        annotations.push(annotation);
                     } else {
-                        debug!(?commitment, %height, "ignoring stale block subscriber");
+                        debug!(?commitment, %height, "ignoring stale block annotation");
                     }
                 }
 
@@ -1061,18 +1058,18 @@ where
                 // Round-bound proposal-parent fetches are `Request::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the fetch was triggered by a finalization.
-                let should_finalize = contexts.iter().any(|context| {
+                let should_finalize = annotations.iter().any(|annotation| {
                     matches!(
-                        context,
-                        FetchContext::Repair { .. } | FetchContext::FinalizedBlock { .. }
+                        annotation,
+                        Annotation::Repair { .. } | Annotation::Finalized { .. }
                     )
                 });
                 let wrote = if should_finalize || finalization.is_some() {
                     self.store_finalization(height, digest, block, finalization, application)
                         .await
-                } else if contexts
+                } else if annotations
                     .iter()
-                    .any(|context| matches!(context, FetchContext::Ancestry { .. }))
+                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
                 {
                     if height > self.last_processed_height {
                         if let Some(bounds) = self.epocher.containing(height) {
@@ -1435,7 +1432,7 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver);
@@ -1741,7 +1738,7 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
@@ -1777,7 +1774,7 @@ where
                     // Request the missing block.
                     resolver.fetch(Fetch::new(
                         Request::Block { commitment },
-                        FetchContext::Repair {
+                        Annotation::Repair {
                             height: last_finalized,
                         },
                     ));
@@ -1836,7 +1833,7 @@ where
                         Request::Block {
                             commitment: parent_commitment,
                         },
-                        FetchContext::Repair {
+                        Annotation::Repair {
                             height: parent_height,
                         },
                     ));
@@ -1858,7 +1855,7 @@ where
             .map(|height| {
                 Fetch::new(
                     Request::<V::Commitment>::Finalized { height },
-                    FetchContext::Finalization { height },
+                    Annotation::Finalization { height },
                 )
             })
             .collect();
@@ -1873,7 +1870,7 @@ where
     fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Request = ResolverRequestFor<V>, Subscriber = FetchContext>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;

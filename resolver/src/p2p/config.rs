@@ -10,9 +10,9 @@ pub struct Config<
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    Request: Span,
-    Con: Consumer<Request = Request, Value = Bytes>,
-    Pro: Producer<Request = Request>,
+    Key: Span,
+    Con: Consumer<Key = Key, Value = Bytes>,
+    Pro: Producer<Key = Key>,
 > {
     /// Manages the current set of peers.
     ///

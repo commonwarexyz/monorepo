@@ -1893,51 +1893,50 @@ mod tests {
     }
 
     impl Resolver for RecordingResolver {
-        type Request = handler::Request<D>;
-        type Subscriber = handler::FetchContext;
+        type Key = handler::Request<D>;
+        type Subscriber = handler::Annotation;
         type PublicKey = PublicKey;
 
-        fn fetch<R>(&mut self, _request: R) -> Feedback
+        fn fetch<R>(&mut self, _key: R) -> Feedback
         where
-            R: Into<Fetch<Self::Request, Self::Subscriber>> + Send,
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
             Feedback::Ok
         }
 
-        fn fetch_all<R>(&mut self, _requests: Vec<R>) -> Feedback
+        fn fetch_all<R>(&mut self, _keys: Vec<R>) -> Feedback
         where
-            R: Into<Fetch<Self::Request, Self::Subscriber>> + Send,
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            request: impl Into<Fetch<Self::Request, Self::Subscriber>> + Send,
+            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((request.into().request, targets));
+            self.targeted.lock().push((key.into().key, targets));
             Feedback::Ok
         }
 
         fn fetch_all_targeted<R>(
             &mut self,
-            requests: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
+            keys: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            R: Into<Fetch<Self::Request, Self::Subscriber>> + Send,
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
             self.targeted.lock().extend(
-                requests
-                    .into_iter()
-                    .map(|(request, targets)| (request.into().request, targets)),
+                keys.into_iter()
+                    .map(|(key, targets)| (key.into().key, targets)),
             );
             Feedback::Ok
         }
 
         fn retain(
             &mut self,
-            _predicate: impl Fn(&Self::Request, &Self::Subscriber) -> bool + Send + 'static,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
             Feedback::Ok
         }
@@ -2215,12 +2214,12 @@ mod tests {
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
-                        request: handler::Request::Finalized {
+                        key: handler::Request::Finalized {
                             height: Height::new(5),
                         },
-                        subscribers: vec![handler::FetchContext::Finalization {
+                        subscribers: NonEmptyVec::new(handler::Annotation::Finalization {
                             height: Height::new(5),
-                        }],
+                        }),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
@@ -2233,12 +2232,12 @@ mod tests {
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
-                        request: handler::Request::Notarized {
+                        key: handler::Request::Notarized {
                             round: Round::new(Epoch::zero(), View::new(1)),
                         },
-                        subscribers: vec![handler::FetchContext::Notarization {
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization {
                             round: Round::new(Epoch::zero(), View::new(1)),
-                        }],
+                        }),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,

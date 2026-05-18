@@ -215,16 +215,16 @@ impl Handler {
 }
 
 impl Consumer for Handler {
-    type Request = U64;
+    type Key = U64;
     type Subscriber = ();
     type Value = Bytes;
 
     fn deliver(
         &mut self,
-        delivery: Delivery<Self::Request, Self::Subscriber>,
+        delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
-        let key = delivery.request;
+        let key = delivery.key;
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
             view: View::new(key.into()),
@@ -236,9 +236,9 @@ impl Consumer for Handler {
 }
 
 impl Producer for Handler {
-    type Request = U64;
+    type Key = U64;
 
-    fn produce(&mut self, key: Self::Request) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Produce {
             view: View::new(key.into()),

@@ -350,7 +350,7 @@ where
             commonware_resolver::p2p::Mailbox<
                 handler::Request<H::Digest>,
                 C::PublicKey,
-                handler::FetchContext,
+                handler::Annotation,
             >,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
@@ -397,7 +397,7 @@ where
             commonware_resolver::p2p::Mailbox<
                 handler::Request<H::Digest>,
                 C::PublicKey,
-                handler::FetchContext,
+                handler::Annotation,
             >,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,

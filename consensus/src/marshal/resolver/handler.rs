@@ -23,7 +23,7 @@ pub(crate) enum Message<D: Digest> {
     /// A request to deliver a value for a given key.
     Deliver {
         /// The delivery metadata attached to the resolved value.
-        delivery: Delivery<Request<D>, FetchContext>,
+        delivery: Delivery<Request<D>, Annotation>,
         /// The value being delivered.
         value: Bytes,
         /// A channel to send the result of the delivery.
@@ -127,13 +127,13 @@ impl<D: Digest> Receiver<D> {
 }
 
 impl<D: Digest> Consumer for Handler<D> {
-    type Request = Request<D>;
-    type Subscriber = FetchContext;
+    type Key = Request<D>;
+    type Subscriber = Annotation;
     type Value = Bytes;
 
     fn deliver(
         &mut self,
-        delivery: Delivery<Self::Request, Self::Subscriber>,
+        delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
@@ -147,36 +147,36 @@ impl<D: Digest> Consumer for Handler<D> {
 }
 
 impl<D: Digest> Producer for Handler<D> {
-    type Request = Request<D>;
+    type Key = Request<D>;
 
-    fn produce(&mut self, key: Self::Request) -> oneshot::Receiver<Bytes> {
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Produce { key, response });
         receiver
     }
 }
 
-/// Local processing context for a resolved request.
+/// Local processing annotation for a resolved key.
 ///
-/// The resolver request key is the peer-visible lookup. A subscriber is local
+/// The resolver key is the peer-visible lookup. An annotation is local
 /// metadata attached to that lookup so marshal can decide how to process the
-/// response after validating it against the request key. Multiple local
-/// subscribers may share one peer request when they depend on the same block.
+/// response after validating it against the key. Multiple local annotations
+/// may share one peer key when they depend on the same block.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum FetchContext {
+pub enum Annotation {
     /// A finalization requested by height.
     Finalization { height: Height },
     /// A notarization requested by round.
     Notarization { round: Round },
-    /// A block requested only to satisfy certified ancestry verification.
+    /// A block requested only to satisfy certified block verification.
     ///
     /// The expected height is known before the request from the child block.
-    Ancestry { height: Height },
+    Certified { height: Height },
     /// A block requested after receiving a finalization whose height is not known
     /// until the response block is decoded.
     ///
     /// The finalization names a commitment but not a height.
-    FinalizedBlock { round: Round },
+    Finalized { round: Round },
     /// A block requested while repairing an internal finalized-chain gap.
     ///
     /// The expected height is known before the request from the gap boundary.
@@ -215,16 +215,16 @@ impl<D: Digest> Request<D> {
     /// candidate waits out of the resolver entirely, drops height-bound block
     /// requests once the processed height reaches them, and drops round-bound
     /// certified-parent fetches once the processed round reaches them.
-    pub fn predicate(&self) -> impl Fn(&Self, &FetchContext) -> bool + Send + 'static {
+    pub fn predicate(&self) -> impl Fn(&Self, &Annotation) -> bool + Send + 'static {
         let cloned = *self;
-        move |request, subscriber| match (&cloned, request, subscriber) {
+        move |request, annotation| match (&cloned, request, annotation) {
             (Self::Finalized { height: mine }, Self::Finalized { height: theirs }, _) => {
                 *theirs > *mine
             }
             (
                 Self::Finalized { height: mine },
                 Self::Block { .. },
-                FetchContext::Ancestry { height: theirs } | FetchContext::Repair { height: theirs },
+                Annotation::Certified { height: theirs } | Annotation::Repair { height: theirs },
             ) => *theirs > *mine,
             (Self::Finalized { .. }, _, _) => true,
             (Self::Notarized { round: mine }, Self::Notarized { round: theirs }, _) => {
@@ -233,7 +233,7 @@ impl<D: Digest> Request<D> {
             (
                 Self::Notarized { round: mine },
                 Self::Block { .. },
-                FetchContext::FinalizedBlock { round: theirs },
+                Annotation::Finalized { round: theirs },
             ) => *theirs > *mine,
             (Self::Notarized { .. }, _, _) => true,
             (Self::Block { commitment: mine }, Self::Block { commitment: theirs }, _) => {
@@ -541,34 +541,34 @@ mod tests {
         let block = Request::<D>::Block {
             commitment: Sha256::hash(b"block"),
         };
-        let stale_repair = FetchContext::Repair {
+        let stale_repair = Annotation::Repair {
             height: Height::new(100),
         };
-        let fresh_ancestry = FetchContext::Ancestry {
+        let fresh_certified = Annotation::Certified {
             height: Height::new(101),
         };
 
         let predicate = floor.predicate();
         assert!(predicate(
             &higher_finalized,
-            &FetchContext::Finalization {
+            &Annotation::Finalization {
                 height: Height::new(200),
             }
         ));
         assert!(predicate(
             &notarized,
-            &FetchContext::Notarization {
+            &Annotation::Notarization {
                 round: Round::new(Epoch::new(333), View::new(150)),
             }
         ));
-        assert!(predicate(&block, &fresh_ancestry));
+        assert!(predicate(&block, &fresh_certified));
 
         let same_height = Request::<D>::Finalized {
             height: Height::new(100),
         };
         assert!(!predicate(
             &same_height,
-            &FetchContext::Finalization {
+            &Annotation::Finalization {
                 height: Height::new(100),
             }
         ));
@@ -583,7 +583,7 @@ mod tests {
 
         assert!(!predicate(
             &request,
-            &FetchContext::Repair {
+            &Annotation::Repair {
                 height: Height::new(7),
             }
         ));
@@ -591,7 +591,7 @@ mod tests {
             &Request::<D>::Block {
                 commitment: Sha256::hash(b"other"),
             },
-            &FetchContext::Repair {
+            &Annotation::Repair {
                 height: Height::new(7),
             }
         ));

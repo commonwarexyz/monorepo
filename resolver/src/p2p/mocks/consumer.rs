@@ -60,7 +60,7 @@ where
     V: Clone + PartialEq + Send + 'static,
     S: Clone + Eq + Send + 'static,
 {
-    type Request = R;
+    type Key = R;
     type Subscriber = S;
     type Value = V;
 
@@ -69,14 +69,14 @@ where
     /// Returns `true` if the value is expected for the key or if there is no expected value.
     fn deliver(
         &mut self,
-        delivery: Delivery<Self::Request, Self::Subscriber>,
+        delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
-        let request = delivery.request;
+        let key = delivery.key;
         let (sender, receiver) = oneshot::channel();
-        let valid = self.expected.get(&request).is_none_or(|v| v == &value);
+        let valid = self.expected.get(&key).is_none_or(|v| v == &value);
         if valid {
-            self.sender.send_lossy((request, value));
+            self.sender.send_lossy((key, value));
         }
         let _ = sender.send(valid);
         receiver

@@ -2,13 +2,13 @@
 //!
 //! # Overview
 //!
-//! The `p2p` module enables resolving data by fixed-length requests in a P2P network. Central to the
-//! module is the `peer` actor which manages the fetch-request lifecycle. Its mailbox allows
-//! initiation and pruning of fetch requests via the `Resolver` interface.
+//! The `p2p` module enables resolving data by fixed-length keys in a P2P network. Central to the
+//! module is the `peer` actor which manages the fetch lifecycle. Its mailbox allows
+//! initiation and pruning of fetches via the `Resolver` interface.
 //!
-//! The peer handles an arbitrarily large number of concurrent fetch requests by sending requests
+//! The peer handles an arbitrarily large number of concurrent fetches by sending requests
 //! to other peers and processing their responses. It selects peers based on performance, retrying
-//! with another peer if one fails or provides invalid data. Requests persist until pruned or
+//! with another peer if one fails or provides invalid data. Fetches persist until pruned or
 //! fulfilled, delivering data to the `Consumer` for verification.
 //!
 //! The `Consumer` checks data integrity and authenticity (critical in an adversarial environment)
@@ -39,11 +39,11 @@
 //!
 //! # Subscribers
 //!
-//! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible request and a local
+//! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible key and a local
 //! subscriber. This is useful when several local subscribers can share the same peer-visible
 //! fetch. A fetch remains active while at least one attached subscriber satisfies the latest
 //! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
-//! request and currently retained subscribers are supplied to
+//! key and currently retained subscribers are supplied to
 //! [`Consumer::deliver`](crate::Consumer::deliver).
 //!
 //! # Peer Selection
@@ -58,7 +58,7 @@
 //!
 //! # Performance Considerations
 //!
-//! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
+//! The peer supports arbitrarily many concurrent fetches, but resource usage generally
 //! depends on the rate-limiting configuration of the underlying P2P network.
 
 use bytes::Bytes;
@@ -80,11 +80,11 @@ pub mod mocks;
 
 /// Serves data requested by the network.
 pub trait Producer: Clone + Send + 'static {
-    /// Type used to request data from peers.
-    type Request: Span;
+    /// Type used to key data requested from peers.
+    type Key: Span;
 
     /// Serve a request received from the network.
-    fn produce(&mut self, request: Self::Request) -> oneshot::Receiver<Bytes>;
+    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes>;
 }
 
 #[cfg(test)]
@@ -244,7 +244,7 @@ mod tests {
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key, PublicKey, R>
     where
-        C: crate::Consumer<Request = Key, Subscriber = R, Value = Bytes>,
+        C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
         R: Clone + Ord + Send + 'static,
     {
         let public_key = signer.public_key();
@@ -305,16 +305,16 @@ mod tests {
     }
 
     impl crate::Consumer for BlockingConsumer {
-        type Request = Key;
+        type Key = Key;
         type Subscriber = ();
         type Value = Bytes;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Request, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
         ) -> oneshot::Receiver<bool> {
-            let key = delivery.request;
+            let key = delivery.key;
             self.started.send_lossy(key.clone());
             let (gate, valid) = self
                 .gates
@@ -362,13 +362,13 @@ mod tests {
     }
 
     impl crate::Consumer for SubscriberRecordingConsumer {
-        type Request = Key;
+        type Key = Key;
         type Subscriber = SubscriberTag;
         type Value = Bytes;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Request, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
         ) -> oneshot::Receiver<bool> {
             let (sender, receiver) = oneshot::channel();
@@ -393,13 +393,13 @@ mod tests {
     }
 
     impl crate::Consumer for TypedSubscriberRecordingConsumer {
-        type Request = Key;
+        type Key = Key;
         type Subscriber = SubscriberTag;
         type Value = Bytes;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Request, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber>,
             value: Self::Value,
         ) -> oneshot::Receiver<bool> {
             let (sender, receiver) = oneshot::channel();
@@ -614,7 +614,7 @@ mod tests {
             assert_eq!(started_key, key);
 
             let canceled = key.clone();
-            mailbox1.retain(move |request, _| request != &canceled);
+            mailbox1.retain(move |key, _| key != &canceled);
             mailbox1.fetch((key.clone(), ()));
 
             first_gate_sender.closed().await;
@@ -789,8 +789,8 @@ mod tests {
         });
     }
 
-    /// Tests that pruning a fetch request leaves the consumer untouched.
-    /// This test initiates a fetch request and immediately prunes it, verifying
+    /// Tests that pruning a fetch leaves the consumer untouched.
+    /// This test initiates a fetch and immediately prunes it, verifying
     /// that the consumer does not receive any event.
     #[test_traced]
     fn test_retain_drops_fetch() {
@@ -816,7 +816,7 @@ mod tests {
             let key = Key(3);
             mailbox1.fetch((key.clone(), ()));
             let canceled = key.clone();
-            mailbox1.retain(move |request, _| request != &canceled);
+            mailbox1.retain(move |key, _| key != &canceled);
 
             select! {
                 _ = cons_out1.recv() => panic!("unexpected event"),
@@ -1006,7 +1006,7 @@ mod tests {
         });
     }
 
-    /// Tests that concurrent fetch requests are handled correctly.
+    /// Tests that concurrent fetches are handled correctly.
     /// Also tests that the peer can recover from having no peers available.
     /// Also tests that the peer can get data from multiple peers that have different sets of data.
     #[test_traced]
@@ -1064,7 +1064,7 @@ mod tests {
 
             // Run the fetches multiple times to ensure that the peer tries both of its peers
             for _ in 0..10 {
-                // Initiate concurrent fetch requests
+                // Initiate concurrent fetches.
                 mailbox1.fetch((key2.clone(), ()));
                 mailbox1.fetch((key3.clone(), ()));
 
@@ -1092,10 +1092,10 @@ mod tests {
         });
     }
 
-    /// Tests that pruning an inactive fetch request has no effect.
-    /// Prunes a request before, after, and during the fetch process,
+    /// Tests that pruning an inactive fetch has no effect.
+    /// Prunes a key before, after, and during the fetch process.
     #[test_traced]
-    fn test_retain_drops_request() {
+    fn test_retain_drops_key() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1131,9 +1131,9 @@ mod tests {
                 prod2,
             );
 
-            // Prune before sending the fetch request, expecting no effect
+            // Prune before sending the fetch, expecting no effect.
             let canceled = key.clone();
-            mailbox1.retain(move |request, _| request != &canceled);
+            mailbox1.retain(move |key, _| key != &canceled);
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -1149,7 +1149,7 @@ mod tests {
 
             // Attempt to prune after data has been delivered, expecting no effect
             let canceled = key.clone();
-            mailbox1.retain(move |request, _| request != &canceled);
+            mailbox1.retain(move |key, _| key != &canceled);
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -1157,11 +1157,11 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
-            // Initiate and prune another fetch request.
+            // Initiate and prune another fetch.
             let key = Key(7);
             mailbox1.fetch((key.clone(), ()));
             let canceled = key.clone();
-            mailbox1.retain(move |request, _| request != &canceled);
+            mailbox1.retain(move |key, _| key != &canceled);
 
             // No event should arrive after pruning.
             select! {
@@ -1262,7 +1262,7 @@ mod tests {
 
             // Prune the fetch for keyB.
             let canceled = key_b.clone();
-            mailbox1.retain(move |request, _| request != &canceled);
+            mailbox1.retain(move |key, _| key != &canceled);
 
             // Check oracle
             let blocked = oracle.blocked().await.unwrap();
@@ -1272,11 +1272,11 @@ mod tests {
         });
     }
 
-    /// Tests that duplicate fetch requests for the same key are handled properly.
-    /// The test verifies that when the same key is requested multiple times,
+    /// Tests that duplicate fetches for the same key are handled properly.
+    /// The test verifies that when the same key is fetched multiple times,
     /// the data is correctly delivered once without errors.
     #[test_traced]
-    fn test_duplicate_fetch_request() {
+    fn test_duplicate_fetch_key() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1312,7 +1312,7 @@ mod tests {
                 prod2,
             );
 
-            // Send duplicate fetch requests for the same key
+            // Send duplicate fetches for the same key.
             mailbox1.fetch((key.clone(), ()));
             mailbox1.fetch((key.clone(), ()));
 
@@ -1892,10 +1892,10 @@ mod tests {
             // Start a fetch (no link, so fetch stays in-flight)
             mailbox1.fetch(key.clone());
 
-            // Retain with predicate that excludes the request. This must clean up
-            // the in-flight entry for the request.
+            // Retain with predicate that excludes the key. This must clean up
+            // the in-flight entry for the key.
             let key_clone = key.clone();
-            mailbox1.retain(move |request, _| request != &key_clone);
+            mailbox1.retain(move |key, _| key != &key_clone);
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2009,8 +2009,8 @@ mod tests {
             assert_eq!(
                 delivery,
                 Delivery {
-                    request: key,
-                    subscribers: vec![first_subscriber, second_subscriber],
+                    key,
+                    subscribers: non_empty_vec![first_subscriber, second_subscriber],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2063,8 +2063,8 @@ mod tests {
             assert_eq!(
                 delivery,
                 Delivery {
-                    request: key.clone(),
-                    subscribers: vec![first_subscriber, second_subscriber],
+                    key: key.clone(),
+                    subscribers: non_empty_vec![first_subscriber, second_subscriber],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2120,8 +2120,8 @@ mod tests {
             assert_eq!(
                 delivery,
                 Delivery {
-                    request: key,
-                    subscribers: vec![subscriber],
+                    key,
+                    subscribers: non_empty_vec![subscriber],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2171,8 +2171,8 @@ mod tests {
             assert_eq!(
                 delivery,
                 Delivery {
-                    request: key,
-                    subscribers: vec![subscriber],
+                    key,
+                    subscribers: non_empty_vec![subscriber],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2314,7 +2314,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             let start = context.current();
 
-            // Issue 2 fetch requests rapidly
+            // Issue 2 fetches rapidly.
             // With rate limit of 1/sec per peer and 2 peers, both should complete
             // immediately via spill-over (one request to each peer)
             mailbox1.fetch((Key(0), ()));
@@ -2400,7 +2400,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             let start = context.current();
 
-            // Issue 3 fetch requests to a single peer with rate limit of 1/sec
+            // Issue 3 fetches to a single peer with rate limit of 1/sec.
             // Only 1 can be sent immediately, the others must wait for rate limit reset
             mailbox1.fetch((Key(1), ()));
             mailbox1.fetch((Key(2), ()));
@@ -2432,7 +2432,7 @@ mod tests {
         });
     }
 
-    /// Tests that the resolver never sends fetch requests to itself (me exclusion).
+    /// Tests that the resolver never sends fetches to itself (me exclusion).
     /// Even when the local peer has the data in its producer, it should fetch from
     /// another peer instead.
     #[test_traced]
@@ -3081,9 +3081,9 @@ mod tests {
             let key2 = Key(2);
             mailboxes[0].fetch((key2.clone(), ()));
 
-            // Retain can prune a single request after shutdown without panicking.
+            // Retain can prune a single key after shutdown without panicking.
             let canceled = key2;
-            mailboxes[0].retain(move |request, _| request != &canceled);
+            mailboxes[0].retain(move |key, _| key != &canceled);
 
             // Retain should not panic
             mailboxes[0].retain(|_, _| true);
