@@ -133,36 +133,6 @@ impl<F: merkle::Family, D: Digest> Read for Target<F, D> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
-impl<F: merkle::Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let root = u.arbitrary()?;
-        let max_loc = F::MAX_LEAVES;
-        let lower = u.int_in_range(0..=*max_loc - 1)?;
-        let upper = u.int_in_range(lower + 1..=*max_loc)?;
-        Ok(Self {
-            root,
-            range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
-        })
-    }
-}
-
-#[cfg(all(test, feature = "arbitrary"))]
-mod conformance {
-    use super::*;
-    use crate::merkle::{mmb, mmr};
-    use commonware_codec::conformance::CodecConformance;
-    use commonware_cryptography::sha256;
-
-    commonware_conformance::conformance_tests! {
-        CodecConformance<Target<mmr::Family, sha256::Digest>>,
-        CodecConformance<Target<mmb::Family, sha256::Digest>>,
-    }
-}
-
 /// Returns whether persisted local state already matches the requested sync target by confirming
 /// that the derived `ops_root` matches the one from the target.
 pub(crate) async fn has_local_target_state<F, E, H, S, T>(
@@ -361,3 +331,33 @@ impl_sync_database!(
     Key, VariableValue;
     OrderedVariableOp<F, K, V>: CodecShared
 );
+
+#[cfg(feature = "arbitrary")]
+impl<F: merkle::Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let max_loc = F::MAX_LEAVES;
+        let lower = u.int_in_range(0..=*max_loc - 1)?;
+        let upper = u.int_in_range(lower + 1..=*max_loc)?;
+        Ok(Self {
+            root,
+            range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
+        })
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::{mmb, mmr};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Target<mmr::Family, sha256::Digest>>,
+        CodecConformance<Target<mmb::Family, sha256::Digest>>,
+    }
+}

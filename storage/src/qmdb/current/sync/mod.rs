@@ -203,41 +203,6 @@ impl<F: Graftable, D: Digest> commonware_codec::Read for Target<F, D> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
-impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let root = u.arbitrary()?;
-        let ops_root = u.arbitrary()?;
-        let witness = u.arbitrary()?;
-        let max_loc = F::MAX_LEAVES;
-        let lower = u.int_in_range(0..=*max_loc - 1)?;
-        let upper = u.int_in_range(lower + 1..=*max_loc)?;
-        Ok(Self {
-            root,
-            ops_root,
-            witness,
-            range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
-        })
-    }
-}
-
-#[cfg(all(test, feature = "arbitrary"))]
-mod conformance {
-    use super::*;
-    use crate::merkle::{mmb, mmr};
-    use commonware_codec::conformance::CodecConformance;
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
-
-    commonware_conformance::conformance_tests! {
-        CodecConformance<Target<mmr::Family, Sha256Digest>>,
-        CodecConformance<Target<mmb::Family, Sha256Digest>>,
-    }
-}
-
 /// Configuration for syncing a `current` database from trusted database-root targets.
 pub struct Config<DB: Database, R: DbResolver<DB>>
 where
@@ -830,3 +795,38 @@ impl_current_resolver!(
     CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
     OrderedVariableOp<F, K, V>: CodecShared,
 );
+
+#[cfg(feature = "arbitrary")]
+impl<F: Graftable, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let ops_root = u.arbitrary()?;
+        let witness = u.arbitrary()?;
+        let max_loc = F::MAX_LEAVES;
+        let lower = u.int_in_range(0..=*max_loc - 1)?;
+        let upper = u.int_in_range(lower + 1..=*max_loc)?;
+        Ok(Self {
+            root,
+            ops_root,
+            witness,
+            range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
+        })
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::{mmb, mmr};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Target<mmr::Family, Sha256Digest>>,
+        CodecConformance<Target<mmb::Family, Sha256Digest>>,
+    }
+}
