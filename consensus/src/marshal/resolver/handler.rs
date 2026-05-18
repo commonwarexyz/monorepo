@@ -456,19 +456,19 @@ mod tests {
 
     #[test]
     fn test_subject_block_encoding() {
-        let digest = Sha256::hash(b"test");
-        let request = Request::<D>::Block(digest);
+        let commitment = Sha256::hash(b"test");
+        let request = Request::<D>::Block(commitment);
 
         // Test encoding
         let encoded = request.encode();
-        assert_eq!(encoded.len(), 33); // 1 byte for enum variant + 32 bytes for digest
+        assert_eq!(encoded.len(), 33); // 1 byte for enum variant + 32 bytes for commitment
         assert_eq!(encoded[0], 0); // Block variant
 
         // Test decoding
         let mut buf = encoded.as_ref();
         let decoded = Request::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
-        assert_eq!(decoded, Request::Block(digest));
+        assert_eq!(decoded, Request::Block(commitment));
     }
 
     #[test]
@@ -618,8 +618,8 @@ mod tests {
 
     #[test]
     fn test_encode_size() {
-        let digest = Sha256::hash(&[0u8; 32]);
-        let r1 = Request::<D>::Block(digest);
+        let commitment = Sha256::hash(&[0u8; 32]);
+        let r1 = Request::<D>::Block(commitment);
         let r2 = Request::<D>::Finalized {
             height: Height::new(u64::MAX),
         };
@@ -636,13 +636,13 @@ mod tests {
     #[test]
     fn test_request_ord_same_variant() {
         // Test ordering within the same variant
-        let digest1 = Sha256::hash(b"test1");
-        let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block(digest1);
-        let block2 = Request::<D>::Block(digest2);
+        let commitment1 = Sha256::hash(b"test1");
+        let commitment2 = Sha256::hash(b"test2");
+        let block1 = Request::<D>::Block(commitment1);
+        let block2 = Request::<D>::Block(commitment2);
 
-        // Block ordering depends on digest ordering
-        if digest1 < digest2 {
+        // Block ordering depends on commitment ordering
+        if commitment1 < commitment2 {
             assert!(block1 < block2);
             assert!(block2 > block1);
         } else {
@@ -683,8 +683,8 @@ mod tests {
 
     #[test]
     fn test_request_ord_cross_variant() {
-        let digest = Sha256::hash(b"test");
-        let block = Request::<D>::Block(digest);
+        let commitment = Sha256::hash(b"test");
+        let block = Request::<D>::Block(commitment);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -712,10 +712,10 @@ mod tests {
 
     #[test]
     fn test_request_partial_ord() {
-        let digest1 = Sha256::hash(b"test1");
-        let digest2 = Sha256::hash(b"test2");
-        let block1 = Request::<D>::Block(digest1);
-        let block2 = Request::<D>::Block(digest2);
+        let commitment1 = Sha256::hash(b"test1");
+        let commitment2 = Sha256::hash(b"test2");
+        let block1 = Request::<D>::Block(commitment1);
+        let block2 = Request::<D>::Block(commitment2);
         let finalized = Request::<D>::Finalized {
             height: Height::new(100),
         };
@@ -745,26 +745,26 @@ mod tests {
 
     #[test]
     fn test_request_ord_sorting() {
-        let digest1 = Sha256::hash(b"a");
-        let digest2 = Sha256::hash(b"b");
-        let digest3 = Sha256::hash(b"c");
+        let commitment1 = Sha256::hash(b"a");
+        let commitment2 = Sha256::hash(b"b");
+        let commitment3 = Sha256::hash(b"c");
 
         let requests = vec![
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(300)),
             },
-            Request::<D>::Block(digest2),
+            Request::<D>::Block(commitment2),
             Request::<D>::Finalized {
                 height: Height::new(200),
             },
-            Request::<D>::Block(digest1),
+            Request::<D>::Block(commitment1),
             Request::<D>::Notarized {
                 round: Round::new(Epoch::new(333), View::new(250)),
             },
             Request::<D>::Finalized {
                 height: Height::new(100),
             },
-            Request::<D>::Block(digest3),
+            Request::<D>::Block(commitment3),
         ];
 
         // Sort using BTreeSet (uses Ord)
@@ -774,7 +774,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        // Verify order: all Blocks first (sorted by digest), then Finalized (by height), then Notarized (by view)
+        // Verify order: all Blocks first (sorted by commitment), then Finalized (by height), then Notarized (by view)
         assert_eq!(sorted.len(), 7);
 
         // Check that all blocks come first
@@ -832,8 +832,8 @@ mod tests {
         assert!(max_finalized < min_notarized);
 
         // Test self-comparison
-        let digest = Sha256::hash(b"self");
-        let block = Request::<D>::Block(digest);
+        let commitment = Sha256::hash(b"self");
+        let block = Request::<D>::Block(commitment);
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
         assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);
