@@ -1021,6 +1021,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-actor-fuzz"
+version = "2026.4.0"
+dependencies = [
+ "arbitrary",
+ "commonware-actor",
+ "commonware-runtime",
+ "commonware-utils",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-bridge"
 version = "2026.4.0"
 dependencies = [
@@ -1615,6 +1626,21 @@ dependencies = [
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-resolver-fuzz"
+version = "2026.4.0"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-utils",
+ "libfuzzer-sys",
+ "rand 0.8.5",
 ]
 
 [[package]]
