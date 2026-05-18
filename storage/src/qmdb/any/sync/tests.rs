@@ -59,8 +59,10 @@ fn test_sync_target_read_invalid_bounds() {
 mod harnesses {
     use crate::{
         merkle::{self, mmb},
-        qmdb::any::value::VariableEncoding,
-        qmdb::sync::tests::{OpOf, SyncTestHarness},
+        qmdb::{
+            any::value::VariableEncoding,
+            sync::tests::{OpOf, SyncTestHarness},
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
