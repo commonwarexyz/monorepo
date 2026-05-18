@@ -781,7 +781,7 @@ mod tests {
                     Proposal::new(
                         Round::new(Epoch::zero(), view),
                         parent_view,
-                        StandardHarness::commitment(&block),
+                        StandardHarness::commitment(block),
                     ),
                     &schemes,
                     3,
@@ -882,7 +882,7 @@ mod tests {
                 Proposal::new(
                     Round::new(Epoch::zero(), View::new(pending_tip)),
                     View::new(pending_tip - 1),
-                    StandardHarness::commitment(&tip_block),
+                    StandardHarness::commitment(tip_block),
                 ),
                 &schemes,
                 QUORUM,
