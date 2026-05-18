@@ -163,9 +163,11 @@ impl<D: Digest> Producer for Handler<D> {
 /// response after validating it against the key. Multiple local annotations
 /// may share one peer key when they depend on the same block.
 ///
-/// Some annotations describe how a [`Request::Block`] delivery should be
-/// stored. Others mirror the non-block request type and only carry pruning
-/// metadata.
+/// [`Finalization`](Annotation::Finalization) and
+/// [`Notarization`](Annotation::Notarization) mirror non-block request types and
+/// only carry pruning metadata. [`Certified`](Annotation::Certified) and
+/// [`Finalized`](Annotation::Finalized) describe how a [`Request::Block`]
+/// delivery should be stored.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
     /// A finalization requested by height.
@@ -176,15 +178,20 @@ pub enum Annotation {
     ///
     /// The expected height is known before the request from the child block.
     Certified { height: Height },
-    /// A block requested by commitment because a finalization named it.
+    /// A block requested by commitment for the finalized chain.
+    Finalized(Finalized),
+}
+
+/// Metadata for a finalized block requested by commitment.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Finalized {
+    /// The finalized block's height is known before the request.
+    ByHeight { height: Height },
+    /// Only the finalization round is known before the request.
     ///
-    /// The finalization names a commitment but not a height. The round is
-    /// retained so the request can be pruned once processing passes it.
-    Finalized { round: Round },
-    /// A block requested while repairing an internal finalized-chain gap.
-    ///
-    /// The expected height is known before the request from the gap boundary.
-    Repair { height: Height },
+    /// This happens when a finalization names the block commitment but not the
+    /// block height.
+    ByRound { round: Round },
 }
 
 /// A request for backfilling data.
@@ -228,7 +235,8 @@ impl<D: Digest> Request<D> {
             (
                 Self::Finalized { height: mine },
                 Self::Block { .. },
-                Annotation::Certified { height: theirs } | Annotation::Repair { height: theirs },
+                Annotation::Certified { height: theirs }
+                | Annotation::Finalized(Finalized::ByHeight { height: theirs }),
             ) => *theirs > *mine,
             (Self::Finalized { .. }, _, _) => true,
             (Self::Notarized { round: mine }, Self::Notarized { round: theirs }, _) => {
@@ -237,7 +245,7 @@ impl<D: Digest> Request<D> {
             (
                 Self::Notarized { round: mine },
                 Self::Block { .. },
-                Annotation::Finalized { round: theirs },
+                Annotation::Finalized(Finalized::ByRound { round: theirs }),
             ) => *theirs > *mine,
             (Self::Notarized { .. }, _, _) => true,
             (Self::Block { commitment: mine }, Self::Block { commitment: theirs }, _) => {
@@ -545,9 +553,9 @@ mod tests {
         let block = Request::<D>::Block {
             commitment: Sha256::hash(b"block"),
         };
-        let stale_repair = Annotation::Repair {
+        let stale_finalized = Annotation::Finalized(Finalized::ByHeight {
             height: Height::new(100),
-        };
+        });
         let fresh_certified = Annotation::Certified {
             height: Height::new(101),
         };
@@ -576,7 +584,7 @@ mod tests {
                 height: Height::new(100),
             }
         ));
-        assert!(!predicate(&block, &stale_repair));
+        assert!(!predicate(&block, &stale_finalized));
 
         let floor = Request::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(10)),
@@ -584,15 +592,15 @@ mod tests {
         let predicate = floor.predicate();
         assert!(predicate(
             &block,
-            &Annotation::Finalized {
+            &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(11)),
-            }
+            })
         ));
         assert!(!predicate(
             &block,
-            &Annotation::Finalized {
+            &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(10)),
-            }
+            })
         ));
     }
 
@@ -604,17 +612,17 @@ mod tests {
 
         assert!(!predicate(
             &request,
-            &Annotation::Repair {
+            &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(7),
-            }
+            })
         ));
         assert!(predicate(
             &Request::<D>::Block {
                 commitment: Sha256::hash(b"other"),
             },
-            &Annotation::Repair {
+            &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(7),
-            }
+            })
         ));
     }
 

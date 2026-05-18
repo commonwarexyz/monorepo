@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::handler::{self, Annotation, Request},
+        resolver::handler::{self, Annotation, Finalized, Request},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -648,7 +648,7 @@ where
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver.fetch(Fetch::new(
                                 Request::Block { commitment },
-                                Annotation::Finalized { round },
+                                Annotation::Finalized(Finalized::ByRound { round }),
                             ));
                         }
                     }
@@ -1040,10 +1040,9 @@ where
                 let mut annotations = Vec::new();
                 for annotation in subscribers {
                     let expected_height = match annotation {
-                        Annotation::Certified { height } | Annotation::Repair { height } => {
-                            Some(height)
-                        }
-                        Annotation::Finalized { .. }
+                        Annotation::Certified { height }
+                        | Annotation::Finalized(Finalized::ByHeight { height }) => Some(height),
+                        Annotation::Finalized(Finalized::ByRound { .. })
                         | Annotation::Finalization { .. }
                         | Annotation::Notarization { .. } => None,
                     };
@@ -1057,13 +1056,10 @@ where
                 let finalization = self.cache.get_finalization_for(digest).await;
                 // Round-bound proposal-parent fetches are `Request::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
-                // `Finalized` means the fetch was triggered by a finalization.
-                let should_finalize = annotations.iter().any(|annotation| {
-                    matches!(
-                        annotation,
-                        Annotation::Repair { .. } | Annotation::Finalized { .. }
-                    )
-                });
+                // `Finalized` means the block belongs in the finalized chain.
+                let should_finalize = annotations
+                    .iter()
+                    .any(|annotation| matches!(annotation, Annotation::Finalized(_)));
                 let wrote = if should_finalize || finalization.is_some() {
                     self.store_finalization(height, digest, block, finalization, application)
                         .await
@@ -1774,9 +1770,9 @@ where
                     // Request the missing block.
                     resolver.fetch(Fetch::new(
                         Request::Block { commitment },
-                        Annotation::Repair {
+                        Annotation::Finalized(Finalized::ByHeight {
                             height: last_finalized,
-                        },
+                        }),
                     ));
                 }
             }
@@ -1833,9 +1829,9 @@ where
                         Request::Block {
                             commitment: parent_commitment,
                         },
-                        Annotation::Repair {
+                        Annotation::Finalized(Finalized::ByHeight {
                             height: parent_height,
-                        },
+                        }),
                     ));
                     break 'cache_repair;
                 }
