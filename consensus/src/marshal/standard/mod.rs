@@ -1501,11 +1501,11 @@ mod tests {
         }
     }
 
-    /// Regression for `Deferred::certify`'s `fetch_notarized` bump. When `verify`
+    /// Regression for `Deferred::certify`'s `hint_notarized` bump. When `verify`
     /// has an in-progress task with the block still missing locally, `certify`
     /// must take that task AND nudge a round-bound notarized fetch; otherwise
     /// the shared task would wait forever on a local subscription that nothing
-    /// drives. Removing the `fetch_notarized` call makes this test hang.
+    /// drives. Removing the `hint_notarized` call makes this test hang.
     #[test_traced("WARN")]
     fn test_standard_deferred_certify_bumps_notarized_fetch_for_pending_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1554,7 +1554,7 @@ mod tests {
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
             resolver.respond_to_next_fetch((notarization, block).encode());
 
-            // `certify` takes the in-progress task and calls `fetch_notarized`,
+            // `certify` takes the in-progress task and calls `hint_notarized`,
             // which issues a round-bound `Request::Notarized`. The recording
             // resolver delivers; the marshal stores the block and wakes
             // verify's digest subscription; deferred_verify produces the final
@@ -2487,6 +2487,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
+        active_fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         retains: Arc<Mutex<usize>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
@@ -2501,6 +2502,7 @@ mod tests {
                 handler::Receiver::new(receiver),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
+                    active_fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     retains: Arc::new(Mutex::new(0)),
                     auto_delivery: Arc::new(Mutex::new(None)),
@@ -2512,6 +2514,7 @@ mod tests {
 
         fn record_fetch(&self, fetch: FetchRecord) {
             self.fetches.lock().push(fetch.clone());
+            self.active_fetches.lock().push(fetch.clone());
             let Some(value) = self.auto_delivery.lock().take() else {
                 return;
             };
@@ -2549,6 +2552,10 @@ mod tests {
 
         fn fetches(&self) -> Vec<FetchRecord> {
             self.fetches.lock().clone()
+        }
+
+        fn active_fetches(&self) -> Vec<FetchRecord> {
+            self.active_fetches.lock().clone()
         }
 
         fn targeted(&self) -> Vec<TargetedFetch> {
@@ -2619,8 +2626,11 @@ mod tests {
 
         fn retain(
             &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
+            self.active_fetches
+                .lock()
+                .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
             *self.retains.lock() += 1;
             Feedback::Ok
         }
@@ -2941,7 +2951,7 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.fetch_notarized(round, Sha256::hash(b"missing-at-processed-round"));
+            mailbox.hint_notarized(round, Sha256::hash(b"missing-at-processed-round"));
             let subscription = mailbox.subscribe_by_commitment(
                 Sha256::hash(b"missing-subscription-at-processed-round"),
                 CommitmentFallback::FetchByRound { round },
@@ -2957,7 +2967,7 @@ mod tests {
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_before,
-                "fetch_notarized must not enqueue the already-pruned processed round"
+                "hint_notarized must not enqueue the already-pruned processed round"
             );
             select! {
                 result = subscription => {
@@ -2970,6 +2980,240 @@ mod tests {
                     panic!("processed-round subscription remained open");
                 },
             }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalization_rejects_processed_round_block_fetch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalization-processed-round-fetch",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                RecordingBuffer::default(),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            assert!(mailbox.verified(round, block.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            let retain_floor = resolver.retain_count() + 3;
+            assert_eq!(application.acknowledged().await, Height::new(1));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "processed-round pruning",
+                || resolver.retain_count() >= retain_floor,
+            )
+            .await;
+
+            let fetches_before = resolver.fetches().len();
+            let stale_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    round,
+                    View::zero(),
+                    Sha256::hash(b"missing-finalized-at-processed-round"),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, stale_finalization).await;
+
+            let barrier = make_raw_block(block.digest(), Height::new(2), 200);
+            assert!(
+                mailbox
+                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .await
+            );
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "stale finalization must not enqueue a round-bound block fetch"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_processed_round_restored_after_restart() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let partition_prefix = format!("processed-round-restart-{me}");
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                RecordingBuffer::default(),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            assert!(mailbox.verified(round, block.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            let retain_floor = resolver.retain_count() + 3;
+            assert_eq!(application.acknowledged().await, Height::new(1));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "processed-round pruning",
+                || resolver.retain_count() >= retain_floor,
+            )
+            .await;
+            assert_eq!(
+                mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(1), block.digest()))
+            );
+
+            actor_handle.abort();
+            drop(mailbox);
+            context.sleep(Duration::from_millis(1)).await;
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
+                &partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+            )
+            .await;
+
+            let fetches_before = resolver.fetches().len();
+            mailbox.hint_notarized(round, Sha256::hash(b"missing-after-restart"));
+            let subscription = mailbox.subscribe_by_commitment(
+                Sha256::hash(b"missing-subscription-after-restart"),
+                CommitmentFallback::FetchByRound { round },
+            );
+
+            let barrier = make_raw_block(block.digest(), Height::new(2), 200);
+            assert!(
+                mailbox
+                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .await
+            );
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "restart must restore the processed round floor"
+            );
+            select! {
+                result = subscription => {
+                    assert!(
+                        result.is_err(),
+                        "processed-round subscription should be canceled after restart"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("processed-round subscription remained open after restart");
+                },
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_set_floor_prunes_round_bound_fetches() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                &schemes,
+                QUORUM,
+            );
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "set-floor-round-prune",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            let missing = Sha256::hash(b"missing-before-set-floor");
+            let _subscription = mailbox
+                .subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "round-bound fetch",
+                || {
+                    resolver.active_fetches().iter().any(|fetch| {
+                        matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
+                    })
+                },
+            )
+            .await;
+
+            mailbox.set_floor(Height::new(1));
+            assert!(mailbox.verified(round, block.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "round-bound prune",
+                || {
+                    resolver.active_fetches().iter().all(|fetch| {
+                        !matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
+                    })
+                },
+            )
+            .await;
+            assert!(
+                resolver.active_fetches().iter().all(|fetch| {
+                    !matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
+                }),
+                "processed finalization after set_floor must prune existing round-bound fetches"
+            );
+
+            let fetches_before = resolver.fetches().len();
+            mailbox.hint_notarized(round, Sha256::hash(b"missing-after-set-floor"));
+            let barrier = make_raw_block(block.digest(), Height::new(2), 200);
+            assert!(
+                mailbox
+                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .await
+            );
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "set_floor must apply the round floor to future fetches"
+            );
         });
     }
 

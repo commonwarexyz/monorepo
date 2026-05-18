@@ -87,18 +87,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
-    /// A request to fetch a notarized block by round without adding another local subscriber.
+    /// A hint to fetch a notarized block by round without adding another local subscriber.
     ///
     /// `commitment` is used as a locality check: if the block is already
     /// available locally, the fetch is skipped.
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))]
-    FetchNotarized {
+    HintNotarized {
         /// The notarized round to request.
         round: Round,
         /// The commitment used to short-circuit if the block is already local.
@@ -262,14 +255,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             } => false,
-            #[cfg(not(any(
-                commonware_stability_BETA,
-                commonware_stability_GAMMA,
-                commonware_stability_DELTA,
-                commonware_stability_EPSILON,
-                commonware_stability_RESERVED
-            )))]
-            Self::FetchNotarized { .. } => false,
+            Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
             | Self::GetVerified { .. }
@@ -290,14 +276,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
-            #[cfg(not(any(
-                commonware_stability_BETA,
-                commonware_stability_GAMMA,
-                commonware_stability_DELTA,
-                commonware_stability_EPSILON,
-                commonware_stability_RESERVED
-            )))]
-            Self::FetchNotarized { .. } => false,
+            Self::HintNotarized { .. } => false,
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
@@ -683,24 +662,18 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         rx
     }
 
-    /// Trigger a round-bound notarized fetch without adding a new subscriber.
+    /// Hint that peers may have the block notarized at `round`.
     ///
-    /// Used when certification finds an existing local-only waiter from
-    /// `verify()`: the existing waiter should receive the block, but
-    /// certification is now allowed to ask peers by notarized round. The
-    /// `commitment` is only a locality hint and skips the fetch if the block
-    /// is already in local storage.
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))]
-    pub(crate) fn fetch_notarized(&self, round: Round, commitment: V::Commitment) {
+    /// This issues a round-bound resolver request without registering a new
+    /// block subscriber. The `commitment` is only used to skip the request when
+    /// the block is already available locally.
+    ///
+    /// This is useful when a local-only waiter already exists and later
+    /// certification makes a network fetch by notarized round valid.
+    pub fn hint_notarized(&self, round: Round, commitment: V::Commitment) {
         let _ = self
             .sender
-            .enqueue(Message::FetchNotarized { round, commitment });
+            .enqueue(Message::HintNotarized { round, commitment });
     }
 
     /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.

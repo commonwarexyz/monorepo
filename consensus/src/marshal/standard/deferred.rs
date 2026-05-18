@@ -358,7 +358,7 @@ where
         // round-bound notarized fetch so the existing waiter can be
         // unblocked if local broadcast never arrives. For the standard
         // variant, the digest is also the variant commitment.
-        self.marshal.fetch_notarized(round, digest);
+        self.marshal.hint_notarized(round, digest);
 
         let mut marshaled = self.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -638,7 +638,7 @@ where
         // Register the verification task synchronously so `certify` finds a pending
         // entry even while the optimistic block subscription is still waiting locally.
         // This lets `certify` take the task and bump a round-bound notarized fetch
-        // via `fetch_notarized`.
+        // via `hint_notarized`.
         let (task_tx, task_rx) = oneshot::channel();
         self.verification_tasks.insert(round, digest, task_rx);
 

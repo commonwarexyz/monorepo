@@ -221,39 +221,39 @@ impl<D: Digest> Request<D> {
             Self::Notarized { .. } => NOTARIZED_REQUEST,
         }
     }
+}
 
-    /// The predicate to use when pruning subjects related to this subject.
-    ///
-    /// Unrelated subjects are retained. Related subjects are pruned if they are
-    /// "less than or equal to" this request's floor. This keeps pending
-    /// candidate waits out of the resolver entirely, drops height-bound block
-    /// requests once the processed height reaches them, and drops round-bound
-    /// certified-parent fetches once the processed round reaches them.
-    pub fn predicate(&self) -> impl Fn(&Self, &Annotation) -> bool + Send + 'static {
-        let cloned = *self;
-        move |request, annotation| match (&cloned, request, annotation) {
-            (Self::Finalized { height: mine }, Self::Finalized { height: theirs }, _) => {
-                *theirs > *mine
-            }
-            (
-                Self::Finalized { height: mine },
-                Self::Block(_),
-                Annotation::Certified { height: theirs }
-                | Annotation::Finalized(Finalized::ByHeight { height: theirs }),
-            ) => *theirs > *mine,
-            (Self::Finalized { .. }, _, _) => true,
-            (Self::Notarized { round: mine }, Self::Notarized { round: theirs }, _) => {
-                *theirs > *mine
-            }
-            (
-                Self::Notarized { round: mine },
-                Self::Block(_),
-                Annotation::Finalized(Finalized::ByRound { round: theirs }),
-            ) => *theirs > *mine,
-            (Self::Notarized { .. }, _, _) => true,
-            (Self::Block(mine), Self::Block(theirs), _) => mine != theirs,
-            (Self::Block(_), _, _) => true,
+/// Returns a predicate that keeps resolver requests above the processed height floor.
+///
+/// Unrelated requests are retained. Height-bound requests are pruned once the
+/// processed height reaches them.
+pub(crate) fn above_height_floor<D: Digest>(
+    height: Height,
+) -> impl Fn(&Request<D>, &Annotation) -> bool + Send + 'static {
+    move |request, annotation| match (request, annotation) {
+        (Request::Finalized { height: requested }, _) => *requested > height,
+        (
+            Request::Block(_),
+            Annotation::Certified { height: requested }
+            | Annotation::Finalized(Finalized::ByHeight { height: requested }),
+        ) => *requested > height,
+        _ => true,
+    }
+}
+
+/// Returns a predicate that keeps resolver requests above the processed round floor.
+///
+/// Unrelated requests are retained. Round-bound requests are pruned once the
+/// processed round reaches them.
+pub(crate) fn above_round_floor<D: Digest>(
+    round: Round,
+) -> impl Fn(&Request<D>, &Annotation) -> bool + Send + 'static {
+    move |request, annotation| match (request, annotation) {
+        (Request::Notarized { round: requested }, _) => *requested > round,
+        (Request::Block(_), Annotation::Finalized(Finalized::ByRound { round: requested })) => {
+            *requested > round
         }
+        _ => true,
     }
 }
 
@@ -537,10 +537,8 @@ mod tests {
     }
 
     #[test]
-    fn test_subject_predicate() {
-        let floor = Request::<D>::Finalized {
-            height: Height::new(100),
-        };
+    fn test_height_floor_predicate() {
+        let floor = Height::new(100);
         let higher_finalized = Request::<D>::Finalized {
             height: Height::new(200),
         };
@@ -554,8 +552,11 @@ mod tests {
         let fresh_certified = Annotation::Certified {
             height: Height::new(101),
         };
+        let stale_certified = Annotation::Certified {
+            height: Height::new(100),
+        };
 
-        let predicate = floor.predicate();
+        let predicate = above_height_floor(floor);
         assert!(predicate(
             &higher_finalized,
             &Annotation::Finalized(Finalized::ByHeight {
@@ -580,11 +581,36 @@ mod tests {
             })
         ));
         assert!(!predicate(&block, &stale_finalized));
+        assert!(!predicate(&block, &stale_certified));
+    }
 
-        let floor = Request::<D>::Notarized {
+    #[test]
+    fn test_round_floor_predicate() {
+        let floor = Round::new(Epoch::new(1), View::new(10));
+        let block = Request::<D>::Block(Sha256::hash(b"block"));
+        let higher_notarized = Request::<D>::Notarized {
+            round: Round::new(Epoch::new(1), View::new(11)),
+        };
+        let same_notarized = Request::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(10)),
         };
-        let predicate = floor.predicate();
+        let finalized = Request::<D>::Finalized {
+            height: Height::new(100),
+        };
+
+        let predicate = above_round_floor(floor);
+        assert!(predicate(
+            &higher_notarized,
+            &Annotation::Notarization {
+                round: Round::new(Epoch::new(1), View::new(11)),
+            }
+        ));
+        assert!(predicate(
+            &finalized,
+            &Annotation::Finalized(Finalized::ByHeight {
+                height: Height::new(100),
+            })
+        ));
         assert!(predicate(
             &block,
             &Annotation::Finalized(Finalized::ByRound {
@@ -592,29 +618,15 @@ mod tests {
             })
         ));
         assert!(!predicate(
+            &same_notarized,
+            &Annotation::Notarization {
+                round: Round::new(Epoch::new(1), View::new(10)),
+            }
+        ));
+        assert!(!predicate(
             &block,
             &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(10)),
-            })
-        ));
-    }
-
-    #[test]
-    fn test_block_request_predicate_prunes_matching_commitment() {
-        let commitment = Sha256::hash(b"block");
-        let request = Request::<D>::Block(commitment);
-        let predicate = request.predicate();
-
-        assert!(!predicate(
-            &request,
-            &Annotation::Finalized(Finalized::ByHeight {
-                height: Height::new(7),
-            })
-        ));
-        assert!(predicate(
-            &Request::<D>::Block(Sha256::hash(b"other")),
-            &Annotation::Finalized(Finalized::ByHeight {
-                height: Height::new(7),
             })
         ));
     }

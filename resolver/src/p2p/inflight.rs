@@ -22,7 +22,13 @@ struct Entry<P: PublicKey, V> {
 }
 
 /// Tracks all in-flight fetch state.
-pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> {
+pub(super) struct Inflight<E, Con, P, Key>
+where
+    E: Clock,
+    Con: Consumer<Key = Key>,
+    P: PublicKey,
+    Key: Span,
+{
     /// Per-key entries tracking fetch duration timers and (when validating a response)
     /// the [Aborter] that cancels the in-flight consumer delivery.
     entries: HashMap<Key, Entry<P, Con::Value>>,
@@ -38,8 +44,12 @@ pub(super) struct Inflight<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key
     _clock: PhantomData<E>,
 }
 
-impl<E: Clock, Con: Consumer<Key = Key>, P: PublicKey, Key: Span> Inflight<E, Con, P, Key>
+impl<E, Con, P, Key> Inflight<E, Con, P, Key>
 where
+    E: Clock,
+    Con: Consumer<Key = Key>,
+    P: PublicKey,
+    Key: Span,
     Con::Value: Clone + Send + 'static,
 {
     pub(super) fn new(consumer: Con) -> Self {

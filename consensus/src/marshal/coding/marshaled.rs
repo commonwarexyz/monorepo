@@ -371,11 +371,12 @@ where
 
             // The context supplies the certified parent round. Do not derive a
             // height from the unverified child block for this lookup.
+            let fallback = core::CommitmentFallback::FetchByRound {
+                round: Round::new(consensus_context.epoch(), parent_view),
+            };
             let parent_request = fetch_parent(
                 parent_commitment,
-                core::CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                },
+                fallback,
                 &mut application,
                 &mut marshal,
                 cached_genesis,
@@ -575,7 +576,7 @@ where
         // verifier must be unblocked by round-bound recovery if local
         // reconstruction never completes.
         self.shards.notarized(payload, round);
-        self.marshal.fetch_notarized(round, payload);
+        self.marshal.hint_notarized(round, payload);
 
         let mut marshaled = self.clone();
         let (mut tx, rx) = oneshot::channel();

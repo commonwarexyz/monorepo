@@ -37,7 +37,8 @@ struct Serve<P: PublicKey> {
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
-pub struct Engine<
+pub struct Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
+where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
@@ -47,7 +48,6 @@ pub struct Engine<
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
-> where
     Con::Subscriber: Eq,
 {
     /// Context used to spawn tasks, manage time, etc.
@@ -93,18 +93,17 @@ pub struct Engine<
     _r: PhantomData<NetR>,
 }
 
-impl<
-        E: BufferPooler + Clock + Spawner + Rng + Metrics,
-        P: PublicKey,
-        D: Provider<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
-        Key: Span,
-        Con: Consumer<Key = Key, Value = Bytes>,
-        Pro: Producer<Key = Key>,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
+impl<E, P, D, B, Key, Con, Pro, NetS, NetR> Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
 where
+    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    P: PublicKey,
+    D: Provider<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
+    Key: Span,
+    Con: Consumer<Key = Key, Value = Bytes>,
+    Pro: Producer<Key = Key>,
+    NetS: Sender<PublicKey = P>,
+    NetR: Receiver<PublicKey = P>,
     Con::Subscriber: Clone + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
