@@ -240,9 +240,9 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_committed_parent_height_mismatch_wakes_subscriber() {
-        harness::committed_parent_height_mismatch_wakes_subscriber::<InlineHarness>();
-        harness::committed_parent_height_mismatch_wakes_subscriber::<DeferredHarness>();
+    fn test_standard_commitment_fetch_height_hint_mismatch_wakes_subscriber() {
+        harness::commitment_fetch_height_hint_mismatch_wakes_subscriber::<InlineHarness>();
+        harness::commitment_fetch_height_hint_mismatch_wakes_subscriber::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]

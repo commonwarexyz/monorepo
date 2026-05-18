@@ -204,8 +204,8 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_committed_parent_height_mismatch_wakes_subscriber() {
-        harness::committed_parent_height_mismatch_wakes_subscriber::<CodingHarness>();
+    fn test_coding_commitment_fetch_height_hint_mismatch_wakes_subscriber() {
+        harness::commitment_fetch_height_hint_mismatch_wakes_subscriber::<CodingHarness>();
     }
 
     #[test_traced("WARN")]

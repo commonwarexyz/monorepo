@@ -7,7 +7,7 @@ use crate::{
         standard::Standard,
     },
     simplex::types::Context,
-    types::Epocher,
+    types::{Epocher, Round},
     Application, Block, Epochable,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -132,19 +132,11 @@ where
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
-    let (_, parent_digest) = context.parent;
-
-    // The candidate block is already available, so the parent request can be
-    // height-bound instead of round-bound. The parent is certified by the
-    // proposal context, but the child block is what gives us the parent height.
-    let Some(parent_height) = block.height().previous() else {
-        debug!(height = %block.height(), "block has no possible parent height");
-        return Some(false);
-    };
+    let (parent_view, parent_digest) = context.parent;
     let parent_request = fetch_parent(
         parent_digest,
-        Fallback::FetchByCommitment {
-            height: parent_height,
+        Fallback::FetchByRound {
+            round: Round::new(context.epoch(), parent_view),
         },
         application,
         marshal,
@@ -215,14 +207,13 @@ where
 /// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
 /// to marshal for parent availability according to `fallback`.
 ///
-/// Use `FetchByCommitment` whenever the expected parent height is known before
-/// the request, such as verification/certification of a known child block. Use
-/// `FetchByRound` only when the caller knows the certified parent round and
-/// commitment but not the parent height, such as proposal construction. Do not
-/// derive that height from the finalized tip: proposals may build on a certified
-/// parent that is not finalized locally yet. Once a round-bound response arrives
-/// it is heightable, but that is too late to use height as the resolver key or
-/// pruning floor.
+/// Use `FetchByRound` for certified parent lookups when the caller knows the
+/// certified parent round and commitment, such as proposal construction or
+/// verification of a known child. Do not derive the parent height from the
+/// finalized tip or the child block: proposals may build on a certified parent
+/// that is not finalized locally yet, and an unverified child may lie about its
+/// height. Once a round-bound response arrives it is heightable, and normal
+/// ancestry validation decides whether it matches the child.
 ///
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.

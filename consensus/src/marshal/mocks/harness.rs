@@ -3571,9 +3571,9 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
     });
 }
 
-/// Regression test: commitment-fetched certified parents must wake subscribers even
-/// when the child's claimed parent height does not match the fetched block height.
-pub fn committed_parent_height_mismatch_wakes_subscriber<H: TestHarness>() {
+/// Regression test: commitment-fetched blocks must wake subscribers and cache by
+/// decoded height even when the local pruning hint is far ahead.
+pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         let Fixture {
@@ -3614,9 +3614,9 @@ pub fn committed_parent_height_mismatch_wakes_subscriber<H: TestHarness>() {
         };
 
         let actual_height = Height::new(7);
-        let expected_height = Height::new(3);
+        let expected_height = Height::new(1_000_000);
         let block = H::make_test_block(
-            Sha256::hash(b"committed-parent-height-mismatch"),
+            Sha256::hash(b"commitment-fetch-height-hint-mismatch"),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
             actual_height,
             7,
@@ -3644,7 +3644,7 @@ pub fn committed_parent_height_mismatch_wakes_subscriber<H: TestHarness>() {
                 result.expect("commitment subscription should receive the fetched block")
             },
             _ = context.sleep(Duration::from_secs(5)) => {
-                panic!("commitment subscription was not woken by height-mismatched block");
+                panic!("commitment subscription was not woken by height-hint-mismatched block");
             },
         };
         assert_eq!(
@@ -3652,10 +3652,12 @@ pub fn committed_parent_height_mismatch_wakes_subscriber<H: TestHarness>() {
             commitment
         );
         assert_eq!(received.height(), actual_height);
-        assert!(
-            victim_handle.mailbox.get_block(&received.digest()).await.is_none(),
-            "height-mismatched certified fetch must wake the subscriber without caching by claimed height"
-        );
+        let cached = victim_handle
+            .mailbox
+            .get_block(&received.digest())
+            .await
+            .expect("height-hint-mismatched fetch should cache by decoded height");
+        assert_eq!(cached.height(), actual_height);
     });
 }
 

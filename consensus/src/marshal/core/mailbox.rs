@@ -180,18 +180,26 @@ pub enum Fallback {
     ///
     /// Use this only for certified parent lookups where the caller knows the
     /// parent round and commitment but not the parent height, such as proposal
-    /// construction. Do not infer height from the finalized tip: proposals may
-    /// build on a certified parent that is not finalized locally yet.
+    /// construction or verification of a known child. Do not infer height from
+    /// the finalized tip or the child block: proposals may build on a certified
+    /// parent that is not finalized locally yet, and an unverified child may
+    /// lie about its height.
     ///
-    /// The returned block is heightable once decoded, but that is too late to
-    /// make height the resolver request key or the pruning bound.
+    /// The returned block is heightable once decoded, but that is too late for
+    /// the in-flight resolver key or pruning bound.
     FetchByRound { round: Round },
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
-    /// Use this when the expected height is known before the request, such as
-    /// walking a certified parent chain from a known child block or repairing a
-    /// finalized gap.
+    /// Use this only when no certified parent round is available and the caller
+    /// has a locally validated pruning bound, such as repairing a finalized gap
+    /// or walking an accepted ancestry stream. Do not use it for a candidate's
+    /// immediate parent when the consensus context supplies the parent round.
+    ///
+    /// The height is not sent to peers. It is a local pruning hint for request
+    /// retention, not part of response validity: a fetched block is delivered
+    /// if its commitment matches, and certified storage uses the decoded block
+    /// height.
     FetchByCommitment { height: Height },
 }
 
@@ -744,6 +752,10 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
     async fn subscribe_parent(self, block: Self::AncestryBlock) -> Option<Self::AncestryBlock> {
         let parent_height = block.height().previous()?;
         let commitment = V::parent_commitment(&block);
+        // Ancestry walking does not carry the certified parent round. By this
+        // point the stream is walking accepted ancestry, so this height should
+        // be correct; it remains a local pruning bound rather than a peer
+        // response validity condition.
         let fallback = Fallback::FetchByCommitment {
             height: parent_height,
         };

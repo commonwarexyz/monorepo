@@ -338,7 +338,7 @@ where
             .with_attribute("round", consensus_context.round);
         context.spawn(move |runtime_context| async move {
             let round = consensus_context.round;
-            let (_, parent_commitment) = consensus_context.parent;
+            let (parent_view, parent_commitment) = consensus_context.parent;
 
             // Get the candidate block either from the caller or by waiting for
             // local reconstruction. Candidate data remains local-only: a
@@ -369,19 +369,10 @@ where
                 }
             };
 
-            // Once the candidate block is available, its parent request can be
-            // height-bound instead of round-bound. The parent is certified by
-            // the proposal context, but the child block is what gives us the
-            // parent height.
-            let Some(parent_height) = block.height().previous() else {
-                debug!(height = %block.height(), "block has no possible parent height");
-                tx.send_lossy(false);
-                return;
-            };
             let parent_request = fetch_parent(
                 parent_commitment,
-                core::Fallback::FetchByCommitment {
-                    height: parent_height,
+                core::Fallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut application,
                 &mut marshal,
@@ -1070,7 +1061,8 @@ where
 /// This is a helper function used during proposal and verification to retrieve the parent
 /// block. If the parent commitment matches the genesis block, it returns the genesis block
 /// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
-/// the parent block's availability according to `fallback`.
+/// the parent block's availability according to `fallback`. Certified parent lookups should
+/// use the certified parent round instead of deriving a height from an unverified child.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[allow(clippy::type_complexity)]

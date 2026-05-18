@@ -178,7 +178,10 @@ pub enum Annotation {
     Notarization { round: Round },
     /// A block requested by commitment for a certified chain.
     ///
-    /// The expected height is known before the request from the child block.
+    /// The expected height is local pruning metadata and should only be
+    /// supplied when the caller has a validated height bound. It must not make
+    /// a commitment-matching response invalid, and certified storage uses the
+    /// fetched block's decoded height.
     Certified { height: Height },
     /// A block requested by commitment for the finalized chain.
     Finalized(Finalized),

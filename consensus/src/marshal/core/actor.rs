@@ -923,10 +923,9 @@ where
         // `Fallback::Wait` and reaches this point without a round or
         // height, so it only registers a local subscriber below.
         //
-        // Round-based fetching is only for certified parent lookups whose
-        // height is not known before the request. Height-based fetching is used
-        // once the caller has a child block, which makes the expected parent
-        // height known before the request.
+        // Round-based fetching is for certified parent lookups whose height is
+        // not known before the request. Height-based fetching is only for
+        // callers that already have a validated pruning height.
         match fallback {
             Fallback::FetchByRound { round } => {
                 if round <= self.last_processed_round {
@@ -1039,19 +1038,23 @@ where
 
                 // The peer-visible request only says "give me this block".
                 // Local annotations explain why the block was requested and
-                // therefore where, if anywhere, it should be stored. A stale
-                // annotation is ignored rather than allowed to drive storage.
+                // therefore where, if anywhere, it should be stored. Certified
+                // annotations carry a pruning hint, but certified storage uses
+                // the decoded block height. By-height finalization annotations
+                // must match the decoded height before driving finalized storage.
                 let height = block.height();
                 let digest = block.digest();
                 let mut annotations = Vec::new();
                 for annotation in subscribers {
-                    let expected_height = match annotation {
-                        Annotation::Certified { height }
-                        | Annotation::Finalized(Finalized::ByHeight { height }) => Some(height),
-                        Annotation::Finalized(Finalized::ByRound { .. })
-                        | Annotation::Notarization { .. } => None,
+                    let keep = match annotation {
+                        Annotation::Finalized(Finalized::ByHeight { height: expected }) => {
+                            expected == height
+                        }
+                        Annotation::Certified { .. }
+                        | Annotation::Finalized(Finalized::ByRound { .. })
+                        | Annotation::Notarization { .. } => true,
                     };
-                    if expected_height.is_none_or(|expected| expected == height) {
+                    if keep {
                         annotations.push(annotation);
                     } else {
                         debug!(?commitment, %height, "ignoring stale block annotation");
@@ -1438,9 +1441,9 @@ where
         self.update_processed_height(height, resolver);
 
         // Prune any useless requests.
-        resolver.retain(move |request, _| {
-            !matches!(request, Request::Block(pending) if *pending == commitment)
-        });
+        resolver.retain(
+            move |request, _| !matches!(request, Request::Block(pending) if *pending == commitment),
+        );
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
