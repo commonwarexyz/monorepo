@@ -10,12 +10,13 @@ use crate::{
     merkle::{self, full::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
         self,
+        any::sync::Target,
         keyless::{self, variable, Operation},
         sync::{
             self,
             engine::{Config, NextStep},
             resolver::{tests::FailResolver, Resolver},
-            Engine, Target,
+            Engine,
         },
     },
 };
@@ -97,10 +98,10 @@ where
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let config = Config {
             context: context.child("client"),
-            target: Target {
-                root: sha256::Digest::from([0; 32]),
-                range: non_empty_range!(Location::new(0), Location::new(5)),
-            },
+            target: Target::new(
+                sha256::Digest::from([0; 32]),
+                non_empty_range!(Location::new(0), Location::new(5)),
+            ),
             resolver,
             apply_batch_size: 2,
             max_outstanding_requests: 2,
@@ -139,10 +140,10 @@ where
         let config = Config {
             db_config: db_config.clone(),
             fetch_batch_size,
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(target_oldest_retained_loc, target_op_count),
-            },
+            target: Target::new(
+                target_root,
+                non_empty_range!(target_oldest_retained_loc, target_op_count),
+            ),
             context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -200,10 +201,10 @@ where
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(target_oldest_retained_loc, target_op_count),
-            },
+            target: Target::new(
+                target_root,
+                non_empty_range!(target_oldest_retained_loc, target_op_count),
+            ),
             context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -251,10 +252,7 @@ where
         let config = Config {
             db_config: db_config.clone(),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(lower_bound, op_count),
-            },
+            target: Target::new(target_root, non_empty_range!(lower_bound, op_count)),
             context: client_context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -324,10 +322,10 @@ where
             let config = Config {
                 context: context.child("client"),
                 db_config: H::config(&format!("update_test_{}", context.next_u64()), &context),
-                target: Target {
-                    root: initial_root,
-                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-                },
+                target: Target::new(
+                    initial_root,
+                    non_empty_range!(initial_lower_bound, initial_upper_bound),
+                ),
                 resolver: target_db.clone(),
                 fetch_batch_size: NZU64!(2),
                 max_outstanding_requests: 10,
@@ -337,11 +335,12 @@ where
                 reached_target_tx: None,
                 max_retained_roots: 1,
             };
-            let mut client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+            let mut client: Engine<DbOf<H>, _, Target<H::Family, sha256::Digest>> =
+                Engine::new(config).await.unwrap();
             loop {
                 client = match client.step().await.unwrap() {
                     NextStep::Continue(new_client) => new_client,
-                    NextStep::Complete(_) => panic!("client should not be complete"),
+                    NextStep::Complete(..) => panic!("client should not be complete"),
                 };
                 let log_size = Contiguous::size(client.journal()).await;
                 if log_size > *initial_lower_bound {
@@ -351,10 +350,10 @@ where
         };
 
         update_sender
-            .send(Target {
-                root: final_root,
-                range: non_empty_range!(initial_lower_bound, final_upper_bound),
-            })
+            .send(Target::new(
+                final_root,
+                non_empty_range!(initial_lower_bound, final_upper_bound),
+            ))
             .await
             .unwrap();
 
@@ -398,10 +397,7 @@ where
         let config = Config {
             db_config: H::config(&format!("subset_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(lower_bound, op_count),
-            },
+            target: Target::new(target_root, non_empty_range!(lower_bound, op_count)),
             context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -453,10 +449,7 @@ where
         let config = Config {
             db_config: sync_db_config,
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
+            target: Target::new(root, non_empty_range!(lower_bound, upper_bound)),
             context: context.child("sync"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -506,10 +499,7 @@ where
         let config = Config {
             db_config: sync_config,
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
+            target: Target::new(root, non_empty_range!(lower_bound, upper_bound)),
             context: context.child("sync"),
             resolver: resolver.clone(),
             apply_batch_size: 1024,
@@ -555,10 +545,10 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("lb-dec-{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
+            target: Target::new(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound),
+            ),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
@@ -567,16 +557,17 @@ where
             reached_target_tx: None,
             max_retained_roots: 1,
         };
-        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+        let client: Engine<DbOf<H>, _, Target<H::Family, sha256::Digest>> =
+            Engine::new(config).await.unwrap();
 
         update_sender
-            .send(Target {
-                root: initial_root,
-                range: non_empty_range!(
+            .send(Target::new(
+                initial_root,
+                non_empty_range!(
                     initial_lower_bound.checked_sub(1).unwrap(),
                     initial_upper_bound
                 ),
-            })
+            ))
             .await
             .unwrap();
 
@@ -616,10 +607,10 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("ub-dec-{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
+            target: Target::new(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound),
+            ),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
@@ -628,13 +619,14 @@ where
             reached_target_tx: None,
             max_retained_roots: 1,
         };
-        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+        let client: Engine<DbOf<H>, _, Target<H::Family, sha256::Digest>> =
+            Engine::new(config).await.unwrap();
 
         update_sender
-            .send(Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
-            })
+            .send(Target::new(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
+            ))
             .await
             .unwrap();
 
@@ -688,10 +680,10 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("bounds_inc_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(1),
-            target: Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
+            target: Target::new(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound),
+            ),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -702,10 +694,10 @@ where
         };
 
         update_sender
-            .send(Target {
-                root: final_root,
-                range: non_empty_range!(final_lower_bound, final_upper_bound),
-            })
+            .send(Target::new(
+                final_root,
+                non_empty_range!(final_lower_bound, final_upper_bound),
+            ))
             .await
             .unwrap();
 
@@ -745,10 +737,7 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("done_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(20),
-            target: Target {
-                root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
+            target: Target::new(root, non_empty_range!(lower_bound, upper_bound)),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
@@ -761,10 +750,10 @@ where
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         let _ = update_sender
-            .send(Target {
-                root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(lower_bound + 1, upper_bound + 1),
-            })
+            .send(Target::new(
+                sha256::Digest::from([2u8; 32]),
+                non_empty_range!(lower_bound + 1, upper_bound + 1),
+            ))
             .await;
 
         assert_eq!(H::db_root(&synced_db), root);
@@ -1106,10 +1095,8 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|_context| async move {
             let resolver: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = sync::compact::Target {
-                root: sha256::Digest::from([0; 32]),
-                leaf_count: Location::new(1),
-            };
+            let target =
+                sync::compact::Target::new(sha256::Digest::from([0; 32]), Location::new(1));
 
             assert!(matches!(
                 sync::compact::Resolver::get_compact_state(&resolver, target).await,
@@ -1137,10 +1124,7 @@ mod compact_variable_mmr {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
@@ -1187,10 +1171,7 @@ mod compact_variable_mmr {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
@@ -1231,10 +1212,7 @@ mod compact_variable_mmr {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
@@ -1286,10 +1264,7 @@ mod compact_variable_mmr {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
@@ -1331,10 +1306,7 @@ mod compact_variable_mmr {
             );
             source.apply_batch(batch1).await.unwrap();
             source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: source.bounds().await.end,
-            };
+            let stale_target = sync::compact::Target::new(source.root(), source.bounds().await.end);
 
             let batch2 = source.new_batch().append(vec![4, 5, 6]).merkleize(
                 &source,
@@ -1343,10 +1315,8 @@ mod compact_variable_mmr {
             );
             source.apply_batch(batch2).await.unwrap();
             source.commit().await.unwrap();
-            let current_target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: source.bounds().await.end,
-            };
+            let current_target =
+                sync::compact::Target::new(source.root(), source.bounds().await.end);
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
@@ -1574,10 +1544,8 @@ mod compact_variable_mmb {
         deterministic::Runner::default().start(|_context| async move {
             let resolver: Arc<commonware_utils::sync::AsyncRwLock<Option<SourceDb>>> =
                 Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-            let target = sync::compact::Target {
-                root: sha256::Digest::from([0; 32]),
-                leaf_count: Location::new(1),
-            };
+            let target =
+                sync::compact::Target::new(sha256::Digest::from([0; 32]), Location::new(1));
 
             assert!(matches!(
                 sync::compact::Resolver::get_compact_state(&resolver, target).await,
@@ -1605,10 +1573,7 @@ mod compact_variable_mmb {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let client_cfg = client_config(&suffix);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
@@ -1655,10 +1620,7 @@ mod compact_variable_mmb {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
@@ -1699,10 +1661,7 @@ mod compact_variable_mmb {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
@@ -1754,10 +1713,7 @@ mod compact_variable_mmb {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
+            let target = sync::compact::Target::new(source.root(), bounds.end);
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
@@ -1799,10 +1755,7 @@ mod compact_variable_mmb {
             );
             source.apply_batch(batch1).await.unwrap();
             source.commit().await.unwrap();
-            let stale_target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: source.bounds().await.end,
-            };
+            let stale_target = sync::compact::Target::new(source.root(), source.bounds().await.end);
 
             let batch2 = source.new_batch().append(vec![4, 5, 6]).merkleize(
                 &source,
@@ -1811,10 +1764,8 @@ mod compact_variable_mmb {
             );
             source.apply_batch(batch2).await.unwrap();
             source.commit().await.unwrap();
-            let current_target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: source.bounds().await.end,
-            };
+            let current_target =
+                sync::compact::Target::new(source.root(), source.bounds().await.end);
             assert_ne!(stale_target, current_target);
 
             let source = Arc::new(source);
