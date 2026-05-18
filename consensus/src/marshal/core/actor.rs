@@ -1081,12 +1081,7 @@ where
                     if height > self.last_processed_height {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
-                                .put_certified(
-                                    bounds.epoch(),
-                                    height,
-                                    digest,
-                                    block.clone().into(),
-                                )
+                                .put_certified(bounds.epoch(), height, digest, block.clone().into())
                                 .await;
                         }
                     }

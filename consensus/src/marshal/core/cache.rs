@@ -47,7 +47,8 @@ where
     notarized_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Certified, non-finalized blocks stored by height and keyed by digest.
-    certified_blocks: prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
+    certified_blocks:
+        prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view
     notarizations: prunable::Archive<
         TwoCap,
@@ -208,13 +209,7 @@ where
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
         let context = self.context.child("cache").with_attribute("epoch", epoch);
-        let (
-            verified_blocks,
-            notarized_blocks,
-            certified_blocks,
-            notarizations,
-            finalizations,
-        ) = futures::join!(
+        let (verified_blocks, notarized_blocks, certified_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
                 &context,
                 &self.cfg,
@@ -321,11 +316,7 @@ where
             return;
         };
 
-        match cache
-            .certified_blocks
-            .has(Identifier::Key(&digest))
-            .await
-        {
+        match cache.certified_blocks.has(Identifier::Key(&digest)).await {
             Ok(true) => return,
             Ok(false) => {}
             Err(e) => panic!("failed to check certified block: {e}"),
