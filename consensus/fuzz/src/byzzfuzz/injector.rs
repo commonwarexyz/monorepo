@@ -155,9 +155,7 @@ where
             variant,
             item.targets.len(),
         ));
-        let _ = vote_sender
-            .send(commonware_p2p::Recipients::Some(item.targets), bytes, true)
-            .await;
+        let _ = vote_sender.send(commonware_p2p::Recipients::Some(item.targets), bytes, true);
     }
 
     /// True per-message mutate: take the actual decoded `Vote`, run the

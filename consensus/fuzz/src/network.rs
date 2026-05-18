@@ -20,11 +20,7 @@ use commonware_p2p::{simulated::SplitTarget, Message, Receiver};
 use commonware_utils::sync::Mutex;
 use rand::Rng;
 use rand_core::CryptoRngCore;
-use std::{
-    collections::HashSet,
-    fmt::{self, Debug},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 /// Shared cell holding the currently-active honest-message drop rate (0..=90).
 /// Updated by the `FaultyMessaging` scheduler on view boundaries; read on every
@@ -89,6 +85,7 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Clone for Router<P, E> {
 }
 
 /// A receiver that preferentially yields messages from the "primary" (Byzantine) lane.
+#[derive(Debug)]
 pub struct ByzantineFirstReceiver<P, R>
 where
     P: PublicKey,
@@ -96,21 +93,6 @@ where
 {
     primary: R,
     secondary: R,
-    primary_closed: bool,
-    secondary_closed: bool,
-}
-
-impl<P, R> Debug for ByzantineFirstReceiver<P, R>
-where
-    P: PublicKey,
-    R: Receiver<PublicKey = P> + Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ByzantineFirstReceiver")
-            .field("primary_closed", &self.primary_closed)
-            .field("secondary_closed", &self.secondary_closed)
-            .finish_non_exhaustive()
-    }
 }
 
 impl<P, R> ByzantineFirstReceiver<P, R>
@@ -119,12 +101,7 @@ where
     R: Receiver<PublicKey = P>,
 {
     pub const fn new(primary: R, secondary: R) -> Self {
-        Self {
-            primary,
-            secondary,
-            primary_closed: false,
-            secondary_closed: false,
-        }
+        Self { primary, secondary }
     }
 }
 
@@ -138,35 +115,9 @@ where
     type PublicKey = P;
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
-        loop {
-            match (self.primary_closed, self.secondary_closed) {
-                (true, true) => {
-                    return self.primary.recv().await;
-                }
-                (false, true) => return self.primary.recv().await,
-                (true, false) => return self.secondary.recv().await,
-                (false, false) => {
-                    let result = select! {
-                        msg = self.primary.recv() => (true, msg),
-                        msg = self.secondary.recv() => (false, msg),
-                    };
-
-                    let (was_primary, msg) = result;
-                    match msg {
-                        Ok(m) => return Ok(m),
-                        Err(e) => {
-                            if was_primary {
-                                self.primary_closed = true;
-                            } else {
-                                self.secondary_closed = true;
-                            }
-                            if self.primary_closed && self.secondary_closed {
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-            }
+        select! {
+            msg = self.primary.recv() => msg,
+            msg = self.secondary.recv() => msg,
         }
     }
 }
