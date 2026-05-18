@@ -774,8 +774,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(());
         };
 
-        // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
-        // the tail section above.
+        // Upgrade only for the metadata mutation; reads were allowed while syncing
+        // the tail section above. Downgrade before the metadata fsync to unblock readers.
         let mut inner = inner.upgrade().await;
         if put {
             inner.metadata.put(
@@ -785,6 +785,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         } else {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
+        let inner = inner.downgrade_to_upgradable();
         inner.metadata.sync().await?;
 
         Ok(())
