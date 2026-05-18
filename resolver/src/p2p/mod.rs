@@ -41,7 +41,7 @@
 //!
 //! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible request and a local
 //! subscriber. This is useful when several local subscribers can share the same peer-visible
-//! fetch. A fetch remains active while at least one attached interest satisfies the latest
+//! fetch. A fetch remains active while at least one attached subscriber satisfies the latest
 //! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
 //! request and currently retained subscribers are supplied to
 //! [`Consumer::deliver`](crate::Consumer::deliver).
