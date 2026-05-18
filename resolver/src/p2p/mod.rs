@@ -231,6 +231,29 @@ mod tests {
             .unwrap();
     }
 
+    #[derive(Clone, Default)]
+    struct SequencedProducer {
+        data: Arc<Mutex<HashMap<Key, VecDeque<Bytes>>>>,
+    }
+
+    impl SequencedProducer {
+        fn insert(&mut self, key: Key, values: impl IntoIterator<Item = Bytes>) {
+            self.data.lock().insert(key, values.into_iter().collect());
+        }
+    }
+
+    impl crate::p2p::Producer for SequencedProducer {
+        type Key = Key;
+
+        fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+            let (sender, receiver) = oneshot::channel();
+            if let Some(value) = self.data.lock().get_mut(&key).and_then(VecDeque::pop_front) {
+                let _ = sender.send(value);
+            }
+            receiver
+        }
+    }
+
     fn setup_and_spawn_actor<C, R>(
         context: &deterministic::Context,
         provider: impl Provider<PublicKey = PublicKey>,
@@ -245,6 +268,28 @@ mod tests {
     ) -> Mailbox<Key, PublicKey, R>
     where
         C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
+        R: Clone + Ord + Send + 'static,
+    {
+        setup_and_spawn_actor_with_producer(
+            context, provider, blocker, signer, connection, consumer, producer,
+        )
+    }
+
+    fn setup_and_spawn_actor_with_producer<C, R, Pro>(
+        context: &deterministic::Context,
+        provider: impl Provider<PublicKey = PublicKey>,
+        blocker: impl Blocker<PublicKey = PublicKey>,
+        signer: impl Signer<PublicKey = PublicKey>,
+        connection: (
+            Sender<PublicKey, deterministic::Context>,
+            Receiver<PublicKey>,
+        ),
+        consumer: C,
+        producer: Pro,
+    ) -> Mailbox<Key, PublicKey, R>
+    where
+        C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
+        Pro: crate::p2p::Producer<Key = Key>,
         R: Clone + Ord + Send + 'static,
     {
         let public_key = signer.public_key();
@@ -505,7 +550,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -563,7 +608,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -643,7 +688,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -714,7 +759,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -2116,7 +2161,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fetch_during_validation_is_delivered_after_success() {
+    fn test_fetch_during_validation_reuses_response_after_success() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2125,9 +2170,10 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let key = Key(5);
-            let data = Bytes::from("data for key 5");
-            let mut prod2 = Producer::default();
-            prod2.insert(key.clone(), data.clone());
+            let first_response = Bytes::from("data for key 5");
+            let second_response = Bytes::from("refetched data for key 5");
+            let mut prod2 = SequencedProducer::default();
+            prod2.insert(key.clone(), [first_response.clone(), second_response]);
 
             let (first_gate_sender, first_gate_receiver) = oneshot::channel();
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
@@ -2148,7 +2194,7 @@ mod tests {
             );
 
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
@@ -2183,7 +2229,7 @@ mod tests {
                     subscribers: non_empty_vec![first_subscriber],
                 }
             );
-            assert_eq!(value, data);
+            assert_eq!(value, first_response);
 
             let delivery = select! {
                 delivery = started.recv() => delivery.expect("second delivery did not start"),
@@ -2208,12 +2254,12 @@ mod tests {
                     subscribers: non_empty_vec![second_subscriber],
                 }
             );
-            assert_eq!(value, Bytes::from("data for key 5"));
+            assert_eq!(value, first_response);
         });
     }
 
     #[test_traced]
-    fn test_late_subscriber_refetch_ignores_unrelated_waiter() {
+    fn test_late_subscriber_delivery_ignores_unrelated_waiter() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2317,7 +2363,7 @@ mod tests {
             let delivery = select! {
                 delivery = started.recv() => delivery.expect("second delivery did not start"),
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("late subscriber was not refetched while an unrelated waiter was armed");
+                    panic!("late subscriber was not delivered while an unrelated waiter was armed");
                 },
             };
             assert_eq!(
