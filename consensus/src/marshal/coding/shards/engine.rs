@@ -67,8 +67,9 @@
 //!
 //! For each [`Commitment`] that is either leader-discovered or notarized, nodes
 //! (both participants and non-participants) maintain a [`ReconstructionState`].
-//! Before either consensus signal, a leader announcement or a notarization for
-//! the commitment, shards are buffered in bounded per-peer queues:
+//! Before either consensus signal is observed (a leader announcement or a
+//! notarization for the commitment), shards are buffered in bounded per-peer
+//! queues:
 //!
 //! ```text
 //!    +----------------------+

@@ -46,7 +46,7 @@ where
     /// Notarized blocks stored by view
     notarized_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
-    /// Certified, non-finalized blocks stored by height and keyed by digest.
+    /// Certified blocks indexed by height and keyed by digest.
     certified_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view
