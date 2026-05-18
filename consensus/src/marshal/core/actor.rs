@@ -211,7 +211,7 @@ struct Floor {
 impl Floor {
     /// Returns true when the resolver request is above all processed floors.
     fn permits<D: commonware_cryptography::Digest>(
-        self,
+        &self,
         request: &Request<D>,
         subscriber: &Annotation,
     ) -> bool {
@@ -222,6 +222,59 @@ impl Floor {
 
         let round_predicate = above_round_floor::<D>(self.round);
         round_predicate(request, subscriber)
+    }
+
+    fn fetch_if_permitted<D, R>(
+        &self,
+        resolver: &mut R,
+        fetch: Fetch<Request<D>, Annotation>,
+    ) -> bool
+    where
+        D: commonware_cryptography::Digest,
+        R: Resolver<Key = Request<D>, Subscriber = Annotation>,
+    {
+        if !self.permits(&fetch.key, &fetch.subscriber) {
+            return false;
+        }
+        resolver.fetch(fetch);
+        true
+    }
+
+    fn fetch_targeted_if_permitted<D, R>(
+        &self,
+        resolver: &mut R,
+        fetch: Fetch<Request<D>, Annotation>,
+        targets: NonEmptyVec<R::PublicKey>,
+    ) -> bool
+    where
+        D: commonware_cryptography::Digest,
+        R: Resolver<Key = Request<D>, Subscriber = Annotation>,
+    {
+        if !self.permits(&fetch.key, &fetch.subscriber) {
+            return false;
+        }
+        resolver.fetch_targeted(fetch, targets);
+        true
+    }
+
+    fn fetch_all_if_permitted<D, R>(
+        &self,
+        resolver: &mut R,
+        fetches: Vec<Fetch<Request<D>, Annotation>>,
+    ) -> bool
+    where
+        D: commonware_cryptography::Digest,
+        R: Resolver<Key = Request<D>, Subscriber = Annotation>,
+    {
+        let fetches = fetches
+            .into_iter()
+            .filter(|fetch| self.permits(&fetch.key, &fetch.subscriber))
+            .collect::<Vec<_>>();
+        if fetches.is_empty() {
+            return false;
+        }
+        resolver.fetch_all(fetches);
+        true
     }
 }
 
@@ -276,10 +329,8 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Round of the last finalized block acknowledged by the application
-    last_processed_round: Round,
-    // Last height processed by the application
-    last_processed_height: Height,
+    // Processed floors used to admit or reject resolver fetches
+    floor: Floor,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
     // Highest known finalized height
@@ -377,8 +428,10 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                last_processed_round,
-                last_processed_height,
+                floor: Floor {
+                    height: last_processed_height,
+                    round: last_processed_round,
+                },
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
@@ -680,7 +733,7 @@ where
                             // not a height. Keep the request round-bound until the
                             // block is decoded.
                             debug!(?round, ?commitment, "finalized block missing");
-                            self.fetch_if_permitted(
+                            self.floor.fetch_if_permitted(
                                 &mut resolver,
                                 Fetch {
                                     key: Request::Block(commitment),
@@ -721,7 +774,7 @@ where
                             continue;
                         }
 
-                        self.fetch_targeted_if_permitted(
+                        self.floor.fetch_targeted_if_permitted(
                             &mut resolver,
                             Fetch {
                                 key: Request::<V::Commitment>::Finalized { height },
@@ -777,10 +830,10 @@ where
                         .await;
                     }
                     Message::SetFloor { height } => {
-                        if self.last_processed_height >= height {
+                        if self.floor.height >= height {
                             warn!(
                                 %height,
-                                existing = %self.last_processed_height,
+                                existing = %self.floor.height,
                                 "floor not updated, lower than existing"
                             );
                             continue;
@@ -796,7 +849,7 @@ where
 
                         // Drop all pending acknowledgements. We must do this to prevent
                         // an in-process block from being processed that is below the new floor
-                        // updating `last_processed_height`.
+                        // updating `floor.height`.
                         self.pending_acks.clear();
 
                         // The floor is durable, so cache/finalized data below it can be pruned.
@@ -811,8 +864,8 @@ where
                     }
                     Message::Prune { height } => {
                         // Only allow pruning at or below the current floor
-                        if height > self.last_processed_height {
-                            warn!(%height, floor = %self.last_processed_height, "prune height above floor, ignoring");
+                        if height > self.floor.height {
+                            warn!(%height, floor = %self.floor.height, "prune height above floor, ignoring");
                             continue;
                         }
 
@@ -903,63 +956,6 @@ where
         }
     }
 
-    const fn floor(&self) -> Floor {
-        Floor {
-            height: self.last_processed_height,
-            round: self.last_processed_round,
-        }
-    }
-
-    fn fetch_if_permitted<R>(
-        &self,
-        resolver: &mut R,
-        fetch: Fetch<ResolverRequestFor<V>, Annotation>,
-    ) -> bool
-    where
-        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    {
-        if !self.floor().permits(&fetch.key, &fetch.subscriber) {
-            return false;
-        }
-        resolver.fetch(fetch);
-        true
-    }
-
-    fn fetch_targeted_if_permitted<R>(
-        &self,
-        resolver: &mut R,
-        fetch: Fetch<ResolverRequestFor<V>, Annotation>,
-        targets: NonEmptyVec<R::PublicKey>,
-    ) -> bool
-    where
-        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    {
-        if !self.floor().permits(&fetch.key, &fetch.subscriber) {
-            return false;
-        }
-        resolver.fetch_targeted(fetch, targets);
-        true
-    }
-
-    fn fetch_all_if_permitted<R>(
-        &self,
-        resolver: &mut R,
-        fetches: Vec<Fetch<ResolverRequestFor<V>, Annotation>>,
-    ) -> bool
-    where
-        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    {
-        let fetches = fetches
-            .into_iter()
-            .filter(|fetch| self.floor().permits(&fetch.key, &fetch.subscriber))
-            .collect::<Vec<_>>();
-        if fetches.is_empty() {
-            return false;
-        }
-        resolver.fetch_all(fetches);
-        true
-    }
-
     /// Handle a produce request from a remote peer.
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
@@ -1041,7 +1037,7 @@ where
                 // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
-                if !self.fetch_if_permitted(
+                if !self.floor.fetch_if_permitted(
                     resolver,
                     Fetch {
                         key: Request::Notarized { round },
@@ -1062,7 +1058,7 @@ where
 
                 // This path is only for accepted ancestry or finalized repair,
                 // never for a candidate block's immediate parent.
-                if !self.fetch_if_permitted(
+                if !self.floor.fetch_if_permitted(
                     resolver,
                     Fetch {
                         key: Request::Block(commitment),
@@ -1132,7 +1128,7 @@ where
         {
             return;
         }
-        self.fetch_if_permitted(
+        self.floor.fetch_if_permitted(
             resolver,
             Fetch {
                 key: Request::Notarized { round },
@@ -1228,7 +1224,7 @@ where
                     if annotations
                         .iter()
                         .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
-                        && height > self.last_processed_height
+                        && height > self.floor.height
                     {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
@@ -1246,7 +1242,7 @@ where
                 let Some(bounds) = self.epocher.containing(height) else {
                     debug!(
                         %height,
-                        floor = %self.last_processed_height,
+                        floor = %self.floor.height,
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -1255,7 +1251,7 @@ where
                 let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
                     debug!(
                         %height,
-                        floor = %self.last_processed_height,
+                        floor = %self.floor.height,
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -1295,7 +1291,7 @@ where
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
                     debug!(
                         ?round,
-                        floor = %self.last_processed_height,
+                        floor = %self.floor.height,
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -1520,7 +1516,7 @@ where
     /// Dispatch finalized blocks to the application until the pipeline is full
     /// or no more blocks are available.
     ///
-    /// This does NOT advance `last_processed_height` or sync metadata. It only
+    /// This does NOT advance `floor.height` or sync metadata. It only
     /// sends blocks to the application and enqueues pending acks. Metadata is
     /// updated later, in a subsequent `select_loop!` iteration, when acks
     /// arrive and [`Self::handle_block_processed`] calls
@@ -1530,14 +1526,14 @@ where
     /// preceding finalized-archive writes durable. In other words, anything fed
     /// to the application from this method is already durably persisted in marshal.
     ///
-    /// Acks are processed in FIFO order so `last_processed_height` always
+    /// Acks are processed in FIFO order so `floor.height` always
     /// advances sequentially.
     ///
     /// # Crash safety
     ///
     /// Because `select_loop!` arms run to completion, the caller's
     /// [`Self::sync_finalized`] always executes before the ack handler runs. This
-    /// guarantees archive data is durable before `last_processed_height`
+    /// guarantees archive data is durable before `floor.height`
     /// advances:
     ///
     /// ```text
@@ -1555,9 +1551,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
         while self.pending_acks.has_capacity() {
-            let next_height = self
-                .pending_acks
-                .next_dispatch_height(self.last_processed_height);
+            let next_height = self.pending_acks.next_dispatch_height(self.floor.height);
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
@@ -1640,7 +1634,7 @@ where
     /// to the loop. This is the durability barrier for application delivery:
     /// [`Self::try_dispatch_blocks`] must run only after this sync completes.
     /// It also ensures archives are durable before the ack handler advances
-    /// `last_processed_height`. See [`Self::try_dispatch_blocks`] for details.
+    /// `floor.height`. See [`Self::try_dispatch_blocks`] for details.
     async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
             async {
@@ -1698,7 +1692,7 @@ where
     /// Writes are buffered and not synced. The caller must call
     /// [sync_finalized](Self::sync_finalized) before yielding to the
     /// `select_loop!` so that archive data is durable before the ack handler
-    /// advances `last_processed_height`. See [`Self::try_dispatch_blocks`] for the
+    /// advances `floor.height`. See [`Self::try_dispatch_blocks`] for the
     /// crash safety invariant.
     async fn store_finalization(
         &mut self,
@@ -1711,10 +1705,10 @@ where
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
         // pruning boundary)
-        if height <= self.last_processed_height {
+        if height <= self.floor.height {
             debug!(
                 %height,
-                floor = %self.last_processed_height,
+                floor = %self.floor.height,
                 ?digest,
                 "dropping finalization at or below processed height floor"
             );
@@ -1879,7 +1873,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         let mut wrote = false;
-        let start = self.last_processed_height.next();
+        let start = self.floor.height.next();
 
         // If finalizations extend beyond the last stored block, anchor the
         // trailing block so the gap repair loop below can walk backward from it.
@@ -1888,7 +1882,7 @@ where
                 .finalized_blocks
                 .last_index()
                 .is_some_and(|last| last >= last_finalized);
-            if last_finalized > self.last_processed_height && !have_block {
+            if last_finalized > self.floor.height && !have_block {
                 // Get the finalization for the last finalized block.
                 let finalization = self
                     .get_finalization_by_height(last_finalized)
@@ -1909,7 +1903,7 @@ where
                         .await;
                 } else {
                     // Request the missing block.
-                    self.fetch_if_permitted(
+                    self.floor.fetch_if_permitted(
                         resolver,
                         Fetch {
                             key: Request::Block(commitment),
@@ -1970,7 +1964,7 @@ where
                         .height()
                         .previous()
                         .expect("cursor above gap start has a parent");
-                    self.fetch_if_permitted(
+                    self.floor.fetch_if_permitted(
                         resolver,
                         Fetch {
                             key: Request::Block(parent_commitment),
@@ -2000,7 +1994,7 @@ where
             })
             .collect();
         if !requests.is_empty() {
-            self.fetch_all_if_permitted(resolver, requests);
+            self.floor.fetch_all_if_permitted(resolver, requests);
         }
         wrote
     }
@@ -2013,10 +2007,8 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         self.application_metadata.put(LATEST_KEY, height);
-        self.last_processed_height = height;
-        let _ = self
-            .processed_height
-            .try_set(self.last_processed_height.get());
+        self.floor.height = height;
+        let _ = self.processed_height.try_set(self.floor.height.get());
 
         // Prune any existing requests below the new floor.
         resolver.retain(above_height_floor::<V::Commitment>(height));
@@ -2062,12 +2054,12 @@ where
         round: Round,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
-        if height > self.last_processed_height || round <= self.last_processed_round {
+        if height > self.floor.height || round <= self.floor.round {
             return;
         }
 
-        let previous = self.last_processed_round;
-        self.last_processed_round = round;
+        let previous = self.floor.round;
+        self.floor.round = round;
 
         // Retain view-indexed cache data for a window behind the previously
         // processed finalized block.
@@ -2078,8 +2070,7 @@ where
         self.prune_view_cache(prune_round).await;
 
         // Prune round-bound requests at or below the processed round.
-        let round = self.last_processed_round;
-        resolver.retain(above_round_floor::<V::Commitment>(round));
+        resolver.retain(above_round_floor::<V::Commitment>(self.floor.round));
     }
 
     /// Prunes finalized blocks and certificates below the given height.
