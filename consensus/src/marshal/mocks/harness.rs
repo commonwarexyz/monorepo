@@ -33,6 +33,7 @@ use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
+use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -3566,6 +3567,94 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
                 .await
                 .is_none(),
             "stale finalization below floor must not be persisted"
+        );
+    });
+}
+
+/// Regression test: commitment-fetched certified parents must wake subscribers even
+/// when the child's claimed parent height does not match the fetched block height.
+pub fn committed_parent_height_mismatch_wakes_subscriber<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+        let victim = participants[0].clone();
+        let server = participants[1].clone();
+        let peers = vec![victim.clone(), server.clone()];
+        let mut oracle =
+            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
+                .await;
+
+        let victim_setup = H::setup_validator(
+            context.child("victim"),
+            &mut oracle,
+            victim.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let server_setup = H::setup_validator(
+            context.child("server"),
+            &mut oracle,
+            server.clone(),
+            ConstantProvider::new(schemes[1].clone()),
+        )
+        .await;
+
+        let victim_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: victim_setup.mailbox,
+            extra: victim_setup.extra,
+        };
+        let mut server_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: server_setup.mailbox,
+            extra: server_setup.extra,
+        };
+
+        let actual_height = Height::new(7);
+        let expected_height = Height::new(3);
+        let block = H::make_test_block(
+            Sha256::hash(b"committed-parent-height-mismatch"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            actual_height,
+            7,
+            NUM_VALIDATORS as u16,
+        );
+        let commitment = H::commitment(&block);
+        H::propose(
+            &mut server_handle,
+            Round::new(Epoch::zero(), View::new(actual_height.get())),
+            &block,
+        )
+        .await;
+
+        let subscription = victim_handle.mailbox.subscribe_by_commitment(
+            commitment,
+            crate::marshal::core::Fallback::FetchByCommitment {
+                height: expected_height,
+            },
+        );
+
+        setup_network_links(&mut oracle, &peers, LINK).await;
+
+        let received = select! {
+            result = subscription => {
+                result.expect("commitment subscription should receive the fetched block")
+            },
+            _ = context.sleep(Duration::from_secs(5)) => {
+                panic!("commitment subscription was not woken by height-mismatched block");
+            },
+        };
+        assert_eq!(
+            <<H as TestHarness>::Variant as crate::marshal::core::Variant>::commitment(&received),
+            commitment
+        );
+        assert_eq!(received.height(), actual_height);
+        assert!(
+            victim_handle.mailbox.get_block(&received.digest()).await.is_none(),
+            "height-mismatched certified fetch must wake the subscriber without caching by claimed height"
         );
     });
 }

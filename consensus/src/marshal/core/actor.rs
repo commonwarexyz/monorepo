@@ -1031,6 +1031,12 @@ where
                     return false;
                 }
 
+                // The commitment validates the peer response. Annotation height
+                // is local metadata, not a validity condition for the committed
+                // block. Subscribers still need the block so their own validation
+                // can reject bad ancestry.
+                self.notify_subscribers(&block);
+
                 // The peer-visible request only says "give me this block".
                 // Local annotations explain why the block was requested and
                 // therefore where, if anywhere, it should be stored. A stale
@@ -1077,7 +1083,6 @@ where
                                 )
                                 .await;
                         }
-                        self.notify_subscribers(&block);
                     }
                     false
                 } else {

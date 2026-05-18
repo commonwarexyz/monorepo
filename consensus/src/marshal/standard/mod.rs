@@ -240,6 +240,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_committed_parent_height_mismatch_wakes_subscriber() {
+        harness::committed_parent_height_mismatch_wakes_subscriber::<InlineHarness>();
+        harness::committed_parent_height_mismatch_wakes_subscriber::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_prune_finalized_archives() {
         harness::prune_finalized_archives::<InlineHarness>();
         harness::prune_finalized_archives::<DeferredHarness>();
