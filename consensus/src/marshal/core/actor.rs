@@ -1459,6 +1459,7 @@ where
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
                         self.update_processed_round_floor(height, finalization.round(), resolver)
                             .await;
+
                         // SAFETY: `digest` identifies a unique `commitment`, so this
                         // cached finalization payload must match `V::commitment(&block)`.
                         wrote |= self
