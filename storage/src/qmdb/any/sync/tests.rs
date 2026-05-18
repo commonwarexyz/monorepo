@@ -73,9 +73,10 @@ mod harnesses {
 
     fn target<F: merkle::Family>(
         root: Digest,
-        _ops_root: Digest,
+        ops_root: Digest,
         range: NonEmptyRange<crate::merkle::Location<F>>,
     ) -> crate::qmdb::any::sync::Target<F, Digest> {
+        assert_eq!(root, ops_root);
         crate::qmdb::any::sync::Target::new(root, range)
     }
 
