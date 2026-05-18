@@ -20,6 +20,9 @@ pub(crate) use database::{Config as DatabaseConfig, Database};
 pub mod resolver;
 pub(crate) use resolver::{FetchResult, Resolver};
 
+#[cfg(test)]
+pub(crate) mod tests;
+
 mod target;
 pub use target::Target;
 

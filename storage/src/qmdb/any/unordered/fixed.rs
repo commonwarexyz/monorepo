@@ -823,7 +823,7 @@ pub(crate) mod test {
         use super::*;
         use crate::{
             merkle::mmr::{self, full::Mmr},
-            qmdb::any::sync::tests::FromSyncTestable,
+            qmdb::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 

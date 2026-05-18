@@ -21,6 +21,26 @@ pub struct Target<F: Family, D: Digest> {
     pub range: NonEmptyRange<Location<F>>,
 }
 
+impl<F: Family, D: Digest> Target<F, D> {
+    /// Create a target whose database root and operation root are identical.
+    pub const fn from_root(root: D, range: NonEmptyRange<Location<F>>) -> Self {
+        Self {
+            root,
+            ops_root: root,
+            range,
+        }
+    }
+
+    /// Create a target with distinct database and operation roots.
+    pub const fn from_roots(root: D, ops_root: D, range: NonEmptyRange<Location<F>>) -> Self {
+        Self {
+            root,
+            ops_root,
+            range,
+        }
+    }
+}
+
 impl<F: Family, D: Digest> Clone for Target<F, D> {
     fn clone(&self) -> Self {
         Self {
@@ -143,11 +163,10 @@ mod tests {
     use std::io::Cursor;
 
     fn target(ops_root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
-        Target {
-            root: ops_root,
+        Target::from_root(
             ops_root,
-            range: non_empty_range!(Location::new(start), Location::new(end)),
-        }
+            non_empty_range!(Location::new(start), Location::new(end)),
+        )
     }
 
     #[test]

@@ -114,11 +114,11 @@ impl<F: Graftable, D: Digest> Target<F, D> {
         hasher: &StandardHasher<H>,
     ) -> Option<qmdb_sync::Target<F, D>> {
         if self.witness.verify(hasher, &self.ops_root, &self.root) {
-            Some(qmdb_sync::Target {
-                root: self.root,
-                ops_root: self.ops_root,
-                range: self.range.clone(),
-            })
+            Some(qmdb_sync::Target::from_roots(
+                self.root,
+                self.ops_root,
+                self.range.clone(),
+            ))
         } else {
             None
         }

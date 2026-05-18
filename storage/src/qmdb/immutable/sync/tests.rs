@@ -126,11 +126,10 @@ where
         let config = Config {
             db_config: db_config.clone(),
             fetch_batch_size,
-            target: Target {
-                root: target_root,
-                ops_root: target_root,
-                range: non_empty_range!(target_oldest_retained_loc, target_op_count),
-            },
+            target: Target::from_root(
+                target_root,
+                non_empty_range!(target_oldest_retained_loc, target_op_count),
+            ),
             context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -189,11 +188,10 @@ where
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root: target_root,
-                ops_root: target_root,
-                range: non_empty_range!(target_oldest_retained_loc, target_op_count),
-            },
+            target: Target::from_root(
+                target_root,
+                non_empty_range!(target_oldest_retained_loc, target_op_count),
+            ),
             context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -241,11 +239,7 @@ where
         let config = Config {
             db_config: db_config.clone(),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: target_root,
-                ops_root: target_root,
-                range: non_empty_range!(lower_bound, op_count),
-            },
+            target: Target::from_root(target_root, non_empty_range!(lower_bound, op_count)),
             context: client_context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -315,11 +309,10 @@ where
             let config = Config {
                 context: context.child("client"),
                 db_config: H::config(&format!("update_test_{}", context.next_u64()), &context),
-                target: Target {
-                    root: initial_root,
-                    ops_root: initial_root,
-                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-                },
+                target: Target::from_root(
+                    initial_root,
+                    non_empty_range!(initial_lower_bound, initial_upper_bound),
+                ),
                 resolver: target_db.clone(),
                 fetch_batch_size: NZU64!(2),
                 max_outstanding_requests: 10,
@@ -343,11 +336,10 @@ where
         };
 
         update_sender
-            .send(Target {
-                root: final_root,
-                ops_root: final_root,
-                range: non_empty_range!(initial_lower_bound, final_upper_bound),
-            })
+            .send(Target::from_root(
+                final_root,
+                non_empty_range!(initial_lower_bound, final_upper_bound),
+            ))
             .await
             .unwrap();
 
@@ -399,11 +391,7 @@ where
         let config = Config {
             db_config: H::config(&format!("subset_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root: target_root,
-                ops_root: target_root,
-                range: non_empty_range!(lower_bound, op_count),
-            },
+            target: Target::from_root(target_root, non_empty_range!(lower_bound, op_count)),
             context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -455,11 +443,7 @@ where
         let config = Config {
             db_config: sync_db_config,
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root,
-                ops_root: root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
+            target: Target::from_root(root, non_empty_range!(lower_bound, upper_bound)),
             context: context.child("sync"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -509,11 +493,7 @@ where
         let config = Config {
             db_config: sync_config,
             fetch_batch_size: NZU64!(10),
-            target: Target {
-                root,
-                ops_root: root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
+            target: Target::from_root(root, non_empty_range!(lower_bound, upper_bound)),
             context: context.child("sync"),
             resolver: resolver.clone(),
             apply_batch_size: 1024,
@@ -559,11 +539,10 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("lb-dec-{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: initial_root,
-                ops_root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
+            target: Target::from_root(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound),
+            ),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
@@ -575,14 +554,13 @@ where
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
         update_sender
-            .send(Target {
-                root: initial_root,
-                ops_root: initial_root,
-                range: non_empty_range!(
+            .send(Target::from_root(
+                initial_root,
+                non_empty_range!(
                     initial_lower_bound.checked_sub(1).unwrap(),
                     initial_upper_bound
                 ),
-            })
+            ))
             .await
             .unwrap();
 
@@ -622,11 +600,10 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("ub-dec-{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: initial_root,
-                ops_root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
+            target: Target::from_root(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound),
+            ),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
@@ -638,11 +615,10 @@ where
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
         update_sender
-            .send(Target {
-                root: initial_root,
-                ops_root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
-            })
+            .send(Target::from_root(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
+            ))
             .await
             .unwrap();
 
@@ -696,11 +672,10 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("bounds_inc_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(1),
-            target: Target {
-                root: initial_root,
-                ops_root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
+            target: Target::from_root(
+                initial_root,
+                non_empty_range!(initial_lower_bound, initial_upper_bound),
+            ),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
@@ -711,11 +686,10 @@ where
         };
 
         update_sender
-            .send(Target {
-                root: final_root,
-                ops_root: final_root,
-                range: non_empty_range!(final_lower_bound, final_upper_bound),
-            })
+            .send(Target::from_root(
+                final_root,
+                non_empty_range!(final_lower_bound, final_upper_bound),
+            ))
             .await
             .unwrap();
 
@@ -769,11 +743,7 @@ where
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(100),
-            target: Target {
-                root: target_root,
-                ops_root: target_root,
-                range: non_empty_range!(bounds.start, bounds.end),
-            },
+            target: Target::from_root(target_root, non_empty_range!(bounds.start, bounds.end)),
             context: context.child("client"),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -834,11 +804,7 @@ where
             context: context.child("client"),
             db_config: H::config(&format!("done_{}", context.next_u64()), &context),
             fetch_batch_size: NZU64!(20),
-            target: Target {
-                root,
-                ops_root: root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
+            target: Target::from_root(root, non_empty_range!(lower_bound, upper_bound)),
             resolver: target_db.clone(),
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
@@ -851,11 +817,10 @@ where
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         let _ = update_sender
-            .send(Target {
-                root: sha256::Digest::from([2u8; 32]),
-                ops_root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(lower_bound + 1, upper_bound + 1),
-            })
+            .send(Target::from_root(
+                sha256::Digest::from([2u8; 32]),
+                non_empty_range!(lower_bound + 1, upper_bound + 1),
+            ))
             .await;
 
         assert_eq!(H::db_root(&synced_db), root);
