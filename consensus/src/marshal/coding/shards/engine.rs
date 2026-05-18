@@ -790,9 +790,10 @@ where
     /// different: it is only valid when it came from the leader, and the leader's
     /// identity is needed before it can be accepted as assigned-shard evidence.
     fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
-        let Some(state) = self.state.get(&commitment) else {
-            return false;
-        };
+        let state = self
+            .state
+            .get(&commitment)
+            .expect("buffered shards can only be ingested with reconstruction state");
         let round = state.round();
         let leader_known = state.leader().is_some();
         let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
@@ -827,9 +828,10 @@ where
             }
         }
 
-        let Some(state) = self.state.get_mut(&commitment) else {
-            return false;
-        };
+        let state = self
+            .state
+            .get_mut(&commitment)
+            .expect("reconstruction state checked before buffered shard drain");
 
         // Ingest buffered shards into the active reconstruction state. Batch verification
         // will be triggered if there are enough shards to meet the quorum threshold.
@@ -4875,7 +4877,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peer_buffer_is_retained_until_peer_leaves_latest_primary() {
+    fn test_peer_buffer_lifetime_tracks_latest_primary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -4931,11 +4933,9 @@ mod tests {
                 coding_config_for_participants(participants.len() as u16),
                 &STRATEGY,
             );
-            let commitment = coded_block.commitment();
             let shard = coded_block.shard(0).expect("missing shard");
 
-            // Pre-leader path: buffer one shard before any `ReconstructionState` exists for this
-            // commitment.
+            // Pre-leader path: buffer one shard before any leader or notarized interest arrives.
             engine.buffer_peer_shard(sender_pk.clone(), shard);
             assert_eq!(
                 engine.peer_buffers.get(&sender_pk).map(VecDeque::len),
@@ -4943,27 +4943,8 @@ mod tests {
                 "peer buffer should contain the buffered shard"
             );
 
-            // No reconstruction state yet: `ingest_buffered_shards` has nowhere to apply the shard,
-            // so it leaves the buffered shard staged while the sender remains in `latest.primary`.
-            let progressed = engine.ingest_buffered_shards(commitment);
-            assert!(
-                !progressed,
-                "ingest should not progress without reconstruction state"
-            );
-            assert!(
-                engine.peer_buffers.contains_key(&sender_pk),
-                "empty peer buffer should be retained while sender remains in latest.primary"
-            );
-            assert!(
-                engine
-                    .peer_buffers
-                    .get(&sender_pk)
-                    .is_some_and(|queue| queue.len() == 1),
-                "retained peer buffer should still contain the staged shard"
-            );
-
             // Empty primary: no peer may retain buffers; `update_latest_primary_peers` drops the
-            // empty deque entry for `sender_pk`.
+            // staged shard and the deque entry for `sender_pk`.
             engine.update_latest_primary_peers(Set::default());
             assert!(
                 !engine.peer_buffers.contains_key(&sender_pk),
