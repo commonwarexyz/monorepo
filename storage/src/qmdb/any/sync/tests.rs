@@ -1,70 +1,66 @@
-//! `any` database harnesses for the shared sync test suite.
+//! `any` database tests for the shared sync test suite.
 //!
 //! Shared sync test helpers live in [crate::qmdb::sync::tests]. This module keeps only
-//! the `any`-specific harness implementations and test instantiations.
+//! the `any`-specific target tests, harness implementations, and test instantiations.
 
-use crate::qmdb::sync::tests::*;
+use crate::{
+    merkle::{mmr, Location},
+    qmdb::any::sync::Target,
+};
+use commonware_codec::{EncodeSize, Error as CodecError, ReadExt as _, Write};
+use commonware_cryptography::sha256;
+use commonware_utils::non_empty_range;
+use std::io::Cursor;
 
-mod target_tests {
-    use crate::{
-        merkle::{mmr, Location},
-        qmdb::any::sync::Target,
-    };
-    use commonware_codec::{EncodeSize, Error as CodecError, ReadExt as _, Write};
-    use commonware_cryptography::sha256;
-    use commonware_utils::non_empty_range;
-    use std::io::Cursor;
+#[test]
+fn test_sync_target_serialization() {
+    let target = Target::<mmr::Family, sha256::Digest>::new(
+        sha256::Digest::from([42; 32]),
+        non_empty_range!(Location::new(100), Location::new(500)),
+    );
 
-    #[test]
-    fn test_sync_target_serialization() {
-        let target = Target::<mmr::Family, sha256::Digest>::new(
-            sha256::Digest::from([42; 32]),
-            non_empty_range!(Location::new(100), Location::new(500)),
-        );
+    let mut buffer = Vec::new();
+    target.write(&mut buffer);
 
-        let mut buffer = Vec::new();
-        target.write(&mut buffer);
+    assert_eq!(buffer.len(), target.encode_size());
 
-        assert_eq!(buffer.len(), target.encode_size());
+    let mut cursor = Cursor::new(buffer);
+    let deserialized = Target::read(&mut cursor).unwrap();
 
-        let mut cursor = Cursor::new(buffer);
-        let deserialized = Target::read(&mut cursor).unwrap();
+    assert_eq!(target, deserialized);
+    assert_eq!(target.root, deserialized.root);
+    assert_eq!(target.range, deserialized.range);
+}
 
-        assert_eq!(target, deserialized);
-        assert_eq!(target.root, deserialized.root);
-        assert_eq!(target.range, deserialized.range);
-    }
+#[test]
+fn test_sync_target_read_invalid_bounds() {
+    let mut buffer = Vec::new();
+    sha256::Digest::from([42; 32]).write(&mut buffer);
+    Location::<mmr::Family>::new(100).write(&mut buffer);
+    Location::<mmr::Family>::new(50).write(&mut buffer);
 
-    #[test]
-    fn test_sync_target_read_invalid_bounds() {
-        let mut buffer = Vec::new();
-        sha256::Digest::from([42; 32]).write(&mut buffer);
-        Location::<mmr::Family>::new(100).write(&mut buffer);
-        Location::<mmr::Family>::new(50).write(&mut buffer);
+    let mut cursor = Cursor::new(buffer);
+    assert!(matches!(
+        Target::<mmr::Family, sha256::Digest>::read(&mut cursor),
+        Err(CodecError::Invalid("Range", "start must be <= end"))
+    ));
 
-        let mut cursor = Cursor::new(buffer);
-        assert!(matches!(
-            Target::<mmr::Family, sha256::Digest>::read(&mut cursor),
-            Err(CodecError::Invalid("Range", "start must be <= end"))
-        ));
+    let mut buffer = Vec::new();
+    sha256::Digest::from([42; 32]).write(&mut buffer);
+    (Location::<mmr::Family>::new(100)..Location::<mmr::Family>::new(100)).write(&mut buffer);
 
-        let mut buffer = Vec::new();
-        sha256::Digest::from([42; 32]).write(&mut buffer);
-        (Location::<mmr::Family>::new(100)..Location::<mmr::Family>::new(100)).write(&mut buffer);
-
-        let mut cursor = Cursor::new(buffer);
-        assert!(matches!(
-            Target::<mmr::Family, sha256::Digest>::read(&mut cursor),
-            Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
-        ));
-    }
+    let mut cursor = Cursor::new(buffer);
+    assert!(matches!(
+        Target::<mmr::Family, sha256::Digest>::read(&mut cursor),
+        Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
+    ));
 }
 
 mod harnesses {
-    use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb},
         qmdb::any::value::VariableEncoding,
+        qmdb::sync::tests::{OpOf, SyncTestHarness},
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -419,7 +415,7 @@ mod harnesses {
             crate::qmdb::any::unordered::variable::test::create_test_ops(n)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<super::OpOf<Self>> {
+        fn create_ops_seeded(n: usize, seed: u64) -> Vec<OpOf<Self>> {
             crate::qmdb::any::unordered::variable::test::create_test_ops_seeded(n, seed)
         }
 
@@ -826,12 +822,12 @@ macro_rules! sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_empty_operations_no_panic() {
-                super::test_sync_empty_operations_no_panic::<$harness>();
+                crate::qmdb::sync::tests::test_sync_empty_operations_no_panic::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_subset_of_target_database() {
-                super::test_sync_subset_of_target_database::<$harness>(1000);
+                crate::qmdb::sync::tests::test_sync_subset_of_target_database::<$harness>(1000);
             }
 
             #[rstest]
@@ -844,7 +840,7 @@ macro_rules! sync_tests_for_harness {
             #[case::db_size_eq_batch_size(1000, 1000)]
             #[case::batch_size_gt_db_size(1000, 1001)]
             fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
-                super::test_sync::<$harness>(
+                crate::qmdb::sync::tests::test_sync::<$harness>(
                     target_db_ops,
                     NonZeroU64::new(fetch_batch_size).unwrap(),
                 );
@@ -852,64 +848,64 @@ macro_rules! sync_tests_for_harness {
 
             #[test_traced]
             fn test_sync_use_existing_db_partial_match() {
-                super::test_sync_use_existing_db_partial_match::<$harness>(1000);
+                crate::qmdb::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(1000);
             }
 
             #[test_traced]
             fn test_sync_use_existing_db_exact_match() {
-                super::test_sync_use_existing_db_exact_match::<$harness>(1000);
+                crate::qmdb::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(1000);
             }
 
             #[test_traced("WARN")]
             fn test_target_update_lower_bound_decrease() {
-                super::test_target_update_lower_bound_decrease::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_lower_bound_decrease::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_upper_bound_decrease() {
-                super::test_target_update_upper_bound_decrease::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_upper_bound_decrease::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_bounds_increase() {
-                super::test_target_update_bounds_increase::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_bounds_increase::<$harness>();
             }
 
             #[test]
             fn test_target_update_prune_only_rejected() {
-                super::test_target_update_prune_only_rejected::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_prune_only_rejected::<$harness>();
             }
 
             #[test_traced("WARN")]
             fn test_target_update_on_done_client() {
-                super::test_target_update_on_done_client::<$harness>();
+                crate::qmdb::sync::tests::test_target_update_on_done_client::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_waits_for_explicit_finish() {
-                super::test_sync_waits_for_explicit_finish::<$harness>();
+                crate::qmdb::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_reports_progress_for_reached_targets_before_explicit_finish() {
-                super::test_sync_reports_progress_for_reached_targets_before_explicit_finish::<
+                crate::qmdb::sync::tests::test_sync_reports_progress_for_reached_targets_before_explicit_finish::<
                     $harness,
                 >();
             }
 
             #[test_traced]
             fn test_sync_handles_early_finish_signal() {
-                super::test_sync_handles_early_finish_signal::<$harness>();
+                crate::qmdb::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_fails_when_finish_sender_dropped() {
-                super::test_sync_fails_when_finish_sender_dropped::<$harness>();
+                crate::qmdb::sync::tests::test_sync_fails_when_finish_sender_dropped::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_allows_dropped_reached_target_receiver() {
-                super::test_sync_allows_dropped_reached_target_receiver::<$harness>();
+                crate::qmdb::sync::tests::test_sync_allows_dropped_reached_target_receiver::<$harness>();
             }
 
             #[rstest]
@@ -929,32 +925,32 @@ macro_rules! sync_tests_for_harness {
                 #[case] initial_ops: usize,
                 #[case] additional_ops: usize,
             ) {
-                super::test_target_update_during_sync::<$harness>(initial_ops, additional_ops);
+                crate::qmdb::sync::tests::test_target_update_during_sync::<$harness>(initial_ops, additional_ops);
             }
 
             #[test_traced]
             fn test_sync_database_persistence() {
-                super::test_sync_database_persistence::<$harness>();
+                crate::qmdb::sync::tests::test_sync_database_persistence::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_post_sync_usability() {
-                super::test_sync_post_sync_usability::<$harness>();
+                crate::qmdb::sync::tests::test_sync_post_sync_usability::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_resolver_fails() {
-                super::test_sync_resolver_fails::<$harness>();
+                crate::qmdb::sync::tests::test_sync_resolver_fails::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_retries_bad_pinned_nodes() {
-                super::test_sync_retries_bad_pinned_nodes::<$harness>();
+                crate::qmdb::sync::tests::test_sync_retries_bad_pinned_nodes::<$harness>();
             }
 
             #[test_traced]
             fn test_sync_waits_for_boundary_retry_after_target_update() {
-                super::test_sync_waits_for_boundary_retry_after_target_update::<$harness>();
+                crate::qmdb::sync::tests::test_sync_waits_for_boundary_retry_after_target_update::<$harness>();
             }
         }
     };
@@ -970,22 +966,22 @@ macro_rules! from_sync_result_tests_for_harness {
 
             #[test_traced("WARN")]
             fn test_from_sync_result_empty_to_empty() {
-                super::test_from_sync_result_empty_to_empty::<$harness>();
+                crate::qmdb::sync::tests::test_from_sync_result_empty_to_empty::<$harness>();
             }
 
             #[test_traced]
             fn test_from_sync_result_empty_to_nonempty() {
-                super::test_from_sync_result_empty_to_nonempty::<$harness>();
+                crate::qmdb::sync::tests::test_from_sync_result_empty_to_nonempty::<$harness>();
             }
 
             #[test_traced]
             fn test_from_sync_result_nonempty_to_nonempty_partial_match() {
-                super::test_from_sync_result_nonempty_to_nonempty_partial_match::<$harness>();
+                crate::qmdb::sync::tests::test_from_sync_result_nonempty_to_nonempty_partial_match::<$harness>();
             }
 
             #[test_traced]
             fn test_from_sync_result_nonempty_to_nonempty_exact_match() {
-                super::test_from_sync_result_nonempty_to_nonempty_exact_match::<$harness>();
+                crate::qmdb::sync::tests::test_from_sync_result_nonempty_to_nonempty_exact_match::<$harness>();
             }
         }
     };

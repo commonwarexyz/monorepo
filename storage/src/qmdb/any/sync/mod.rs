@@ -52,7 +52,7 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_utils::{range::NonEmptyRange, Array};
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 /// Sync target for `any` databases.
 #[derive(Debug)]
