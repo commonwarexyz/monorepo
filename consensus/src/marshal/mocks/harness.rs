@@ -3707,14 +3707,12 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
 
-        let subscription_rx = handle
-            .mailbox
-            .subscribe_by_digest(
-                Fallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(1)),
-                },
-                digest,
-            );
+        let subscription_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest,
+        );
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
         H::verify(
             &mut handle,
@@ -3794,30 +3792,24 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(
-                Fallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(1)),
-                },
-                digest1,
-            );
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(
-                Fallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(2)),
-                },
-                digest2,
-            );
-        let sub3_rx = handle
-            .mailbox
-            .subscribe_by_digest(
-                Fallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(1)),
-                },
-                digest1,
-            );
+        let sub1_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest1,
+        );
+        let sub2_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(2)),
+            },
+            digest2,
+        );
+        let sub3_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest1,
+        );
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
             H::propose(&mut handle, round, block).await;
@@ -3901,22 +3893,18 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(
-                Fallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(1)),
-                },
-                digest1,
-            );
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(
-                Fallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(2)),
-                },
-                digest2,
-            );
+        let sub1_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+            digest1,
+        );
+        let sub2_rx = handle.mailbox.subscribe_by_digest(
+            Fallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(2)),
+            },
+            digest2,
+        );
         drop(sub1_rx);
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {

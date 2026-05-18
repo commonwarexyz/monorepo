@@ -493,10 +493,9 @@ where
             return rx;
         }
 
-        // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self
-            .marshal
-            .subscribe_by_digest(Fallback::FetchByRound { round }, digest);
+        // Otherwise, wait for local block availability. Certification must not
+        // fetch the candidate block from peers.
+        let block_rx = self.marshal.subscribe_by_digest(Fallback::Wait, digest);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self

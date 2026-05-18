@@ -599,9 +599,7 @@ where
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_digest(Fallback::FetchByRound { round }, digest);
+        let block_rx = self.marshal.subscribe_by_digest(Fallback::Wait, digest);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();

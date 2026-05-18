@@ -746,9 +746,7 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
         self,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<Self::AncestryBlock> {
-        let subscription = self
-            .mailbox
-            .subscribe_by_digest(Fallback::Wait, digest);
+        let subscription = self.mailbox.subscribe_by_digest(Fallback::Wait, digest);
         subscription.await.ok()
     }
 

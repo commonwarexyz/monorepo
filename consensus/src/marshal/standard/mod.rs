@@ -78,8 +78,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{self, Network},
-        Manager as _,
-        Recipients,
+        Manager as _, Recipients,
     };
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
@@ -1409,6 +1408,54 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_certify_missing_candidate_waits_without_fetching() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants: _,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("missing-certify-candidate-{kind:?}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::manual_ack(),
+                    RecordingBuffer::default(),
+                )
+                .await;
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis);
+                let mut wrapper =
+                    Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
+
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let missing = Sha256::hash(b"missing certify candidate");
+                let certify = wrapper.certify(round, missing).await;
+
+                context.sleep(Duration::from_millis(50)).await;
+                assert!(
+                    resolver.fetches().is_empty(),
+                    "{kind:?}: certification must not fetch an unavailable candidate from peers"
+                );
+
+                drop(certify);
+                context.sleep(Duration::from_millis(10)).await;
+                assert!(
+                    resolver.fetches().is_empty(),
+                    "{kind:?}: canceling a missing certify wait must not fetch from peers"
+                );
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_verify_height_lie_parent_fetch_is_round_bound() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1453,12 +1500,8 @@ mod tests {
                     leader: me,
                     parent: (View::new(1), parent_digest),
                 };
-                let child = B::new::<Sha256>(
-                    child_context.clone(),
-                    parent_digest,
-                    Height::new(3),
-                    200,
-                );
+                let child =
+                    B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(3), 200);
                 let child_digest = child.digest();
                 assert!(marshal.verified(child_round, child).await);
 
@@ -1519,77 +1562,78 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_verify_parent_fetch_invalid_first_retries() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(
-                &mut context,
-                NAMESPACE,
-                NUM_VALIDATORS,
-            );
-            let victim = participants[0].clone();
-            let malicious = participants[1].clone();
-            let honest = participants[2].clone();
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let victim = participants[0].clone();
+                let malicious = participants[1].clone();
+                let honest = participants[2].clone();
 
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(2),
-                [victim.clone(), malicious.clone()],
-            )
-            .await;
-            setup_network_links(
-                &mut oracle,
-                &[victim.clone(), malicious.clone()],
-                LINK,
-            )
-            .await;
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(2),
+                    [victim.clone(), malicious.clone()],
+                )
+                .await;
+                setup_network_links(
+                    &mut oracle,
+                    &[victim.clone(), malicious.clone()],
+                    LINK,
+                )
+                .await;
 
-            let victim_setup = StandardHarness::setup_validator(
-                context.child("victim").with_attribute("index", 0),
-                &mut oracle,
-                victim.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let victim_mailbox = victim_setup.mailbox;
+                let victim_setup = StandardHarness::setup_validator(
+                    context.child("victim").with_attribute("index", 0),
+                    &mut oracle,
+                    victim.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let victim_mailbox = victim_setup.mailbox;
 
-            let honest_setup = StandardHarness::setup_validator(
-                context.child("honest").with_attribute("index", 2),
-                &mut oracle,
-                honest.clone(),
-                ConstantProvider::new(schemes[2].clone()),
-            )
-            .await;
-            let mut honest_mailbox = honest_setup.mailbox;
+                let honest_setup = StandardHarness::setup_validator(
+                    context.child("honest").with_attribute("index", 2),
+                    &mut oracle,
+                    honest.clone(),
+                    ConstantProvider::new(schemes[2].clone()),
+                )
+                .await;
+                let mut honest_mailbox = honest_setup.mailbox;
 
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let parent_round = Round::new(Epoch::zero(), View::new(1));
-            let parent_context = Ctx {
-                round: parent_round,
-                leader: victim.clone(),
-                parent: (View::zero(), genesis.digest()),
-            };
-            let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
-            let parent_digest = parent.digest();
+                let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+                let parent_round = Round::new(Epoch::zero(), View::new(1));
+                let parent_context = Ctx {
+                    round: parent_round,
+                    leader: victim.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                };
+                let parent =
+                    B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
+                let parent_digest = parent.digest();
 
-            let parent_proposal =
-                Proposal::new(parent_round, View::zero(), parent_digest);
-            let parent_notarization =
-                StandardHarness::make_notarization(parent_proposal, &schemes, QUORUM);
-            assert!(honest_mailbox.verified(parent_round, parent.clone()).await);
-            StandardHarness::report_notarization(&mut honest_mailbox, parent_notarization).await;
-            assert!(honest_mailbox.get_block(&parent_digest).await.is_some());
+                let parent_proposal = Proposal::new(parent_round, View::zero(), parent_digest);
+                let parent_notarization =
+                    StandardHarness::make_notarization(parent_proposal, &schemes, QUORUM);
+                assert!(honest_mailbox.verified(parent_round, parent.clone()).await);
+                StandardHarness::report_notarization(&mut honest_mailbox, parent_notarization)
+                    .await;
+                assert!(honest_mailbox.get_block(&parent_digest).await.is_some());
 
-            let malicious_backfill = oracle
-                .control(malicious.clone())
-                .register(1, Quota::per_second(NonZeroU32::MAX))
-                .await
-                .unwrap();
-            let (malicious_engine, _malicious_mailbox) =
-                commonware_resolver::p2p::Engine::new(
+                let malicious_backfill = oracle
+                    .control(malicious.clone())
+                    .register(1, Quota::per_second(NonZeroU32::MAX))
+                    .await
+                    .unwrap();
+                let (malicious_engine, _malicious_mailbox) = commonware_resolver::p2p::Engine::new(
                     context.child("malicious_resolver"),
                     commonware_resolver::p2p::Config {
                         peer_provider: oracle.manager(),
@@ -1610,76 +1654,84 @@ mod tests {
                         priority_responses: false,
                     },
                 );
-            malicious_engine.start(malicious_backfill);
+                malicious_engine.start(malicious_backfill);
 
-            let child_round = Round::new(Epoch::zero(), View::new(2));
-            let child_context = Ctx {
-                round: child_round,
-                leader: victim.clone(),
-                parent: (View::new(1), parent_digest),
-            };
-            let child =
-                B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(2), 200);
-            let child_digest = child.digest();
-            assert!(victim_mailbox.verified(child_round, child).await);
+                let child_round = Round::new(Epoch::zero(), View::new(2));
+                let child_context = Ctx {
+                    round: child_round,
+                    leader: victim.clone(),
+                    parent: (View::new(1), parent_digest),
+                };
+                let child =
+                    B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(2), 200);
+                let child_digest = child.digest();
+                assert!(victim_mailbox.verified(child_round, child).await);
 
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis);
-            let mut wrapper = Wrapper::new(
-                WrapperKind::Inline,
-                context.child("wrapper"),
-                mock_app,
-                victim_mailbox.clone(),
-            );
-            let verify = wrapper.verify(child_context, child_digest).await;
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis);
+                let mut wrapper = Wrapper::new(
+                    kind,
+                    context.child("wrapper"),
+                    mock_app,
+                    victim_mailbox.clone(),
+                );
+                let verify = wrapper.verify(child_context, child_digest).await;
+                let verify_or_certify = if kind == WrapperKind::Deferred {
+                    let optimistic = verify.await.expect("verify result missing");
+                    assert!(optimistic, "deferred verify should optimistically succeed");
+                    wrapper.certify(child_round, child_digest).await
+                } else {
+                    verify
+                };
 
-            let start = context.current();
-            loop {
+                let start = context.current();
+                loop {
+                    let blocked = oracle.blocked().await.unwrap();
+                    if blocked
+                        .iter()
+                        .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious)
+                    {
+                        break;
+                    }
+                    if context.current().duration_since(start).unwrap_or_default()
+                        > Duration::from_secs(5)
+                    {
+                        panic!("{kind:?}: malicious peer was not blocked");
+                    }
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+
+                oracle
+                    .add_link(victim.clone(), honest.clone(), LINK)
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(honest.clone(), victim.clone(), LINK)
+                    .await
+                    .unwrap();
+                let mut manager = oracle.manager();
+                manager.track(1, Set::from_iter_dedup([honest.clone()]));
+
+                select! {
+                    result = verify_or_certify => {
+                        assert!(
+                            result.expect("verification result missing"),
+                            "{kind:?}: verification should retry against the honest peer and complete"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) => {
+                        panic!("{kind:?}: verification did not complete after honest retry");
+                    },
+                }
+
                 let blocked = oracle.blocked().await.unwrap();
-                if blocked
-                    .iter()
-                    .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious)
-                {
-                    break;
-                }
-                if context.current().duration_since(start).unwrap_or_default()
-                    > Duration::from_secs(5)
-                {
-                    panic!("malicious peer was not blocked");
-                }
-                context.sleep(Duration::from_millis(10)).await;
-            }
-
-            oracle
-                .add_link(victim.clone(), honest.clone(), LINK)
-                .await
-                .unwrap();
-            oracle
-                .add_link(honest.clone(), victim.clone(), LINK)
-                .await
-                .unwrap();
-            let mut manager = oracle.manager();
-            manager.track(1, Set::from_iter_dedup([honest.clone()]));
-
-            select! {
-                result = verify => {
-                    assert!(
-                        result.expect("verify result missing"),
-                        "verify should retry against the honest peer and complete"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(10)) => {
-                    panic!("verify did not complete after honest retry");
-                },
-            }
-
-            let blocked = oracle.blocked().await.unwrap();
-            assert!(
-                blocked
-                    .iter()
-                    .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious),
-                "malicious peer should remain blocked"
-            );
-        });
+                assert!(
+                    blocked
+                        .iter()
+                        .any(|(blocker, blocked)| blocker == &victim && blocked == &malicious),
+                    "{kind:?}: malicious peer should remain blocked"
+                );
+            });
+        }
     }
 
     #[test_traced("WARN")]
@@ -2257,9 +2309,7 @@ mod tests {
         where
             R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            self.fetches
-                .lock()
-                .extend(keys.into_iter().map(Into::into));
+            self.fetches.lock().extend(keys.into_iter().map(Into::into));
             Feedback::Ok
         }
 
