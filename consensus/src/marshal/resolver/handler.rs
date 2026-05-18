@@ -162,20 +162,24 @@ impl<D: Digest> Producer for Handler<D> {
 /// metadata attached to that lookup so marshal can decide how to process the
 /// response after validating it against the key. Multiple local annotations
 /// may share one peer key when they depend on the same block.
+///
+/// Some annotations describe how a [`Request::Block`] delivery should be
+/// stored. Others mirror the non-block request type and only carry pruning
+/// metadata.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
     /// A finalization requested by height.
     Finalization { height: Height },
     /// A notarization requested by round.
     Notarization { round: Round },
-    /// A block requested only to satisfy certified block verification.
+    /// A block requested by commitment for a certified chain.
     ///
     /// The expected height is known before the request from the child block.
     Certified { height: Height },
-    /// A block requested after receiving a finalization whose height is not known
-    /// until the response block is decoded.
+    /// A block requested by commitment because a finalization named it.
     ///
-    /// The finalization names a commitment but not a height.
+    /// The finalization names a commitment but not a height. The round is
+    /// retained so the request can be pruned once processing passes it.
     Finalized { round: Round },
     /// A block requested while repairing an internal finalized-chain gap.
     ///
@@ -573,6 +577,23 @@ mod tests {
             }
         ));
         assert!(!predicate(&block, &stale_repair));
+
+        let floor = Request::<D>::Notarized {
+            round: Round::new(Epoch::new(1), View::new(10)),
+        };
+        let predicate = floor.predicate();
+        assert!(predicate(
+            &block,
+            &Annotation::Finalized {
+                round: Round::new(Epoch::new(1), View::new(11)),
+            }
+        ));
+        assert!(!predicate(
+            &block,
+            &Annotation::Finalized {
+                round: Round::new(Epoch::new(1), View::new(10)),
+            }
+        ));
     }
 
     #[test]
