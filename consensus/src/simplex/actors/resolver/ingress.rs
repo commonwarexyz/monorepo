@@ -216,8 +216,8 @@ impl Handler {
 
 impl Consumer for Handler {
     type Key = U64;
-    type Subscriber = ();
     type Value = Bytes;
+    type Subscriber = ();
 
     fn deliver(
         &mut self,

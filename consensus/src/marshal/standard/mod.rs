@@ -2349,8 +2349,8 @@ mod tests {
 
     impl Consumer for NoopConsumer {
         type Key = handler::Request<D>;
-        type Subscriber = handler::Annotation;
         type Value = Bytes;
+        type Subscriber = handler::Annotation;
 
         fn deliver(
             &mut self,

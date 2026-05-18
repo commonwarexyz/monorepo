@@ -128,8 +128,8 @@ impl<D: Digest> Receiver<D> {
 
 impl<D: Digest> Consumer for Handler<D> {
     type Key = Request<D>;
-    type Subscriber = Annotation;
     type Value = Bytes;
+    type Subscriber = Annotation;
 
     fn deliver(
         &mut self,

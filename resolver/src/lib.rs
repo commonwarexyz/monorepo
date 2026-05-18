@@ -59,11 +59,11 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to key data requested from peers.
         type Key: Span;
 
-        /// Type used to track subscribers on fetch keys.
-        type Subscriber: Clone + Eq + Send + 'static;
-
         /// Type of data to retrieve.
         type Value;
+
+        /// Type used to track subscribers on fetch keys.
+        type Subscriber: Clone + Eq + Send + 'static;
 
         /// Deliver data to the consumer.
         ///

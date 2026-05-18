@@ -235,8 +235,9 @@ where
                             targets,
                         } in keys
                         {
-                            // Check if the fetch is already in progress
                             trace!(?key, "mailbox: fetch");
+
+                            // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
                             let subscribers_for_key = self
                                 .subscribers
@@ -437,6 +438,9 @@ where
             self.metrics.fetch.inc(Status::Success);
             self.inflight.complete(&key, self.context.as_ref());
 
+            // Remove only the subscribers that accepted this response. If other
+            // subscribers still need the key, issue another fetch with the
+            // remaining annotations.
             let refetch = self.subscribers.get_mut(&key).is_some_and(|subscribers| {
                 for subscriber in delivered.into_vec() {
                     subscribers.remove(&subscriber);
@@ -445,12 +449,16 @@ where
             });
 
             if refetch {
+                // Keep the request active so the fetcher can select a peer for the
+                // remaining subscribers on its next pass.
                 self.inflight.insert(
                     key.clone(),
                     self.metrics.fetch_duration.timer(self.context.as_ref()),
                 );
                 self.fetcher.add_ready(key);
             } else {
+                // All subscribers observed a valid response; clear any targeting
+                // state retained for this key.
                 self.subscribers.remove(&key);
                 self.fetcher.clear_targets(&key);
             }

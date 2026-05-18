@@ -306,8 +306,8 @@ mod tests {
 
     impl crate::Consumer for BlockingConsumer {
         type Key = Key;
-        type Subscriber = ();
         type Value = Bytes;
+        type Subscriber = ();
 
         fn deliver(
             &mut self,
@@ -383,8 +383,8 @@ mod tests {
 
     impl crate::Consumer for BlockingSubscriberRecordingConsumer {
         type Key = Key;
-        type Subscriber = SubscriberTag;
         type Value = Bytes;
+        type Subscriber = SubscriberTag;
 
         fn deliver(
             &mut self,
@@ -434,8 +434,8 @@ mod tests {
 
     impl crate::Consumer for SubscriberRecordingConsumer {
         type Key = Key;
-        type Subscriber = SubscriberTag;
         type Value = Bytes;
+        type Subscriber = SubscriberTag;
 
         fn deliver(
             &mut self,

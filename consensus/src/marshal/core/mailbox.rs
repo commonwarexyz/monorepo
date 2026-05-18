@@ -751,12 +751,12 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
     }
 
     async fn subscribe_parent(self, block: Self::AncestryBlock) -> Option<Self::AncestryBlock> {
-        let parent_height = block.height().previous()?;
-        let commitment = V::parent_commitment(&block);
         // Ancestry walking does not carry the certified parent round. By this
         // point the stream is walking accepted ancestry, so this height should
         // be correct; it remains a local pruning bound rather than a peer
         // response validity condition.
+        let parent_height = block.height().previous()?;
+        let commitment = V::parent_commitment(&block);
         let fallback = Fallback::FetchByCommitment {
             height: parent_height,
         };

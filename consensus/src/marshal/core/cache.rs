@@ -46,6 +46,8 @@ where
     /// Notarized blocks stored by view
     notarized_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
+    /// Certified, non-finalized blocks stored by height and keyed by digest.
+    certified_blocks: prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view
     notarizations: prunable::Archive<
         TwoCap,
@@ -60,9 +62,6 @@ where
         <V::Block as Digestible>::Digest,
         Finalization<S, V::Commitment>,
     >,
-    /// Certified, non-finalized blocks stored by height and keyed by digest.
-    certified_blocks_by_height:
-        prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
 }
 
 impl<R, V, S> Cache<R, V, S>
@@ -86,10 +85,10 @@ where
 
     /// Prune height-indexed archives to the given height.
     async fn prune_by_height(&mut self, min_height: Height) {
-        self.certified_blocks_by_height
+        self.certified_blocks
             .prune(min_height.get())
             .await
-            .expect("failed to prune height-indexed certified blocks");
+            .expect("failed to prune certified blocks");
     }
 }
 
@@ -212,9 +211,9 @@ where
         let (
             verified_blocks,
             notarized_blocks,
+            certified_blocks,
             notarizations,
             finalizations,
-            certified_blocks_by_height,
         ) = futures::join!(
             Self::init_archive(
                 &context,
@@ -234,6 +233,13 @@ where
                 &context,
                 &self.cfg,
                 epoch,
+                "certified",
+                self.block_codec_config.clone()
+            ),
+            Self::init_archive(
+                &context,
+                &self.cfg,
+                epoch,
                 "notarizations",
                 S::certificate_codec_config_unbounded(),
             ),
@@ -244,22 +250,15 @@ where
                 "finalizations",
                 S::certificate_codec_config_unbounded(),
             ),
-            Self::init_archive(
-                &context,
-                &self.cfg,
-                epoch,
-                "certified_by_height",
-                self.block_codec_config.clone()
-            ),
         );
         let existing = self.caches.insert(
             epoch,
             Cache {
                 verified_blocks,
                 notarized_blocks,
+                certified_blocks,
                 notarizations,
                 finalizations,
-                certified_blocks_by_height,
             },
         );
         assert!(existing.is_none(), "cache already exists for epoch {epoch}");
@@ -311,7 +310,7 @@ where
     }
 
     /// Add a certified block to the height-indexed archive.
-    pub(crate) async fn put_certified_block_by_height(
+    pub(crate) async fn put_certified(
         &mut self,
         epoch: Epoch,
         height: Height,
@@ -323,25 +322,25 @@ where
         };
 
         match cache
-            .certified_blocks_by_height
+            .certified_blocks
             .has(Identifier::Key(&digest))
             .await
         {
             Ok(true) => return,
             Ok(false) => {}
-            Err(e) => panic!("failed to check height-indexed certified block: {e}"),
+            Err(e) => panic!("failed to check certified block: {e}"),
         }
 
         match cache
-            .certified_blocks_by_height
+            .certified_blocks
             .put_multi_sync(height.get(), digest, block)
             .await
         {
-            Ok(()) => debug!(%height, "cached height-indexed certified block"),
+            Ok(()) => debug!(%height, "cached certified block"),
             Err(archive::Error::AlreadyPrunedTo(_)) => {
-                debug!(%height, "height-indexed certified block already pruned");
+                debug!(%height, "certified block already pruned");
             }
-            Err(e) => panic!("failed to insert height-indexed certified block: {e}"),
+            Err(e) => panic!("failed to insert certified block: {e}"),
         }
     }
 
@@ -470,10 +469,10 @@ where
         // Check in reverse order
         for cache in self.caches.values().rev() {
             if let Some(block) = cache
-                .certified_blocks_by_height
+                .certified_blocks
                 .get(Identifier::Key(&digest))
                 .await
-                .expect("failed to get height-indexed certified block")
+                .expect("failed to get certified block")
             {
                 if predicate(&block) {
                     return Some(block);
@@ -521,15 +520,15 @@ where
             let Cache {
                 verified_blocks: vb,
                 notarized_blocks: nb,
+                certified_blocks: cb,
                 notarizations: nv,
                 finalizations: fv,
-                certified_blocks_by_height: cbh,
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
+            cb.destroy().await.expect("failed to destroy cb");
             nv.destroy().await.expect("failed to destroy nv");
             fv.destroy().await.expect("failed to destroy fv");
-            cbh.destroy().await.expect("failed to destroy cbh");
         }
 
         // Update metadata if necessary

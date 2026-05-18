@@ -12,6 +12,7 @@ pub struct Consumer<R: Span, V, S = ()> {
     ///
     /// If there is no expected value for a key, it will be considered valid
     expected: HashMap<R, V>,
+
     _subscriber: PhantomData<S>,
 }
 
@@ -61,8 +62,8 @@ where
     S: Clone + Eq + Send + 'static,
 {
     type Key = R;
-    type Subscriber = S;
     type Value = V;
+    type Subscriber = S;
 
     /// Deliver data to the consumer.
     ///

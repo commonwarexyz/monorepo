@@ -248,7 +248,7 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Last view processed
+    // Round of the last finalized block acknowledged by the application
     last_processed_round: Round,
     // Last height processed by the application
     last_processed_height: Height,
@@ -644,7 +644,9 @@ where
                                 debug!(?round, %height, "finalized block stored");
                             }
                         } else {
-                            // Otherwise, fetch the block from the network.
+                            // The finalization carries a round and commitment, but
+                            // not a height. Keep the request round-bound until the
+                            // block is decoded.
                             debug!(?round, ?commitment, "finalized block missing");
                             resolver.fetch(Fetch::new(
                                 Request::Block(commitment),
@@ -689,10 +691,11 @@ where
                             continue;
                         }
 
-                        // Trigger a targeted fetch via the resolver
-                        let request = Request::<V::Commitment>::Finalized { height };
                         resolver.fetch_targeted(
-                            Fetch::new(request, Annotation::Finalized(Finalized::ByHeight { height })),
+                            Fetch::new(
+                                Request::<V::Commitment>::Finalized { height },
+                                Annotation::Finalized(Finalized::ByHeight { height }),
+                            ),
                             targets,
                         );
                     }
@@ -926,10 +929,10 @@ where
         // callers that already have a validated pruning height.
         match fallback {
             Fallback::FetchByRound { round } => {
-                if round <= self.last_processed_round {
+                if round < self.last_processed_round {
                     // `last_processed_round` only advances after the application
                     // processes the corresponding finalized block. A round-bound
-                    // certified-parent fetch at or below that floor is only
+                    // certified-parent fetch below that floor is only
                     // proposal-construction assistance for data behind the
                     // processed chain.
                     return;
@@ -947,6 +950,8 @@ where
             }
             Fallback::FetchByCommitment { height } => {
                 if let BlockSubscriptionKey::Commitment(commitment) = key {
+                    // This path is only for accepted ancestry or finalized repair,
+                    // never for a candidate block's immediate parent.
                     if height <= self.last_processed_height {
                         // We already checked local storage. Missing ancestors at or
                         // below the processed floor are no longer useful to request.
@@ -1059,10 +1064,10 @@ where
                     }
                 }
 
-                let finalization = self.cache.get_finalization_for(digest).await;
                 // Round-bound proposal-parent fetches are `Request::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the block belongs in the finalized chain.
+                let finalization = self.cache.get_finalization_for(digest).await;
                 let should_finalize = annotations
                     .iter()
                     .any(|annotation| matches!(annotation, Annotation::Finalized(_)));
@@ -1076,7 +1081,7 @@ where
                     if height > self.last_processed_height {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
-                                .put_certified_block_by_height(
+                                .put_certified(
                                     bounds.epoch(),
                                     height,
                                     digest,
@@ -1090,8 +1095,6 @@ where
                     false
                 };
                 debug!(?digest, %height, "received block");
-                // The delivery result is only request validity. Stale local
-                // subscribers do not make the peer response invalid.
                 response.send_lossy(true);
                 wrote
             }
@@ -1444,21 +1447,23 @@ where
         );
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
-            // Trail the previous processed finalized block by the timeout
+            // Retain view-indexed cache data for a window behind the previously
+            // processed finalized block.
             let lpr = self.last_processed_round;
             let prune_round = Round::new(
                 lpr.epoch(),
                 lpr.view().saturating_sub(self.view_retention_timeout),
             );
 
-            // Prune archives
-            self.cache.prune_by_view(prune_round).await;
+            self.prune_view_cache(prune_round).await;
 
-            // Update the last processed round
+            // This finalization is now the latest finalized block acknowledged by
+            // the application.
             let round = finalization.round();
             self.last_processed_round = round;
 
-            // Prune useless requests.
+            // Prune round-bound certified-parent requests at or below the
+            // processed round.
             resolver.retain(Request::<V::Commitment>::Notarized { round }.predicate());
         }
     }
@@ -1664,7 +1669,7 @@ where
         }
     }
 
-    /// Looks for a block in cache and finalized storage by digest, returning
+    /// Looks for a block in cache and finalized storage by inner digest, returning
     /// only blocks that match `predicate`.
     async fn find_block_in_storage_matching(
         &self,
@@ -1827,9 +1832,10 @@ where
                     // SAFETY: We can rely on this derived parent commitment because
                     // the block is provably a member of the finalized chain due to the end
                     // boundary of the gap being finalized.
-                    let Some(parent_height) = cursor.height().previous() else {
-                        break 'cache_repair;
-                    };
+                    let parent_height = cursor
+                        .height()
+                        .previous()
+                        .expect("cursor above gap start has a parent");
                     resolver.fetch(Fetch::new(
                         Request::Block(parent_commitment),
                         Annotation::Finalized(Finalized::ByHeight {
@@ -1900,6 +1906,11 @@ where
             }
         )?;
         Ok(())
+    }
+
+    /// Prunes view-indexed cache data below the given round.
+    async fn prune_view_cache(&mut self, round: Round) {
+        self.cache.prune_by_view(round).await;
     }
 
     /// Prunes finalized archives and height-indexed certified cache data below the durable floor.

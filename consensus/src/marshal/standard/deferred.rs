@@ -360,10 +360,15 @@ where
                 return;
             }
 
+            // The parent for any consensus context is in the same epoch: the
+            // boundary block of the previous epoch is the genesis block of the
+            // current epoch.
+            //
+            // Proposal context carries the certified parent view/commitment but
+            // not the parent height. The parent may be certified above the
+            // finalized tip, so this must stay round-bound until the block is
+            // returned.
             let (parent_view, parent_digest) = consensus_context.parent;
-            // Proposal context carries the certified parent view/commitment
-            // but not the parent height. The parent may be certified above the
-            // finalized tip, so this must stay round-bound until the block is returned.
             let parent_request = fetch_parent(
                 parent_digest,
                 Fallback::FetchByRound {
