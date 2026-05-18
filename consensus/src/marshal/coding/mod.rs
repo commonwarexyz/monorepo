@@ -1511,10 +1511,7 @@ mod tests {
             );
             let coded_boundary = CodedBlock::new(boundary_block, coding_config, &Sequential);
             let boundary_commitment = coded_boundary.commitment();
-            let reproposal_round = Round::new(
-                Epoch::zero(),
-                View::new(boundary_height.get() + 1),
-            );
+            let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = CodingCtx {
                 round: reproposal_round,
                 leader: me,
