@@ -12,6 +12,7 @@ use commonware_runtime::{
 use commonware_storage::{
     mmr,
     qmdb::{
+        any::sync::Target,
         current as current_qmdb,
         sync::{self, compact},
     },
@@ -73,9 +74,9 @@ struct Config {
 async fn target_update_task<E, Op, D>(
     context: E,
     resolver: Resolver<Op, D>,
-    update_tx: mpsc::Sender<sync::Target<mmr::Family, D>>,
+    update_tx: mpsc::Sender<Target<mmr::Family, D>>,
     interval_duration: Duration,
-    initial_target: sync::Target<mmr::Family, D>,
+    initial_target: Target<mmr::Family, D>,
 ) -> Result<(), Error>
 where
     E: Clock,
@@ -135,8 +136,8 @@ where
         E,
         Config,
         Resolver<Op, Key>,
-        sync::Target<mmr::Family, Key>,
-        mpsc::Receiver<sync::Target<mmr::Family, Key>>,
+        Target<mmr::Family, Key>,
+        mpsc::Receiver<Target<mmr::Family, Key>>,
         u32,
     ) -> SyncFut,
     SyncFut: Future<Output = Result<DB, Box<dyn std::error::Error>>>,
