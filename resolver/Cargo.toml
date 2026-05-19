@@ -25,6 +25,7 @@ commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
+loom = { workspace = true, optional = true }
 rand.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -44,6 +45,7 @@ bench = false
 
 [features]
 mocks = [ "commonware-cryptography/mocks", "commonware-p2p/mocks" ]
+loom = [ "dep:loom" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
