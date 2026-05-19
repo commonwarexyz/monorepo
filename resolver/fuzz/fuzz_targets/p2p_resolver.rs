@@ -7,7 +7,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_p2p::{
-    simulated::{Link, Network},
+    simulated::{Error as NetworkError, Link, Network},
     Manager as _,
 };
 use commonware_resolver::{
@@ -20,9 +20,9 @@ use commonware_resolver::{
 use commonware_runtime::{
     deterministic, telemetry::metrics::count_running_tasks, Clock, Quota, Runner, Supervisor as _,
 };
-use commonware_utils::{ordered::Set, vec::NonEmptyVec, NZUsize};
+use commonware_utils::{ordered::Set, vec::NonEmptyVec, FuzzRng, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroUsize},
@@ -30,6 +30,10 @@ use std::{
 };
 
 const MAX_OPERATIONS: usize = 256;
+// Keeps runtime RNG snapshots bounded; cargo-fuzz defaults to 4096-byte inputs.
+const MAX_RAW_BYTES: usize = 32_768;
+const OPERATION_BYTE_COST_ESTIMATE: usize = 5;
+const PREAMBLE_BYTE_RESERVE: usize = 16;
 const MIN_PEERS: usize = 3;
 const MAX_PEERS: usize = 8;
 const MAX_INITIAL_ITEMS: usize = 32;
@@ -61,6 +65,13 @@ const TRACKED_PEER_SETS: usize = 8;
 const TASK_SETTLE_MS: u64 = 100;
 const TRACK_MIN_ID: u64 = 1;
 const TRACK_ALL_ID: u64 = u64::MAX;
+const MAX_TRACK_ID: u64 = 1024;
+const DEFAULT_SUCCESS_RATE_PERCENT: u8 = MAX_SUCCESS_RATE_PERCENT;
+const DEFAULT_MAILBOX_SIZE: usize = MAX_MAILBOX_SIZE;
+const DEFAULT_QUOTA_PER_SECOND: u32 = MAX_QUOTA_PER_SECOND;
+const DEFAULT_FETCH_TIMEOUT_MS: u64 = MAX_FETCH_TIMEOUT_MS;
+// Keep in sync with the match arms in Operation::arbitrary.
+const OPERATION_VARIANTS: u8 = 12;
 
 #[derive(Clone, Debug)]
 struct Item {
@@ -125,16 +136,17 @@ enum Operation {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 struct TargetedRequest {
     key: u8,
+    #[arbitrary(with = arbitrary_peer)]
     target: usize,
     target_mask: u8,
 }
 
 #[derive(Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
+    raw_bytes: Vec<u8>,
     peers: usize,
     latency_ms: u64,
     jitter_ms: u64,
@@ -153,127 +165,201 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for Item {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let value_len = u.int_in_range(0..=MAX_VALUE_LEN)?;
+        let key = u.arbitrary()?;
+        let value_len = u.int_in_range(0..=MAX_VALUE_LEN.min(u.len().saturating_sub(1)))?;
         Ok(Self {
-            key: u.arbitrary()?,
+            key,
             value: u.bytes(value_len)?.to_vec(),
         })
     }
 }
 
+fn arbitrary_peer(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
+    u.int_in_range(0..=MAX_PEERS - 1)
+}
+
+fn arbitrary_divisor(u: &mut Unstructured<'_>) -> arbitrary::Result<u8> {
+    u.int_in_range(2..=u8::MAX)
+}
+
+fn arbitrary_sleep_duration(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+    u.int_in_range(MIN_SLEEP_DURATION_MS..=MAX_SLEEP_DURATION_MS)
+}
+
+fn arbitrary_link_latency(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+    u.int_in_range(MIN_LINK_LATENCY_MS..=MAX_LINK_LATENCY_MS)
+}
+
+fn arbitrary_link_jitter(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+    u.int_in_range(0..=MAX_LINK_JITTER_MS)
+}
+
+fn arbitrary_success_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<u8> {
+    u.int_in_range(MIN_SUCCESS_RATE_PERCENT..=MAX_SUCCESS_RATE_PERCENT)
+}
+
+fn arbitrary_track_id(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+    u.int_in_range(TRACK_MIN_ID..=MAX_TRACK_ID)
+}
+
+fn arbitrary_completion_window(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+    u.int_in_range(MIN_COMPLETION_WINDOW_MS..=MAX_COMPLETION_WINDOW_MS)
+}
+
+fn arbitrary_keys(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+    let max = MAX_BATCH_ITEMS.min(u.len().saturating_sub(1).max(1));
+    let count = u.int_in_range(1..=max)?;
+    (0..count).map(|_| u.arbitrary()).collect()
+}
+
+fn arbitrary_requests(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<TargetedRequest>> {
+    let max = MAX_BATCH_ITEMS.min((u.len().saturating_sub(1) / 3).max(1));
+    let count = u.int_in_range(1..=max)?;
+    (0..count).map(|_| u.arbitrary()).collect()
+}
+
+fn arbitrary_operations(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<Operation>> {
+    let max = MAX_OPERATIONS
+        .min((u.len().saturating_sub(PREAMBLE_BYTE_RESERVE) / OPERATION_BYTE_COST_ESTIMATE).max(1));
+    let count = u.int_in_range(1..=max)?;
+    (0..count).map(|_| Operation::arbitrary(u)).collect()
+}
+
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        match u.int_in_range(0..=11)? {
+        let variant = u.int_in_range(0..=OPERATION_VARIANTS - 1)?;
+        match variant {
             0 => Ok(Self::Fetch {
-                peer: u.arbitrary()?,
+                peer: arbitrary_peer(u)?,
                 key: u.arbitrary()?,
             }),
-            1 => {
-                let count = u.int_in_range(0..=MAX_BATCH_ITEMS)?;
-                let mut keys = Vec::with_capacity(count);
-                for _ in 0..count {
-                    keys.push(u.arbitrary()?);
-                }
-                Ok(Self::FetchAll {
-                    peer: u.arbitrary()?,
-                    keys,
-                })
-            }
+            1 => Ok(Self::FetchAll {
+                peer: arbitrary_peer(u)?,
+                keys: arbitrary_keys(u)?,
+            }),
             2 => Ok(Self::FetchTargeted {
-                peer: u.arbitrary()?,
+                peer: arbitrary_peer(u)?,
                 key: u.arbitrary()?,
-                target: u.arbitrary()?,
+                target: arbitrary_peer(u)?,
                 target_mask: u.arbitrary()?,
             }),
-            3 => {
-                let count = u.int_in_range(0..=MAX_BATCH_ITEMS)?;
-                let mut requests = Vec::with_capacity(count);
-                for _ in 0..count {
-                    requests.push(u.arbitrary()?);
-                }
-                Ok(Self::FetchAllTargeted {
-                    peer: u.arbitrary()?,
-                    requests,
-                })
-            }
+            3 => Ok(Self::FetchAllTargeted {
+                peer: arbitrary_peer(u)?,
+                requests: arbitrary_requests(u)?,
+            }),
             4 => Ok(Self::Cancel {
-                peer: u.arbitrary()?,
+                peer: arbitrary_peer(u)?,
                 key: u.arbitrary()?,
             }),
             5 => Ok(Self::Clear {
-                peer: u.arbitrary()?,
+                peer: arbitrary_peer(u)?,
             }),
             6 => Ok(Self::Retain {
-                peer: u.arbitrary()?,
-                divisor: u.int_in_range(2..=u8::MAX)?,
+                peer: arbitrary_peer(u)?,
+                divisor: arbitrary_divisor(u)?,
                 remainder: u.arbitrary()?,
             }),
             7 => Ok(Self::Sleep {
-                duration_ms: u.int_in_range(MIN_SLEEP_DURATION_MS..=MAX_SLEEP_DURATION_MS)?,
+                duration_ms: arbitrary_sleep_duration(u)?,
             }),
             8 => Ok(Self::Link {
-                from: u.arbitrary()?,
-                to: u.arbitrary()?,
-                latency_ms: u.int_in_range(MIN_LINK_LATENCY_MS..=MAX_LINK_LATENCY_MS)?,
-                jitter_ms: u.int_in_range(0..=MAX_LINK_JITTER_MS)?,
-                success_rate_percent: u
-                    .int_in_range(MIN_SUCCESS_RATE_PERCENT..=MAX_SUCCESS_RATE_PERCENT)?,
+                from: arbitrary_peer(u)?,
+                to: arbitrary_peer(u)?,
+                latency_ms: arbitrary_link_latency(u)?,
+                jitter_ms: arbitrary_link_jitter(u)?,
+                success_rate_percent: arbitrary_success_rate(u)?,
             }),
             9 => Ok(Self::RemoveLink {
-                from: u.arbitrary()?,
-                to: u.arbitrary()?,
+                from: arbitrary_peer(u)?,
+                to: arbitrary_peer(u)?,
             }),
             10 => Ok(Self::Track {
-                id: u.int_in_range(TRACK_MIN_ID..=TRACK_ALL_ID - 1)?,
+                id: arbitrary_track_id(u)?,
                 primary_mask: u.arbitrary()?,
             }),
             _ => Ok(Self::CompleteFetch {
-                peer: u.arbitrary()?,
+                peer: arbitrary_peer(u)?,
                 key: u.arbitrary()?,
-                settle_ms: u.int_in_range(MIN_COMPLETION_WINDOW_MS..=MAX_COMPLETION_WINDOW_MS)?,
+                settle_ms: arbitrary_completion_window(u)?,
             }),
         }
-    }
-}
-
-impl<'a> Arbitrary<'a> for TargetedRequest {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            key: u.arbitrary()?,
-            target: u.arbitrary()?,
-            target_mask: u.arbitrary()?,
-        })
     }
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let seed = u.arbitrary()?;
-        let peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)?;
-        let latency_ms = u.int_in_range(MIN_LINK_LATENCY_MS..=MAX_LINK_LATENCY_MS)?;
-        let jitter_ms = u.int_in_range(0..=MAX_LINK_JITTER_MS)?;
-        let success_rate_percent =
-            u.int_in_range(MIN_SUCCESS_RATE_PERCENT..=MAX_SUCCESS_RATE_PERCENT)?;
-        let mailbox_size = u.int_in_range(MIN_MAILBOX_SIZE..=MAX_MAILBOX_SIZE)?;
-        let quota_per_second = u.int_in_range(MIN_QUOTA_PER_SECOND..=MAX_QUOTA_PER_SECOND)?;
-        let fetch_initial_ms = u.int_in_range(MIN_FETCH_INITIAL_MS..=MAX_FETCH_INITIAL_MS)?;
-        let fetch_timeout_ms = u.int_in_range(MIN_FETCH_TIMEOUT_MS..=MAX_FETCH_TIMEOUT_MS)?;
-        let fetch_retry_timeout_ms =
-            u.int_in_range(MIN_FETCH_RETRY_TIMEOUT_MS..=MAX_FETCH_RETRY_TIMEOUT_MS)?;
-        let completion_window_ms =
-            u.int_in_range(MIN_COMPLETION_WINDOW_MS..=MAX_COMPLETION_WINDOW_MS)?;
-        let item_count = u.int_in_range(1..=MAX_INITIAL_ITEMS)?;
+        let raw_len = u.len().min(MAX_RAW_BYTES);
+        let raw_bytes = if raw_len == 0 {
+            vec![0]
+        } else {
+            u.peek_bytes(raw_len)
+                .expect("raw_len is in bounds")
+                .to_vec()
+        };
+        let operations = arbitrary_operations(u)?;
+        let peers = if u.is_empty() {
+            MIN_PEERS
+        } else {
+            u.int_in_range(MIN_PEERS..=MAX_PEERS)?
+        };
+        let latency_ms = if u.is_empty() {
+            MIN_LINK_LATENCY_MS
+        } else {
+            u.int_in_range(MIN_LINK_LATENCY_MS..=MAX_LINK_LATENCY_MS)?
+        };
+        let jitter_ms = if u.is_empty() {
+            0
+        } else {
+            u.int_in_range(0..=MAX_LINK_JITTER_MS)?
+        };
+        let success_rate_percent = if u.is_empty() {
+            DEFAULT_SUCCESS_RATE_PERCENT
+        } else {
+            u.int_in_range(MIN_SUCCESS_RATE_PERCENT..=MAX_SUCCESS_RATE_PERCENT)?
+        };
+        let mailbox_size = if u.is_empty() {
+            DEFAULT_MAILBOX_SIZE
+        } else {
+            u.int_in_range(MIN_MAILBOX_SIZE..=MAX_MAILBOX_SIZE)?
+        };
+        let quota_per_second = if u.is_empty() {
+            DEFAULT_QUOTA_PER_SECOND
+        } else {
+            u.int_in_range(MIN_QUOTA_PER_SECOND..=MAX_QUOTA_PER_SECOND)?
+        };
+        let fetch_initial_ms = if u.is_empty() {
+            MIN_FETCH_INITIAL_MS
+        } else {
+            u.int_in_range(MIN_FETCH_INITIAL_MS..=MAX_FETCH_INITIAL_MS)?
+        };
+        let fetch_timeout_ms = if u.is_empty() {
+            DEFAULT_FETCH_TIMEOUT_MS
+        } else {
+            u.int_in_range(MIN_FETCH_TIMEOUT_MS..=MAX_FETCH_TIMEOUT_MS)?
+        };
+        let fetch_retry_timeout_ms = if u.is_empty() {
+            MIN_FETCH_RETRY_TIMEOUT_MS
+        } else {
+            u.int_in_range(MIN_FETCH_RETRY_TIMEOUT_MS..=MAX_FETCH_RETRY_TIMEOUT_MS)?
+        };
+        let completion_window_ms = if u.is_empty() {
+            MIN_COMPLETION_WINDOW_MS
+        } else {
+            u.int_in_range(MIN_COMPLETION_WINDOW_MS..=MAX_COMPLETION_WINDOW_MS)?
+        };
+        let priority_requests = !u.is_empty() && u.arbitrary()?;
+        let priority_responses = !u.is_empty() && u.arbitrary()?;
+        let item_count = if u.is_empty() {
+            1
+        } else {
+            u.int_in_range(1..=MAX_INITIAL_ITEMS)?
+        };
         let mut items = Vec::with_capacity(item_count);
         for _ in 0..item_count {
             items.push(u.arbitrary()?);
         }
-        let operation_count = u.int_in_range(1..=MAX_OPERATIONS)?;
-        let mut operations = Vec::with_capacity(operation_count);
-        for _ in 0..operation_count {
-            operations.push(u.arbitrary()?);
-        }
         Ok(Self {
-            seed,
+            raw_bytes,
             peers,
             latency_ms,
             jitter_ms,
@@ -284,8 +370,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             fetch_timeout_ms,
             fetch_retry_timeout_ms,
             completion_window_ms,
-            priority_requests: u.arbitrary()?,
-            priority_responses: u.arbitrary()?,
+            priority_requests,
+            priority_responses,
             items,
             operations,
         })
@@ -325,8 +411,14 @@ fn tracked(peers: &[PublicKey], mask: u8) -> Set<PublicKey> {
 }
 
 fn producer_holds(key: &Key, peer: usize, peers: usize) -> bool {
-    let holder_count = (peers / 2).max(1);
+    let holder_count = peers.div_ceil(2).max(1);
     (key.0 as usize + peer * holder_count) % peers < holder_count
+}
+
+fn remote_holder(key: &Key, requester: usize, peers: usize) -> usize {
+    (0..peers)
+        .find(|peer| *peer != requester && producer_holds(key, *peer, peers))
+        .expect("key must have a remote holder")
 }
 
 fn drain_outputs(
@@ -343,6 +435,25 @@ fn drain_outputs(
     }
 }
 
+async fn set_link(
+    oracle: &commonware_p2p::simulated::Oracle<PublicKey, deterministic::Context>,
+    from: PublicKey,
+    to: PublicKey,
+    link: Link,
+) {
+    match oracle
+        .add_link(from.clone(), to.clone(), link.clone())
+        .await
+    {
+        Ok(()) => {}
+        Err(NetworkError::LinkExists) => {
+            oracle.remove_link(from.clone(), to.clone()).await.unwrap();
+            oracle.add_link(from, to, link).await.unwrap();
+        }
+        Err(err) => panic!("failed to add link: {err}"),
+    }
+}
+
 async fn make_reliable(
     oracle: &commonware_p2p::simulated::Oracle<PublicKey, deterministic::Context>,
     peers: &[PublicKey],
@@ -351,21 +462,18 @@ async fn make_reliable(
     for from in peers {
         for to in peers {
             if from != to {
-                oracle
-                    .add_link(from.clone(), to.clone(), link.clone())
-                    .await
-                    .unwrap();
+                set_link(oracle, from.clone(), to.clone(), link.clone()).await;
             }
         }
     }
 }
 
 fn run(input: FuzzInput) -> String {
-    let executor = deterministic::Runner::seeded(input.seed);
-    executor.start(|context| async move {
-        let mut rng = StdRng::seed_from_u64(input.seed);
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let executor = deterministic::Runner::new(cfg);
+    executor.start(|mut context| async move {
         let schemes = (0..input.peers)
-            .map(|_| PrivateKey::from_seed(rng.gen()))
+            .map(|_| PrivateKey::from_seed(context.gen()))
             .collect::<Vec<_>>();
         let peers = schemes
             .iter()
@@ -518,14 +626,13 @@ fn run(input: FuzzInput) -> String {
                     let from = from % peers.len();
                     let to = to % peers.len();
                     if from != to {
-                        oracle
-                            .add_link(
-                                peers[from].clone(),
-                                peers[to].clone(),
-                                link(latency_ms, jitter_ms, success_rate_percent),
-                            )
-                            .await
-                            .unwrap();
+                        set_link(
+                            &oracle,
+                            peers[from].clone(),
+                            peers[to].clone(),
+                            link(latency_ms, jitter_ms, success_rate_percent),
+                        )
+                        .await;
                     }
                 }
                 Operation::RemoveLink { from, to } => {
@@ -565,10 +672,17 @@ fn run(input: FuzzInput) -> String {
                         .track(0, Set::try_from(peers.clone()).unwrap())
                         .accepted());
                     let index = peer % mailboxes.len();
+                    let quota_window_ms =
+                        (peers.len() as u64 * 1_000).div_ceil(input.quota_per_second as u64);
                     let settle = Duration::from_millis(
                         settle_ms
                             .max(input.completion_window_ms)
-                            .max(input.fetch_timeout_ms + input.fetch_retry_timeout_ms),
+                            .max(input.fetch_timeout_ms + input.fetch_retry_timeout_ms)
+                            .max(
+                                quota_window_ms
+                                    + input.fetch_timeout_ms
+                                    + input.fetch_retry_timeout_ms,
+                            ),
                     );
                     assert!(mailboxes[index].clear().accepted());
                     context.sleep(settle).await;
@@ -577,13 +691,19 @@ fn run(input: FuzzInput) -> String {
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut delivered);
                     let mut oracle_window = vec![BTreeSet::new(); peers.len()];
-                    assert!(mailboxes[index].fetch(key.clone()).accepted());
+                    let holder = remote_holder(&key, index, peers.len());
+                    assert!(mailboxes[index]
+                        .fetch_targeted(key.clone(), NonEmptyVec::new(peers[holder].clone()))
+                        .accepted());
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut oracle_window);
                     for (peer_idx, keys) in oracle_window.iter().enumerate() {
                         delivered[peer_idx].extend(keys.iter().cloned());
                     }
-                    assert!(oracle_window[index].contains(&key));
+                    assert!(
+                        oracle_window[index].contains(&key),
+                        "missing oracle delivery: index={index}, holder={holder}, key={key:?}"
+                    );
                 }
             }
             drain_outputs(&mut outputs, &expected, &mut delivered);
