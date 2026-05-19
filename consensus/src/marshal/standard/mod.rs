@@ -43,6 +43,7 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
+            ancestry::BlockProvider,
             config::Config,
             core::{cache, Actor, CommitmentFallback, Mailbox},
             mocks::{
@@ -104,6 +105,12 @@ mod tests {
         sync::Arc,
         time::Duration,
     };
+
+    #[test]
+    fn mailbox_provides_application_blocks() {
+        fn assert_provider<P: BlockProvider<Block = B>>() {}
+        assert_provider::<Mailbox<S, Standard<B>>>();
+    }
 
     fn assert_finalize_deterministic<H: TestHarness>(
         seed: u64,

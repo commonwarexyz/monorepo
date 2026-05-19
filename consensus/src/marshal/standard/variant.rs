@@ -4,13 +4,16 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    marshal::core::{Buffer, Variant},
+    marshal::{
+        ancestry::BlockProvider,
+        core::{Buffer, DigestFallback, Mailbox, Variant},
+    },
     types::Round,
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::Read;
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 
@@ -87,5 +90,19 @@ where
 
     fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
         Broadcaster::broadcast(self, recipients, block);
+    }
+}
+
+impl<S, B> BlockProvider for Mailbox<S, Standard<B>>
+where
+    S: Scheme,
+    B: Block,
+{
+    type Block = B;
+
+    async fn subscribe(self, digest: B::Digest) -> Option<Self::Block> {
+        self.subscribe_by_digest(digest, DigestFallback::Wait)
+            .await
+            .ok()
     }
 }

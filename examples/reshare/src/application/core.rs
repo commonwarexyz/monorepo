@@ -113,7 +113,7 @@ where
     async fn verify(
         &mut self,
         _: (E, Self::Context),
-        _: impl Stream<Item = Self::Block> + Send,
+        _: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
     ) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).

@@ -119,7 +119,6 @@ mod tests {
     #[test]
     fn mailbox_provides_application_blocks() {
         fn assert_provider<P: BlockProvider<Block = CodingB>>() {}
-
         assert_provider::<core::Mailbox<S, TestCodingVariant>>();
     }
 
