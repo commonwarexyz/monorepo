@@ -1347,7 +1347,8 @@ mod tests {
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Metrics as _, Runner, Storage, Supervisor as _,
+        buffer::paged::{Append, CacheRef},
+        deterministic, Metrics as _, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
@@ -2381,6 +2382,139 @@ mod tests {
             ));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_init_persists_offsets_trailing_item_repair() {
+        let executor = deterministic::Runner::default();
+        let ((offsets_blob_partition, expected_size), checkpoint) =
+            executor.start_and_recover(|context| async move {
+                let cfg = Config {
+                    partition: "offsets-init-repair-sync".into(),
+                    items_per_section: NZU64!(10),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    write_buffer: NZUsize!(1024),
+                };
+                let offsets_blob_partition = format!("{}-blobs", cfg.offsets_partition());
+                let expected_size = 2 * std::mem::size_of::<u64>() as u64;
+
+                let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                journal.append(&10).await.unwrap();
+                journal.append(&20).await.unwrap();
+                journal.sync().await.unwrap();
+                drop(journal);
+
+                let (blob, raw_size) = context
+                    .open(&offsets_blob_partition, &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let append = Append::new(
+                    blob,
+                    raw_size,
+                    2048,
+                    CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                )
+                .await
+                .unwrap();
+                assert_eq!(append.size().await, expected_size);
+                append.resize(expected_size + 1).await.unwrap();
+                append.sync().await.unwrap();
+                drop(append);
+
+                let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds().await, 0..2);
+                drop(journal);
+
+                (offsets_blob_partition, expected_size)
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let (blob, raw_size) = context
+                .open(&offsets_blob_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            let append = Append::new(
+                blob,
+                raw_size,
+                2048,
+                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(append.size().await, expected_size);
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_init_persists_data_tail_repair() {
+        let executor = deterministic::Runner::default();
+        let ((data_partition, expected_size), checkpoint) =
+            executor.start_and_recover(|context| async move {
+                let cfg = Config {
+                    partition: "data-init-repair-sync".into(),
+                    items_per_section: NZU64!(10),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    write_buffer: NZUsize!(1024),
+                };
+                let data_partition = cfg.data_partition();
+
+                let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                journal.append(&10).await.unwrap();
+                journal.append(&20).await.unwrap();
+                journal.sync().await.unwrap();
+                drop(journal);
+
+                let (blob, raw_size) = context
+                    .open(&data_partition, &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let append = Append::new(
+                    blob,
+                    raw_size,
+                    2048,
+                    CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                )
+                .await
+                .unwrap();
+                let expected_size = append.size().await;
+                append.append(&[0xFF, 0xFF]).await.unwrap();
+                append.sync().await.unwrap();
+                drop(append);
+
+                let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds().await, 0..2);
+                drop(journal);
+
+                (data_partition, expected_size)
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let (blob, raw_size) = context
+                .open(&data_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            let append = Append::new(
+                blob,
+                raw_size,
+                2048,
+                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(append.size().await, expected_size);
         });
     }
 

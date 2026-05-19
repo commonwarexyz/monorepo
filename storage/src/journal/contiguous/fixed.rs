@@ -673,6 +673,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 .journal
                 .rewind(repair.section, repair.byte_offset)
                 .await?;
+            inner.journal.sync(repair.section).await?;
         }
 
         let tail_section = size / items_per_blob;
@@ -1396,6 +1397,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
+        buffer::paged::Append,
         deterministic::{self, Context},
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Storage, Supervisor as _,
     };
@@ -2059,6 +2061,67 @@ mod tests {
                 Err(Error::ItemOutOfRange(3))
             ));
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_persists_trailing_item_repair() {
+        let executor = deterministic::Runner::default();
+        let ((blob_partition, expected_size), checkpoint) =
+            executor.start_and_recover(|context| async move {
+                let cfg = test_cfg(&context, NZU64!(5));
+                let blob_partition = blob_partition(&cfg);
+                let journal = Journal::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+                for i in 0..3 {
+                    journal.append(&test_digest(i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+                drop(journal);
+
+                let (blob, raw_size) = context
+                    .open(&blob_partition, &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let append = Append::new(
+                    blob,
+                    raw_size,
+                    2048,
+                    CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                )
+                .await
+                .unwrap();
+                let logical_size = append.size().await;
+                assert_eq!(logical_size, 3 * Digest::SIZE as u64);
+                append.resize(logical_size - 1).await.unwrap();
+                append.sync().await.unwrap();
+                drop(append);
+
+                let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.size().await, 2);
+                drop(journal);
+
+                (blob_partition, 2 * Digest::SIZE as u64)
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let (blob, raw_size) = context
+                .open(&blob_partition, &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            let append = Append::new(
+                blob,
+                raw_size,
+                2048,
+                CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            )
+            .await
+            .unwrap();
+            assert_eq!(append.size().await, expected_size);
         });
     }
 
