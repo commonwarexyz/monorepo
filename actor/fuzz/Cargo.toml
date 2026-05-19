@@ -15,9 +15,19 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
 
+[lib]
+bench = false
+
 [[bin]]
-name = "mailbox"
-path = "fuzz_targets/mailbox.rs"
+name = "mailbox_fifo"
+path = "fuzz_targets/mailbox_fifo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mailbox_coalesce"
+path = "fuzz_targets/mailbox_coalesce.rs"
 test = false
 doc = false
 bench = false

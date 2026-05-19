@@ -1,10 +1,7 @@
-#![no_main]
-
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_actor::{mailbox, Feedback};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor};
 use commonware_utils::sync::Mutex;
-use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -85,7 +82,7 @@ impl<'a> Arbitrary<'a> for Operation {
         match u.int_in_range(0..=MAX_OPERATION_INDEX)? {
             0 => Ok(Self::Enqueue(EnqueueInput::arbitrary(u)?)),
             1 => {
-                let len = u.int_in_range(0..=MAX_BATCH_MESSAGES)?;
+                let len = u.int_in_range(1..=MAX_BATCH_MESSAGES)?;
                 let messages = (0..len)
                     .map(|_| EnqueueInput::arbitrary(u))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -140,27 +137,45 @@ impl<'a> Arbitrary<'a> for CoalesceInput {
 }
 
 #[derive(Debug)]
-struct FuzzInput {
+pub struct FifoInput {
     capacity: usize,
     operations: Vec<Operation>,
+}
+
+#[derive(Debug)]
+pub struct CoalesceFuzzInput {
+    capacity: usize,
     coalesce: Vec<CoalesceInput>,
 }
 
-impl<'a> Arbitrary<'a> for FuzzInput {
+fn arbitrary_operations(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<Operation>> {
+    let operations_len = u.int_in_range(1..=MAX_OPERATIONS)?;
+    (0..operations_len)
+        .map(|_| Operation::arbitrary(u))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn arbitrary_coalesce(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<CoalesceInput>> {
+    let coalesce_len = u.int_in_range(1..=MAX_OPERATIONS)?;
+    (0..coalesce_len)
+        .map(|_| CoalesceInput::arbitrary(u))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+impl<'a> Arbitrary<'a> for FifoInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let capacity = u.int_in_range(1..=MAX_CAPACITY)?;
-        let operations_len = u.int_in_range(0..=MAX_OPERATIONS)?;
-        let operations = (0..operations_len)
-            .map(|_| Operation::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
-        let coalesce_len = u.int_in_range(0..=MAX_OPERATIONS)?;
-        let coalesce = (0..coalesce_len)
-            .map(|_| CoalesceInput::arbitrary(u))
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            capacity,
-            operations,
-            coalesce,
+            capacity: u.int_in_range(1..=MAX_CAPACITY)?,
+            operations: arbitrary_operations(u)?,
+        })
+    }
+}
+
+impl<'a> Arbitrary<'a> for CoalesceFuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            capacity: u.int_in_range(1..=MAX_CAPACITY)?,
+            coalesce: arbitrary_coalesce(u)?,
         })
     }
 }
@@ -553,14 +568,16 @@ where
     );
 }
 
-fn fuzz(input: FuzzInput) {
+pub fn fuzz_fifo(input: FifoInput) {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         run_fifo(context.child("fifo"), input.capacity, input.operations).await;
-        run_coalesce(context.child("coalesce"), input.capacity, input.coalesce).await;
     });
 }
 
-fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
-});
+pub fn fuzz_coalesce(input: CoalesceFuzzInput) {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        run_coalesce(context.child("coalesce"), input.capacity, input.coalesce).await;
+    });
+}
