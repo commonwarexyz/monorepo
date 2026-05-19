@@ -1,7 +1,7 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{Application, Block, EpochProvider, Provider},
+    application::{genesis, Application, Block, EpochProvider, Provider},
     dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
@@ -260,6 +260,7 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
+        let genesis = genesis::<H, C, V>();
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -267,6 +268,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: marshal::Start::Genesis(genesis),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(

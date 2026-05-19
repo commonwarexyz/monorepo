@@ -138,7 +138,6 @@ where
         CommitmentFallback::FetchByRound {
             round: Round::new(context.epoch(), parent_view),
         },
-        application,
         marshal,
     )
     .await;
@@ -204,8 +203,8 @@ where
 
 /// Fetches the parent block given its commitment and missing-block behavior.
 ///
-/// If the commitment matches genesis, returns genesis directly. Otherwise, subscribes
-/// to marshal for parent availability according to `fallback`.
+/// If the parent is already available locally, returns it directly. Otherwise,
+/// subscribes to marshal for parent availability according to `fallback`.
 ///
 /// Use `FetchByRound` for certified parent lookups when the caller knows the
 /// certified parent round and commitment, such as proposal construction or
@@ -218,25 +217,23 @@ where
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.
 #[inline]
-pub(super) async fn fetch_parent<E, S, A, B>(
+pub(super) async fn fetch_parent<S, B>(
     parent_commitment: B::Digest,
     fallback: CommitmentFallback,
-    application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
-    let genesis = application.genesis().await;
-    if parent_commitment == <Standard<B> as Variant>::commitment(&genesis) {
-        Either::Left(ready(Ok(genesis)))
-    } else {
-        let receiver = marshal.subscribe_by_commitment(parent_commitment, fallback);
-        Either::Right(receiver)
+    if let Some(parent) = marshal.get_block(&parent_commitment).await {
+        if parent_commitment == <Standard<B> as Variant>::commitment(&parent) {
+            return Either::Left(ready(Ok(parent)));
+        }
     }
+
+    let receiver = marshal.subscribe_by_commitment(parent_commitment, fallback);
+    Either::Right(receiver)
 }
 
 #[cfg(test)]

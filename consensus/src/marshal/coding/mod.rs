@@ -71,7 +71,7 @@ mod tests {
                 types::{coding_config_for_participants, CodedBlock},
                 Coding, Marshaled, MarshaledConfig,
             },
-            config::Config,
+            config::{Config, Start},
             core,
             mocks::{
                 application::Application,
@@ -302,6 +302,7 @@ mod tests {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),

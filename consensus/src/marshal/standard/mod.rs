@@ -43,7 +43,7 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            config::Config,
+            config::{Config, Start},
             core::{cache, Actor, CommitmentFallback, Mailbox},
             mocks::{
                 application::Application,
@@ -93,7 +93,7 @@ mod tests {
     };
     use commonware_utils::{
         acknowledgement::Exact,
-        channel::{fallible::OneshotExt, oneshot},
+        channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
         ordered::Set,
         sync::Mutex,
         vec::NonEmptyVec,
@@ -2749,9 +2749,38 @@ mod tests {
         R: Reporter<Activity = Update<B>>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
+        start_standard_actor_with_start(
+            context,
+            partition_prefix,
+            provider,
+            application,
+            buffer,
+            Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+        )
+        .await
+    }
+
+    async fn start_standard_actor_with_start<R, Buf>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        application: R,
+        buffer: Buf,
+        start: Start<S, D, B>,
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        Buf,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    )
+    where
+        R: Reporter<Activity = Update<B>>,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
+    {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            start,
             mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2834,6 +2863,79 @@ mod tests {
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_start_floor_fetches_async_and_serves_requests() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let (application, mut started_rx) = HoldingBlockReporter::new();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor_with_start(
+                context.child("validator"),
+                "start-floor-async",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                RecordingBuffer::default(),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor block fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&floor_block)
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let served = make_raw_block(Sha256::hash(b"served-parent"), Height::new(1), 100);
+            let served_round = Round::new(Epoch::zero(), View::new(1));
+            assert!(mailbox.verified(served_round, served.clone()).await);
+            let (response, response_rx) = oneshot::channel();
+            resolver.enqueue(handler::Message::Produce {
+                key: handler::Key::Block(StandardHarness::commitment(&served)),
+                response,
+            });
+            assert_eq!(response_rx.await.unwrap(), served.encode());
+
+            let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
+            let next_round = Round::new(Epoch::zero(), View::new(6));
+            assert!(mailbox.verified(next_round, next.clone()).await);
+            let next_finalization = StandardHarness::make_finalization(
+                Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
+                &schemes,
+                QUORUM,
+            );
+            let mut mailbox_for_report = mailbox.clone();
+            StandardHarness::report_finalization(&mut mailbox_for_report, next_finalization).await;
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+
+            assert!(mailbox.verified(floor_round, floor_block).await);
+            assert_eq!(started_rx.await.unwrap(), Height::new(6));
+        });
     }
 
     #[test_traced("WARN")]
@@ -3163,8 +3265,6 @@ mod tests {
                 RecordingBuffer::default(),
             )
             .await;
-            let mut mailbox = mailbox;
-
             let missing = Sha256::hash(b"missing-before-set-floor");
             let _subscription = mailbox
                 .subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
@@ -3180,9 +3280,8 @@ mod tests {
             )
             .await;
 
-            mailbox.set_floor(Height::new(1));
+            mailbox.set_floor(finalization.clone());
             assert!(mailbox.verified(round, block.clone()).await);
-            StandardHarness::report_finalization(&mut mailbox, finalization).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -3247,6 +3346,7 @@ mod tests {
             let config = Config {
                 provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 mailbox_size: NZUsize!(100),
                 view_retention_timeout: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
@@ -3769,7 +3869,25 @@ mod tests {
             .await;
 
             // Raise the floor above the hint we are about to send.
-            mailbox.set_floor(Height::new(10));
+            let floor_anchor = StandardHarness::make_test_block(
+                Sha256::hash(b"floor-parent"),
+                StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                Height::new(10),
+                10,
+                NUM_VALIDATORS as u16,
+            );
+            let floor_round = Round::new(Epoch::zero(), View::new(10));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(9),
+                    StandardHarness::commitment(&floor_anchor),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(finalization);
+            assert!(mailbox.verified(floor_round, floor_anchor).await);
             context.sleep(Duration::from_millis(50)).await;
 
             mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));

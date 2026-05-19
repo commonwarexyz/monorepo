@@ -23,8 +23,8 @@
 //! ### Genesis
 //!
 //! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
-//! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
-//! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//! [`Config::floor`](config::Config::floor) supplies the initial finalized state. Voting begins
+//! at view 1, with the first proposal referencing genesis as its parent.
 //!
 //! ### Specification for View `v`
 //!
@@ -347,7 +347,7 @@ cfg_if::cfg_if! {
 
         mod actors;
         pub mod config;
-        pub use config::{Config, ForwardingPolicy};
+        pub use config::{Config, Floor, ForwardingPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
@@ -812,6 +812,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -1068,6 +1072,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -1227,6 +1235,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -1388,6 +1400,10 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -1572,6 +1588,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -1691,6 +1711,10 @@ mod tests {
                 partition: me.to_string(),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
+
+                floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
@@ -1828,6 +1852,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2063,6 +2091,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2231,6 +2263,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2432,6 +2468,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2628,6 +2668,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2880,6 +2924,10 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -3059,6 +3107,10 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -3233,6 +3285,10 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -3445,6 +3501,7 @@ mod tests {
                 partition: me.to_string(),
                 mailbox_size: NZUsize!(1),
                 epoch,
+                floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
@@ -3562,6 +3619,10 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -3726,6 +3787,10 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -3817,6 +3882,10 @@ mod tests {
                 partition: validator.to_string(),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
+
+                floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
@@ -4044,6 +4113,10 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -4200,6 +4273,10 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -4373,6 +4450,10 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -4512,6 +4593,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -4674,6 +4759,10 @@ mod tests {
                 partition: participants[0].clone().to_string(),
                 mailbox_size: NZUsize!(64),
                 epoch: Epoch::new(333),
+
+                floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_millis(50),
                 certification_timeout: Duration::from_millis(100),
                 timeout_retry: Duration::from_millis(250),
@@ -4899,6 +4988,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -5253,6 +5346,10 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(10),
                         certification_timeout: Duration::from_secs(10),
                         timeout_retry: Duration::from_secs(10),
@@ -5467,6 +5564,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_millis(100),
                     certification_timeout: Duration::from_millis(200),
                     timeout_retry: Duration::from_millis(500),
@@ -5610,6 +5711,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -5709,6 +5814,10 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+
+                    floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -6207,6 +6316,10 @@ mod tests {
                             partition,
                             mailbox_size: NZUsize!(1024),
                             epoch: Epoch::new(333),
+
+                            floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                                Epoch::new(333),
+                            )),
                             leader_timeout: Duration::from_secs(1),
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
@@ -6274,6 +6387,10 @@ mod tests {
                         partition,
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+
+                        floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),

@@ -391,6 +391,8 @@ where
         partition: validator.to_string(),
         mailbox_size: NZUsize!(1024),
         epoch: Epoch::new(EPOCH),
+
+        floor: config::Floor::genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
         leader_timeout,
         certification_timeout,
         timeout_retry: Duration::from_secs(10),
@@ -634,6 +636,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 partition: format!("twin_{idx}_primary"),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(EPOCH),
+
+                floor: config::Floor::genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_millis(1_500),
                 timeout_retry: Duration::from_secs(10),

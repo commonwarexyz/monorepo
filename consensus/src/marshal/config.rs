@@ -1,11 +1,27 @@
 use crate::{
+    simplex::types::Finalization,
     types::{Epoch, Epocher, ViewDelta},
     Block,
 };
-use commonware_cryptography::certificate::Provider;
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest, Digestible,
+};
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
+
+/// Startup anchor for marshal.
+pub enum Start<S: Scheme, C: Digest, B: Block> {
+    /// Start from the height-zero genesis block.
+    Genesis(B),
+    /// Start from an already-processed finalized commitment.
+    ///
+    /// Marshal enters a pending-floor pre-start phase and fetches the
+    /// corresponding block asynchronously. Until the block is available, marshal
+    /// can serve local requests but will not dispatch application blocks.
+    Floor(Finalization<S, C>),
+}
 
 /// Marshal configuration.
 ///
@@ -26,9 +42,11 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// height passes a prune target. The last processed height can be
 /// derived from an `Update::Block` at height `H` as
 /// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
-pub struct Config<B, P, ES, T>
+pub struct Config<A, P, ES, T, B = A, C = <B as Digestible>::Digest>
 where
+    A: Block,
     B: Block,
+    C: Digest,
     P: Provider<Scope = Epoch>,
     ES: Epocher,
     T: Strategy,
@@ -42,6 +60,13 @@ where
     ///
     /// Must cover every height the marshal will sync.
     pub epocher: ES,
+
+    /// Startup anchor.
+    ///
+    /// `Genesis` seeds the height-zero parent for fresh starts. `Floor` starts
+    /// from a finalization and asynchronously fetches the corresponding block
+    /// before leaving marshal's pending-floor pre-start phase.
+    pub start: Start<P::Scheme, C, B>,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
@@ -70,7 +95,7 @@ where
     pub value_write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
-    pub block_codec_config: B::Cfg,
+    pub block_codec_config: A::Cfg,
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,

@@ -55,7 +55,7 @@ use crate::{
         Update,
     },
     simplex::{types::Context, Plan},
-    types::{Epoch, Epocher, Round},
+    types::{Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
 };
 use commonware_actor::Feedback;
@@ -208,26 +208,6 @@ where
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
 
-    /// Returns the genesis digest for `epoch`.
-    ///
-    /// For epoch zero, returns the application genesis digest. For later epochs,
-    /// uses the previous epoch's terminal block from marshal storage.
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        if epoch.is_zero() {
-            return self.application.genesis().await.digest();
-        }
-
-        let prev = epoch.previous().expect("checked to be non-zero above");
-        let last_height = self
-            .epocher
-            .last(prev)
-            .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await else {
-            unreachable!("missing starting epoch block at height {}", last_height);
-        };
-        block.digest()
-    }
-
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest.
@@ -287,7 +267,6 @@ where
                 CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
-                &mut application,
                 &mut marshal,
             )
             .await;

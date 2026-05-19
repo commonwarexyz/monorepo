@@ -7,7 +7,7 @@ use crate::{
     marshal::{
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
-        Config, Identifier as BlockID, Update,
+        Config, Identifier as BlockID, Start, Update,
     },
     simplex::{
         scheme::Scheme,
@@ -313,6 +313,10 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
+    // Startup floor to apply once the resolver and buffer are available.
+    startup_floor: Option<Finalization<P::Scheme, V::Commitment>>,
+    // Unresolved floor finalization whose block anchor is still being fetched.
+    pending_floor: Option<Finalization<P::Scheme, V::Commitment>>,
     // Last processed height and round
     floor: Floor,
     // Pending application acknowledgements
@@ -358,8 +362,8 @@ where
     pub async fn init(
         context: E,
         finalizations_by_height: FC,
-        finalized_blocks: FB,
-        config: Config<V::ApplicationBlock, P, ES, T>,
+        mut finalized_blocks: FB,
+        config: Config<V::ApplicationBlock, P, ES, T, V::Block, V::Commitment>,
     ) -> (Self, Mailbox<P::Scheme, V>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
@@ -391,6 +395,34 @@ where
             .get(&LATEST_KEY)
             .copied()
             .unwrap_or(Height::zero());
+
+        let startup_floor = match config.start {
+            Start::Genesis(anchor) => {
+                assert_eq!(
+                    anchor.height(),
+                    Height::zero(),
+                    "genesis anchor must be at height zero"
+                );
+                let anchor_height = anchor.height();
+                if anchor_height < last_processed_height {
+                    warn!(
+                        height = %anchor_height,
+                        existing = %last_processed_height,
+                        "startup anchor below existing processed height, ignoring"
+                    );
+                } else {
+                    if let Err(err) = finalized_blocks.put(anchor.into()).await {
+                        panic!("failed to store startup anchor: {err}");
+                    }
+                    if let Err(err) = finalized_blocks.sync().await {
+                        panic!("failed to sync startup anchor: {err}");
+                    }
+                }
+                None
+            }
+            Start::Floor(finalization) => Some(finalization),
+        };
+
         let last_processed_round =
             Self::latest_processed_round(&finalizations_by_height, last_processed_height).await;
 
@@ -412,6 +444,8 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
+                startup_floor,
+                pending_floor: None,
                 floor: Floor {
                     height: last_processed_height,
                     round: last_processed_round,
@@ -477,6 +511,16 @@ where
         // Load persisted cache epochs so find_block can discover blocks
         // written before the last shutdown.
         self.cache.load_persisted_epochs().await;
+
+        if let Some(finalization) = self.startup_floor.take() {
+            if let Err(err) = self
+                .handle_set_floor(finalization, &mut resolver, &mut buffer, &mut application)
+                .await
+            {
+                error!(?err, "failed to initialize marshal floor");
+                return;
+            }
+        }
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
         if self
@@ -628,8 +672,18 @@ where
                         // `cache_verified` is a no-op because the round is below
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
-                        self.cache_verified(round, block.digest(), block.clone())
-                            .await;
+                        self.cache_verified(round, block.digest(), block.clone()).await;
+                        if let Err(err) = self
+                            .try_apply_pending_floor(
+                                block.clone(),
+                                &mut application,
+                                &mut resolver,
+                            )
+                            .await
+                        {
+                            error!(?err, "failed to apply pending floor");
+                            return;
+                        }
                         // Retain the block in memory so the subsequent
                         // `Forward` can broadcast it without reloading from
                         // storage. An older retained proposal (if any) is
@@ -643,7 +697,14 @@ where
                         // `cache_verified` is a no-op because the round is below
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
-                        self.cache_verified(round, block.digest(), block).await;
+                        self.cache_verified(round, block.digest(), block.clone()).await;
+                        if let Err(err) = self
+                            .try_apply_pending_floor(block, &mut application, &mut resolver)
+                            .await
+                        {
+                            error!(?err, "failed to apply pending floor");
+                            return;
+                        }
                         ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Certified { round, block, ack } => {
@@ -651,7 +712,14 @@ where
                         // `cache_block` is a no-op because the round is below
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
-                        self.cache_block(round, block.digest(), block).await;
+                        self.cache_block(round, block.digest(), block.clone()).await;
+                        if let Err(err) = self
+                            .try_apply_pending_floor(block, &mut application, &mut resolver)
+                            .await
+                        {
+                            error!(?err, "failed to apply pending floor");
+                            return;
+                        }
                         ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Notarization { notarization } => {
@@ -691,6 +759,22 @@ where
                         if let Some(block) =
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
+                            if self.pending_floor_matches(&finalization, &block) {
+                                if let Err(err) = self
+                                    .apply_floor_anchor(
+                                        finalization,
+                                        block,
+                                        &mut application,
+                                        &mut resolver,
+                                    )
+                                    .await
+                                {
+                                    error!(?err, "failed to apply pending floor");
+                                    return;
+                                }
+                                continue;
+                            }
+
                             // If found, persist the block
                             let height = block.height();
                             self.update_processed_round_floor(height, round, &mut resolver)
@@ -705,8 +789,12 @@ where
                                 )
                                 .await
                             {
-                                self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-                                    .await;
+                                self.try_repair_gaps(
+                                    &mut buffer,
+                                    &mut resolver,
+                                    &mut application,
+                                )
+                                .await;
                                 self.sync_finalized().await;
                                 self.try_dispatch_blocks(&mut application).await;
                                 debug!(?round, %height, "finalized block stored");
@@ -799,38 +887,19 @@ where
                         )
                         .await;
                     }
-                    Message::SetFloor { height } => {
-                        if self.floor.height >= height {
-                            warn!(
-                                %height,
-                                existing = %self.floor.height,
-                                "floor not updated, lower than existing"
-                            );
-                            continue;
-                        }
-
-                        // Update the processed floor
-                        self.update_processed_height(height, &mut resolver);
-                        self.update_processed_round(height, &mut resolver).await;
-                        if let Err(err) = self.application_metadata.sync().await {
-                            error!(?err, %height, "failed to update floor");
+                    Message::SetFloor { finalization } => {
+                        if let Err(err) = self
+                            .handle_set_floor(
+                                finalization,
+                                &mut resolver,
+                                &mut buffer,
+                                &mut application,
+                            )
+                            .await
+                        {
+                            error!(?err, "failed to set floor");
                             return;
                         }
-
-                        // Drop all pending acknowledgements. We must do this to prevent
-                        // an in-process block from being processed that is below the new floor
-                        // updating `floor.height`.
-                        self.pending_acks.clear();
-
-                        // The floor is durable, so cache/finalized data below it can be pruned.
-                        if let Err(err) = self.prune_after_floor(height).await {
-                            error!(?err, %height, "failed to prune data below floor");
-                            return;
-                        }
-
-                        // Intentionally keep existing block subscriptions alive. Canceling
-                        // waiters can have catastrophic consequences (nodes can get stuck in
-                        // different views) as actors do not retry subscriptions on failed channels.
                     }
                     Message::Prune { height } => {
                         // Only allow pruning at or below the current floor
@@ -1097,6 +1166,190 @@ where
             .fetch_if_permitted(resolver, Request::notarized(round));
     }
 
+    async fn handle_set_floor<Buf, R>(
+        &mut self,
+        finalization: Finalization<P::Scheme, V::Commitment>,
+        resolver: &mut R,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+    ) -> Result<(), BoxedError>
+    where
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        R: Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
+    {
+        let round = finalization.round();
+        if round <= self.floor.round {
+            debug!(
+                ?round,
+                floor = ?self.floor.round,
+                "floor not updated, below existing round floor"
+            );
+            return Ok(());
+        }
+
+        if !self.verify_finalization(&finalization) {
+            warn!(?round, "floor finalization failed verification");
+            return Ok(());
+        }
+
+        let commitment = finalization.proposal.payload;
+        let digest = V::commitment_to_inner(commitment);
+        self.cache
+            .put_finalization(round, digest, finalization.clone())
+            .await;
+
+        if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+            return self
+                .apply_floor_anchor(finalization, block, application, resolver)
+                .await;
+        }
+
+        if self
+            .pending_floor
+            .as_ref()
+            .is_some_and(|pending| pending.round() >= round)
+        {
+            return Ok(());
+        }
+
+        debug!(
+            ?round,
+            ?commitment,
+            "floor block missing, fetching asynchronously"
+        );
+        self.pending_floor = Some(finalization);
+        self.floor.fetch_if_permitted(
+            resolver,
+            Request::finalized_block_by_round(commitment, round),
+        );
+        Ok(())
+    }
+
+    fn verify_finalization(
+        &mut self,
+        finalization: &Finalization<P::Scheme, V::Commitment>,
+    ) -> bool {
+        let Some(scheme) = self.get_scheme_certificate_verifier(finalization.epoch()) else {
+            return false;
+        };
+        finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
+    }
+
+    fn pending_floor_matches(
+        &self,
+        finalization: &Finalization<P::Scheme, V::Commitment>,
+        block: &V::Block,
+    ) -> bool {
+        self.pending_floor.as_ref().is_some_and(|pending| {
+            pending.round() == finalization.round()
+                && pending.proposal.payload == finalization.proposal.payload
+                && V::commitment(block) == pending.proposal.payload
+        })
+    }
+
+    async fn try_apply_pending_floor(
+        &mut self,
+        block: V::Block,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
+    ) -> Result<bool, BoxedError> {
+        let Some(pending) = self.pending_floor.as_ref() else {
+            return Ok(false);
+        };
+        if V::commitment(&block) != pending.proposal.payload {
+            return Ok(false);
+        }
+
+        let finalization = self.pending_floor.take().expect("pending floor present");
+        self.apply_floor_anchor(finalization, block, application, resolver)
+            .await?;
+        Ok(true)
+    }
+
+    async fn apply_floor_anchor(
+        &mut self,
+        finalization: Finalization<P::Scheme, V::Commitment>,
+        block: V::Block,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
+    ) -> Result<(), BoxedError> {
+        let commitment = finalization.proposal.payload;
+        if V::commitment(&block) != commitment {
+            warn!(?commitment, "floor block commitment mismatch");
+            return Ok(());
+        }
+
+        let height = block.height();
+        if height < self.floor.height {
+            warn!(
+                %height,
+                existing = %self.floor.height,
+                "floor not updated, lower than existing"
+            );
+            return Ok(());
+        }
+
+        let digest = block.digest();
+        try_join!(
+            async {
+                self.finalized_blocks
+                    .put(block.clone().into())
+                    .await
+                    .map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            },
+            async {
+                self.finalizations_by_height
+                    .put(height, digest, finalization.clone())
+                    .await
+                    .map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            }
+        )?;
+        self.sync_finalized().await;
+        self.notify_subscribers(&block);
+
+        let round = finalization.round();
+        if height > self.tip {
+            application.report(Update::Tip(round, height, digest));
+            self.tip = height;
+            let _ = self.finalized_height.try_set(height.get());
+        }
+
+        // Update the processed floor after the anchor and certificate are durable.
+        self.update_processed_height(height, resolver);
+        self.update_processed_round_floor(height, round, resolver)
+            .await;
+        self.application_metadata.sync().await.map_err(Box::new)?;
+
+        // Drop all pending acknowledgements. We must do this to prevent
+        // an in-process block from being processed below the new floor and
+        // rewriting `floor.height`.
+        self.pending_acks.clear();
+
+        // The floor is durable, so cache/finalized data below it can be pruned.
+        self.prune_after_floor(height).await?;
+        self.pending_floor = None;
+
+        // Intentionally keep existing block subscriptions alive. Canceling
+        // waiters can have catastrophic consequences (nodes can get stuck in
+        // different views) as actors do not retry subscriptions on failed channels.
+        self.try_dispatch_blocks(application).await;
+        Ok(())
+    }
+
     /// Handle a deliver message from the resolver. Block delivers are handled
     /// immediately. Finalized/Notarized delivers are parsed and structurally
     /// validated, then collected into `delivers` for batch certificate verification.
@@ -1124,6 +1377,15 @@ where
                 };
                 if V::commitment(&block) != commitment {
                     response.send_lossy(false);
+                    return false;
+                }
+
+                if self
+                    .try_apply_pending_floor(block.clone(), application, resolver)
+                    .await
+                    .unwrap_or_else(|e| panic!("failed to apply pending floor: {e}"))
+                {
+                    response.send_lossy(true);
                     return false;
                 }
 
@@ -1364,6 +1626,15 @@ where
                     let height = block.height();
                     let digest = block.digest();
                     debug!(?round, %height, "received finalization");
+
+                    if self
+                        .try_apply_pending_floor(block.clone(), application, resolver)
+                        .await
+                        .unwrap_or_else(|e| panic!("failed to apply pending floor: {e}"))
+                    {
+                        continue;
+                    }
+
                     self.update_processed_round_floor(height, round, resolver)
                         .await;
 
@@ -1406,10 +1677,18 @@ where
                     }
 
                     // Cache the notarization and block.
-                    self.cache_block(round, digest, block).await;
+                    self.cache_block(round, digest, block.clone()).await;
                     self.cache
                         .put_notarization(round, digest, notarization)
                         .await;
+
+                    if self
+                        .try_apply_pending_floor(block.clone(), application, resolver)
+                        .await
+                        .unwrap_or_else(|e| panic!("failed to apply pending floor: {e}"))
+                    {
+                        continue;
+                    }
                 }
             }
         }
@@ -1488,6 +1767,10 @@ where
         &mut self,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
+        if self.pending_floor.is_some() {
+            return;
+        }
+
         while self.pending_acks.has_capacity() {
             let next_height = self.pending_acks.next_dispatch_height(self.floor.height);
             let Some(block) = self.get_finalized_block(next_height).await else {
@@ -1812,6 +2095,10 @@ where
         >,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
+        if self.pending_floor.is_some() {
+            return false;
+        }
+
         let mut wrote = false;
         let start = self.floor.height.next();
 

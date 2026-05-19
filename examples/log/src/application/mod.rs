@@ -12,6 +12,16 @@ mod reporter;
 
 pub type Scheme = commonware_consensus::simplex::scheme::ed25519::Scheme;
 
+/// Genesis message to use during initialization.
+const GENESIS: &[u8] = b"commonware is neat";
+
+/// Returns the initial payload for the single consensus epoch.
+pub fn genesis<H: Hasher>() -> H::Digest {
+    let mut hasher = H::default();
+    hasher.update(GENESIS);
+    hasher.finalize()
+}
+
 /// Configuration for the application.
 pub struct Config<H: Hasher> {
     /// Hashing scheme to use.

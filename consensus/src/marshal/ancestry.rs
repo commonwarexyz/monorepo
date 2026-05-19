@@ -54,10 +54,8 @@ pub trait BlockProvider: Clone + Send + 'static {
     }
 }
 
-/// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
-///
-// TODO(<https://github.com/commonwarexyz/monorepo/issues/2982>): Once marshal can also yield the genesis block,
-// this stream should end at block height 0 rather than 1.
+/// Yields the ancestors of a block while prefetching parents, including the
+/// height-zero genesis block if it is available.
 #[pin_project]
 pub struct AncestorStream<M: BlockProvider> {
     buffered: Vec<M::Block>,
@@ -106,8 +104,7 @@ where
     type Item = M::Block;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Because marshal cannot currently yield the genesis block, we stop at height 1.
-        const END_BOUND: Height = Height::new(1);
+        const END_BOUND: Height = Height::zero();
 
         let mut this = self.project();
 

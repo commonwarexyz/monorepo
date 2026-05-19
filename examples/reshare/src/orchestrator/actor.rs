@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochProvider, Provider},
+    application::{genesis, Block, EpochProvider, Provider},
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
@@ -13,7 +13,7 @@ use commonware_consensus::{
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -317,6 +317,7 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: NZUsize!(1024),
                 epoch,
+                floor: simplex::Floor::genesis(genesis::<H, C, V>().digest()),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

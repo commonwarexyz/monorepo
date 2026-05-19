@@ -12,6 +12,16 @@ use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
 mod ingress;
 
+/// Genesis message to use during initialization.
+const GENESIS: &[u8] = b"commonware is neat";
+
+/// Returns the initial payload for the single consensus epoch.
+pub fn genesis<H: Hasher>() -> H::Digest {
+    let mut hasher = H::default();
+    hasher.update(GENESIS);
+    hasher.finalize()
+}
+
 /// Configuration for the application.
 pub struct Config<H: Hasher, Si: Sink, St: Stream> {
     pub indexer: (Sender<Si>, Receiver<St>),

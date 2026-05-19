@@ -13,7 +13,7 @@ use crate::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
         },
-        Plan,
+        Floor, Plan,
     },
     types::{Round as Rnd, View},
     CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
@@ -108,6 +108,7 @@ pub struct Actor<
     automaton: A,
     relay: R,
     reporter: F,
+    floor: Floor<S, D>,
 
     certificate_config: <S::Certificate as Read>::Cfg,
     partition: String,
@@ -172,6 +173,7 @@ impl<
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
+                floor: cfg.floor,
 
                 certificate_config,
                 partition: cfg.partition,
@@ -675,11 +677,12 @@ impl<
         let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
-        // Add initial view
-        //
-        // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.state
-            .set_genesis(self.automaton.genesis(self.state.epoch()).await);
+        // Add initial view from the configured floor.
+        let floor = self.floor.clone();
+        if let Some(finalization) = self.state.set_floor(floor) {
+            resolver.updated(Certificate::Finalization(finalization.clone()));
+            self.reporter.report(Activity::Finalization(finalization));
+        }
 
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(

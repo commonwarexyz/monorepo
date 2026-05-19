@@ -140,18 +140,20 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: Option<oneshot::Sender<()>>,
     },
-    /// Sets the sync starting point (advances if higher than current).
+    /// Sets the sync starting point using an already-processed finalization.
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// Marshal enters a pending-floor pre-start phase, fetches the finalized
+    /// block asynchronously, then stores the anchor, treats its height as
+    /// processed, and delivers blocks starting at `height + 1`. Data below the
+    /// anchor height is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Message::Prune] instead.
     ///
-    /// The default floor is 0.
+    /// The startup floor comes from [`crate::marshal::Config::start`].
     SetFloor {
-        /// The candidate floor height.
-        height: Height,
+        /// The candidate floor finalization.
+        finalization: Finalization<S, V::Commitment>,
     },
     /// Prunes finalized blocks and certificates below the given height.
     ///
@@ -291,7 +293,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
 }
 
 pub(crate) struct Pending<S: Scheme, V: Variant> {
-    floor: Option<Height>,
+    floor: Option<Finalization<S, V::Commitment>>,
     prune: Option<Height>,
     hints: BTreeMap<Height, NonEmptyVec<S::PublicKey>>,
     messages: VecDeque<PendingMessage<S, V>>,
@@ -314,9 +316,10 @@ impl<S: Scheme, V: Variant> Default for Pending<S, V> {
 }
 
 impl<S: Scheme, V: Variant> Pending<S, V> {
-    // The effective floor for staleness checks is the max of both pending advances
-    fn height(&self) -> Option<Height> {
-        self.floor.into_iter().chain(self.prune).max()
+    // Only prune advances are usable for height staleness checks. A pending
+    // floor finalization does not carry the block height until the block is decoded.
+    const fn height(&self) -> Option<Height> {
+        self.prune
     }
 
     fn retain(&mut self) {
@@ -332,17 +335,17 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         });
     }
 
-    fn set_floor(&mut self, height: Height) {
-        let current = self.height();
-        let floor = Some(height);
-        if self.floor >= floor {
+    fn set_floor(&mut self, finalization: Finalization<S, V::Commitment>) {
+        let round = finalization.round();
+        if self
+            .floor
+            .as_ref()
+            .is_some_and(|floor| floor.round() >= round)
+        {
             return;
         }
 
-        self.floor = self.floor.max(floor);
-        if self.height() > current {
-            self.retain();
-        }
+        self.floor = Some(finalization);
     }
 
     fn prune(&mut self, height: Height) {
@@ -412,7 +415,7 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
 
         // Receiver rejected; restore so the next drain retries from the same point
         match message {
-            Message::SetFloor { height } => self.set_floor(height),
+            Message::SetFloor { finalization } => self.set_floor(finalization),
             Message::Prune { height } => self.prune(height),
             Message::HintFinalized { height, targets } => self.restore_hint(height, targets),
             message => self.messages.push_front(PendingMessage::Message(message)),
@@ -435,8 +438,8 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     {
         // Drain floor and prune first so the actor advances its floor before
         // it sees the height-bounded reads that follow
-        if let Some(height) = self.floor.take() {
-            if !self.drain_one(Message::SetFloor { height }, &mut push) {
+        if let Some(finalization) = self.floor.take() {
+            if !self.drain_one(Message::SetFloor { finalization }, &mut push) {
                 return;
             }
         }
@@ -487,9 +490,10 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::HintFinalized { height, targets } => {
                 overflow.hint_finalized(height, targets);
             }
-            // Floor and prune collapse to the highest height seen
-            Self::SetFloor { height } => {
-                overflow.set_floor(height);
+            // Floors collapse to the highest round seen; prune collapses to
+            // the highest height seen.
+            Self::SetFloor { finalization } => {
+                overflow.set_floor(finalization);
             }
             Self::Prune { height } => {
                 overflow.prune(height);
@@ -749,17 +753,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.is_ok()
     }
 
-    /// Sets the sync starting point (advances if higher than current).
+    /// Sets the sync starting point using an already-processed finalization.
     ///
-    /// Marshal will sync and deliver blocks starting at `floor + 1`. Data below
-    /// the floor is pruned.
+    /// Marshal fetches the corresponding block asynchronously before advancing
+    /// its processed floor and dispatching application blocks. While the floor
+    /// block is unresolved, marshal can serve local requests but remains in a
+    /// pending-floor pre-start phase.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Self::prune] instead.
     ///
-    /// The default floor is 0.
-    pub fn set_floor(&self, height: Height) {
-        let _ = self.sender.enqueue(Message::SetFloor { height });
+    /// Use [`crate::marshal::Config::start`] to provide the startup anchor.
+    pub fn set_floor(&self, finalization: Finalization<S, V::Commitment>) {
+        let _ = self.sender.enqueue(Message::SetFloor { finalization });
     }
 
     /// Prunes finalized blocks and certificates below the given height.
@@ -829,11 +835,13 @@ mod tests {
     use super::*;
     use crate::{
         marshal::{mocks::harness, standard::Standard},
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{Epoch, View},
-        Heightable,
     };
-    use commonware_cryptography::{ed25519::PrivateKey, Digest as _, Signer as _};
-    use commonware_utils::channel::oneshot::error::TryRecvError;
+    use commonware_cryptography::{
+        certificate::mocks::Fixture, ed25519::PrivateKey, Digest as _, Signer as _,
+    };
+    use commonware_utils::{channel::oneshot::error::TryRecvError, test_rng_seeded};
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
     type TestPending = Pending<harness::S, Standard<harness::B>>;
@@ -852,6 +860,21 @@ mod tests {
 
     fn commitment(height: u64) -> harness::D {
         <Standard<harness::B> as Variant>::commitment(&block(height))
+    }
+
+    fn finalization(height: u64) -> Finalization<harness::S, harness::D> {
+        let mut rng = test_rng_seeded(height);
+        let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<harness::V, _>(
+            &mut rng,
+            harness::NAMESPACE,
+            harness::NUM_VALIDATORS,
+        );
+        let proposal = Proposal::new(round(height), View::zero(), commitment(height));
+        <harness::StandardHarness as harness::TestHarness>::make_finalization(
+            proposal,
+            &schemes,
+            harness::QUORUM,
+        )
     }
 
     fn get_info(height: u64) -> (TestMessage, oneshot::Receiver<Option<(Height, harness::D)>>) {
@@ -966,7 +989,7 @@ mod tests {
 
     fn set_floor(height: u64) -> TestMessage {
         TestMessage::SetFloor {
-            height: Height::new(height),
+            finalization: finalization(height),
         }
     }
 
@@ -1276,7 +1299,10 @@ mod tests {
         <TestMessage as Policy>::handle(&mut overflow, prune(2));
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
 
-        assert_eq!(overflow.floor, Some(Height::new(8)));
+        assert_eq!(
+            overflow.floor.as_ref().map(Finalization::round),
+            Some(round(8))
+        );
         assert_eq!(overflow.prune, Some(Height::new(7)));
         assert!(overflow.messages.is_empty());
 
@@ -1284,7 +1310,7 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert!(matches!(
             &drained[0],
-            TestMessage::SetFloor { height } if *height == Height::new(8)
+            TestMessage::SetFloor { finalization } if finalization.round() == round(8)
         ));
         assert!(matches!(
             &drained[1],
@@ -1296,7 +1322,7 @@ mod tests {
     fn policy_replaces_floor_and_prune_and_drops_stale_pending_on_drain() {
         let mut overflow = pending();
 
-        overflow.floor = Some(Height::new(5));
+        overflow.floor = Some(finalization(5));
         let (get_info_4, _get_info_4_rx) = get_info(4);
         let (get_block_7, _get_block_7_rx) = get_block(7);
         let (get_block_8, _get_block_8_rx) = get_block(8);
@@ -1311,20 +1337,28 @@ mod tests {
             .messages
             .push_back(PendingMessage::Message(get_block_8));
         <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
-        assert_eq!(overflow.floor, Some(Height::new(8)));
+        <TestMessage as Policy>::handle(&mut overflow, prune(8));
+        assert_eq!(
+            overflow.floor.as_ref().map(Finalization::round),
+            Some(round(8))
+        );
         assert_eq!(overflow.messages.len(), 1);
         assert!(!has_get_info(&overflow, 4));
         assert!(!has_get_block(&overflow, 7));
         assert!(has_get_block(&overflow, 8));
         assert!(hint_targets(&overflow, 8).is_none());
         let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 2);
+        assert_eq!(drained.len(), 3);
         assert!(matches!(
             &drained[0],
-            TestMessage::SetFloor { height } if *height == Height::new(8)
+            TestMessage::SetFloor { finalization } if finalization.round() == round(8)
         ));
         assert!(matches!(
             &drained[1],
+            TestMessage::Prune { height } if *height == Height::new(8)
+        ));
+        assert!(matches!(
+            &drained[2],
             TestMessage::GetBlock {
                 identifier: Identifier::Height(height),
                 ..
@@ -1369,7 +1403,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_floor_and_prune_drop_closed_pending() {
+    fn policy_prune_drops_closed_pending() {
         let mut overflow = pending();
         let (closed_message, closed_rx) = get_block(8);
         drop(closed_rx);
@@ -1382,7 +1416,7 @@ mod tests {
             .messages
             .push_back(PendingMessage::Message(open_message));
 
-        <TestMessage as Policy>::handle(&mut overflow, set_floor(7));
+        <TestMessage as Policy>::handle(&mut overflow, prune(7));
         assert_eq!(overflow.messages.len(), 1);
         assert!(has_get_block(&overflow, 8));
         assert!(matches!(open_rx.try_recv(), Err(TryRecvError::Empty)));
@@ -1406,9 +1440,9 @@ mod tests {
     }
 
     #[test]
-    fn policy_skips_retain_when_effective_height_does_not_increase() {
+    fn policy_skips_retain_when_prune_height_does_not_increase() {
         let mut overflow = pending();
-        <TestMessage as Policy>::handle(&mut overflow, set_floor(10));
+        <TestMessage as Policy>::handle(&mut overflow, prune(10));
 
         let (closed_message, closed_rx) = get_block(11);
         drop(closed_rx);
@@ -1464,7 +1498,7 @@ mod tests {
         assert_eq!(drained.len(), 4);
         assert!(matches!(
             &drained[0],
-            TestMessage::SetFloor { height } if *height == Height::new(5)
+            TestMessage::SetFloor { finalization } if finalization.round() == round(5)
         ));
         assert!(matches!(
             &drained[1],
