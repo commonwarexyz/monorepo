@@ -402,6 +402,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                                     new_size = state.valid_offset,
                                                     "trailing bytes detected: truncating"
                                                 );
+                                                // Tail repair is exceptional; make it durable
+                                                // immediately so callers do not need to track
+                                                // replay-time repaired sections separately.
                                                 if let Err(err) =
                                                     state.blob.resize(state.valid_offset).await
                                                 {
@@ -409,9 +412,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                                     state.done = true;
                                                     return Some((batch, state));
                                                 }
-                                                // Tail repair is exceptional; make it durable
-                                                // immediately so callers do not need to track
-                                                // replay-time repaired sections separately.
                                                 if let Err(err) = state.blob.sync().await {
                                                     batch.push(Err(err.into()));
                                                     state.done = true;

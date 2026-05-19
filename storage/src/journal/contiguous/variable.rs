@@ -202,10 +202,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// The data journal is always the source of truth. The offsets journal is an index
 /// that may temporarily diverge during crashes. Divergences are automatically
 /// aligned during init():
-/// * If offsets.size() < data.size(): Rebuild missing offsets by replaying data.
-///   (This can happen if we crash after writing data journal but before writing offsets journal)
-/// * If offsets.size() > data.size(): Rewind offsets to match data size.
-///   (This can happen if we crash after rewinding data journal but before rewinding offsets journal)
+/// * If offsets are behind data after the recovery watermark: rebuild missing offsets by replaying
+///   data from the recovery anchor.
+/// * If offsets are ahead of the retained data prefix: rewind offsets to match the data-backed
+///   size.
 /// * If offsets.bounds().start < data.bounds().start: Prune offsets to match
 ///   (This can happen if we crash after pruning data journal but before pruning offsets journal)
 ///
@@ -217,8 +217,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 ///
 /// The offsets journal's recovery watermark records a preferred point for replaying data to rebuild
 /// offset entries after a crash. If that point falls outside the recovered offsets bounds, init
-/// falls back to the offsets start. Items appended after the replay point may still survive, but
-/// matching offsets may need to be rebuilt.
+/// falls back to the offsets start. Replay after the anchor stops at the first short data section
+/// and truncates newer sections so the recovered journal remains a contiguous prefix.
 pub struct Journal<E: Context, V: Codec> {
     /// Inner state for data journal metadata.
     ///
@@ -921,8 +921,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Align the offsets journal and data journal to be consistent in case a crash occurred
     /// on a previous run and left the journals in an inconsistent state.
     ///
-    /// The data journal is the source of truth. This function scans it to determine
-    /// what SHOULD be in the offsets journal, then fixes any mismatches.
+    /// The data journal is the source of truth. This function replays the data journal as needed to
+    /// verify or rebuild the offsets suffix, then fixes any mismatches.
     ///
     /// # Returns
     ///
@@ -1051,16 +1051,30 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let offsets_reader = offsets.reader().await;
             offsets_reader.bounds()
         };
-        let recovery_watermark = offsets.recovery_watermark().await;
+        // The newest data section bounds how far recovery can possibly go. If it is also the
+        // oldest retained section, its logical start may be a mid-section pruning boundary.
+        let data_newest_section = data
+            .newest_section()
+            .expect("non-empty data journal should have newest section");
+        let data_newest_start = data_newest_section
+            .checked_mul(items_per_section)
+            .ok_or(Error::OffsetOverflow)?;
+        let retained_data_end_bound = data_newest_start
+            .max(offsets_bounds.start)
+            .checked_add(items_in_last_section)
+            .ok_or(Error::OffsetOverflow)?;
 
+        let recovery_watermark = offsets.recovery_watermark().await;
         let recovery_start = if recovery_watermark < offsets_bounds.start
             || recovery_watermark > offsets_bounds.end
+            || recovery_watermark > retained_data_end_bound
         {
             warn!(
                 recovery_watermark,
                 start = offsets_bounds.start,
                 end = offsets_bounds.end,
-                "crash repair: offsets recovery watermark outside recovered offsets bounds, rebuilding from offsets start"
+                retained_data_end_bound,
+                "crash repair: offsets recovery watermark is unusable, rebuilding from offsets start"
             );
             offsets_bounds.start
         } else {
@@ -1127,10 +1141,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Rebuild the offsets suffix by replaying the data journal from a recovery anchor.
     ///
-    /// Returns `Ok(None)` if the anchor is ahead of the data journal and callers should retry
-    /// from an earlier point.
+    /// Returns `Ok(None)` if the anchor is ahead of the data journal and callers should retry from
+    /// an earlier point. If replay finds a short section after the anchor, recovery truncates newer
+    /// data sections and returns the contiguous data-backed size.
     async fn rebuild_offsets_from_anchor(
-        data: &variable::Journal<E, V>,
+        data: &mut variable::Journal<E, V>,
         offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
         pruning_boundary: u64,
@@ -1156,37 +1171,62 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let start_section = position_to_section(anchor, items_per_section);
         let first_position = pruning_boundary.max(start_section * items_per_section);
 
-        let skip = anchor - first_position;
-        let stream = data.replay(start_section, 0, REPLAY_BUFFER_SIZE).await?;
-        futures::pin_mut!(stream);
+        let (size, repair) = {
+            let skip = anchor - first_position;
+            let stream = data.replay(start_section, 0, REPLAY_BUFFER_SIZE).await?;
+            futures::pin_mut!(stream);
 
-        let mut skipped = 0;
-        while skipped < skip {
-            let Some(result) = stream.next().await else {
-                return Ok(None);
-            };
-            let (section, _offset, _size, _item) = result?;
-            let position = first_position + skipped;
-            let expected_section = position_to_section(position, items_per_section);
-            if section != expected_section {
-                return Err(Error::Corruption(format!(
-                    "data section {section} contains logical position {position}, expected section {expected_section}"
-                )));
+            let mut skipped = 0;
+            while skipped < skip {
+                let Some(result) = stream.next().await else {
+                    return Ok(None);
+                };
+                let (section, _offset, _size, _item) = result?;
+                let position = first_position + skipped;
+                let expected_section = position_to_section(position, items_per_section);
+                if section != expected_section {
+                    if section > expected_section {
+                        return Ok(None);
+                    }
+                    return Err(Error::Corruption(format!(
+                        "data section {section} contains logical position {position}, expected section {expected_section}"
+                    )));
+                }
+                skipped += 1;
             }
-            skipped += 1;
-        }
 
-        let mut size = anchor;
-        while let Some(result) = stream.next().await {
-            let (section, offset, _size, _item) = result?;
-            let expected_section = position_to_section(size, items_per_section);
-            if section != expected_section {
-                return Err(Error::Corruption(format!(
-                    "data section {section} contains logical position {size}, expected section {expected_section}"
-                )));
+            let mut size = anchor;
+            let mut repair = None;
+            while let Some(result) = stream.next().await {
+                let (section, offset, _size, _item) = result?;
+                let expected_section = position_to_section(size, items_per_section);
+                if section != expected_section {
+                    if section > expected_section {
+                        let byte_offset = data.size(expected_section).await?;
+                        repair = Some((expected_section, section, size, byte_offset));
+                        break;
+                    }
+                    return Err(Error::Corruption(format!(
+                        "data section {section} contains logical position {size}, expected section {expected_section}"
+                    )));
+                }
+                offsets.append(&offset).await?;
+                size += 1;
             }
-            offsets.append(&offset).await?;
-            size += 1;
+            (size, repair)
+        };
+
+        if let Some((section, next_section, size, byte_offset)) = repair {
+            warn!(
+                section,
+                next_section,
+                size,
+                byte_offset,
+                "crash repair: truncating data after short section"
+            );
+            data.rewind(section, byte_offset).await?;
+            data.sync(section).await?;
+            return Ok(Some(size));
         }
 
         Ok(Some(size))
@@ -2283,7 +2323,7 @@ mod tests {
             offsets.append(&offset).await.unwrap();
 
             let result =
-                Journal::<_, u64>::rebuild_offsets_from_anchor(&data, &mut offsets, 10, 0, 2)
+                Journal::<_, u64>::rebuild_offsets_from_anchor(&mut data, &mut offsets, 10, 0, 2)
                     .await
                     .unwrap();
             assert!(result.is_none());
@@ -2373,6 +2413,107 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(journal.bounds().await, 0..12);
+            for i in 0..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(12).await,
+                Err(Error::ItemOutOfRange(12))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_boundary_data_rewind_rebuilds_offsets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-boundary-data-rewind".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..20u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            journal.test_rewind_data_to_position(10).await.unwrap();
+            journal.test_sync_data().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..10);
+            assert_eq!(journal.test_offsets_size().await, 10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(10).await,
+                Err(Error::ItemOutOfRange(10))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_truncates_short_data_section_after_anchor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-short-section-after-anchor".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..25u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Simulate a crash after the previous recovery checkpoint where section 1 was only
+            // partly durable but section 2 was present. Recovery should keep the contiguous prefix
+            // and discard section 2 rather than treating the section jump as hard corruption.
+            journal
+                .test_set_offsets_recovery_watermark(10)
+                .await
+                .unwrap();
+            let offset = {
+                let offsets = journal.offsets.reader().await;
+                offsets.read(12).await.unwrap()
+            };
+            {
+                let mut inner = journal.inner.write().await;
+                inner.data.rewind_section(1, offset).await.unwrap();
+                inner.data.sync(1).await.unwrap();
+                inner.data.sync(2).await.unwrap();
+            }
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..12);
+            assert_eq!(journal.test_offsets_size().await, 12);
             for i in 0..12u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
