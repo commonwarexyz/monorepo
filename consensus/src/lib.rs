@@ -261,16 +261,14 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Payload used to initialize the consensus engine in the first epoch.
         ///
         /// This future may be cancelled before it completes. Implementations must be
-        /// cancellation-safe: dropping and retrying must not violate invariants or lose durable
-        /// progress.
+        /// cancellation-safe.
         fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
         /// This future may be cancelled before it completes. Implementations must be
-        /// cancellation-safe: dropping and retrying must not violate invariants or lose durable
-        /// progress.
+        /// cancellation-safe.
         fn propose(
             &mut self,
             context: (E, Self::Context),
@@ -285,8 +283,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// continue waiting instead of returning `false`.
         ///
         /// This future may be cancelled before it completes. Implementations must be
-        /// cancellation-safe: dropping and retrying must not violate invariants or lose durable
-        /// progress.
+        /// cancellation-safe.
         fn verify(
             &mut self,
             context: (E, Self::Context),
