@@ -118,6 +118,7 @@ where
 /// - `Some(valid)` when a verification verdict is available.
 /// - `None` when work should stop early (e.g., receiver dropped or parent unavailable).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn verify_with_parent<E, S, A, B>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,

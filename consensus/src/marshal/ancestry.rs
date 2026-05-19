@@ -275,7 +275,7 @@ mod test {
         Timed::new(context.histogram(
             "ancestor_fetch_duration",
             "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::NETWORK,
+            Buckets::LOCAL,
         ))
     }
 
@@ -285,7 +285,12 @@ mod test {
             let stream_context = context.child("ancestor_stream");
             let timed = timed(&stream_context);
             let mut stream: AncestorStream<MockProvider, deterministic::Context> =
-                AncestorStream::new(MockProvider::default(), vec![], timed, Arc::new(stream_context));
+                AncestorStream::new(
+                    MockProvider::default(),
+                    vec![],
+                    timed,
+                    Arc::new(stream_context),
+                );
             assert_eq!(stream.next().await, None);
         });
     }

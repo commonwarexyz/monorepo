@@ -198,7 +198,7 @@ where
         let ancestor_fetch_histogram = context.histogram(
             "ancestor_fetch_duration",
             "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::NETWORK,
+            Buckets::LOCAL,
         );
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 

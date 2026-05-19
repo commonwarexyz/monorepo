@@ -59,6 +59,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::info;
@@ -4730,14 +4731,14 @@ pub fn ancestry_stream<H: TestHarness>() {
         let fetch_duration = Timed::new(context.histogram(
             "ancestor_fetch_duration",
             "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::NETWORK,
+            Buckets::LOCAL,
         ));
         let ancestry = handle
             .mailbox
             .ancestry(
                 (DigestFallback::Wait, commitment),
                 fetch_duration,
-                std::sync::Arc::new(context.child("ancestor_stream")),
+                Arc::new(context.child("ancestor_stream")),
             )
             .await
             .unwrap();
