@@ -268,6 +268,17 @@ where
     pub peer_provider: D,
 }
 
+/// A cached reconstructed block and the consensus round that produced it.
+struct ReconstructedBlock<B, C, H>
+where
+    B: Block,
+    C: CodingScheme,
+    H: Hasher,
+{
+    round: Round,
+    block: CodedBlock<B, C, H>,
+}
+
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
@@ -334,10 +345,7 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
-    reconstructed_blocks: BTreeMap<Commitment, CodedBlock<B, C, H>>,
-
-    /// Consensus rounds associated with cached reconstructed blocks.
-    reconstructed_block_rounds: BTreeMap<Commitment, Round>,
+    reconstructed_blocks: BTreeMap<Commitment, ReconstructedBlock<B, C, H>>,
 
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
@@ -395,7 +403,6 @@ where
                 latest_primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
-                reconstructed_block_rounds: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
                 metrics,
@@ -494,15 +501,19 @@ where
                         commitment,
                         response,
                     } => {
-                        let block = self.reconstructed_blocks.get(&commitment).cloned();
+                        let block = self
+                            .reconstructed_blocks
+                            .get(&commitment)
+                            .map(|entry| entry.block.clone());
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
                         let block = self
                             .reconstructed_blocks
-                            .iter()
-                            .find_map(|(_, b)| (b.digest() == digest).then_some(b))
-                            .cloned();
+                            .values()
+                            .find_map(|entry| {
+                                (entry.block.digest() == digest).then_some(entry.block.clone())
+                            });
                         response.send_lossy(block);
                     }
                     Message::SubscribeAssignedShardVerified {
@@ -630,8 +641,8 @@ where
         &mut self,
         commitment: Commitment,
     ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
-        if let Some(block) = self.reconstructed_blocks.get(&commitment) {
-            return Ok(Some(block.clone()));
+        if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
+            return Ok(Some(entry.block.clone()));
         }
         let Some(state) = self.state.get_mut(&commitment) else {
             return Ok(None);
@@ -874,8 +885,13 @@ where
     /// Cache a block and notify all subscribers waiting on it.
     fn cache_block(&mut self, round: Round, block: CodedBlock<B, C, H>) {
         let commitment = block.commitment();
-        self.reconstructed_block_rounds.insert(commitment, round);
-        self.reconstructed_blocks.insert(commitment, block.clone());
+        self.reconstructed_blocks.insert(
+            commitment,
+            ReconstructedBlock {
+                round,
+                block: block.clone(),
+            },
+        );
         self.notify_block_subscribers(block);
     }
 
@@ -1062,13 +1078,14 @@ where
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
         let block = match key {
-            BlockSubscriptionKey::Commitment(commitment) => {
-                self.reconstructed_blocks.get(&commitment)
-            }
+            BlockSubscriptionKey::Commitment(commitment) => self
+                .reconstructed_blocks
+                .get(&commitment)
+                .map(|entry| &entry.block),
             BlockSubscriptionKey::Digest(digest) => self
                 .reconstructed_blocks
-                .iter()
-                .find_map(|(_, block)| (block.digest() == digest).then_some(block)),
+                .values()
+                .find_map(|entry| (entry.block.digest() == digest).then_some(&entry.block)),
         };
 
         // Answer immediately if we have the block cached.
@@ -1147,19 +1164,13 @@ where
     /// in the same round. Both must remain recoverable until finalization
     /// determines which one is canonical.
     fn prune(&mut self, through: Commitment) {
-        let cached_round = self.reconstructed_block_rounds.get(&through).copied();
-        if let Some(height) = self.reconstructed_blocks.get(&through).map(|b| b.height()) {
-            let mut pruned_blocks = Vec::new();
-            self.reconstructed_blocks.retain(|commitment, block| {
-                let keep = block.height() > height;
-                if !keep {
-                    pruned_blocks.push(*commitment);
-                }
-                keep
-            });
-            for commitment in pruned_blocks {
-                self.reconstructed_block_rounds.remove(&commitment);
-            }
+        let cached = self
+            .reconstructed_blocks
+            .get(&through)
+            .map(|entry| (entry.round, entry.block.height()));
+        if let Some((_, height)) = cached {
+            self.reconstructed_blocks
+                .retain(|_, entry| entry.block.height() > height);
         }
 
         // Always clear direct state/subscriptions for the pruned commitment.
@@ -1167,6 +1178,7 @@ where
         // that was never reconstructed locally.
         self.drop_subscriptions(through);
         let state_round = self.state.remove(&through).map(|state| state.round());
+        let cached_round = cached.map(|(round, _)| round);
         let Some(round) = state_round.or(cached_round) else {
             return;
         };
