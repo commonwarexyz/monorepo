@@ -3,8 +3,13 @@
 use arbitrary::Arbitrary;
 use blst::min_pk::{PublicKey as RefPublicKey, Signature as RefSignature};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_cryptography::bls12381::{PublicKey, Signature};
+use commonware_cryptography::{
+    bls12381::{PrivateKey as BlsPrivateKey, PublicKey, Signature},
+    Signer as _,
+};
 use libfuzzer_sys::fuzz_target;
+
+const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DECODE_FUZZ";
 
 #[derive(Debug, Arbitrary)]
 pub struct FuzzInput {
@@ -17,6 +22,22 @@ pub struct FuzzInput {
     })]
     pub variable_data: Vec<u8>,
     pub case_selector: u8,
+}
+
+fn signer(input: &FuzzInput) -> BlsPrivateKey {
+    let seed = u64::from_le_bytes(input.pubkey_48[..8].try_into().unwrap());
+    BlsPrivateKey::from_seed(seed)
+}
+
+fn valid_pubkey(input: &FuzzInput) -> Vec<u8> {
+    signer(input).public_key().encode().to_vec()
+}
+
+fn valid_signature(input: &FuzzInput) -> Vec<u8> {
+    signer(input)
+        .sign(NAMESPACE, &input.variable_data)
+        .encode()
+        .to_vec()
 }
 
 fn test_pubkey_diff_validate(data: &[u8]) {
@@ -63,13 +84,17 @@ fn test_signature_decode_encode(data: &[u8]) {
 }
 
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 6 {
+    match input.case_selector % 10 {
         0 => test_pubkey_diff_validate(&input.pubkey_48), // Fixed 48-byte pubkey
         1 => test_signature_diff_validate(&input.signature_96), // Fixed 96-byte signature
         2 => test_pubkey_diff_validate(&input.variable_data), // Variable length pubkey
         3 => test_signature_diff_validate(&input.variable_data), // Variable length signature
         4 => test_pubkey_decode_encode(&input.variable_data), // Pubkey encode/encode roundtrip
         5 => test_signature_decode_encode(&input.variable_data), // Signature decode/encode roundtrip
+        6 => test_pubkey_diff_validate(&valid_pubkey(&input)),   // Valid pubkey differential
+        7 => test_signature_diff_validate(&valid_signature(&input)), // Valid signature differential
+        8 => test_pubkey_decode_encode(&valid_pubkey(&input)),   // Valid pubkey roundtrip
+        9 => test_signature_decode_encode(&valid_signature(&input)), // Valid signature roundtrip
         _ => unreachable!(),
     }
 }
