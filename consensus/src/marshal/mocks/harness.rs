@@ -37,7 +37,13 @@ use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, Quota, Runner, Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic,
+    telemetry::metrics::{
+        histogram::{Buckets, Timed},
+        MetricsExt as _,
+    },
+    Clock, Quota, Runner, Supervisor as _,
 };
 use commonware_storage::{
     archive::{immutable, prunable},
@@ -4721,9 +4727,18 @@ pub fn ancestry_stream<H: TestHarness>() {
 
         // Stream from latest -> height 1
         let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
+        let fetch_duration = Timed::new(context.histogram(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+            Buckets::NETWORK,
+        ));
         let ancestry = handle
             .mailbox
-            .ancestry((DigestFallback::Wait, commitment))
+            .ancestry(
+                (DigestFallback::Wait, commitment),
+                fetch_duration,
+                std::sync::Arc::new(context.child("ancestor_stream")),
+            )
             .await
             .unwrap();
         let blocks = ancestry.collect::<Vec<_>>().await;

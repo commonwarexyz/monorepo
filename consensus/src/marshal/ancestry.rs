@@ -2,6 +2,7 @@
 
 use crate::{types::Height, Block, Heightable};
 use commonware_cryptography::Digestible;
+use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock};
 use futures::{
     future::{BoxFuture, OptionFuture},
     FutureExt, Stream,
@@ -10,6 +11,7 @@ use pin_project::pin_project;
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -59,20 +61,27 @@ pub trait BlockProvider: Clone + Send + 'static {
 // TODO(<https://github.com/commonwarexyz/monorepo/issues/2982>): Once marshal can also yield the genesis block,
 // this stream should end at block height 0 rather than 1.
 #[pin_project]
-pub struct AncestorStream<M: BlockProvider> {
+pub struct AncestorStream<M: BlockProvider, C: Clock> {
     buffered: Vec<M::Block>,
     marshal: M,
+    fetch_duration: Timed,
+    clock: Arc<C>,
     #[pin]
     pending: OptionFuture<BoxFuture<'static, Option<M::Block>>>,
 }
 
-impl<M: BlockProvider> AncestorStream<M> {
+impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous in height.
-    pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = M::Block>) -> Self {
+    pub(crate) fn new(
+        marshal: M,
+        initial: impl IntoIterator<Item = M::Block>,
+        fetch_duration: Timed,
+        clock: Arc<C>,
+    ) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<M::Block>>();
         buffered.sort_by_key(Heightable::height);
 
@@ -93,15 +102,18 @@ impl<M: BlockProvider> AncestorStream<M> {
         Self {
             marshal,
             buffered,
+            fetch_duration,
+            clock,
             pending: None.into(),
         }
     }
 }
 
-impl<M> Stream for AncestorStream<M>
+impl<M, C> Stream for AncestorStream<M, C>
 where
     M: BlockProvider,
     M::Block: Clone,
+    C: Clock,
 {
     type Item = M::Block;
 
@@ -117,7 +129,19 @@ where
             let should_subscribe_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_subscribe_parent && end_of_buffered {
-                let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
+                let marshal = this.marshal.clone();
+                let fetch_duration = this.fetch_duration.clone();
+                let clock = this.clock.clone();
+                let child = block.clone();
+                let future = async move {
+                    let timer = fetch_duration.timer(clock.as_ref());
+                    let parent = marshal.subscribe_parent(child).await;
+                    if parent.is_some() {
+                        timer.observe(clock.as_ref());
+                    }
+                    parent
+                }
+                .boxed();
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -149,7 +173,19 @@ where
                 let height = block.height();
                 let should_subscribe_parent = height > END_BOUND;
                 if should_subscribe_parent {
-                    let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
+                    let marshal = this.marshal.clone();
+                    let fetch_duration = this.fetch_duration.clone();
+                    let clock = this.clock.clone();
+                    let child = block.clone();
+                    let future = async move {
+                        let timer = fetch_duration.timer(clock.as_ref());
+                        let parent = marshal.subscribe_parent(child).await;
+                        if parent.is_some() {
+                            timer.observe(clock.as_ref());
+                        }
+                        parent
+                    }
+                    .boxed();
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -179,7 +215,14 @@ mod test {
     use super::*;
     use crate::marshal::mocks::block::Block;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
-    use commonware_macros::test_async;
+    use commonware_runtime::{
+        deterministic,
+        telemetry::metrics::{
+            histogram::{Buckets, Timed},
+            MetricsExt as _,
+        },
+        Runner as _, Supervisor as _,
+    };
     use futures::StreamExt;
 
     #[derive(Default, Clone)]
@@ -195,71 +238,118 @@ mod test {
     #[test]
     #[should_panic = "initial blocks must be contiguous in height"]
     fn test_panics_on_non_contiguous_initial_blocks_height() {
-        AncestorStream::new(
-            MockProvider::default(),
-            vec![
-                Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
-                Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(3), 3),
-            ],
-        );
+        deterministic::Runner::default().start(|context| async move {
+            let stream_context = context.child("ancestor_stream");
+            let timed = timed(&stream_context);
+            AncestorStream::new(
+                MockProvider::default(),
+                vec![
+                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
+                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(3), 3),
+                ],
+                timed,
+                Arc::new(stream_context),
+            );
+        });
     }
 
     #[test]
     #[should_panic = "initial blocks must be contiguous in ancestry"]
     fn test_panics_on_non_contiguous_initial_blocks_digest() {
-        AncestorStream::new(
-            MockProvider::default(),
-            vec![
-                Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
-                Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(2), 2),
-            ],
-        );
+        deterministic::Runner::default().start(|context| async move {
+            let stream_context = context.child("ancestor_stream");
+            let timed = timed(&stream_context);
+            AncestorStream::new(
+                MockProvider::default(),
+                vec![
+                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1),
+                    Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(2), 2),
+                ],
+                timed,
+                Arc::new(stream_context),
+            );
+        });
     }
 
-    #[test_async]
-    async fn test_empty_yields_none() {
-        let mut stream: AncestorStream<MockProvider> =
-            AncestorStream::new(MockProvider::default(), vec![]);
-        assert_eq!(stream.next().await, None);
+    fn timed(context: &deterministic::Context) -> Timed {
+        Timed::new(context.histogram(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+            Buckets::NETWORK,
+        ))
     }
 
-    #[test_async]
-    async fn test_yields_ancestors() {
-        let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-        let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
-        let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
-
-        let provider = MockProvider(vec![block1.clone(), block2.clone()]);
-        let stream = AncestorStream::new(provider, [block3.clone()]);
-
-        let results = stream.collect::<Vec<_>>().await;
-        assert_eq!(results, vec![block3, block2, block1]);
+    #[test]
+    fn test_empty_yields_none() {
+        deterministic::Runner::default().start(|context| async move {
+            let stream_context = context.child("ancestor_stream");
+            let timed = timed(&stream_context);
+            let mut stream: AncestorStream<MockProvider, deterministic::Context> =
+                AncestorStream::new(MockProvider::default(), vec![], timed, Arc::new(stream_context));
+            assert_eq!(stream.next().await, None);
+        });
     }
 
-    #[test_async]
-    async fn test_yields_ancestors_all_buffered() {
-        let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-        let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
-        let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
+    #[test]
+    fn test_yields_ancestors() {
+        deterministic::Runner::default().start(|context| async move {
+            let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
+            let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
 
-        let provider = MockProvider(vec![]);
-        let stream =
-            AncestorStream::new(provider, [block1.clone(), block2.clone(), block3.clone()]);
+            let provider = MockProvider(vec![block1.clone(), block2.clone()]);
+            let stream_context = context.child("ancestor_stream");
+            let stream = AncestorStream::new(
+                provider,
+                [block3.clone()],
+                timed(&stream_context),
+                Arc::new(stream_context),
+            );
 
-        let results = stream.collect::<Vec<_>>().await;
-        assert_eq!(results, vec![block3, block2, block1]);
+            let results = stream.collect::<Vec<_>>().await;
+            assert_eq!(results, vec![block3, block2, block1]);
+        });
     }
 
-    #[test_async]
-    async fn test_missing_parent_ends_stream() {
-        let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
-        let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
-        let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
+    #[test]
+    fn test_yields_ancestors_all_buffered() {
+        deterministic::Runner::default().start(|context| async move {
+            let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
+            let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
 
-        let provider = MockProvider(vec![block1]);
-        let stream = AncestorStream::new(provider, [block3.clone()]);
+            let provider = MockProvider(vec![]);
+            let stream_context = context.child("ancestor_stream");
+            let stream = AncestorStream::new(
+                provider,
+                [block1.clone(), block2.clone(), block3.clone()],
+                timed(&stream_context),
+                Arc::new(stream_context),
+            );
 
-        let results = stream.collect::<Vec<_>>().await;
-        assert_eq!(results, vec![block3]);
+            let results = stream.collect::<Vec<_>>().await;
+            assert_eq!(results, vec![block3, block2, block1]);
+        });
+    }
+
+    #[test]
+    fn test_missing_parent_ends_stream() {
+        deterministic::Runner::default().start(|context| async move {
+            let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
+            let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
+
+            let provider = MockProvider(vec![block1]);
+            let stream_context = context.child("ancestor_stream");
+            let stream = AncestorStream::new(
+                provider,
+                [block3.clone()],
+                timed(&stream_context),
+                Arc::new(stream_context),
+            );
+
+            let results = stream.collect::<Vec<_>>().await;
+            assert_eq!(results, vec![block3]);
+        });
     }
 }

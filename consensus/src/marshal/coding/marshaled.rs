@@ -189,6 +189,7 @@ where
     build_duration: Timed,
     verify_duration: Timed,
     proposal_parent_fetch_duration: Timed,
+    ancestor_fetch_duration: Timed,
     erasure_encode_duration: Timed,
 }
 
@@ -217,6 +218,7 @@ where
             build_duration: self.build_duration.clone(),
             verify_duration: self.verify_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
+            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
             erasure_encode_duration: self.erasure_encode_duration.clone(),
         }
     }
@@ -273,6 +275,12 @@ where
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
+        let ancestor_fetch_histogram = context.histogram(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+            Buckets::NETWORK,
+        );
+        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         let erasure_histogram = context.histogram(
             "erasure_encode_duration",
@@ -295,6 +303,7 @@ where
             build_duration,
             verify_duration,
             proposal_parent_fetch_duration,
+            ancestor_fetch_duration,
             erasure_encode_duration,
         }
     }
@@ -327,6 +336,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let cached_genesis = self.cached_genesis.clone();
 
         let (mut tx, rx) = oneshot::channel();
@@ -423,7 +433,11 @@ where
                 return;
             }
 
-            let ancestry_stream = marshal.ancestor_stream([block.clone(), parent]);
+            let ancestry_stream = marshal.ancestor_stream(
+                [block.clone(), parent],
+                ancestor_fetch_duration,
+                Arc::new(runtime_context.child("ancestor_stream")),
+            );
             let validity_request = application.verify(
                 (
                     runtime_context.child("app_verify"),
@@ -714,6 +728,7 @@ where
         // Metrics
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
@@ -827,7 +842,11 @@ where
                 return;
             }
 
-            let ancestor_stream = marshal.ancestor_stream([parent]);
+            let ancestor_stream = marshal.ancestor_stream(
+                [parent],
+                ancestor_fetch_duration,
+                Arc::new(runtime_context.child("ancestor_stream")),
+            );
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
