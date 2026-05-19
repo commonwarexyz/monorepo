@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{p2p::Producer, Consumer, Delivery};
+use commonware_resolver::{p2p::Producer, Consumer, Delivery, Fetch as ResolverFetch};
 use commonware_utils::{channel::oneshot, Span};
 use std::{
     collections::VecDeque,
@@ -173,7 +173,7 @@ impl<D: Digest> Producer for Handler<D> {
 /// need to update different local stores depending on whether it was fetched
 /// for a certified chain or for the finalized chain.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Annotation {
+pub(crate) enum Annotation {
     /// A notarization requested by round.
     Notarization { round: Round },
     /// A block requested by commitment for a certified chain.
@@ -189,7 +189,7 @@ pub enum Annotation {
 
 /// Metadata for a finalized block requested by commitment.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Finalized {
+pub(crate) enum Finalized {
     /// The finalized height is known before the request.
     ByHeight { height: Height },
     /// Only the finalization round is known before the request.
@@ -201,7 +201,7 @@ pub enum Finalized {
 
 /// A request for backfilling data.
 #[derive(Clone, Copy)]
-pub enum Request<D: Digest> {
+pub(crate) enum Request<D: Digest> {
     /// Fetch a block by consensus commitment.
     Block(D),
     Finalized {
@@ -219,6 +219,115 @@ impl<D: Digest> Request<D> {
             Self::Block(_) => BLOCK_REQUEST,
             Self::Finalized { .. } => FINALIZED_REQUEST,
             Self::Notarized { .. } => NOTARIZED_REQUEST,
+        }
+    }
+}
+
+/// A valid marshal backfill fetch request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FetchRequestKind<D: Digest> {
+    /// Fetch a notarized proposal for a round.
+    Notarized { round: Round },
+    /// Fetch a finalization for a height.
+    Finalized { height: Height },
+    /// Fetch a certified-chain block by commitment.
+    CertifiedBlock { commitment: D, height: Height },
+    /// Fetch a finalized-chain block by commitment when its height is known.
+    FinalizedBlockByHeight { commitment: D, height: Height },
+    /// Fetch a finalized-chain block by commitment when only its finalization round is known.
+    FinalizedBlockByRound { commitment: D, round: Round },
+}
+
+/// A marshal backfill fetch with a request and local processing annotation that match.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FetchRequest<D: Digest> {
+    kind: FetchRequestKind<D>,
+}
+
+impl<D: Digest> FetchRequest<D> {
+    /// Fetch a notarized proposal for `round`.
+    pub const fn notarized(round: Round) -> Self {
+        Self {
+            kind: FetchRequestKind::Notarized { round },
+        }
+    }
+
+    /// Fetch a finalization for `height`.
+    pub const fn finalized(height: Height) -> Self {
+        Self {
+            kind: FetchRequestKind::Finalized { height },
+        }
+    }
+
+    /// Fetch a certified-chain block by commitment.
+    pub const fn certified_block(commitment: D, height: Height) -> Self {
+        Self {
+            kind: FetchRequestKind::CertifiedBlock { commitment, height },
+        }
+    }
+
+    /// Fetch a finalized-chain block by commitment when its height is known.
+    pub const fn finalized_block_by_height(commitment: D, height: Height) -> Self {
+        Self {
+            kind: FetchRequestKind::FinalizedBlockByHeight { commitment, height },
+        }
+    }
+
+    /// Fetch a finalized-chain block by commitment when only its finalization round is known.
+    pub const fn finalized_block_by_round(commitment: D, round: Round) -> Self {
+        Self {
+            kind: FetchRequestKind::FinalizedBlockByRound { commitment, round },
+        }
+    }
+
+    /// Return the typed fetch request.
+    pub const fn kind(&self) -> FetchRequestKind<D> {
+        self.kind
+    }
+
+    pub(crate) fn above_height_floor(&self, floor: Height) -> bool {
+        match self.kind {
+            FetchRequestKind::Finalized { height }
+            | FetchRequestKind::CertifiedBlock { height, .. }
+            | FetchRequestKind::FinalizedBlockByHeight { height, .. } => height > floor,
+            FetchRequestKind::Notarized { .. } | FetchRequestKind::FinalizedBlockByRound { .. } => {
+                true
+            }
+        }
+    }
+
+    pub(crate) fn above_round_floor(&self, floor: Round) -> bool {
+        match self.kind {
+            FetchRequestKind::Notarized { round }
+            | FetchRequestKind::FinalizedBlockByRound { round, .. } => round > floor,
+            FetchRequestKind::Finalized { .. }
+            | FetchRequestKind::CertifiedBlock { .. }
+            | FetchRequestKind::FinalizedBlockByHeight { .. } => true,
+        }
+    }
+
+    pub(crate) const fn into_inner(self) -> ResolverFetch<Request<D>, Annotation> {
+        match self.kind {
+            FetchRequestKind::Notarized { round } => ResolverFetch {
+                key: Request::Notarized { round },
+                subscriber: Annotation::Notarization { round },
+            },
+            FetchRequestKind::Finalized { height } => ResolverFetch {
+                key: Request::Finalized { height },
+                subscriber: Annotation::Finalized(Finalized::ByHeight { height }),
+            },
+            FetchRequestKind::CertifiedBlock { commitment, height } => ResolverFetch {
+                key: Request::Block(commitment),
+                subscriber: Annotation::Certified { height },
+            },
+            FetchRequestKind::FinalizedBlockByHeight { commitment, height } => ResolverFetch {
+                key: Request::Block(commitment),
+                subscriber: Annotation::Finalized(Finalized::ByHeight { height }),
+            },
+            FetchRequestKind::FinalizedBlockByRound { commitment, round } => ResolverFetch {
+                key: Request::Block(commitment),
+                subscriber: Annotation::Finalized(Finalized::ByRound { round }),
+            },
         }
     }
 }

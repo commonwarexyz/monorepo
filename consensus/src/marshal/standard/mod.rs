@@ -56,7 +56,7 @@ mod tests {
                 },
                 verifying::MockVerifyingApp,
             },
-            resolver::handler,
+            resolver::{self, handler},
             Identifier, Update,
         },
         simplex::{
@@ -82,7 +82,7 @@ mod tests {
         Manager as _, Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
+    use commonware_resolver::{Consumer, Delivery, Fetch};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
@@ -2578,59 +2578,52 @@ mod tests {
         }
     }
 
-    impl Resolver for RecordingResolver {
-        type Key = handler::Request<D>;
-        type Subscriber = handler::Annotation;
+    impl resolver::Resolver<D> for RecordingResolver {
         type PublicKey = PublicKey;
 
-        fn fetch<R>(&mut self, key: R) -> Feedback
-        where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            self.record_fetch(key.into());
+        fn fetch(&mut self, fetch: handler::FetchRequest<D>) -> Feedback {
+            self.record_fetch(fetch.into_inner());
             Feedback::Ok
         }
 
-        fn fetch_all<R>(&mut self, keys: Vec<R>) -> Feedback
-        where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            for key in keys {
-                self.record_fetch(key.into());
+        fn fetch_all(&mut self, fetches: Vec<handler::FetchRequest<D>>) -> Feedback {
+            for fetch in fetches {
+                self.record_fetch(fetch.into_inner());
             }
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            fetch: handler::FetchRequest<D>,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((key.into().key, targets));
+            self.targeted.lock().push((fetch.into_inner().key, targets));
             Feedback::Ok
         }
 
-        fn fetch_all_targeted<R>(
-            &mut self,
-            keys: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            self.targeted.lock().extend(
-                keys.into_iter()
-                    .map(|(key, targets)| (key.into().key, targets)),
-            );
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
+        fn retain_above_height(&mut self, height: Height) -> Feedback {
+            let predicate = handler::above_height_floor::<D>(height);
             self.active_fetches
                 .lock()
                 .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
+            *self.retains.lock() += 1;
+            Feedback::Ok
+        }
+
+        fn retain_above_round(&mut self, round: Round) -> Feedback {
+            let predicate = handler::above_round_floor::<D>(round);
+            self.active_fetches
+                .lock()
+                .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
+            *self.retains.lock() += 1;
+            Feedback::Ok
+        }
+
+        fn retain_except_block(&mut self, commitment: D) -> Feedback {
+            self.active_fetches.lock().retain(
+                |fetch| !matches!(fetch.key, handler::Request::Block(pending) if pending == commitment),
+            );
             *self.retains.lock() += 1;
             Feedback::Ok
         }
