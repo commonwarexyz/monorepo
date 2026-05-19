@@ -103,7 +103,11 @@ So if all ciphertexts use the same witness, the verifier can fold pairings acros
 
 We start from a simple observation:
 
-> *A perfectly correct encryption scheme is also a perfectly binding commitment scheme*
+<div align="center">
+
+*A perfectly correct encryption scheme is also a perfectly binding commitment scheme*
+
+</div>
 
 If a helper provides us the message *and* randomness used to create the ciphertext, we can avoid the decryption equation check entirely. Instead, we can check that the ciphertext is a valid encryption of the claimed message under the claimed randomness. In the linear WE notation above, this means checking:
 
