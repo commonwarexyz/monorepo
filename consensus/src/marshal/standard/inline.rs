@@ -146,6 +146,7 @@ where
     available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed,
+    proposal_parent_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
@@ -164,6 +165,7 @@ where
             epocher: self.epocher.clone(),
             available_blocks: self.available_blocks.clone(),
             build_duration: self.build_duration.clone(),
+            proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
         }
     }
 }
@@ -186,6 +188,12 @@ where
             Buckets::LOCAL,
         );
         let build_duration = Timed::new(build_histogram);
+        let parent_fetch_histogram = context.histogram(
+            "parent_fetch_duration",
+            "Histogram of time taken to fetch a parent block in propose, in seconds",
+            Buckets::LOCAL,
+        );
+        let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
 
         Self {
             context: Arc::new(AsyncMutex::new(context)),
@@ -194,6 +202,7 @@ where
             epocher,
             available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             build_duration,
+            proposal_parent_fetch_duration,
         }
     }
 }
@@ -243,6 +252,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let build_duration = self.build_duration.clone();
+        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -286,6 +296,7 @@ where
             )
             .await;
 
+            let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
             let parent = select! {
                 _ = tx.closed() => {
                     debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -303,6 +314,7 @@ where
                     }
                 },
             };
+            parent_timer.observe(&runtime_context);
 
             // At epoch boundary, re-propose the parent block.
             let last_in_epoch = epocher

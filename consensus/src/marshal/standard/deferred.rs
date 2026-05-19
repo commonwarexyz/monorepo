@@ -152,6 +152,7 @@ where
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
     build_duration: Timed,
+    proposal_parent_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
@@ -170,6 +171,7 @@ where
             epocher: self.epocher.clone(),
             verification_tasks: self.verification_tasks.clone(),
             build_duration: self.build_duration.clone(),
+            proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
         }
     }
 }
@@ -190,6 +192,12 @@ where
             Buckets::LOCAL,
         );
         let build_duration = Timed::new(build_histogram);
+        let parent_fetch_histogram = context.histogram(
+            "parent_fetch_duration",
+            "Histogram of time taken to fetch a parent block in propose, in seconds",
+            Buckets::LOCAL,
+        );
+        let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
 
         Self {
             context: Arc::new(AsyncMutex::new(context)),
@@ -199,6 +207,7 @@ where
             verification_tasks: VerificationTasks::new(),
 
             build_duration,
+            proposal_parent_fetch_duration,
         }
     }
 
@@ -317,6 +326,7 @@ where
 
         // Metrics
         let build_duration = self.build_duration.clone();
+        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -373,6 +383,7 @@ where
             )
             .await;
 
+            let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
             let parent = select! {
                 _ = tx.closed() => {
                     debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -390,6 +401,7 @@ where
                     }
                 },
             };
+            parent_timer.observe(&runtime_context);
 
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it as to not produce any blocks that will be cut out
