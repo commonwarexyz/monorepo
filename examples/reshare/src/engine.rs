@@ -346,7 +346,7 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            resolver::Receiver<H::Digest>,
+            resolver::handler::Receiver<H::Digest>,
             resolver::p2p::Mailbox<H::Digest, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
@@ -389,7 +389,7 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            resolver::Receiver<H::Digest>,
+            resolver::handler::Receiver<H::Digest>,
             resolver::p2p::Mailbox<H::Digest, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
