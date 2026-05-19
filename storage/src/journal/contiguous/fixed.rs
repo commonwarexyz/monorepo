@@ -58,9 +58,9 @@
 //!
 //! Recovery derives fixed-journal size from retained blob lengths:
 //! - Once RECOVERY_WATERMARK_KEY exists, recovery walks retained blob lengths from oldest to
-//!   newest, stops at the first short section, and truncates newer sections to preserve a
-//!   contiguous prefix. After size recovery, the watermark is preserved if it is still within the
-//!   recovered size and lowered otherwise.
+//!   newest. A short newest section is the natural tail; a short earlier section is treated as the
+//!   end of the contiguous prefix, and newer sections are truncated. After size recovery, the
+//!   watermark is preserved if it is still within the recovered size and lowered otherwise.
 //! - Legacy journals without RECOVERY_WATERMARK_KEY rely on the old rule that section rollover
 //!   synced the previous section. Valid legacy journals recover from the newest retained blob once,
 //!   then persist the watermark before returning from `init`.
@@ -843,7 +843,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((size, None))
     }
 
-    /// Recover by walking section lengths until the first short section.
+    /// Recover by walking section lengths until the first short non-tail section.
     ///
     /// This is the normal current-format crash-repair path. Legacy recovery uses it only when the
     /// old rollover invariant is already violated or pruning metadata was stale.
@@ -885,6 +885,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
             size += len;
             if len < capacity {
+                if section == newest {
+                    return Ok((size, None));
+                }
                 return Ok((
                     size,
                     Some(RecoveryRepair {
@@ -2122,6 +2125,70 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(append.size().await, expected_size);
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_recover_accepts_clean_short_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let segmented_cfg = SegmentedConfig {
+                partition: blob_partition(&cfg),
+                page_cache: cfg.page_cache.clone(),
+                write_buffer: cfg.write_buffer,
+            };
+            let mut inner =
+                SegmentedJournal::<_, Digest>::init(context.child("blobs"), segmented_cfg)
+                    .await
+                    .unwrap();
+
+            for i in 0..5 {
+                inner.append(0, &test_digest(i)).await.unwrap();
+            }
+            for i in 5..7 {
+                inner.append(1, &test_digest(i)).await.unwrap();
+            }
+            inner.sync(0).await.unwrap();
+            inner.sync(1).await.unwrap();
+
+            let (size, repair) = Journal::<_, Digest>::recover_by_walking_lengths(&mut inner, 5, 0)
+                .await
+                .unwrap();
+            assert_eq!(size, 7);
+            assert!(repair.is_none());
+            inner.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_recover_accepts_clean_empty_tail() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let segmented_cfg = SegmentedConfig {
+                partition: blob_partition(&cfg),
+                page_cache: cfg.page_cache.clone(),
+                write_buffer: cfg.write_buffer,
+            };
+            let mut inner =
+                SegmentedJournal::<_, Digest>::init(context.child("blobs"), segmented_cfg)
+                    .await
+                    .unwrap();
+
+            for i in 0..5 {
+                inner.append(0, &test_digest(i)).await.unwrap();
+            }
+            inner.ensure_section_exists(1).await.unwrap();
+            inner.sync(0).await.unwrap();
+            inner.sync(1).await.unwrap();
+
+            let (size, repair) = Journal::<_, Digest>::recover_by_walking_lengths(&mut inner, 5, 0)
+                .await
+                .unwrap();
+            assert_eq!(size, 5);
+            assert!(repair.is_none());
+            inner.destroy().await.unwrap();
         });
     }
 
