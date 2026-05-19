@@ -459,17 +459,6 @@ where
     ) -> Option<V::StoredBlock> {
         // Check in reverse order
         for cache in self.caches.values().rev() {
-            if let Some(block) = cache
-                .certified_blocks
-                .get(Identifier::Key(&digest))
-                .await
-                .expect("failed to get certified block")
-            {
-                if predicate(&block) {
-                    return Some(block);
-                }
-            }
-
             // Check verified blocks
             if let Some(block) = cache
                 .verified_blocks
@@ -488,6 +477,18 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get notarized block")
+            {
+                if predicate(&block) {
+                    return Some(block);
+                }
+            }
+
+            // Check certified blocks
+            if let Some(block) = cache
+                .certified_blocks
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get certified block")
             {
                 if predicate(&block) {
                     return Some(block);
