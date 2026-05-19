@@ -103,7 +103,11 @@ So if all ciphertexts use the same witness, the verifier can fold pairings acros
 
 We start from a simple observation:
 
-> *A perfectly correct encryption scheme is also a perfectly binding commitment scheme*
+<div align="center">
+
+*A perfectly correct encryption scheme is also a perfectly binding commitment scheme*
+
+</div>
 
 If a helper provides us the message *and* randomness used to create the ciphertext, we can avoid the decryption equation check entirely. Instead, we can check that the ciphertext is a valid encryption of the claimed message under the claimed randomness. In the linear WE notation above, this means checking:
 
@@ -286,7 +290,11 @@ $$
 \right).
 $$
 
-> This is precisely the batch of ciphertexts together with the partial decryption in the simple-BTE scheme! Thus the users and the committee produce the ciphertext $\mathsf{ct}$ in a *distributed* manner.
+<div align="center">
+
+This is precisely the batch of ciphertexts together with the partial decryption in the simple-BTE scheme! Thus the users and the committee produce the ciphertext $\mathsf{ct}$ in a *distributed* manner.
+
+</div>
 
 **Decrypt:** To decrypt the $i$-th ciphertext, we use $\{h_{\ell+B+1-i}\}_{\ell\in[0,B]\setminus\{i\}}$ as the witness which is readily available in the public parameters.
   $$

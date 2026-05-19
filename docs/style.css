@@ -82,6 +82,10 @@ p {
     margin-bottom: 5px;
 }
 
+div[data-align="center"] {
+    text-align: center;
+}
+
 button {
     padding: 5px;
     margin-bottom: 5px;
@@ -381,6 +385,20 @@ details.podcast-episode summary.podcast-title {
 
 .katex-display {
     padding-bottom: 0.25rem;
+}
+
+/* Avoid subpixel seams between KaTeX's stitched stretchy brace pieces. */
+.katex .brace-left {
+    width: 25.4%;
+}
+
+.katex .brace-center {
+    left: 24.8%;
+    width: 50.4%;
+}
+
+.katex .brace-right {
+    width: 25.4%;
 }
 
 /* MCP page styles */
