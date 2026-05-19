@@ -9,16 +9,20 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Phone a Friend</title>
-    <meta name="description" content="TBD">
+    <meta name="description" content="Helper-aided decryption lets
+validators verify batches of encrypted transactions with short hints
+instead of locally repeating expensive pairing work.">
     <meta name="author" content="Guru Vamsi Policharla">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
     <meta property="og:url" content="https://commonware.xyz/blogs/phone-a-friend" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="https://commonware.xyz/imgs/phone-a-friend.png" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/batch-mempool-decryption.png" />
     <meta property="og:title" content="Phone a Friend" />
-    <meta property="og:description" content="TBD" />
+    <meta property="og:description" content="Helper-aided decryption
+lets validators verify batches of encrypted transactions with short
+hints instead of locally repeating expensive pairing work." />
     <meta property="article:author" content="Guru Vamsi Policharla" />
     <meta property="article:published_time" content="2026-05-19T00:00:00Z" />
     <meta property="article:modified_time" content="2026-05-19T00:00:00Z" />
@@ -29,8 +33,10 @@
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/phone-a-friend" />
     <meta property="twitter:title" content="Phone a Friend" />
-    <meta property="twitter:description" content="TBD" />
-    <meta property="twitter:image" content="https://commonware.xyz/imgs/phone-a-friend.png" />
+    <meta property="twitter:description" content="Helper-aided
+decryption lets validators verify batches of encrypted transactions with
+short hints instead of locally repeating expensive pairing work." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/batch-mempool-decryption.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/gvamsip" />
     
@@ -250,8 +256,8 @@ Vamsi Policharla</a></div>
         pairing product equations to MSMs of size <span
         class="math inline">\(N\)</span> and a single pairing product
         equation. In fact, we used this idea in our previous <a
-        href="https://commonware.xyz/blogs/batch-pari">blog post</a> on
-        batch verification of Pari proofs.</p>
+        href="/blogs/batch-pari">blog post</a> on batch verification of
+        Pari proofs.</p>
         <p>A natural approach is to have the helper send the recovered
         message together with the corresponding witness as the hint. The
         verifier can then check the decryption equation is satisfied for
@@ -273,14 +279,12 @@ Vamsi Policharla</a></div>
         which is the case in most other applications of pairing based WE
         schemes, the verifier will have to evaluate a large number of
         pairings.</p>
-        <!-- top -->
         <h2 id="our-approach">Our Approach</h2>
         <p>We start from a simple observation:</p>
-        <div data-align="center">
-        <p><i>A perfectly correct encryption scheme is also a perfectly
-        binding commitment scheme</i></p>
-        </div>
-        <p><br></p>
+        <blockquote>
+        <p><em>A perfectly correct encryption scheme is also a perfectly
+        binding commitment scheme</em></p>
+        </blockquote>
         <p>If a helper provides us the message <em>and</em> randomness
         used to create the ciphertext, we can avoid the decryption
         equation check entirely. Instead, we can check that the
@@ -299,7 +303,7 @@ Vamsi Policharla</a></div>
         \]</span></p>
         <p>These checks use MSMs in the source groups and target group,
         but no pairings. They also batch naturally via <a
-        href="https://eprint.iacr.org/2008/015">[FGHP09]</a>: sample
+        href="https://eprint.iacr.org/2008/015">FGHP09</a>: sample
         random coefficients <span
         class="math inline">\(r_1,\ldots,r_B\gets\mathbb{F}\)</span> and
         check the random linear combination of the claimed openings:</p>
@@ -407,37 +411,28 @@ Vamsi Policharla</a></div>
         <h2 id="scaling-batched-threshold-encryption">Scaling Batched
         Threshold Encryption</h2>
         <p>Coming to the specific case of batched threshold encryption
-        there are two remaining hurdles: - While some constructions of
-        BTE such as <a
+        there are two remaining hurdles:</p>
+        <ul>
+        <li>While some constructions of BTE such as <a
         href="https://eprint.iacr.org/2024/1516">CGPW25</a> and <a
         href="https://eprint.iacr.org/2024/1575">AFP25</a> have been
         presented as witness encryption schemes, it is not obvious how
-        we can view constructions such as <a
-        href="https://commonware.xyz/blogs/bte">Simple BTE</a> as a
-        witness encryption scheme. - We have completely ignored the
-        issue of malformed ciphertexts. Suppose a user submits a
-        ciphertext that fails the FO decryption check such that the
-        helper cannot recover randomness. Observe that the helper cannot
-        just output <span class="math inline">\(\bot\)</span>, because a
-        malicious helper could suppress honest ciphertexts by falsely
-        claiming they are malformed. Instead, the helper needs to
-        <em>prove</em> the ciphertext is malformed. One can of course
-        attach a SNARK but this is quite expensive and we would like to
-        do better.</p>
+        we can view constructions such as <a href="/blogs/bte">Simple
+        BTE</a> as a witness encryption scheme.</li>
+        <li>We have completely ignored the issue of malformed
+        ciphertexts. Suppose a user submits a ciphertext that fails the
+        FO decryption check such that the helper cannot recover
+        randomness. Observe that the helper cannot just output <span
+        class="math inline">\(\bot\)</span>, because a malicious helper
+        could suppress honest ciphertexts by falsely claiming they are
+        malformed. Instead, the helper needs to <em>prove</em> the
+        ciphertext is malformed. One can of course attach a SNARK but
+        this is quite expensive and we would like to do better.</li>
+        </ul>
         <h3 id="simple-bte-as-a-witness-encryption-scheme">Simple BTE as
         a Witness Encryption Scheme</h3>
         <p>We recall the simple BTE construction from our <a
-        href="https://commonware.xyz/blogs/bte">previous blog
-        post</a>.</p>
-        <!-- - **Setup:** A trusted party publishes the encryption key and the punctured powers-of-$\tau$ values needed for decryption:
-
-          $$
-          \mathsf{ek} := [\tau^{B+1}]_T
-          \qquad\text{and}\qquad
-          \mathsf{dk} := \left(\{h_j := [\tau^j]_2\}_{j\in[2B]\setminus\{B+1\}}\right)
-          $$
-
-          Each committee member $j$ receives shares $(\sigma^i_j)_{i\in[B]}$ of the powers $(\tau^i)_{i\in[B]}$. -->
+        href="/blogs/bte">previous blog post</a>.</p>
         <ul>
         <li><p><strong>Encrypt:</strong> An ElGamal-style
         ciphertext:</p>
@@ -462,18 +457,6 @@ Vamsi Policharla</a></div>
         \mathsf{pd} = \left[\sum_{i\in[B]} k_i\tau^i\right]_1
         \]</span></p></li>
         </ul>
-        <!-- - **Decrypt** the $i$-th ciphertext:
-
-          $$
-          [k_i \tau^{B+1}]_T
-          = \mathsf{pd}\circ h_{B+1-i}
-          - \sum_{\substack{\ell\in[B]\\\ell\ne i}}
-          \mathsf{ct}_{\ell,1}\circ h_{\ell+B+1-i}
-          $$
-
-          $$
-          m_i = \mathsf{ct}_{i,2} - [k_i \tau^{B+1}]_T
-          $$ -->
         <p>At first glance, one might view each ciphertext as a witness
         encryption for the relation</p>
         <p><span class="math display">\[
@@ -592,7 +575,6 @@ Vamsi Policharla</a></div>
         simple BTE scheme on an M5 MacBook Pro in single-threaded mode.
         Our implementation using arkworks can be found <a
         href="https://github.com/commonwarexyz/simple-bte/pull/2">here</a>.</p>
-        <div data-align="center">
         <table>
         <colgroup>
         <col style="width: 9%" />
@@ -684,23 +666,26 @@ Vamsi Policharla</a></div>
         </tr>
         </tbody>
         </table>
-        </div>
         <p>Helper refers to the time it takes to carry out decryption.
         Producing hints has negligible overhead. For the batch
-        verification, we benchmarked three different strategies: -
-        <strong>Naive:</strong> This is the “first attempt” described
-        above where the helper sends the recovered message together with
-        the corresponding witness as the hint, and the verifier checks
-        the decryption equation for each ciphertext. -
-        <strong>Bandwidth-optimized:</strong> This is the strategy
+        verification, we benchmarked three different strategies:</p>
+        <ul>
+        <li><strong>Naive:</strong> This is the “first attempt”
+        described above where the helper sends the recovered message
+        together with the corresponding witness as the hint, and the
+        verifier checks the decryption equation for each
+        ciphertext.</li>
+        <li><strong>Bandwidth-optimized:</strong> This is the strategy
         described above where the helper sends the short PRG seed <span
         class="math inline">\(\rho^k\)</span> for each ciphertext but
         this comes at the cost of <span
         class="math inline">\(\mathbb{G}_T\)</span> exponentiations for
-        each ciphertext. - <strong>Verification-optimized:</strong> This
-        is the strategy described above where the helper sends the
-        recovered <span class="math inline">\(K^k\)</span> values
-        directly and only uses MSMs/Hashes for verification.</p>
+        each ciphertext.</li>
+        <li><strong>Verification-optimized:</strong> This is the
+        strategy described above where the helper sends the recovered
+        <span class="math inline">\(K^k\)</span> values directly and
+        only uses MSMs/Hashes for verification.</li>
+        </ul>
         <p>While these benchmarks were run in single-threaded mode on an
         M5 MacBook Pro, we expect them to scale well with
         parallelization.</p>
@@ -730,22 +715,25 @@ Vamsi Policharla</a></div>
         class="math inline">\(\$2\)</span>-<span
         class="math inline">\(\$3\)</span> per hour it normally costs to
         rent compute as a validator.</p>
-        <p>With helper aided decryption: - In the
-        <strong>Verification-optimized</strong> version, the helper
-        needs to distribute an additional 38 MB of data to every
+        <p>With helper aided decryption:</p>
+        <ul>
+        <li>In the <strong>Verification-optimized</strong> version, the
+        helper needs to distribute an additional 38 MB of data to every
         participant in the network, every second. However, this comes
         with the benefit of being able to batch verify the decryption of
         ciphertexts in under 2s (single threaded) instead of spending
         556s decrypting them. When bandwidth is abundant and we have
-        room to double the throughput, this is the preferred option. -
-        In the <strong>Bandwidth-optimized</strong> version, the helper
-        needs to distribute just 1 MB of data to every participant in
-        the network, every second. The validators spend about 24 s
-        (single threaded) verifying the decryption but this can of
-        course be parallelized. This allows us to retain the benefits of
-        batched verification (23 <span
+        room to double the throughput, this is the preferred
+        option.</li>
+        <li>In the <strong>Bandwidth-optimized</strong> version, the
+        helper needs to distribute just 1 MB of data to every
+        participant in the network, every second. The validators spend
+        about 24 s (single threaded) verifying the decryption but this
+        can of course be parallelized. This allows us to retain the
+        benefits of batched verification (23 <span
         class="math inline">\(\times\)</span> speedup) with a modest
-        (~4%) increase in bandwidth usage.</p>
+        (~4%) increase in bandwidth usage.</li>
+        </ul>
         <p>In the figure below, we provide a visual representation of
         the three different decryption strategies. Pricing is estimated
         by assuming perfect parallelization of single threaded
@@ -758,7 +746,7 @@ Vamsi Policharla</a></div>
         specialized hardware such as GPUs/FPGAs is an interesting avenue
         for future work.</p>
         <figure>
-        <img src="Figures/Batch-Decryption.svg"
+        <img src="/imgs/batch-mempool-decryption.png"
         alt="Batch verification strategies" />
         <figcaption aria-hidden="true">Batch verification
         strategies</figcaption>
@@ -780,7 +768,7 @@ Vamsi Policharla</a></div>
         can pay base fee can be sorted and proposed based on priority
         fees.</p>
         <figure>
-        <img src="Figures/Encrypted-Transaction.svg"
+        <img src="/imgs/encrypted-transaction.png"
         alt="Encrypted Transaction" />
         <figcaption aria-hidden="true">Encrypted
         Transaction</figcaption>
@@ -818,8 +806,7 @@ Vamsi Policharla</a></div>
         <p>Furthermore, the sequencer itself can act as the helper party
         and broadcast hints to the network. This colocation allows the
         sequencer to begin a large chunk (~90%) of the decryption work
-        that we refer to as <a
-        href="https://commonware.xyz/blogs/bte">“pre-decryption”</a>
+        that we refer to as <a href="/blogs/bte">“pre-decryption”</a>
         immediately after it has built the block. It does not have to
         wait for decryption shares to be released and allows decryption
         work to be pipelined with block dissemination.</p>

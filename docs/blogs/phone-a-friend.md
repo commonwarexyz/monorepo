@@ -1,13 +1,13 @@
 ---
 title: "Phone a Friend"
-description: "TBD"
+description: "Helper-aided decryption lets validators verify batches of encrypted transactions with short hints instead of locally repeating expensive pairing work."
 date: "May 19th, 2026"
 published-time: "2026-05-19T00:00:00Z"
 modified-time: "2026-05-19T00:00:00Z"
 author: "Guru Vamsi Policharla"
 author_twitter: "https://x.com/gvamsip"
 url: "https://commonware.xyz/blogs/phone-a-friend"
-image: "https://commonware.xyz/imgs/phone-a-friend.png"
+image: "https://commonware.xyz/imgs/batch-mempool-decryption.png"
 katex: true
 ---
 
@@ -89,7 +89,7 @@ $$
 even for adversarially chosen ciphertexts $(\mathsf{ct}^1,\ldots,\mathsf{ct}^B)$, where the probability is taken over the randomness of the adversary. Thus we only rely on the helper for liveness and a malicious helper cannot violate safety by equivocating hints.
 
 ### A First Attempt
-In some pairing based proof systems, it's possible to reduce the verification of $N$ pairing product equations to MSMs of size $N$ and a single pairing product equation. In fact, we used this idea in our previous [blog post](https://commonware.xyz/blogs/batch-pari) on batch verification of Pari proofs.
+In some pairing based proof systems, it's possible to reduce the verification of $N$ pairing product equations to MSMs of size $N$ and a single pairing product equation. In fact, we used this idea in our previous [blog post](/blogs/batch-pari) on batch verification of Pari proofs.
 
 A natural approach is to have the helper send the recovered message together with the corresponding witness as the hint. The verifier can then check the decryption equation is satisfied for all of the ciphertexts by sampling random coefficients and applying the test from [FGHP09](https://eprint.iacr.org/2008/015). This reduces many checks to a single pairing-product equation.
 However, the number of pairings only reduces when there is a common input across the different pairing terms:
@@ -99,15 +99,11 @@ $$
 
 So if all ciphertexts use the same witness, the verifier can fold pairings across the $B$ ciphertexts with an MSM. Fortunately, this is the case for Timelock encryption as the witness is a signature on the block height. But if each ciphertext has its own unrelated witness, which is the case in most other applications of pairing based WE schemes, the verifier will have to evaluate a large number of pairings.
 
-<!-- top -->
-
 ## Our Approach
 
 We start from a simple observation:
 
-<div align="center">
-<i>A perfectly correct encryption scheme is also a perfectly binding commitment scheme</i>
-</div><br>
+> *A perfectly correct encryption scheme is also a perfectly binding commitment scheme*
 
 If a helper provides us the message *and* randomness used to create the ciphertext, we can avoid the decryption equation check entirely. Instead, we can check that the ciphertext is a valid encryption of the claimed message under the claimed randomness. In the linear WE notation above, this means checking:
 
@@ -122,7 +118,7 @@ $$
 \sum_{i=1}^{m}\alpha_i b_i.
 $$
 
-These checks use MSMs in the source groups and target group, but no pairings. They also batch naturally via [[FGHP09]](https://eprint.iacr.org/2008/015): sample random coefficients $r_1,\ldots,r_B\gets\mathbb{F}$ and check the random linear combination of the claimed openings:
+These checks use MSMs in the source groups and target group, but no pairings. They also batch naturally via [FGHP09](https://eprint.iacr.org/2008/015): sample random coefficients $r_1,\ldots,r_B\gets\mathbb{F}$ and check the random linear combination of the claimed openings:
 
 $$
 \sum_{k=1}^{B} r_k\mathsf{ct}^k_j
@@ -207,23 +203,14 @@ This gives two possible choices for the hint:
 ## Scaling Batched Threshold Encryption
 
 Coming to the specific case of batched threshold encryption there are two remaining hurdles:
-- While some constructions of BTE such as [CGPW25](https://eprint.iacr.org/2024/1516) and [AFP25](https://eprint.iacr.org/2024/1575) have been presented as witness encryption schemes, it is not  obvious how we can view constructions such as [Simple BTE](https://commonware.xyz/blogs/bte) as a witness encryption scheme.
+
+- While some constructions of BTE such as [CGPW25](https://eprint.iacr.org/2024/1516) and [AFP25](https://eprint.iacr.org/2024/1575) have been presented as witness encryption schemes, it is not  obvious how we can view constructions such as [Simple BTE](/blogs/bte) as a witness encryption scheme.
 - We have completely ignored the issue of malformed ciphertexts. Suppose a user submits a ciphertext that fails the FO decryption check such that the helper cannot recover randomness. Observe that the helper cannot just output $\bot$, because a malicious helper could suppress honest ciphertexts by falsely claiming they are malformed.
 Instead, the helper needs to *prove* the ciphertext is malformed. One can of course attach a SNARK but this is quite expensive and we would like to do better.
 
 ### Simple BTE as a Witness Encryption Scheme
 
-We recall the simple BTE construction from our [previous blog post](https://commonware.xyz/blogs/bte).
-
-<!-- - **Setup:** A trusted party publishes the encryption key and the punctured powers-of-$\tau$ values needed for decryption:
-
-  $$
-  \mathsf{ek} := [\tau^{B+1}]_T
-  \qquad\text{and}\qquad
-  \mathsf{dk} := \left(\{h_j := [\tau^j]_2\}_{j\in[2B]\setminus\{B+1\}}\right)
-  $$
-
-  Each committee member $j$ receives shares $(\sigma^i_j)_{i\in[B]}$ of the powers $(\tau^i)_{i\in[B]}$. -->
+We recall the simple BTE construction from our [previous blog post](/blogs/bte).
 
 - **Encrypt:** An ElGamal-style ciphertext:
 
@@ -242,19 +229,6 @@ We recall the simple BTE construction from our [previous blog post](https://comm
   $$
   \mathsf{pd} = \left[\sum_{i\in[B]} k_i\tau^i\right]_1
   $$
-
-<!-- - **Decrypt** the $i$-th ciphertext:
-
-  $$
-  [k_i \tau^{B+1}]_T
-  = \mathsf{pd}\circ h_{B+1-i}
-  - \sum_{\substack{\ell\in[B]\\\ell\ne i}}
-  \mathsf{ct}_{\ell,1}\circ h_{\ell+B+1-i}
-  $$
-
-  $$
-  m_i = \mathsf{ct}_{i,2} - [k_i \tau^{B+1}]_T
-  $$ -->
 
 At first glance, one might view each ciphertext as a witness encryption for the relation
 
@@ -331,8 +305,6 @@ relation as part of the hint. This allows the verifier to run the decryption loc
 ## Evaluation
 We benchmarked the batch verification of decryption for the simple BTE scheme on an M5 MacBook Pro in single-threaded mode. Our implementation using arkworks can be found [here](https://github.com/commonwarexyz/simple-bte/pull/2).
 
-<div align="center">
-
 | $B$ | Helper | Naive | Bandwidth-opt. | Verification-opt. |
 |:---:|:------:|:-----:|:--------------:|:-----------------:|
 | 32 | 121.61 ms | 89.61 ms (1.4 $\times$) | 11.53 ms (10.5 $\times$) | 7.274 ms (16.7 $\times$) |
@@ -343,9 +315,8 @@ We benchmarked the batch verification of decryption for the simple BTE scheme on
 | 32768 | 262.54 s | 174.005 s (1.5 $\times$) | 12.006 s (21.9 $\times$) | 1.136 s (231.1 $\times$) |
 | 65536 | 556.09 s | 366.852 s (1.5 $\times$) | 23.937 s (23.2 $\times$) | 1.988 s (279.7 $\times$) |
 
-</div>
-
 Helper refers to the time it takes to carry out decryption. Producing hints has negligible overhead. For the batch verification, we benchmarked three different strategies:
+
 - **Naive:** This is the "first attempt" described above where the helper sends the recovered message together with the corresponding witness as the hint, and the verifier checks the decryption equation for each ciphertext.
 - **Bandwidth-optimized:** This is the strategy described above where the helper sends the short PRG seed $\rho^k$ for each ciphertext but this comes at the cost of $\mathbb{G}_T$ exponentiations for each ciphertext.
 - **Verification-optimized:** This is the strategy described above where the helper sends the recovered $K^k$ values directly and only uses MSMs/Hashes for verification.
@@ -362,12 +333,13 @@ Each batch can then be processed in parallel, potentially across different machi
 **Local Decryption:** If all validators carried out the decryption locally, they would need to speed up decryption by over $\approx 500 \times$. In theory, this can be achieved by running four large instances that come with 128 vCPUs each (say) and cost $\approx 4 \times \$6.5$ per hour, but this is much more expensive than the $\$2$-$\$3$ per hour it normally costs to rent compute as a validator.
 
 With helper aided decryption:
+
 - In the **Verification-optimized** version, the helper needs to distribute an additional 38 MB of data to every participant in the network, every second. However, this comes with the benefit of being able to batch verify the decryption of ciphertexts in under 2s (single threaded) instead of spending 556s decrypting them. When bandwidth is abundant and we have room to double the throughput, this is the preferred option.
 - In the **Bandwidth-optimized** version, the helper needs to distribute just 1 MB of data to every participant in the network, every second. The validators spend about 24 s (single threaded) verifying the decryption but this can of course be parallelized. This allows us to retain the benefits of batched verification (23 $\times$ speedup) with a modest (~4%) increase in bandwidth usage.
 
 In the figure below, we provide a visual representation of the three different decryption strategies. Pricing is estimated by assuming perfect parallelization of single threaded performance and calculating the number of threads required to attain 65K TPS. For local decryption we use 4 $\times$ c8id.32x large instances (128 vCPUs each), for verification optimized hints we use r6id.large (2 vCPUs), and for bandwidth optimized hints we use z1d.6xlarge (24 vCPUs). Reducing costs through the use of specialized hardware such as GPUs/FPGAs is an interesting avenue for future work.
 
-![Batch verification strategies](Figures/Batch-Decryption.svg)
+![Batch verification strategies](/imgs/batch-mempool-decryption.png)
 
 In both helper aided architectures, even though the helper spends a lot more resources to carry out decryption, the marginal cost to support additional validators is sending ~1 MB of hints. Thus, we are able to support the same level of decentralization with minimal overhead.
 
@@ -375,7 +347,7 @@ A knee-jerk criticism is that validators must wait to receive hints from the hel
 
 We envision a system where there are dedicated fee paying accounts which can only be used to pay the fees for encrypted transactions. Additionally, we delay the state root update by a small number of slots, say 10 blocks. Because the balances of fee paying accounts are never encrypted, they can be updated immediately by validators even without hints. Transactions that can pay base fee can be sorted and proposed based on priority fees.
 
-![Encrypted Transaction](Figures/Encrypted-Transaction.svg)
+![Encrypted Transaction](/imgs/encrypted-transaction.png)
 
 While it's true that validators will incur additional latency before they see the latest state of the chain, note that it does not materially affect their ability to propose and vote on blocks. Thus, they have no motivation to decrypt faster (as the data being sequenced is encrypted). Specialized parties such as RPC providers / Searchers / Market Makers are incentivized to decrypt transactions quickly in order to gain an edge and can then act as helper parties assisting the network. The buffer for state root updates also makes helper failures easier to absorb: the network can fall back to another helper or to local decryption, spreading the recovery process across several slots rather than forcing all validators to catch up in a single block.
 
@@ -387,4 +359,4 @@ This provides the performance benefits of a single sequencer but with a *cryptog
 Concerns around censorship through metadata such as fee payer accounts/IP address leakage can be mitigated via [anonymous tokens](https://datatracker.ietf.org/wg/privacypass/about/) or routing transactions through an RPC provider that acts as the fee payer.
 
 Furthermore, the sequencer itself can act as the helper party and broadcast hints to the network.
-This colocation allows the sequencer to begin a large chunk (~90%) of the decryption work that we refer to as ["pre-decryption"](https://commonware.xyz/blogs/bte) immediately after it has built the block. It does not have to wait for decryption shares to be released and allows decryption work to be pipelined with block dissemination.
+This colocation allows the sequencer to begin a large chunk (~90%) of the decryption work that we refer to as ["pre-decryption"](/blogs/bte) immediately after it has built the block. It does not have to wait for decryption shares to be released and allows decryption work to be pipelined with block dissemination.
