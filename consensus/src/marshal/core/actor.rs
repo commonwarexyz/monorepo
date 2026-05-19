@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::{self, handler, Annotation, Key, Request},
+        resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -436,7 +436,7 @@ where
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
-        resolver: (resolver::Receiver<V::Commitment>, R),
+        resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
         R: Resolver<
@@ -454,7 +454,7 @@ where
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
-        (mut resolver_rx, mut resolver): (resolver::Receiver<V::Commitment>, R),
+        (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: Resolver<
             Key = ResolverRequestFor<V>,

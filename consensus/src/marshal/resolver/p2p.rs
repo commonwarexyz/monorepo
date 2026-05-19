@@ -1,6 +1,6 @@
 //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-use crate::marshal::resolver::{handler, Annotation, Key, Receiver as HandlerReceiver};
+use crate::marshal::resolver::handler::{self, Annotation, Key, Receiver as HandlerReceiver};
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};

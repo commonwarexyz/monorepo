@@ -9,7 +9,5 @@
 //! [`commonware_resolver::p2p::Engine`] and lets each marshal variant plug in its own message
 //! handler while reusing the same transport plumbing.
 
-pub(crate) mod handler;
+pub mod handler;
 pub mod p2p;
-
-pub use handler::{Annotation, Finalized, Key, Receiver, Request};
