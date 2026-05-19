@@ -272,7 +272,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
@@ -287,7 +287,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
         ) -> impl Future<Output = bool> + Send;
     }
 });

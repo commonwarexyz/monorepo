@@ -75,7 +75,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
     ) -> Option<Self::Block> {
         self.propose_result.clone()
     }
@@ -83,7 +83,7 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
     ) -> bool {
         self.verify_result
     }
@@ -136,7 +136,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
     ) -> Option<Self::Block> {
         None
     }
@@ -144,7 +144,7 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Stream<Item = Self::Block> + Send,
+        _ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());

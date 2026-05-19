@@ -88,10 +88,9 @@ where
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        mut ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
-        futures::pin_mut!(ancestry);
         let parent_block = ancestry.next().await?;
         let parent_commitment = parent_block.commitment();
 

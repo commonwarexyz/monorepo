@@ -65,6 +65,7 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 mod tests {
     use crate::{
         marshal::{
+            ancestry::BlockProvider,
             coding::{
                 marshaled::genesis_coding_commitment,
                 shards,
@@ -114,6 +115,13 @@ mod tests {
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
+
+    #[test]
+    fn mailbox_provides_application_blocks() {
+        fn assert_provider<P: BlockProvider<Block = CodingB>>() {}
+
+        assert_provider::<core::Mailbox<S, TestCodingVariant>>();
+    }
 
     /// A coding buffer that records subscriptions and never resolves them.
     #[derive(Clone, Default)]
