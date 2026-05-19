@@ -370,6 +370,10 @@ where
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
+        // A previous pending key may have pushed the waiter far into the future
+        // because no eligible peer could serve it. Clear the stale global waiter
+        // so this retry can drive pending processing again.
+        self.waiter = None;
         let deadline = self.context.current() + self.retry_timeout;
         self.pending.put(key, (deadline, true));
     }
@@ -1334,6 +1338,45 @@ mod tests {
             fetcher.add_ready(MockKey(2));
             assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
 
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.pending.contains(&MockKey(1)));
+            assert!(!fetcher.pending.contains(&MockKey(2)));
+            assert_eq!(fetcher.len_active(), 1);
+        });
+    }
+
+    #[test]
+    fn test_add_retry_clears_waiter_for_retry_deadline() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer = PrivateKey::from_seed(1).public_key();
+            let missing_peer = PrivateKey::from_seed(2).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, SuccessMockSender> =
+                Fetcher::new(context.child("fetcher"), config);
+            fetcher.reconcile(&[public_key, peer]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
+
+            fetcher.add_targets(MockKey(1), [missing_peer]);
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.waiter.is_some());
+
+            fetcher.add_retry(MockKey(2));
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert!(deadline <= context.current() + Duration::from_millis(100));
+
+            context.sleep(Duration::from_millis(100)).await;
             fetcher.fetch(&mut sender);
             assert!(fetcher.pending.contains(&MockKey(1)));
             assert!(!fetcher.pending.contains(&MockKey(2)));
