@@ -12,7 +12,7 @@ use commonware_consensus::{
     marshal::{
         self,
         core::Actor as MarshalActor,
-        resolver::handler,
+        resolver,
         standard::{Deferred, Standard},
     },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
@@ -346,12 +346,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            handler::Receiver<H::Digest>,
-            commonware_resolver::p2p::Mailbox<
-                handler::Request<H::Digest>,
-                C::PublicKey,
-                handler::Annotation,
-            >,
+            resolver::handler::Receiver<H::Digest>,
+            resolver::p2p::Mailbox<H::Digest, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
@@ -393,12 +389,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            handler::Receiver<H::Digest>,
-            commonware_resolver::p2p::Mailbox<
-                handler::Request<H::Digest>,
-                C::PublicKey,
-                handler::Annotation,
-            >,
+            resolver::handler::Receiver<H::Digest>,
+            resolver::p2p::Mailbox<H::Digest, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {

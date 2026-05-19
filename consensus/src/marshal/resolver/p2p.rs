@@ -1,9 +1,9 @@
 //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-use crate::marshal::resolver::handler;
+use crate::marshal::resolver::handler::{self, Annotation, Key, Receiver as HandlerReceiver};
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_p2p::{Blocker, Provider, Receiver, Sender};
+use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
 use rand::Rng;
@@ -46,22 +46,22 @@ where
     pub priority_responses: bool,
 }
 
+/// Mailbox for issuing marshal backfill requests.
+pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
+
 /// Initialize a P2P resolver.
 pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
-) -> (
-    handler::Receiver<D>,
-    p2p::Mailbox<handler::Request<D>, P, handler::Annotation>,
-)
+) -> (HandlerReceiver<D>, Mailbox<D, P>)
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
     S: Sender<PublicKey = P>,
-    R: Receiver<PublicKey = P>,
+    R: P2pReceiver<PublicKey = P>,
     P: PublicKey,
 {
     let (sender, receiver) = mailbox::new(context.child("handler"), config.mailbox_size);
@@ -83,5 +83,5 @@ where
         },
     );
     resolver_engine.start(backfill);
-    (handler::Receiver::new(receiver), resolver)
+    (HandlerReceiver::new(receiver), resolver)
 }

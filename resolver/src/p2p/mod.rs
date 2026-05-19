@@ -241,6 +241,14 @@ mod tests {
         fn insert(&mut self, key: Key, values: impl IntoIterator<Item = Bytes>) {
             self.data.lock().insert(key, values.into_iter().collect());
         }
+
+        fn remaining(&self, key: &Key) -> Vec<Bytes> {
+            self.data
+                .lock()
+                .get(key)
+                .map(|values| values.iter().cloned().collect())
+                .unwrap_or_default()
+        }
     }
 
     impl crate::p2p::Producer for SequencedProducer {
@@ -2192,7 +2200,11 @@ mod tests {
             let first_response = Bytes::from("data for key 5");
             let second_response = Bytes::from("refetched data for key 5");
             let mut prod2 = SequencedProducer::default();
-            prod2.insert(key.clone(), [first_response.clone(), second_response]);
+            prod2.insert(
+                key.clone(),
+                [first_response.clone(), second_response.clone()],
+            );
+            let prod2_observer = prod2.clone();
 
             let (first_gate_sender, first_gate_receiver) = oneshot::channel();
             let (second_gate_sender, second_gate_receiver) = oneshot::channel();
@@ -2244,6 +2256,10 @@ mod tests {
                 subscriber: second_subscriber.clone(),
             });
             context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                prod2_observer.remaining(&key),
+                vec![second_response.clone()]
+            );
 
             first_gate_sender.send(()).unwrap();
             let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
@@ -2275,11 +2291,12 @@ mod tests {
             assert_eq!(
                 delivery,
                 Delivery {
-                    key,
+                    key: key.clone(),
                     subscribers: non_empty_vec![second_subscriber],
                 }
             );
             assert_eq!(value, first_response);
+            assert_eq!(prod2_observer.remaining(&key), vec![second_response]);
         });
     }
 

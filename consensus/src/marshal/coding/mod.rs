@@ -161,8 +161,8 @@ mod tests {
         }
     }
 
-    type CodingFetchRecord = Fetch<handler::Request<Commitment>, handler::Annotation>;
-    type CodingTargetedFetch = (handler::Request<Commitment>, NonEmptyVec<K>);
+    type CodingFetchRecord = Fetch<handler::Key<Commitment>, handler::Annotation>;
+    type CodingTargetedFetch = (handler::Key<Commitment>, NonEmptyVec<K>);
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
     #[derive(Clone, Default)]
@@ -236,48 +236,48 @@ mod tests {
     }
 
     impl Resolver for RecordingResolver {
-        type Key = handler::Request<Commitment>;
+        type Key = handler::Key<Commitment>;
         type Subscriber = handler::Annotation;
         type PublicKey = K;
 
-        fn fetch<R>(&mut self, key: R) -> Feedback
+        fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            self.record_fetch(key.into());
+            self.record_fetch(fetch.into());
             Feedback::Ok
         }
 
-        fn fetch_all<R>(&mut self, keys: Vec<R>) -> Feedback
+        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
         where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            for key in keys {
-                self.record_fetch(key.into());
+            for fetch in fetches {
+                self.record_fetch(fetch.into());
             }
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((key.into().key, targets));
+            self.targeted.lock().push((fetch.into().key, targets));
             Feedback::Ok
         }
 
-        fn fetch_all_targeted<R>(
+        fn fetch_all_targeted<F>(
             &mut self,
-            keys: Vec<(R, NonEmptyVec<Self::PublicKey>)>,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            self.targeted.lock().extend(
-                keys.into_iter()
-                    .map(|(key, targets)| (key.into().key, targets)),
-            );
+            let mut targeted = self.targeted.lock();
+            for (fetch, targets) in fetches {
+                targeted.push((fetch.into().key, targets));
+            }
             Feedback::Ok
         }
 
@@ -557,7 +557,7 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Request::Notarized { round: request_round },
+                        handler::Key::Notarized { round: request_round },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -631,7 +631,7 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Request::Notarized { round: request_round },
+                        handler::Key::Notarized { round: request_round },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -2229,7 +2229,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Regression: when backfilling by Request::Block(commitment), a peer may return
+        // Regression: when backfilling by Key::Block(commitment), a peer may return
         // a coded block with matching inner digest but a different coding commitment.
         // If a finalization for this digest is already cached, marshal must reject
         // the block unless V::commitment(block) matches the finalization payload.
@@ -2315,7 +2315,7 @@ mod tests {
             let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - it fetches Request::Block(commitment)
+            //   - it fetches Key::Block(commitment)
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
             //   - deliver path must reject because the response commitment does not
             //     match the request key

@@ -4,15 +4,13 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{
-    marshal::ancestry::{AncestorStream, BlockProvider},
-    CertifiableBlock, Epochable,
-};
+use crate::{CertifiableBlock, Epochable};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
+use futures::Stream;
 use std::{marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
@@ -74,18 +72,18 @@ where
         self.genesis.clone()
     }
 
-    async fn propose<A: BlockProvider<Block = Self::Block>>(
+    async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A>,
+        _ancestry: impl Stream<Item = Self::Block> + Send,
     ) -> Option<Self::Block> {
         self.propose_result.clone()
     }
 
-    async fn verify<A: BlockProvider<Block = Self::Block>>(
+    async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A>,
+        _ancestry: impl Stream<Item = Self::Block> + Send,
     ) -> bool {
         self.verify_result
     }
@@ -135,18 +133,18 @@ where
         self.genesis.clone()
     }
 
-    async fn propose<A: BlockProvider<Block = Self::Block>>(
+    async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A>,
+        _ancestry: impl Stream<Item = Self::Block> + Send,
     ) -> Option<Self::Block> {
         None
     }
 
-    async fn verify<A: BlockProvider<Block = Self::Block>>(
+    async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: AncestorStream<A>,
+        _ancestry: impl Stream<Item = Self::Block> + Send,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());

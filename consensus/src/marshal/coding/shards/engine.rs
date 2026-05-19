@@ -268,6 +268,17 @@ where
     pub peer_provider: D,
 }
 
+/// A cached reconstructed block and the consensus round that produced it.
+struct ReconstructedBlock<B, C, H>
+where
+    B: Block,
+    C: CodingScheme,
+    H: Hasher,
+{
+    round: Round,
+    block: CodedBlock<B, C, H>,
+}
+
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
@@ -334,7 +345,7 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
-    reconstructed_blocks: BTreeMap<Commitment, CodedBlock<B, C, H>>,
+    reconstructed_blocks: BTreeMap<Commitment, ReconstructedBlock<B, C, H>>,
 
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
@@ -490,15 +501,19 @@ where
                         commitment,
                         response,
                     } => {
-                        let block = self.reconstructed_blocks.get(&commitment).cloned();
+                        let block = self
+                            .reconstructed_blocks
+                            .get(&commitment)
+                            .map(|entry| entry.block.clone());
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
                         let block = self
                             .reconstructed_blocks
-                            .iter()
-                            .find_map(|(_, b)| (b.digest() == digest).then_some(b))
-                            .cloned();
+                            .values()
+                            .find_map(|entry| {
+                                (entry.block.digest() == digest).then_some(entry.block.clone())
+                            });
                         response.send_lossy(block);
                     }
                     Message::SubscribeAssignedShardVerified {
@@ -626,12 +641,13 @@ where
         &mut self,
         commitment: Commitment,
     ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
-        if let Some(block) = self.reconstructed_blocks.get(&commitment) {
-            return Ok(Some(block.clone()));
+        if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
+            return Ok(Some(entry.block.clone()));
         }
         let Some(state) = self.state.get_mut(&commitment) else {
             return Ok(None);
         };
+        let round = state.round();
         if state.checked_shards().len() < usize::from(commitment.config().minimum_shards.get()) {
             debug!(%commitment, "not enough checked shards to reconstruct block");
             return Ok(None);
@@ -681,7 +697,7 @@ where
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
         let block = CodedBlock::new_trusted(inner, commitment);
-        self.cache_block(block.clone());
+        self.cache_block(round, block.clone());
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
@@ -867,9 +883,15 @@ where
     }
 
     /// Cache a block and notify all subscribers waiting on it.
-    fn cache_block(&mut self, block: CodedBlock<B, C, H>) {
+    fn cache_block(&mut self, round: Round, block: CodedBlock<B, C, H>) {
         let commitment = block.commitment();
-        self.reconstructed_blocks.insert(commitment, block.clone());
+        self.reconstructed_blocks.insert(
+            commitment,
+            ReconstructedBlock {
+                round,
+                block: block.clone(),
+            },
+        );
         self.notify_block_subscribers(block);
     }
 
@@ -943,7 +965,7 @@ where
         }
 
         // Cache the block so we don't have to reconstruct it again.
-        self.cache_block(block);
+        self.cache_block(round, block);
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
@@ -1056,13 +1078,14 @@ where
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
         let block = match key {
-            BlockSubscriptionKey::Commitment(commitment) => {
-                self.reconstructed_blocks.get(&commitment)
-            }
+            BlockSubscriptionKey::Commitment(commitment) => self
+                .reconstructed_blocks
+                .get(&commitment)
+                .map(|entry| &entry.block),
             BlockSubscriptionKey::Digest(digest) => self
                 .reconstructed_blocks
-                .iter()
-                .find_map(|(_, block)| (block.digest() == digest).then_some(block)),
+                .values()
+                .find_map(|entry| (entry.block.digest() == digest).then_some(&entry.block)),
         };
 
         // Answer immediately if we have the block cached.
@@ -1141,16 +1164,22 @@ where
     /// in the same round. Both must remain recoverable until finalization
     /// determines which one is canonical.
     fn prune(&mut self, through: Commitment) {
-        if let Some(height) = self.reconstructed_blocks.get(&through).map(|b| b.height()) {
+        let cached = self
+            .reconstructed_blocks
+            .get(&through)
+            .map(|entry| (entry.round, entry.block.height()));
+        if let Some((_, height)) = cached {
             self.reconstructed_blocks
-                .retain(|_, block| block.height() > height);
+                .retain(|_, entry| entry.block.height() > height);
         }
 
         // Always clear direct state/subscriptions for the pruned commitment.
         // This avoids dangling waiters when prune is called for a commitment
         // that was never reconstructed locally.
         self.drop_subscriptions(through);
-        let Some(round) = self.state.remove(&through).map(|state| state.round()) else {
+        let state_round = self.state.remove(&through).map(|state| state.round());
+        let cached_round = cached.map(|(round, _)| round);
+        let Some(round) = state_round.or(cached_round) else {
             return;
         };
 
@@ -3017,6 +3046,91 @@ mod tests {
                 assert!(
                     !blocked_peer1,
                     "peer1 should not be blocked after lower-view state was pruned"
+                );
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_local_proposal_prune_clears_older_reconstruction_state() {
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let block_a = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let commitment_a = block_a.commitment();
+
+                let block_b = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let commitment_b = block_b.commitment();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+                let round_a = Round::new(Epoch::zero(), View::new(1));
+                let round_b = Round::new(Epoch::zero(), View::new(2));
+
+                peers[2].mailbox.discovered(commitment_a, leader, round_a);
+                let block_sub = peers[2].mailbox.subscribe(commitment_a);
+
+                let peer1_index = peers[1].index.get() as u16;
+                let shard_a = block_a.shard(peer1_index).expect("missing shard");
+
+                let block_a_equivocating = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 300),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let mut equivocating_shard = block_a_equivocating
+                    .shard(peer1_index)
+                    .expect("missing shard");
+                equivocating_shard.commitment = commitment_a;
+
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk.clone()), shard_a.encode(), true);
+                context.sleep(config.link.latency * 2).await;
+
+                peers[2].mailbox.proposed(round_b, block_b);
+                assert!(
+                    peers[2].mailbox.get(commitment_b).await.is_some(),
+                    "local proposal should be cached before pruning"
+                );
+                peers[2].mailbox.prune(commitment_b);
+
+                select! {
+                    result = block_sub => {
+                        assert!(
+                            result.is_err(),
+                            "older block subscription should close after local-proposal prune"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("older block subscription remained open after local-proposal prune");
+                    },
+                }
+
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk), equivocating_shard.encode(), true);
+                context.sleep(config.link.latency * 2).await;
+
+                let blocked = oracle.blocked().await.unwrap();
+                let blocked_peer1 = blocked
+                    .iter()
+                    .any(|(a, b)| a == &peers[2].public_key && b == &peers[1].public_key);
+                assert!(
+                    !blocked_peer1,
+                    "peer1 should not be blocked after older state was pruned"
                 );
             },
         );

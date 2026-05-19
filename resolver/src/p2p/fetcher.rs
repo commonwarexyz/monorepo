@@ -370,6 +370,10 @@ where
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
+        // A previous pending key may have pushed the waiter far into the future
+        // because no eligible peer could serve it. Clear the stale global waiter
+        // so this retry can drive pending processing again.
+        self.waiter = None;
         let deadline = self.context.current() + self.retry_timeout;
         self.pending.put(key, (deadline, true));
     }
@@ -1342,6 +1346,45 @@ mod tests {
     }
 
     #[test]
+    fn test_add_retry_clears_waiter_for_retry_deadline() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer = PrivateKey::from_seed(1).public_key();
+            let missing_peer = PrivateKey::from_seed(2).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+            };
+            let mut fetcher: Fetcher<_, _, MockKey, SuccessMockSender> =
+                Fetcher::new(context.child("fetcher"), config);
+            fetcher.reconcile(&[public_key, peer]);
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
+
+            fetcher.add_targets(MockKey(1), [missing_peer]);
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.waiter.is_some());
+
+            fetcher.add_retry(MockKey(2));
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert!(deadline <= context.current() + Duration::from_millis(100));
+
+            context.sleep(Duration::from_millis(100)).await;
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.pending.contains(&MockKey(1)));
+            assert!(!fetcher.pending.contains(&MockKey(2)));
+            assert_eq!(fetcher.len_active(), 1);
+        });
+    }
+
+    #[test]
     fn test_waiter_uses_retry_timeout_on_send_failure() {
         let cfg = deterministic::Config::default().with_timeout(Some(Duration::from_secs(5)));
         let runner = Runner::new(cfg);
@@ -1824,5 +1867,214 @@ mod tests {
                 "Shuffling should produce different orders"
             );
         });
+    }
+
+    #[cfg(feature = "loom")]
+    mod loom_tests {
+        use super::*;
+        use loom::{
+            sync::{Arc, Mutex},
+            thread,
+        };
+
+        const RETRY_TIMEOUT: Duration = Duration::from_millis(100);
+
+        type TestFetcher = Fetcher<Context, PublicKey, MockKey, SuccessMockSender>;
+
+        fn unservable_fetcher(context: &Context) -> (TestFetcher, PublicKey) {
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let peer = PrivateKey::from_seed(1).public_key();
+            let missing_peer = PrivateKey::from_seed(2).public_key();
+            let config = Config {
+                me: Some(public_key.clone()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+                retry_timeout: RETRY_TIMEOUT,
+                priority_requests: false,
+            };
+            let mut fetcher = Fetcher::new(context.child("fetcher"), config);
+            fetcher.reconcile(&[public_key, peer.clone()]);
+            fetcher.add_targets(MockKey(1), [missing_peer]);
+            fetcher.add_ready(MockKey(1));
+            (fetcher, peer)
+        }
+
+        fn spawn_fetch(
+            fetcher: Arc<Mutex<TestFetcher>>,
+            pool: commonware_runtime::BufferPool,
+        ) -> thread::JoinHandle<()> {
+            thread::spawn(move || {
+                thread::yield_now();
+                let mut sender = WrappedSender::new(pool, SuccessMockSender::default());
+                fetcher.lock().unwrap().fetch(&mut sender);
+            })
+        }
+
+        fn assert_fetches_by(
+            context: &Context,
+            fetcher: &mut TestFetcher,
+            key: MockKey,
+            max_delay: Duration,
+        ) {
+            if fetcher.pending.contains(&key) {
+                let deadline = fetcher
+                    .get_pending_deadline()
+                    .expect("pending key should remain");
+                assert!(
+                    deadline <= context.current() + max_delay,
+                    "{key:?} should wake by its deadline"
+                );
+
+                let mut sender = WrappedSender::new(
+                    context.network_buffer_pool().clone(),
+                    SuccessMockSender::default(),
+                );
+                fetcher.fetch(&mut sender);
+            }
+
+            assert!(!fetcher.pending.contains(&key));
+            assert_eq!(fetcher.len_active(), 1);
+        }
+
+        #[test]
+        fn add_ready_clears_stale_waiter_for_ready_key() {
+            loom::model(|| {
+                let runner = Runner::default();
+                runner.start(|context| async move {
+                    let (fetcher, _) = unservable_fetcher(&context);
+                    let fetcher = Arc::new(Mutex::new(fetcher));
+                    let poller =
+                        spawn_fetch(fetcher.clone(), context.network_buffer_pool().clone());
+
+                    let ready = {
+                        let fetcher = fetcher.clone();
+                        thread::spawn(move || {
+                            thread::yield_now();
+                            fetcher.lock().unwrap().add_ready(MockKey(2));
+                        })
+                    };
+
+                    poller.join().unwrap();
+                    ready.join().unwrap();
+
+                    let mut fetcher = fetcher.lock().unwrap();
+                    assert_fetches_by(&context, &mut fetcher, MockKey(2), Duration::ZERO);
+                    assert!(fetcher.pending.contains(&MockKey(1)));
+                });
+            });
+        }
+
+        #[test]
+        fn add_retry_clears_stale_waiter_for_retry_deadline() {
+            loom::model(|| {
+                let runner = Runner::default();
+                runner.start(|context| async move {
+                    let (fetcher, _) = unservable_fetcher(&context);
+                    let fetcher = Arc::new(Mutex::new(fetcher));
+                    let poller =
+                        spawn_fetch(fetcher.clone(), context.network_buffer_pool().clone());
+
+                    let retry = {
+                        let fetcher = fetcher.clone();
+                        thread::spawn(move || {
+                            thread::yield_now();
+                            fetcher.lock().unwrap().add_retry(MockKey(2));
+                        })
+                    };
+
+                    poller.join().unwrap();
+                    retry.join().unwrap();
+
+                    let mut fetcher = fetcher.lock().unwrap();
+                    assert_fetches_by(&context, &mut fetcher, MockKey(2), RETRY_TIMEOUT);
+                    assert!(fetcher.pending.contains(&MockKey(1)));
+                });
+            });
+        }
+
+        #[test]
+        fn active_timeout_reenqueue_clears_stale_waiter_for_retry_deadline() {
+            loom::model(|| {
+                let runner = Runner::default();
+                runner.start(|context| async move {
+                    let (mut fetcher, _) = unservable_fetcher(&context);
+                    add_test_active(&mut fetcher, 0, MockKey(2));
+                    let fetcher = Arc::new(Mutex::new(fetcher));
+                    let poller =
+                        spawn_fetch(fetcher.clone(), context.network_buffer_pool().clone());
+
+                    let timeout = {
+                        let fetcher = fetcher.clone();
+                        thread::spawn(move || {
+                            thread::yield_now();
+                            let mut fetcher = fetcher.lock().unwrap();
+                            let key = fetcher.pop_active().expect("active key should exist");
+                            fetcher.add_retry(key);
+                        })
+                    };
+
+                    poller.join().unwrap();
+                    timeout.join().unwrap();
+
+                    let mut fetcher = fetcher.lock().unwrap();
+                    assert_fetches_by(&context, &mut fetcher, MockKey(2), RETRY_TIMEOUT);
+                    assert!(fetcher.pending.contains(&MockKey(1)));
+                });
+            });
+        }
+
+        #[test]
+        fn add_targets_clears_stale_waiter_for_new_target() {
+            loom::model(|| {
+                let runner = Runner::default();
+                runner.start(|context| async move {
+                    let (fetcher, peer) = unservable_fetcher(&context);
+                    let fetcher = Arc::new(Mutex::new(fetcher));
+                    let poller =
+                        spawn_fetch(fetcher.clone(), context.network_buffer_pool().clone());
+
+                    let target = {
+                        let fetcher = fetcher.clone();
+                        thread::spawn(move || {
+                            thread::yield_now();
+                            fetcher.lock().unwrap().add_targets(MockKey(1), [peer]);
+                        })
+                    };
+
+                    poller.join().unwrap();
+                    target.join().unwrap();
+
+                    let mut fetcher = fetcher.lock().unwrap();
+                    assert_fetches_by(&context, &mut fetcher, MockKey(1), Duration::ZERO);
+                });
+            });
+        }
+
+        #[test]
+        fn clear_targets_clears_stale_waiter_for_fallback() {
+            loom::model(|| {
+                let runner = Runner::default();
+                runner.start(|context| async move {
+                    let (fetcher, _) = unservable_fetcher(&context);
+                    let fetcher = Arc::new(Mutex::new(fetcher));
+                    let poller =
+                        spawn_fetch(fetcher.clone(), context.network_buffer_pool().clone());
+
+                    let clear = {
+                        let fetcher = fetcher.clone();
+                        thread::spawn(move || {
+                            thread::yield_now();
+                            fetcher.lock().unwrap().clear_targets(&MockKey(1));
+                        })
+                    };
+
+                    poller.join().unwrap();
+                    clear.join().unwrap();
+
+                    let mut fetcher = fetcher.lock().unwrap();
+                    assert_fetches_by(&context, &mut fetcher, MockKey(1), Duration::ZERO);
+                });
+            });
+        }
     }
 }
