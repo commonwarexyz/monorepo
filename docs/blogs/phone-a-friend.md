@@ -290,7 +290,11 @@ $$
 \right).
 $$
 
-> This is precisely the batch of ciphertexts together with the partial decryption in the simple-BTE scheme! Thus the users and the committee produce the ciphertext $\mathsf{ct}$ in a *distributed* manner.
+<div align="center">
+
+This is precisely the batch of ciphertexts together with the partial decryption in the simple-BTE scheme! Thus the users and the committee produce the ciphertext $\mathsf{ct}$ in a *distributed* manner.
+
+</div>
 
 **Decrypt:** To decrypt the $i$-th ciphertext, we use $\{h_{\ell+B+1-i}\}_{\ell\in[0,B]\setminus\{i\}}$ as the witness which is readily available in the public parameters.
   $$
