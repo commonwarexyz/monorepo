@@ -339,7 +339,7 @@ With helper aided decryption:
 
 In the figure below, we provide a visual representation of the three different decryption strategies. Pricing is estimated by assuming perfect parallelization of single threaded performance and calculating the number of threads required to attain 65K TPS. For local decryption we use 4 $\times$ c8id.32x large instances (128 vCPUs each), for verification optimized hints we use r6id.large (2 vCPUs), and for bandwidth optimized hints we use z1d.6xlarge (24 vCPUs). Reducing costs through the use of specialized hardware such as GPUs/FPGAs is an interesting avenue for future work.
 
-![Batch verification strategies](/imgs/batch-mempool-decryption.png)
+![Helper-aided decryption reduces validator compute requirements compared to local decryption.](/imgs/batch-mempool-decryption.png)
 
 In both helper aided architectures, even though the helper spends a lot more resources to carry out decryption, the marginal cost to support additional validators is sending ~1 MB of hints. Thus, we are able to support the same level of decentralization with minimal overhead.
 
@@ -347,7 +347,7 @@ A knee-jerk criticism is that validators must wait to receive hints from the hel
 
 We envision a system where there are dedicated fee paying accounts which can only be used to pay the fees for encrypted transactions. Additionally, we delay the state root update by a small number of slots, say 10 blocks. Because the balances of fee paying accounts are never encrypted, they can be updated immediately by validators even without hints. Transactions that can pay base fee can be sorted and proposed based on priority fees.
 
-![Encrypted Transaction](/imgs/encrypted-transaction.png)
+![Encrypted transactions can be sequenced before helpers provide decryption hints.](/imgs/encrypted-transaction.png)
 
 While it's true that validators will incur additional latency before they see the latest state of the chain, note that it does not materially affect their ability to propose and vote on blocks. Thus, they have no motivation to decrypt faster (as the data being sequenced is encrypted). Specialized parties such as RPC providers / Searchers / Market Makers are incentivized to decrypt transactions quickly in order to gain an edge and can then act as helper parties assisting the network. The buffer for state root updates also makes helper failures easier to absorb: the network can fall back to another helper or to local decryption, spreading the recovery process across several slots rather than forcing all validators to catch up in a single block.
 
