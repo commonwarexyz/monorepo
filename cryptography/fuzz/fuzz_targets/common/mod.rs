@@ -1,22 +1,35 @@
+#![allow(dead_code)]
+
 use arbitrary::Unstructured;
-use commonware_codec::ReadExt;
+use commonware_codec::{ReadExt, Write};
 use commonware_cryptography::bls12381::{
     primitives::{
-        group::{Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH},
+        group::{Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH},
         variant::{MinPk, MinSig, PartialSignature, Variant},
     },
     tle::{Block, Ciphertext},
 };
-use commonware_math::{
-    algebra::{Additive, CryptoGroup},
-    poly::Poly,
-};
+use commonware_math::algebra::{Additive, CryptoGroup};
 use commonware_utils::Participant;
-use rand::{rngs::StdRng, SeedableRng};
 
-#[allow(unused)]
+fn encoded_g1(point: G1) -> [u8; G1_ELEMENT_BYTE_LENGTH] {
+    let mut bytes = Vec::with_capacity(G1_ELEMENT_BYTE_LENGTH);
+    point.write(&mut bytes);
+    bytes.try_into().expect("G1 encoding length must be fixed")
+}
+
+fn encoded_g2(point: G2) -> [u8; G2_ELEMENT_BYTE_LENGTH] {
+    let mut bytes = Vec::with_capacity(G2_ELEMENT_BYTE_LENGTH);
+    point.write(&mut bytes);
+    bytes.try_into().expect("G2 encoding length must be fixed")
+}
+
 pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
-    let bytes: [u8; G1_ELEMENT_BYTE_LENGTH] = u.arbitrary()?;
+    let bytes = if u.arbitrary()? {
+        encoded_g1(G1::generator())
+    } else {
+        u.arbitrary()?
+    };
     match G1::read(&mut bytes.as_slice()) {
         Ok(point) => Ok(point),
         Err(_) => Ok(if u.arbitrary()? {
@@ -27,9 +40,12 @@ pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
     }
 }
 
-#[allow(unused)]
 pub fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
-    let bytes: [u8; G2_ELEMENT_BYTE_LENGTH] = u.arbitrary()?;
+    let bytes = if u.arbitrary()? {
+        encoded_g2(G2::generator())
+    } else {
+        u.arbitrary()?
+    };
     match G2::read(&mut bytes.as_slice()) {
         Ok(point) => Ok(point),
         Err(_) => Ok(if u.arbitrary()? {
@@ -40,7 +56,6 @@ pub fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     }
 }
 
-#[allow(unused)]
 pub fn arbitrary_vec_g1(
     u: &mut Unstructured,
     min: usize,
@@ -50,7 +65,6 @@ pub fn arbitrary_vec_g1(
     (0..len).map(|_| arbitrary_g1(u)).collect()
 }
 
-#[allow(unused)]
 pub fn arbitrary_vec_g2(
     u: &mut Unstructured,
     min: usize,
@@ -62,7 +76,6 @@ pub fn arbitrary_vec_g2(
 
 pub type Message = (Vec<u8>, Vec<u8>);
 
-#[allow(unused)]
 pub fn arbitrary_messages(
     u: &mut Unstructured,
     min: usize,
@@ -73,19 +86,6 @@ pub fn arbitrary_messages(
         .collect()
 }
 
-#[allow(unused)]
-pub fn arbitrary_optional_bytes(
-    u: &mut Unstructured,
-    max: usize,
-) -> Result<Option<Vec<u8>>, arbitrary::Error> {
-    if u.arbitrary()? {
-        Ok(Some(arbitrary_bytes(u, 0, max)?))
-    } else {
-        Ok(None)
-    }
-}
-
-#[allow(unused)]
 pub fn arbitrary_bytes(
     u: &mut Unstructured,
     min: usize,
@@ -95,7 +95,6 @@ pub fn arbitrary_bytes(
     u.bytes(len).map(|b| b.to_vec())
 }
 
-#[allow(unused)]
 pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
     Ok(Share::new(
         Participant::new(u.int_in_range(1..=100)?),
@@ -103,28 +102,6 @@ pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> 
     ))
 }
 
-#[allow(unused)]
-pub fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbitrary::Error> {
-    let degree = u.int_in_range(0..=10)?;
-    let seed: [u8; 32] = u.arbitrary()?;
-    let constant: Scalar = u.arbitrary()?;
-    let mut rng = StdRng::from_seed(seed);
-    Ok(Poly::new_with_constant(&mut rng, degree, constant))
-}
-
-#[allow(unused)]
-pub fn arbitrary_poly_g1(u: &mut Unstructured) -> Result<Poly<G1>, arbitrary::Error> {
-    let scalar_poly = arbitrary_poly_scalar(u)?;
-    Ok(Poly::<G1>::commit(scalar_poly))
-}
-
-#[allow(unused)]
-pub fn arbitrary_poly_g2(u: &mut Unstructured) -> Result<Poly<G2>, arbitrary::Error> {
-    let scalar_poly = arbitrary_poly_scalar(u)?;
-    Ok(Poly::<G2>::commit(scalar_poly))
-}
-
-#[allow(unused)]
 pub fn arbitrary_partial_sig_g1(
     u: &mut Unstructured,
 ) -> Result<PartialSignature<MinSig>, arbitrary::Error> {
@@ -134,7 +111,6 @@ pub fn arbitrary_partial_sig_g1(
     })
 }
 
-#[allow(unused)]
 pub fn arbitrary_partial_sig_g2(
     u: &mut Unstructured,
 ) -> Result<PartialSignature<MinPk>, arbitrary::Error> {
@@ -144,17 +120,6 @@ pub fn arbitrary_partial_sig_g2(
     })
 }
 
-#[allow(unused)]
-pub fn arbitrary_vec_scalar(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Scalar>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len).map(|_| u.arbitrary()).collect()
-}
-
-#[allow(unused)]
 pub fn arbitrary_vec_partial_sig_g1(
     u: &mut Unstructured,
     min: usize,
@@ -164,7 +129,6 @@ pub fn arbitrary_vec_partial_sig_g1(
     (0..len).map(|_| arbitrary_partial_sig_g1(u)).collect()
 }
 
-#[allow(unused)]
 pub fn arbitrary_vec_partial_sig_g2(
     u: &mut Unstructured,
     min: usize,
@@ -174,7 +138,6 @@ pub fn arbitrary_vec_partial_sig_g2(
     (0..len).map(|_| arbitrary_partial_sig_g2(u)).collect()
 }
 
-#[allow(unused)]
 pub fn arbitrary_vec_indexed_g1(
     u: &mut Unstructured,
     min: usize,
@@ -186,7 +149,6 @@ pub fn arbitrary_vec_indexed_g1(
         .collect()
 }
 
-#[allow(unused)]
 pub fn arbitrary_vec_indexed_g2(
     u: &mut Unstructured,
     min: usize,
@@ -198,31 +160,6 @@ pub fn arbitrary_vec_indexed_g2(
         .collect()
 }
 
-#[allow(unused)]
-pub fn arbitrary_vec_pending_minpk(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G1, G2)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g1(u)?, arbitrary_g2(u)?)))
-        .collect()
-}
-
-#[allow(unused)]
-pub fn arbitrary_vec_pending_minsig(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G2, G1)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g2(u)?, arbitrary_g1(u)?)))
-        .collect()
-}
-
-#[allow(unused)]
 pub fn arbitrary_vec_of_vec_partial_sig_g1(
     u: &mut Unstructured,
     outer_min: usize,
@@ -236,7 +173,6 @@ pub fn arbitrary_vec_of_vec_partial_sig_g1(
         .collect()
 }
 
-#[allow(unused)]
 pub fn arbitrary_vec_of_vec_partial_sig_g2(
     u: &mut Unstructured,
     outer_min: usize,
@@ -250,21 +186,18 @@ pub fn arbitrary_vec_of_vec_partial_sig_g2(
         .collect()
 }
 
-#[allow(unused)]
 pub fn arbitrary_minpk_signature(
     u: &mut Unstructured,
 ) -> Result<<MinPk as Variant>::Signature, arbitrary::Error> {
     arbitrary_g2(u)
 }
 
-#[allow(unused)]
 pub fn arbitrary_minsig_signature(
     u: &mut Unstructured,
 ) -> Result<<MinSig as Variant>::Signature, arbitrary::Error> {
     arbitrary_g1(u)
 }
 
-#[allow(unused)]
 pub fn arbitrary_ciphertext_minpk(
     u: &mut Unstructured,
 ) -> Result<Ciphertext<MinPk>, arbitrary::Error> {
@@ -275,7 +208,6 @@ pub fn arbitrary_ciphertext_minpk(
     })
 }
 
-#[allow(unused)]
 pub fn arbitrary_ciphertext_minsig(
     u: &mut Unstructured,
 ) -> Result<Ciphertext<MinSig>, arbitrary::Error> {
