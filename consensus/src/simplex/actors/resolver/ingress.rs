@@ -2,7 +2,7 @@ use crate::{simplex::types::Certificate, types::View, Viewable};
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_resolver::{p2p::Producer, Consumer};
+use commonware_resolver::{p2p::Producer, Consumer, Delivery};
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 
@@ -217,11 +217,16 @@ impl Handler {
 impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
+    type Subscriber = ();
 
-    fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool> {
+    fn deliver(
+        &mut self,
+        delivery: Delivery<Self::Key, Self::Subscriber>,
+        value: Self::Value,
+    ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
-            view: View::new(key.into()),
+            view: View::new(delivery.key.into()),
             data: value,
             response,
         });

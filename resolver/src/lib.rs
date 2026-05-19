@@ -12,43 +12,101 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod p2p;
 
+    /// A key to fetch data for a subscriber.
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub struct Fetch<K, S = ()> {
+        /// The peer-visible key.
+        pub key: K,
+        /// Subscriber attached to the key.
+        pub subscriber: S,
+    }
+
+    impl<K, S: Default> From<K> for Fetch<K, S> {
+        fn from(key: K) -> Self {
+            Self {
+                key,
+                subscriber: S::default(),
+            }
+        }
+    }
+
+    /// Data delivered for a resolved fetch.
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub struct Delivery<K, S> {
+        /// The peer-visible key used to validate the response.
+        pub key: K,
+        /// Subscribers that were still retained when the response arrived.
+        pub subscribers: NonEmptyVec<S>,
+    }
+
     /// Notified when data is available, and must validate it.
     pub trait Consumer: Clone + Send + 'static {
-        /// Type used to uniquely identify data.
+        /// Type used to key data requested from peers.
         type Key: Span;
 
         /// Type of data to retrieve.
         type Value;
 
+        /// Type used to track subscribers on fetch keys.
+        type Subscriber: Clone + Eq + Send + 'static;
+
         /// Deliver data to the consumer.
         ///
-        /// Returns a receiver that resolves to `true` if the data is valid.
+        /// Returns a receiver that resolves to `true` if the data is valid for the key.
         ///
         /// The returned receiver may be dropped before completion if the application
-        /// cancels the fetch via [`Resolver::cancel`], [`Resolver::clear`], or
-        /// [`Resolver::retain`]. When this happens, the resolver discards the
-        /// validation result.
+        /// cancels the fetch via [`Resolver::retain`]. When this happens, the
+        /// resolver discards the validation result.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or its variants).
-        fn deliver(&mut self, key: Self::Key, value: Self::Value) -> oneshot::Receiver<bool>;
+        ///
+        /// `delivery` contains the peer-visible key and the retained subscribers
+        /// for the fetch. Subscribers decide who should observe a valid response;
+        /// they do not define peer validity.
+        fn deliver(
+            &mut self,
+            delivery: Delivery<Self::Key, Self::Subscriber>,
+            value: Self::Value,
+        ) -> oneshot::Receiver<bool>;
     }
 
     /// Responsible for fetching data and notifying a `Consumer`.
     pub trait Resolver: Clone + Send + 'static {
-        /// Type used to uniquely identify data.
+        /// Type used to key data requested from peers.
         type Key: Span;
+
+        /// Type used to track subscribers on fetch keys.
+        ///
+        /// Implementations that also own the [`Consumer`] should supply subscribers to
+        /// [`Consumer::deliver`] when a fetch resolves.
+        type Subscriber: Clone + Eq + Send + 'static;
 
         /// Type used to identify peers for targeted fetches.
         type PublicKey: PublicKey;
 
-        /// Initiate a fetch request for a single key.
-        fn fetch(&mut self, key: Self::Key) -> Feedback;
+        /// Initiate a fetch.
+        ///
+        /// The resolver fetches and delivers the key. The subscriber is
+        /// retained and supplied to [`Consumer::deliver`] when the fetch resolves.
+        /// If multiple subscribers are attached to the same key,
+        /// the fetch is retained as long as at least one subscriber satisfies the
+        /// latest [`retain`](Self::retain) predicate.
+        ///
+        /// Passing a bare key is supported when `Subscriber: Default`.
+        fn fetch<F>(
+            &mut self,
+            key: F,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
-        /// Initiate a fetch request for a batch of keys.
-        fn fetch_all(&mut self, keys: Vec<Self::Key>) -> Feedback;
+        /// Initiate fetches for a batch of keys.
+        fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
-        /// Initiate a fetch request restricted to specific target peers.
+        /// Initiate a fetch restricted to specific target peers.
         ///
         /// Only target peers are tried, there is no fallback to other peers. Targets
         /// persist through transient failures (timeout, "no data" response, send failure)
@@ -66,35 +124,30 @@ commonware_macros::stability_scope!(BETA {
         /// from the target set.
         fn fetch_targeted(
             &mut self,
-            key: Self::Key,
+            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback;
 
-        /// Initiate fetch requests for multiple keys, each with their own targets.
+        /// Initiate fetches for multiple keys, each with their own targets.
         ///
         /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-        fn fetch_all_targeted(
+        fn fetch_all_targeted<F>(
             &mut self,
-            requests: Vec<(Self::Key, NonEmptyVec<Self::PublicKey>)>,
+            keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
+
+        /// Retain only fetch subscribers satisfying the predicate.
+        ///
+        /// The predicate receives the peer-visible key and subscriber.
+        ///
+        /// Fetches not retained are canceled. If response validation is in
+        /// progress, cancellation may drop the [`Consumer::deliver`] future
+        /// before it reports whether the data was valid.
+        fn retain(
+            &mut self,
+            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback;
-
-        /// Cancel a fetch request.
-        ///
-        /// If response validation is in progress, cancellation may drop the
-        /// [`Consumer::deliver`] future before it reports whether the data was
-        /// valid.
-        fn cancel(&mut self, key: Self::Key) -> Feedback;
-
-        /// Cancel all fetch requests.
-        ///
-        /// See [`cancel`](Self::cancel) for how cancellation affects
-        /// in-progress response validation.
-        fn clear(&mut self) -> Feedback;
-
-        /// Retain only the fetch requests that satisfy the predicate.
-        ///
-        /// Fetches not retained are canceled. See [`cancel`](Self::cancel) for
-        /// how cancellation affects in-progress response validation.
-        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback;
     }
 });

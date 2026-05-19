@@ -15,23 +15,43 @@ use std::{
 
 /// An interface for providing blocks.
 pub trait BlockProvider: Clone + Send + 'static {
-    /// The block type the provider fetches.
+    /// The block type the provider walks.
     type Block: Block;
 
-    /// A request to retrieve a block by its digest.
+    /// Subscribe to a block by its digest without requesting it from the network.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
-    /// If the block is not available locally, the request will be registered and the caller will
-    /// be notified when the block is available. If the block is not finalized, it's possible that
-    /// it may never become available.
+    /// If the block is not available locally, the subscription will be registered and the caller
+    /// will be notified when the block is available. If the block is not finalized, it's possible
+    /// that it may never become available.
     ///
     /// Returns `None` when the subscription is canceled or the provider can no longer deliver
     /// the block.
-    fn fetch_block(
+    ///
+    /// This is intentionally narrower than [`Self::subscribe_parent`]. A digest is enough to
+    /// identify a block in local storage, but it may not be enough to form the network request
+    /// used by a marshal variant. Variants whose consensus commitment contains extra context
+    /// should keep that logic in [`Self::subscribe_parent`], where the known child block is
+    /// still available.
+    fn subscribe(
         self,
         digest: <Self::Block as Digestible>::Digest,
     ) -> impl Future<Output = Option<Self::Block>> + Send;
+
+    /// Subscribe to the parent of a known block.
+    ///
+    /// This is a separate hook from [`Self::subscribe`] because the child block can carry
+    /// variant-specific context needed to retrieve its parent. The default implementation
+    /// follows the digest link and waits locally, but providers may override this to derive a
+    /// full parent commitment and issue a fetching subscription.
+    fn subscribe_parent(
+        self,
+        block: Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send {
+        let digest = block.parent();
+        self.subscribe(digest)
+    }
 }
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
@@ -39,21 +59,21 @@ pub trait BlockProvider: Clone + Send + 'static {
 // TODO(<https://github.com/commonwarexyz/monorepo/issues/2982>): Once marshal can also yield the genesis block,
 // this stream should end at block height 0 rather than 1.
 #[pin_project]
-pub struct AncestorStream<M, B: Block> {
-    buffered: Vec<B>,
+pub struct AncestorStream<M: BlockProvider> {
+    buffered: Vec<M::Block>,
     marshal: M,
     #[pin]
-    pending: OptionFuture<BoxFuture<'static, Option<B>>>,
+    pending: OptionFuture<BoxFuture<'static, Option<M::Block>>>,
 }
 
-impl<M, B: Block> AncestorStream<M, B> {
+impl<M: BlockProvider> AncestorStream<M> {
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous in height.
-    pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = B>) -> Self {
-        let mut buffered = initial.into_iter().collect::<Vec<B>>();
+    pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = M::Block>) -> Self {
+        let mut buffered = initial.into_iter().collect::<Vec<M::Block>>();
         buffered.sort_by_key(Heightable::height);
 
         // Check that the initial blocks are contiguous in height.
@@ -78,12 +98,12 @@ impl<M, B: Block> AncestorStream<M, B> {
     }
 }
 
-impl<M, B> Stream for AncestorStream<M, B>
+impl<M> Stream for AncestorStream<M>
 where
-    M: BlockProvider<Block = B>,
-    B: Block,
+    M: BlockProvider,
+    M::Block: Clone,
 {
-    type Item = B;
+    type Item = M::Block;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Because marshal cannot currently yield the genesis block, we stop at height 1.
@@ -94,11 +114,10 @@ where
         // If a result has been buffered, return it and queue the parent fetch if needed.
         if let Some(block) = this.buffered.pop() {
             let height = block.height();
-            let should_fetch_parent = height > END_BOUND;
+            let should_subscribe_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
-            if should_fetch_parent && end_of_buffered {
-                let parent_digest = block.parent();
-                let future = this.marshal.clone().fetch_block(parent_digest).boxed();
+            if should_subscribe_parent && end_of_buffered {
+                let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -112,7 +131,7 @@ where
                     }
                     Poll::Ready(None) | Poll::Pending => {}
                 }
-            } else if !should_fetch_parent {
+            } else if !should_subscribe_parent {
                 // No more parents to fetch; Finish the stream.
                 *this.pending.as_mut() = None.into();
             }
@@ -128,10 +147,9 @@ where
             }
             Poll::Ready(Some(Some(block))) => {
                 let height = block.height();
-                let should_fetch_parent = height > END_BOUND;
-                if should_fetch_parent {
-                    let parent_digest = block.parent();
-                    let future = this.marshal.clone().fetch_block(parent_digest).boxed();
+                let should_subscribe_parent = height > END_BOUND;
+                if should_subscribe_parent {
+                    let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -169,7 +187,7 @@ mod test {
     impl BlockProvider for MockProvider {
         type Block = Block<Sha256Digest, ()>;
 
-        async fn fetch_block(self, digest: Sha256Digest) -> Option<Self::Block> {
+        async fn subscribe(self, digest: Sha256Digest) -> Option<Self::Block> {
             self.0.into_iter().find(|b| b.digest() == digest)
         }
     }
@@ -200,7 +218,7 @@ mod test {
 
     #[test_async]
     async fn test_empty_yields_none() {
-        let mut stream: AncestorStream<MockProvider, Block<Sha256Digest, ()>> =
+        let mut stream: AncestorStream<MockProvider> =
             AncestorStream::new(MockProvider::default(), vec![]);
         assert_eq!(stream.next().await, None);
     }

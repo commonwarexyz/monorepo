@@ -236,8 +236,8 @@ stability_scope!(ALPHA {
     pub mod ordered_broadcast;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::{AncestorStream, BlockProvider};
     use commonware_cryptography::certificate::Scheme;
+    use futures::Stream;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand::Rng;
 
@@ -263,10 +263,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].
-        fn propose<A: BlockProvider<Block = Self::Block>>(
+        fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<A, Self::Block>,
+            ancestry: impl Stream<Item = Self::Block> + Send,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
@@ -275,10 +275,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Return `false` only when the block is permanently invalid for the supplied context and
         /// ancestry. If validity may still change as additional information becomes available,
         /// continue waiting instead of returning `false`.
-        fn verify<A: BlockProvider<Block = Self::Block>>(
+        fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<A, Self::Block>,
+            ancestry: impl Stream<Item = Self::Block> + Send,
         ) -> impl Future<Output = bool> + Send;
     }
 });

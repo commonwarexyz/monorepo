@@ -1,10 +1,9 @@
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::Mailbox,
+        core::{CommitmentFallback, Mailbox, Variant},
         standard::Standard,
     },
     simplex::types::Context,
@@ -133,13 +132,12 @@ where
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
-    let (parent_view, parent_digest) = context.parent;
+    let (parent_view, parent_commitment) = context.parent;
     let parent_request = fetch_parent(
-        parent_digest,
-        // We are guaranteed that the parent round for any `context` is
-        // in the same epoch (recall, the boundary block of the previous epoch
-        // is the genesis block of the current epoch).
-        Some(Round::new(context.epoch(), parent_view)),
+        parent_commitment,
+        CommitmentFallback::FetchByRound {
+            round: Round::new(context.epoch(), parent_view),
+        },
         application,
         marshal,
     )
@@ -157,7 +155,7 @@ where
             Ok(parent) => parent,
             Err(_) => {
                 debug!(
-                    ?parent_digest,
+                    ?parent_commitment,
                     reason = "failed to fetch parent block",
                     "skipping verification"
                 );
@@ -166,8 +164,8 @@ where
         },
     };
 
-    // Validate parent digest and contiguous child height before application logic.
-    if let Err(err) = validate_block(&block, &parent, parent_digest) {
+    // Validate parent linkage and contiguous child height before application logic.
+    if let Err(err) = validate_block(&block, &parent, parent_commitment) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -180,7 +178,7 @@ where
     }
 
     // Request verification from the application over the two-block ancestry prefix.
-    let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
+    let ancestry_stream = marshal.ancestor_stream([block.clone(), parent]);
     let validity_request = application.verify(
         (runtime_context.child("app_verify"), context.clone()),
         ancestry_stream,
@@ -204,20 +202,25 @@ where
     Some(application_valid)
 }
 
-/// Fetches the parent block given its digest and optional round hint.
+/// Fetches the parent block given its commitment and missing-block behavior.
 ///
-/// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
-/// to marshal for parent availability.
+/// If the commitment matches genesis, returns genesis directly. Otherwise, subscribes
+/// to marshal for parent availability according to `fallback`.
 ///
-/// `parent_round` is a resolver hint. Callers should only provide a hint when the
-/// source context is trusted/validated. Untrusted paths should pass `None`.
+/// Use `FetchByRound` for certified parent lookups when the caller knows the
+/// certified parent round and commitment, such as proposal construction or
+/// verification of a known child. Do not derive the parent height from the
+/// finalized tip or the child block: proposals may build on a certified parent
+/// that is not finalized locally yet, and an unverified child may lie about its
+/// height. Once a round-bound response arrives it is heightable, and normal
+/// ancestry validation decides whether it matches the child.
 ///
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
-    parent_digest: B::Digest,
-    parent_round: Option<Round>,
+    parent_commitment: B::Digest,
+    fallback: CommitmentFallback,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
 ) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
@@ -228,10 +231,11 @@ where
     B: Block + Clone,
 {
     let genesis = application.genesis().await;
-    if parent_digest == genesis.digest() {
+    if parent_commitment == <Standard<B> as Variant>::commitment(&genesis) {
         Either::Left(ready(Ok(genesis)))
     } else {
-        Either::Right(marshal.subscribe_by_digest(parent_round, parent_digest))
+        let receiver = marshal.subscribe_by_commitment(parent_commitment, fallback);
+        Either::Right(receiver)
     }
 }
 

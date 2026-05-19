@@ -5,7 +5,6 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ancestry::{AncestorStream, BlockProvider},
     simplex::types::Context,
     types::{Epoch, Round, View},
     Heightable,
@@ -15,7 +14,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use rand::Rng;
 use std::marker::PhantomData;
 
@@ -86,12 +85,13 @@ where
         genesis_block::<H, C, V>(genesis_context)
     }
 
-    async fn propose<A: BlockProvider<Block = Self::Block>>(
+    async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
+        ancestry: impl Stream<Item = Self::Block> + Send,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
+        futures::pin_mut!(ancestry);
         let parent_block = ancestry.next().await?;
         let parent_commitment = parent_block.commitment();
 
@@ -111,10 +111,10 @@ where
         ))
     }
 
-    async fn verify<A: BlockProvider<Block = Self::Block>>(
+    async fn verify(
         &mut self,
         _: (E, Self::Context),
-        _: AncestorStream<A, Self::Block>,
+        _: impl Stream<Item = Self::Block> + Send,
     ) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).

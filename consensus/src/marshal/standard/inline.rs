@@ -44,9 +44,8 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::validation::Stage,
-        core::Mailbox,
+        core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
@@ -274,13 +273,20 @@ where
                 return;
             }
 
-            let (parent_view, parent_digest) = consensus_context.parent;
+            // The parent for any consensus context is in the same epoch: the
+            // boundary block of the previous epoch is the genesis block of the
+            // current epoch.
+            //
+            // Proposal context carries the certified parent view/commitment but
+            // not the parent height. The parent may be certified above the
+            // finalized tip, so this must stay round-bound until the block is
+            // returned.
+            let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = fetch_parent(
-                parent_digest,
-                // We are guaranteed that the parent round for any `consensus_context` is
-                // in the same epoch (recall, the boundary block of the previous epoch
-                // is the genesis block of the current epoch).
-                Some(Round::new(consensus_context.epoch(), parent_view)),
+                parent_commitment,
+                CommitmentFallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
                 &mut application,
                 &mut marshal,
             )
@@ -295,7 +301,7 @@ where
                     Ok(parent) => parent,
                     Err(_) => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "failed to fetch parent block",
                             "skipping proposal"
                         );
@@ -328,7 +334,7 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let ancestor_stream = marshal.ancestor_stream([parent]);
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -347,7 +353,7 @@ where
                     Some(block) => block,
                     None => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "block building failed",
                             "skipping proposal"
                         );
@@ -380,7 +386,7 @@ where
     /// Performs complete verification inline.
     ///
     /// This method:
-    /// 1. Fetches the block by digest
+    /// 1. Waits for the block by digest
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
     /// 4. Runs application verification over ancestry
@@ -405,7 +411,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal.subscribe_by_digest(Some(context.round), digest);
+            let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -492,8 +498,14 @@ where
             return rx;
         }
 
-        // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest);
+        // Otherwise, wait for local block availability and recover from peers by
+        // notarized round if necessary. A Byzantine leader can form a notarization
+        // after sending the proposal to only f+1 honest validators; the honest
+        // validators left without the block must fetch it here to certify and
+        // avoid getting stuck if Byzantine validators stop participating.
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -538,12 +550,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
+    fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients)
+        self.marshal.forward(round, commitment, recipients)
     }
 }
 

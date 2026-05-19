@@ -6958,6 +6958,28 @@ mod tests {
                     },
                 }
             }
+
+            // The local nullify vote alone is not enough to advance. Without a
+            // nullification or finalization certificate, the voter must remain in
+            // the same view while certification is still pending.
+            let advanced_without_certificate = loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Update { current, .. } if current > target_view => {
+                            break true;
+                        }
+                        batcher::Message::Update { .. } => {}
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        break false;
+                    },
+                }
+            };
+            assert!(
+                !advanced_without_certificate,
+                "voter should not advance past view {target_view} without a nullification or finalization certificate"
+            );
         });
     }
 
