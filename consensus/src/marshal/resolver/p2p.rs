@@ -1,15 +1,11 @@
 //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-use crate::{
-    marshal::resolver::{handler, Resolver},
-    types::{Height, Round},
-};
+use crate::marshal::resolver::{handler, Annotation, Key, Receiver as HandlerReceiver};
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_p2p::{Blocker, Provider, Receiver, Sender};
-use commonware_resolver::{p2p, Resolver as RawResolver};
+use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
+use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use commonware_utils::vec::NonEmptyVec;
 use rand::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -51,56 +47,21 @@ where
 }
 
 /// Mailbox for issuing marshal backfill requests.
-#[derive(Clone)]
-pub struct Mailbox<D: Digest, P: PublicKey> {
-    inner: p2p::Mailbox<handler::Request<D>, P, handler::Annotation>,
-}
-
-impl<D: Digest, P: PublicKey> Resolver<D> for Mailbox<D, P> {
-    type PublicKey = P;
-
-    fn fetch(&mut self, fetch: handler::FetchRequest<D>) -> commonware_actor::Feedback {
-        self.inner.fetch(fetch.into_inner())
-    }
-
-    fn fetch_all(&mut self, fetches: Vec<handler::FetchRequest<D>>) -> commonware_actor::Feedback {
-        let fetches = fetches
-            .into_iter()
-            .map(handler::FetchRequest::into_inner)
-            .collect();
-        self.inner.fetch_all(fetches)
-    }
-
-    fn fetch_targeted(
-        &mut self,
-        fetch: handler::FetchRequest<D>,
-        targets: NonEmptyVec<Self::PublicKey>,
-    ) -> commonware_actor::Feedback {
-        self.inner.fetch_targeted(fetch.into_inner(), targets)
-    }
-
-    fn retain_above_height(&mut self, height: Height) -> commonware_actor::Feedback {
-        self.inner.retain(handler::above_height_floor(height))
-    }
-
-    fn retain_above_round(&mut self, round: Round) -> commonware_actor::Feedback {
-        self.inner.retain(handler::above_round_floor(round))
-    }
-}
+pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
 
 /// Initialize a P2P resolver.
 pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
     backfill: (S, R),
-) -> (handler::Receiver<D>, Mailbox<D, P>)
+) -> (HandlerReceiver<D>, Mailbox<D, P>)
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
     S: Sender<PublicKey = P>,
-    R: Receiver<PublicKey = P>,
+    R: P2pReceiver<PublicKey = P>,
     P: PublicKey,
 {
     let (sender, receiver) = mailbox::new(context.child("handler"), config.mailbox_size);
@@ -122,8 +83,5 @@ where
         },
     );
     resolver_engine.start(backfill);
-    (
-        handler::Receiver::new(receiver),
-        Mailbox { inner: resolver },
-    )
+    (HandlerReceiver::new(receiver), resolver)
 }

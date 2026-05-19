@@ -83,7 +83,7 @@ mod tests {
                 },
                 verifying::MockVerifyingApp,
             },
-            resolver::{self, handler},
+            resolver::handler,
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
@@ -101,7 +101,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::Recipients;
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch};
+    use commonware_resolver::{Delivery, Fetch, Resolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Supervisor as _,
     };
@@ -161,8 +161,8 @@ mod tests {
         }
     }
 
-    type CodingFetchRecord = Fetch<handler::Request<Commitment>, handler::Annotation>;
-    type CodingTargetedFetch = (handler::Request<Commitment>, NonEmptyVec<K>);
+    type CodingFetchRecord = Fetch<handler::Key<Commitment>, handler::Annotation>;
+    type CodingTargetedFetch = (handler::Key<Commitment>, NonEmptyVec<K>);
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
     #[derive(Clone, Default)]
@@ -235,35 +235,55 @@ mod tests {
         }
     }
 
-    impl resolver::Resolver<Commitment> for RecordingResolver {
+    impl Resolver for RecordingResolver {
+        type Key = handler::Key<Commitment>;
+        type Subscriber = handler::Annotation;
         type PublicKey = K;
 
-        fn fetch(&mut self, fetch: handler::FetchRequest<Commitment>) -> Feedback {
-            self.record_fetch(fetch.into_inner());
+        fn fetch<F>(&mut self, fetch: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.record_fetch(fetch.into());
             Feedback::Ok
         }
 
-        fn fetch_all(&mut self, fetches: Vec<handler::FetchRequest<Commitment>>) -> Feedback {
+        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
             for fetch in fetches {
-                self.record_fetch(fetch.into_inner());
+                self.record_fetch(fetch.into());
             }
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            fetch: handler::FetchRequest<Commitment>,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((fetch.into_inner().key, targets));
+            self.targeted.lock().push((fetch.into().key, targets));
             Feedback::Ok
         }
 
-        fn retain_above_height(&mut self, _height: Height) -> Feedback {
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            for (fetch, targets) in fetches {
+                self.targeted.lock().push((fetch.into().key, targets));
+            }
             Feedback::Ok
         }
 
-        fn retain_above_round(&mut self, _round: Round) -> Feedback {
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
             Feedback::Ok
         }
     }
@@ -536,7 +556,7 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Request::Notarized { round: request_round },
+                        handler::Key::Notarized { round: request_round },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -610,7 +630,7 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Request::Notarized { round: request_round },
+                        handler::Key::Notarized { round: request_round },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -2208,7 +2228,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Regression: when backfilling by Request::Block(commitment), a peer may return
+        // Regression: when backfilling by Key::Block(commitment), a peer may return
         // a coded block with matching inner digest but a different coding commitment.
         // If a finalization for this digest is already cached, marshal must reject
         // the block unless V::commitment(block) matches the finalization payload.
@@ -2294,7 +2314,7 @@ mod tests {
             let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - it fetches Request::Block(commitment)
+            //   - it fetches Key::Block(commitment)
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
             //   - deliver path must reject because the response commitment does not
             //     match the request key

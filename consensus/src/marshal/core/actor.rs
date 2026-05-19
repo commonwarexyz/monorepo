@@ -5,10 +5,7 @@ use super::{
 };
 use crate::{
     marshal::{
-        resolver::{
-            self,
-            handler::{self, Annotation, FetchRequest, Finalized, Request},
-        },
+        resolver::{self, handler, Annotation, Key, Request},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, Update,
     },
@@ -29,7 +26,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::Delivery;
+use commonware_resolver::{Delivery, Resolver};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -200,7 +197,7 @@ enum BlockSubscriptionKey<C, D> {
 
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
-type ResolverRequestFor<V> = Request<<V as Variant>::Commitment>;
+type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
 
 /// Processed floors used to admit or reject resolver fetches.
 #[derive(Clone, Copy)]
@@ -211,7 +208,7 @@ struct Floor {
 
 impl Floor {
     /// Returns true when the resolver request is above all processed floors.
-    fn permits<D: commonware_cryptography::Digest>(&self, fetch: &FetchRequest<D>) -> bool {
+    fn permits<D: commonware_cryptography::Digest>(&self, fetch: &Request<D>) -> bool {
         if !fetch.above_height_floor(self.height) {
             return false;
         }
@@ -219,10 +216,10 @@ impl Floor {
         fetch.above_round_floor(self.round)
     }
 
-    fn fetch_if_permitted<D, R>(&self, resolver: &mut R, fetch: FetchRequest<D>) -> bool
+    fn fetch_if_permitted<D, R>(&self, resolver: &mut R, fetch: Request<D>) -> bool
     where
         D: commonware_cryptography::Digest,
-        R: resolver::Resolver<D>,
+        R: Resolver<Key = Key<D>, Subscriber = Annotation>,
     {
         if !self.permits(&fetch) {
             return false;
@@ -234,12 +231,12 @@ impl Floor {
     fn fetch_targeted_if_permitted<D, R>(
         &self,
         resolver: &mut R,
-        fetch: FetchRequest<D>,
+        fetch: Request<D>,
         targets: NonEmptyVec<R::PublicKey>,
     ) -> bool
     where
         D: commonware_cryptography::Digest,
-        R: resolver::Resolver<D>,
+        R: Resolver<Key = Key<D>, Subscriber = Annotation>,
     {
         if !self.permits(&fetch) {
             return false;
@@ -248,10 +245,10 @@ impl Floor {
         true
     }
 
-    fn fetch_all_if_permitted<D, R>(&self, resolver: &mut R, fetches: Vec<FetchRequest<D>>) -> bool
+    fn fetch_all_if_permitted<D, R>(&self, resolver: &mut R, fetches: Vec<Request<D>>) -> bool
     where
         D: commonware_cryptography::Digest,
-        R: resolver::Resolver<D>,
+        R: Resolver<Key = Key<D>, Subscriber = Annotation>,
     {
         let fetches = fetches
             .into_iter()
@@ -439,11 +436,12 @@ where
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
-        resolver: (handler::Receiver<V::Commitment>, R),
+        resolver: (resolver::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
-        R: resolver::Resolver<
-            V::Commitment,
+        R: Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -456,10 +454,11 @@ where
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
-        (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
+        (mut resolver_rx, mut resolver): (resolver::Receiver<V::Commitment>, R),
     ) where
-        R: resolver::Resolver<
-            V::Commitment,
+        R: Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -719,7 +718,7 @@ where
                             debug!(?round, ?commitment, "finalized block missing");
                             self.floor.fetch_if_permitted(
                                 &mut resolver,
-                                FetchRequest::finalized_block_by_round(commitment, round),
+                                Request::finalized_block_by_round(commitment, round),
                             );
                         }
                     }
@@ -757,7 +756,7 @@ where
 
                         self.floor.fetch_targeted_if_permitted(
                             &mut resolver,
-                            FetchRequest::finalized(height),
+                            Request::finalized(height),
                             targets,
                         );
                     }
@@ -935,14 +934,14 @@ where
         buffer: &Buf,
     ) {
         match key {
-            Request::Block(commitment) => {
+            Key::Block(commitment) => {
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "block missing on request");
                     return;
                 };
                 response.send_lossy(block.encode());
             }
-            Request::Finalized { height } => {
+            Key::Finalized { height } => {
                 let Some(finalization) = self.get_finalization_by_height(height).await else {
                     debug!(%height, "finalization missing on request");
                     return;
@@ -953,7 +952,7 @@ where
                 };
                 response.send_lossy((finalization, block).encode());
             }
-            Request::Notarized { round } => {
+            Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
                     debug!(?round, "notarization missing on request");
                     return;
@@ -974,8 +973,9 @@ where
         fallback: CommitmentFallback,
         key: BlockSubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         waiters: &mut AbortablePool<Result<V::Block, BlockSubscriptionKeyFor<V>>>,
@@ -1013,7 +1013,7 @@ where
                 // the in-flight resolver request.
                 if !self
                     .floor
-                    .fetch_if_permitted(resolver, FetchRequest::notarized(round))
+                    .fetch_if_permitted(resolver, Request::notarized(round))
                 {
                     return;
                 }
@@ -1031,7 +1031,7 @@ where
                 // never for a candidate block's immediate parent.
                 if !self
                     .floor
-                    .fetch_if_permitted(resolver, FetchRequest::certified_block(commitment, height))
+                    .fetch_if_permitted(resolver, Request::certified_block(commitment, height))
                 {
                     return;
                 }
@@ -1079,8 +1079,9 @@ where
         &mut self,
         round: Round,
         commitment: V::Commitment,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         buffer: &mut Buf,
@@ -1093,7 +1094,7 @@ where
             return;
         }
         self.floor
-            .fetch_if_permitted(resolver, FetchRequest::notarized(round));
+            .fetch_if_permitted(resolver, Request::notarized(round));
     }
 
     /// Handle a deliver message from the resolver. Block delivers are handled
@@ -1107,14 +1108,15 @@ where
         response: oneshot::Sender<bool>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) -> bool {
         let Delivery { key, subscribers } = delivery;
         match key {
-            Request::Block(commitment) => {
+            Key::Block(commitment) => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
@@ -1125,43 +1127,19 @@ where
                     return false;
                 }
 
-                // The commitment validates the peer response. Annotation height
-                // is local metadata, not a validity condition for the committed
-                // block. Subscribers still need the block so their own validation
-                // can reject bad ancestry.
+                // The commitment validates the peer response. Annotations are
+                // local context attached to the request and do not affect peer
+                // validity.
                 self.notify_subscribers(&block);
 
                 // The peer-visible request only says "give me this block".
                 // Local annotations explain why the block was requested and
-                // therefore where, if anywhere, it should be stored. Certified
-                // annotations carry a pruning hint, but certified storage uses
-                // the decoded block height. By-height finalization annotations
-                // only drive finalized storage when the decoded height matches.
+                // therefore where, if anywhere, it should be stored.
                 let height = block.height();
                 let digest = block.digest();
-                let mut annotations = Vec::new();
-                for annotation in subscribers {
-                    let keep = match annotation {
-                        Annotation::Finalized(Finalized::ByHeight { height: expected }) => {
-                            expected == height
-                        }
-                        Annotation::Certified { .. }
-                        | Annotation::Finalized(Finalized::ByRound { .. }) => true,
-                        // Notarization annotations are only meaningful on
-                        // `Request::Notarized` deliveries. They tag
-                        // round-bound fetches for resolver pruning, while
-                        // notarized delivery validation uses the request key
-                        // and should not drive block-keyed storage.
-                        Annotation::Notarization { .. } => false,
-                    };
-                    if keep {
-                        annotations.push(annotation);
-                    } else {
-                        debug!(?commitment, %height, "ignoring stale block annotation");
-                    }
-                }
+                let annotations = subscribers.into_vec();
 
-                // Round-bound proposal-parent fetches are `Request::Notarized`
+                // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the block belongs in the finalized chain.
                 let finalization = self.cache.get_finalization_for(digest).await;
@@ -1194,7 +1172,7 @@ where
                 response.send_lossy(true);
                 wrote
             }
-            Request::Finalized { height } => {
+            Key::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
                     debug!(
                         %height,
@@ -1243,7 +1221,7 @@ where
                 });
                 false
             }
-            Request::Notarized { round } => {
+            Key::Notarized { round } => {
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1291,8 +1269,9 @@ where
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) -> bool {
@@ -1538,8 +1517,9 @@ where
     async fn handle_block_processed(
         &mut self,
         height: Height,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
@@ -1825,8 +1805,9 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1864,7 +1845,7 @@ where
                     // Request the missing block.
                     self.floor.fetch_if_permitted(
                         resolver,
-                        FetchRequest::finalized_block_by_height(commitment, last_finalized),
+                        Request::finalized_block_by_height(commitment, last_finalized),
                     );
                 }
             }
@@ -1920,7 +1901,7 @@ where
                         .expect("cursor above gap start has a parent");
                     self.floor.fetch_if_permitted(
                         resolver,
-                        FetchRequest::finalized_block_by_height(parent_commitment, parent_height),
+                        Request::finalized_block_by_height(parent_commitment, parent_height),
                     );
                     break 'cache_repair;
                 }
@@ -1937,7 +1918,7 @@ where
             .missing_items(start, self.max_repair.get());
         let requests: Vec<_> = missing_items
             .into_iter()
-            .map(FetchRequest::finalized)
+            .map(Request::finalized)
             .collect();
         if !requests.is_empty() {
             self.floor.fetch_all_if_permitted(resolver, requests);
@@ -1950,8 +1931,9 @@ where
     fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
@@ -1960,7 +1942,7 @@ where
         let _ = self.processed_height.try_set(self.floor.height.get());
 
         // Prune any existing requests below the new floor.
-        resolver.retain_above_height(height);
+        resolver.retain(handler::above_height_floor::<V::Commitment>(height));
     }
 
     /// Returns the latest known finalization round at or below the processed height.
@@ -1987,8 +1969,9 @@ where
     async fn update_processed_round(
         &mut self,
         height: Height,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
@@ -2004,8 +1987,9 @@ where
         &mut self,
         height: Height,
         round: Round,
-        resolver: &mut impl resolver::Resolver<
-            V::Commitment,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
@@ -2025,7 +2009,9 @@ where
         self.prune_view_cache(prune_round).await;
 
         // Prune round-bound requests at or below the processed round.
-        resolver.retain_above_round(self.floor.round);
+        resolver.retain(handler::above_round_floor::<V::Commitment>(
+            self.floor.round,
+        ));
     }
 
     /// Prunes finalized blocks and certificates below the given height.

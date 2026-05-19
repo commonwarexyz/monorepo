@@ -3446,7 +3446,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
 /// Regression test: delayed block backfill delivered after floor advancement must not crash.
 ///
-/// This models a resolver peer that responds to `Request::Block` only after the
+/// This models a resolver peer that responds to `Key::Block` only after the
 /// victim has advanced its floor and pruned finalized storage. The stale delivery
 /// must be rejected and must not be persisted.
 pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {

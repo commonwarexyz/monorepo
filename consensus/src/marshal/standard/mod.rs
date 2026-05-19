@@ -56,7 +56,7 @@ mod tests {
                 },
                 verifying::MockVerifyingApp,
             },
-            resolver::{self, handler},
+            resolver::handler,
             Identifier, Update,
         },
         simplex::{
@@ -82,7 +82,7 @@ mod tests {
         Manager as _, Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Consumer, Delivery, Fetch};
+    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
@@ -1482,7 +1482,7 @@ mod tests {
                     resolver.fetches().iter().any(|fetch| matches!(
                         (&fetch.key, &fetch.subscriber),
                         (
-                            handler::Request::Notarized { round: request_round },
+                            handler::Key::Notarized { round: request_round },
                             handler::Annotation::Notarization { round: subscriber_round },
                         ) if *request_round == round && *subscriber_round == round
                     )),
@@ -1555,7 +1555,7 @@ mod tests {
             resolver.respond_to_next_fetch((notarization, block).encode());
 
             // `certify` takes the in-progress task and calls `hint_notarized`,
-            // which issues a round-bound `Request::Notarized`. The recording
+            // which issues a round-bound `Key::Notarized`. The recording
             // resolver delivers; the marshal stores the block and wakes
             // verify's digest subscription; deferred_verify produces the final
             // verdict shared by both receivers.
@@ -1588,7 +1588,7 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Request::Notarized { round: request_round },
+                        handler::Key::Notarized { round: request_round },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -1667,7 +1667,7 @@ mod tests {
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Request::Notarized { round: request_round },
+                        handler::Key::Notarized { round: request_round },
                         handler::Annotation::Notarization { round: subscriber_round },
                     ) if *request_round == round && *subscriber_round == round
                 )),
@@ -1735,7 +1735,7 @@ mod tests {
                         resolver.fetches().iter().any(|fetch| {
                             matches!(
                                 fetch.key,
-                                handler::Request::Notarized { round } if round == parent_round
+                                handler::Key::Notarized { round } if round == parent_round
                             ) && matches!(
                                 fetch.subscriber,
                                 handler::Annotation::Notarization { round }
@@ -1749,7 +1749,7 @@ mod tests {
                 let fetches = resolver.fetches();
                 assert!(
                     fetches.iter().all(|fetch| {
-                        !matches!(fetch.key, handler::Request::Block(_))
+                        !matches!(fetch.key, handler::Key::Block(_))
                             && !matches!(
                                 fetch.subscriber,
                                 handler::Annotation::Certified { height }
@@ -1861,7 +1861,7 @@ mod tests {
                         blocker: oracle.control(malicious.clone()),
                         consumer: NoopConsumer,
                         producer: StaticProducer::new(
-                            handler::Request::Notarized {
+                            handler::Key::Notarized {
                                 round: parent_round,
                             },
                             Bytes::from_static(b"not a valid notarization"),
@@ -2475,10 +2475,10 @@ mod tests {
     }
 
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
-    type TargetedFetch = (handler::Request<D>, NonEmptyVec<PublicKey>);
+    type TargetedFetch = (handler::Key<D>, NonEmptyVec<PublicKey>);
 
     /// Recorded `fetch` call on the [`RecordingResolver`].
-    type FetchRecord = Fetch<handler::Request<D>, handler::Annotation>;
+    type FetchRecord = Fetch<handler::Key<D>, handler::Annotation>;
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
     ///
@@ -2578,41 +2578,55 @@ mod tests {
         }
     }
 
-    impl resolver::Resolver<D> for RecordingResolver {
+    impl Resolver for RecordingResolver {
+        type Key = handler::Key<D>;
+        type Subscriber = handler::Annotation;
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, fetch: handler::FetchRequest<D>) -> Feedback {
-            self.record_fetch(fetch.into_inner());
+        fn fetch<F>(&mut self, fetch: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.record_fetch(fetch.into());
             Feedback::Ok
         }
 
-        fn fetch_all(&mut self, fetches: Vec<handler::FetchRequest<D>>) -> Feedback {
+        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
             for fetch in fetches {
-                self.record_fetch(fetch.into_inner());
+                self.record_fetch(fetch.into());
             }
             Feedback::Ok
         }
 
         fn fetch_targeted(
             &mut self,
-            fetch: handler::FetchRequest<D>,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((fetch.into_inner().key, targets));
+            self.targeted.lock().push((fetch.into().key, targets));
             Feedback::Ok
         }
 
-        fn retain_above_height(&mut self, height: Height) -> Feedback {
-            let predicate = handler::above_height_floor::<D>(height);
-            self.active_fetches
-                .lock()
-                .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
-            *self.retains.lock() += 1;
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            for (fetch, targets) in fetches {
+                self.targeted.lock().push((fetch.into().key, targets));
+            }
             Feedback::Ok
         }
 
-        fn retain_above_round(&mut self, round: Round) -> Feedback {
-            let predicate = handler::above_round_floor::<D>(round);
+        fn retain(
+            &mut self,
+            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
             self.active_fetches
                 .lock()
                 .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
@@ -2625,7 +2639,7 @@ mod tests {
     struct NoopConsumer;
 
     impl Consumer for NoopConsumer {
-        type Key = handler::Request<D>;
+        type Key = handler::Key<D>;
         type Value = Bytes;
         type Subscriber = handler::Annotation;
 
@@ -2642,18 +2656,18 @@ mod tests {
 
     #[derive(Clone)]
     struct StaticProducer {
-        key: handler::Request<D>,
+        key: handler::Key<D>,
         value: Bytes,
     }
 
     impl StaticProducer {
-        fn new(key: handler::Request<D>, value: Bytes) -> Self {
+        fn new(key: handler::Key<D>, value: Bytes) -> Self {
             Self { key, value }
         }
     }
 
     impl commonware_resolver::p2p::Producer for StaticProducer {
-        type Key = handler::Request<D>;
+        type Key = handler::Key<D>;
 
         fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
             let (sender, receiver) = oneshot::channel();
@@ -2856,7 +2870,7 @@ mod tests {
                         matches!(
                             (&fetch.key, &fetch.subscriber),
                             (
-                                handler::Request::Notarized { round: request_round },
+                                handler::Key::Notarized { round: request_round },
                                 handler::Annotation::Notarization { round: subscriber_round },
                             ) if *request_round == round && *subscriber_round == round
                         )
@@ -2869,7 +2883,7 @@ mod tests {
             assert!(resolver
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
-                        key: handler::Request::Notarized { round },
+                        key: handler::Key::Notarized { round },
                         subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
                     },
                     value: (notarization, block.clone()).encode(),
@@ -3159,7 +3173,7 @@ mod tests {
                 "round-bound fetch",
                 || {
                     resolver.active_fetches().iter().any(|fetch| {
-                        matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
+                        matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
                     })
                 },
             )
@@ -3174,14 +3188,14 @@ mod tests {
                 "round-bound prune",
                 || {
                     resolver.active_fetches().iter().all(|fetch| {
-                        !matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
+                        !matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
                     })
                 },
             )
             .await;
             assert!(
                 resolver.active_fetches().iter().all(|fetch| {
-                    !matches!(fetch.key, handler::Request::Notarized { round: r } if r == round)
+                    !matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
                 }),
                 "processed finalization after set_floor must prune existing round-bound fetches"
             );
@@ -3317,7 +3331,7 @@ mod tests {
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
-                        key: handler::Request::Finalized {
+                        key: handler::Key::Finalized {
                             height: Height::new(5),
                         },
                         subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
@@ -3337,7 +3351,7 @@ mod tests {
             assert!(resolver_tx
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
-                        key: handler::Request::Notarized {
+                        key: handler::Key::Notarized {
                             round: Round::new(Epoch::zero(), View::new(1)),
                         },
                         subscribers: NonEmptyVec::new(handler::Annotation::Notarization {
@@ -3849,7 +3863,7 @@ mod tests {
             let (request, targets) = &targeted[0];
             assert_eq!(
                 request,
-                &handler::Request::Finalized {
+                &handler::Key::Finalized {
                     height: Height::new(7)
                 }
             );
