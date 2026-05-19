@@ -266,10 +266,6 @@ mod tests {
         fn retain_above_round(&mut self, _round: Round) -> Feedback {
             Feedback::Ok
         }
-
-        fn retain_except_block(&mut self, _commitment: Commitment) -> Feedback {
-            Feedback::Ok
-        }
     }
 
     async fn start_coding_actor_with_recording(

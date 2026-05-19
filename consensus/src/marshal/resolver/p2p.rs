@@ -86,11 +86,6 @@ impl<D: Digest, P: PublicKey> Resolver<D> for Mailbox<D, P> {
     fn retain_above_round(&mut self, round: Round) -> commonware_actor::Feedback {
         self.inner.retain(handler::above_round_floor(round))
     }
-
-    fn retain_except_block(&mut self, commitment: D) -> commonware_actor::Feedback {
-        self.inner
-            .retain(move |request, _| !matches!(request, handler::Request::Block(pending) if *pending == commitment))
-    }
 }
 
 /// Initialize a P2P resolver.

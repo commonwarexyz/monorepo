@@ -533,8 +533,7 @@ where
                     match result {
                         Ok(()) => {
                             // Apply in-memory progress updates for this acknowledged block.
-                            self.handle_block_processed(height, commitment, &mut resolver)
-                                .await;
+                            self.handle_block_processed(height, &mut resolver).await;
                         }
                         Err(e) => {
                             // Ack failures are fatal for marshal/application coordination.
@@ -1539,7 +1538,6 @@ where
     async fn handle_block_processed(
         &mut self,
         height: Height,
-        commitment: V::Commitment,
         resolver: &mut impl resolver::Resolver<
             V::Commitment,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
@@ -1547,9 +1545,6 @@ where
     ) {
         // Update the processed height (buffered, not synced)
         self.update_processed_height(height, resolver);
-
-        // Prune any useless requests.
-        resolver.retain_except_block(commitment);
 
         self.update_processed_round(height, resolver).await;
     }

@@ -2619,14 +2619,6 @@ mod tests {
             *self.retains.lock() += 1;
             Feedback::Ok
         }
-
-        fn retain_except_block(&mut self, commitment: D) -> Feedback {
-            self.active_fetches.lock().retain(
-                |fetch| !matches!(fetch.key, handler::Request::Block(pending) if pending == commitment),
-            );
-            *self.retains.lock() += 1;
-            Feedback::Ok
-        }
     }
 
     #[derive(Clone)]
@@ -2929,7 +2921,7 @@ mod tests {
             );
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            let retain_floor = resolver.retain_count() + 3;
+            let retain_floor = resolver.retain_count() + 2;
             assert_eq!(
                 application.acknowledged().await,
                 Height::new(1),
@@ -3004,7 +2996,7 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            let retain_floor = resolver.retain_count() + 3;
+            let retain_floor = resolver.retain_count() + 2;
             assert_eq!(application.acknowledged().await, Height::new(1));
             wait_until(
                 &context,
@@ -3073,7 +3065,7 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            let retain_floor = resolver.retain_count() + 3;
+            let retain_floor = resolver.retain_count() + 2;
             assert_eq!(application.acknowledged().await, Height::new(1));
             wait_until(
                 &context,

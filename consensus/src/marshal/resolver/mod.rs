@@ -45,7 +45,4 @@ pub trait Resolver<D: Digest>: Clone + Send + 'static {
 
     /// Retain fetches above the processed round floor.
     fn retain_above_round(&mut self, round: Round) -> Feedback;
-
-    /// Retain all fetches except the block identified by `commitment`.
-    fn retain_except_block(&mut self, commitment: D) -> Feedback;
 }
