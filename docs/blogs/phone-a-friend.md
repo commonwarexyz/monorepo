@@ -1,6 +1,6 @@
 ---
 title: "Phone a Friend"
-description: "Helper-aided decryption lets validators verify batches of encrypted transactions with short hints instead of locally repeating expensive pairing work."
+description: "Instead of every single validator carrying out the work of decryption, a well-provisioned helper can do the work once and broadcast hints to the network which will be used to quickly verify the result."
 date: "May 19th, 2026"
 published-time: "2026-05-19T00:00:00Z"
 modified-time: "2026-05-19T00:00:00Z"
