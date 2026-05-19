@@ -15,7 +15,7 @@ use commonware_actor::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 
 /// Messages sent to the marshal [Actor](super::Actor).
@@ -535,16 +535,20 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// parent's height from its child before issuing a height-bound request.
     ///
     /// Do not use this to wait for pending candidate proposal data.
-    pub(crate) fn ancestor_stream(
+    pub(crate) fn ancestor_stream<I>(
         &self,
-        initial: impl IntoIterator<Item = V::Block>,
-    ) -> AncestorStream<AncestryProvider<S, V>> {
+        initial: I,
+    ) -> impl Stream<Item = V::ApplicationBlock> + Send + use<S, V, I>
+    where
+        I: IntoIterator<Item = V::Block>,
+    {
         AncestorStream::new(
             AncestryProvider {
                 mailbox: self.clone(),
             },
             initial,
         )
+        .map(V::into_inner)
     }
 
     /// A request to retrieve the information about the highest finalized block.
@@ -676,7 +680,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .enqueue(Message::HintNotarized { round, commitment });
     }
 
-    /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
+    /// Returns a stream over the ancestry of a given block, leading up to genesis.
     ///
     /// This stream may fetch missing parents because callers should only request
     /// ancestry for data they already have locally and are willing to build on,
@@ -686,7 +690,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn ancestry(
         &self,
         (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
-    ) -> Option<impl Stream<Item = V::ApplicationBlock>> {
+    ) -> Option<impl Stream<Item = V::ApplicationBlock> + Send + use<S, V>> {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver
             .await
@@ -783,20 +787,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 }
 
 impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
-    type Block = V::ApplicationBlock;
-    type AncestryBlock = V::Block;
+    type Block = V::Block;
 
-    async fn subscribe(
-        self,
-        digest: <V::Block as Digestible>::Digest,
-    ) -> Option<Self::AncestryBlock> {
+    async fn subscribe(self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
         let subscription = self
             .mailbox
             .subscribe_by_digest(digest, DigestFallback::Wait);
         subscription.await.ok()
     }
 
-    async fn subscribe_parent(self, block: Self::AncestryBlock) -> Option<Self::AncestryBlock> {
+    async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
         // Ancestry walking does not carry the certified parent round. By this
         // point the stream is walking accepted ancestry, so this height should
         // be correct; it remains a local pruning bound rather than a peer
@@ -808,10 +808,6 @@ impl<S: Scheme, V: Variant> BlockProvider for AncestryProvider<S, V> {
         };
         let subscription = self.mailbox.subscribe_by_commitment(commitment, fallback);
         subscription.await.ok()
-    }
-
-    fn into_block(block: Self::AncestryBlock) -> Self::Block {
-        V::into_inner(block)
     }
 }
 

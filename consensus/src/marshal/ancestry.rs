@@ -15,11 +15,8 @@ use std::{
 
 /// An interface for providing blocks.
 pub trait BlockProvider: Clone + Send + 'static {
-    /// The block type the provider yields.
+    /// The block type the provider walks.
     type Block: Block;
-
-    /// The block type retained while walking ancestry.
-    type AncestryBlock: Block<Digest = <Self::Block as Digestible>::Digest>;
 
     /// Subscribe to a block by its digest without requesting it from the network.
     ///
@@ -40,7 +37,7 @@ pub trait BlockProvider: Clone + Send + 'static {
     fn subscribe(
         self,
         digest: <Self::Block as Digestible>::Digest,
-    ) -> impl Future<Output = Option<Self::AncestryBlock>> + Send;
+    ) -> impl Future<Output = Option<Self::Block>> + Send;
 
     /// Subscribe to the parent of a known block.
     ///
@@ -50,18 +47,11 @@ pub trait BlockProvider: Clone + Send + 'static {
     /// full parent commitment and issue a fetching subscription.
     fn subscribe_parent(
         self,
-        block: Self::AncestryBlock,
-    ) -> impl Future<Output = Option<Self::AncestryBlock>> + Send {
+        block: Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send {
         let digest = block.parent();
         self.subscribe(digest)
     }
-
-    /// Converts the retained ancestry block into the block yielded by ancestry streams.
-    ///
-    /// Marshal variants may need to walk a richer block type than the application consumes.
-    /// This keeps that conversion at the provider boundary instead of exposing variant internals
-    /// to the stream.
-    fn into_block(block: Self::AncestryBlock) -> Self::Block;
 }
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
@@ -70,10 +60,10 @@ pub trait BlockProvider: Clone + Send + 'static {
 // this stream should end at block height 0 rather than 1.
 #[pin_project]
 pub struct AncestorStream<M: BlockProvider> {
-    buffered: Vec<M::AncestryBlock>,
+    buffered: Vec<M::Block>,
     marshal: M,
     #[pin]
-    pending: OptionFuture<BoxFuture<'static, Option<M::AncestryBlock>>>,
+    pending: OptionFuture<BoxFuture<'static, Option<M::Block>>>,
 }
 
 impl<M: BlockProvider> AncestorStream<M> {
@@ -82,8 +72,8 @@ impl<M: BlockProvider> AncestorStream<M> {
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous in height.
-    pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = M::AncestryBlock>) -> Self {
-        let mut buffered = initial.into_iter().collect::<Vec<M::AncestryBlock>>();
+    pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = M::Block>) -> Self {
+        let mut buffered = initial.into_iter().collect::<Vec<M::Block>>();
         buffered.sort_by_key(Heightable::height);
 
         // Check that the initial blocks are contiguous in height.
@@ -111,6 +101,7 @@ impl<M: BlockProvider> AncestorStream<M> {
 impl<M> Stream for AncestorStream<M>
 where
     M: BlockProvider,
+    M::Block: Clone,
 {
     type Item = M::Block;
 
@@ -145,7 +136,7 @@ where
                 *this.pending.as_mut() = None.into();
             }
 
-            return Poll::Ready(Some(M::into_block(block)));
+            return Poll::Ready(Some(block));
         }
 
         match this.pending.as_mut().poll(cx) {
@@ -177,7 +168,7 @@ where
                     *this.pending.as_mut() = None.into();
                 }
 
-                Poll::Ready(Some(M::into_block(block)))
+                Poll::Ready(Some(block))
             }
         }
     }
@@ -195,14 +186,9 @@ mod test {
     struct MockProvider(Vec<Block<Sha256Digest, ()>>);
     impl BlockProvider for MockProvider {
         type Block = Block<Sha256Digest, ()>;
-        type AncestryBlock = Block<Sha256Digest, ()>;
 
-        async fn subscribe(self, digest: Sha256Digest) -> Option<Self::AncestryBlock> {
+        async fn subscribe(self, digest: Sha256Digest) -> Option<Self::Block> {
             self.0.into_iter().find(|b| b.digest() == digest)
-        }
-
-        fn into_block(block: Self::AncestryBlock) -> Self::Block {
-            block
         }
     }
 
