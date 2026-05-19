@@ -274,8 +274,9 @@ mod tests {
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
+            let mut targeted = self.targeted.lock();
             for (fetch, targets) in fetches {
-                self.targeted.lock().push((fetch.into().key, targets));
+                targeted.push((fetch.into().key, targets));
             }
             Feedback::Ok
         }
