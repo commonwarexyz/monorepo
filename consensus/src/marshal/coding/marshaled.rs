@@ -864,7 +864,13 @@ where
                     .spawn(move |_| async move {
                         CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy)
                     });
-            let coded_block = handle.await.expect("strategy task failed");
+            let coded_block = select! {
+                _ = tx.closed() => {
+                    debug!(reason = "consensus dropped receiver", "skipping proposal");
+                    return;
+                },
+                result = handle => result.expect("strategy task failed"),
+            };
             erasure_timer.observe(&runtime_context);
 
             let commitment = coded_block.commitment();
