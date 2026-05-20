@@ -787,6 +787,31 @@ impl<B: Blob> Append<B> {
         }
     }
 
+    /// Read a physical page and return its validated logical bytes plus the CRC record used.
+    async fn read_valid_page_with_crc(
+        blob: &B,
+        page: u64,
+        logical_page_size: u64,
+    ) -> Result<(IoBuf, Checksum), Error> {
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        let physical_page_start = page
+            .checked_mul(physical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        let page = blob
+            .read_at(physical_page_start, physical_page_size as usize)
+            .await?
+            .coalesce();
+
+        let Some(record) = Checksum::validate_page(page.as_ref()) else {
+            return Err(Error::InvalidChecksum);
+        };
+        let (len, _) = record.get_crc();
+
+        Ok((page.freeze().slice(..len as usize), record))
+    }
+
     /// Durably rewrite a committed partial page to a shorter length in the same physical page.
     ///
     /// Since larger valid lengths are authoritative, a shorter CRC cannot simply be written next to
@@ -966,48 +991,50 @@ impl<B: Blob> Append<B> {
             full_pages * physical_page_size
         };
 
-        let old_partial_page_state = blob_guard.partial_page_state.clone();
-        let same_page_partial_shrink = size < current_size
-            && partial_bytes > 0
-            && full_pages == blob_guard.current_page
-            && old_partial_page_state.is_some();
-
-        if same_page_partial_shrink {
-            let old_crc =
-                old_partial_page_state.expect("same-page shrink requires old partial CRC");
-
+        if partial_bytes > 0 {
             // Evict cached pages at or beyond the new full-page boundary. The page at
             // `full_pages` is now owned by the tip buffer, and anything above is beyond the new
             // logical size.
             self.cache_ref.invalidate_from(self.id, full_pages);
 
-            // Update blob state and buffer based on the desired logical size. The page data is
-            // read with CRC validation, then durably rewritten below with a shorter CRC.
-            blob_guard.current_page = full_pages;
-            buf_guard.offset = full_pages * logical_page_size;
-
-            let page_data =
-                super::get_page_from_blob(&blob_guard.blob, full_pages, logical_page_size).await?;
+            let (page_data, old_crc) =
+                Self::read_valid_page_with_crc(&blob_guard.blob, full_pages, logical_page_size)
+                    .await?;
 
             // Ensure the validated data covers what we need.
             if (page_data.len() as u64) < partial_bytes {
                 return Err(Error::InvalidChecksum);
             }
 
-            buf_guard.clear();
             let new_data = &page_data.as_ref()[..partial_bytes as usize];
-            let over_capacity = buf_guard.append(new_data);
-            assert!(!over_capacity);
+            let new_crc = Crc32::checksum(new_data);
+
+            let current_physical_size = blob_guard
+                .current_page
+                .checked_add(u64::from(blob_guard.partial_page_state.is_some()))
+                .and_then(|pages| pages.checked_mul(physical_page_size))
+                .ok_or(Error::OffsetOverflow)?;
+            if new_physical_size < current_physical_size {
+                blob_guard.blob.resize(new_physical_size).await?;
+                blob_guard.blob.sync().await?;
+            }
 
             let final_record = Self::sync_same_page_shrink(
                 &blob_guard.blob,
                 full_pages,
                 logical_page_size,
                 partial_bytes as u16,
-                Crc32::checksum(new_data),
+                new_crc,
                 &old_crc,
             )
             .await?;
+
+            // Update blob state and buffer based on the desired logical size.
+            blob_guard.current_page = full_pages;
+            buf_guard.offset = full_pages * logical_page_size;
+            buf_guard.clear();
+            let over_capacity = buf_guard.append(new_data);
+            assert!(!over_capacity);
             blob_guard.partial_page_state = Some(final_record);
             return Ok(());
         }
@@ -2875,6 +2902,230 @@ mod tests {
             assert_eq!(append.size().await, 45);
             let read = append.read_at(0, 45).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..45]);
+        });
+    }
+
+    #[test]
+    fn test_resize_full_page_to_partial_survives_interrupted_crc_stage() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..page_size).map(|i| i as u8).collect();
+
+            let (blob, size) = context
+                .open("test_partition", b"full_page_shrink_stage")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"full_page_shrink_stage")
+                .await
+                .unwrap();
+            let faulty_blob = PartialWriteBlob::new(blob, 1, 3);
+            let write_count = faulty_blob.write_count();
+            let failed_write_len = faulty_blob.failed_write_len();
+            let append = Append::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let result = append.resize(45).await;
+            if result.is_ok() {
+                assert!(
+                    append.sync().await.is_err(),
+                    "persisting the resized partial page should fail"
+                );
+            }
+            assert_eq!(write_count.load(Ordering::SeqCst), 1);
+            if result.is_err() {
+                assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
+            }
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"full_page_shrink_stage")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, PAGE_SIZE.get() as u64);
+            let read = append.read_at(0, page_size).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data);
+        });
+    }
+
+    #[test]
+    fn test_resize_full_page_to_partial_survives_interrupted_crc_invalidation() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..page_size).map(|i| i as u8).collect();
+
+            let (blob, size) = context
+                .open("test_partition", b"full_page_shrink_invalidation")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"full_page_shrink_invalidation")
+                .await
+                .unwrap();
+            let faulty_blob = PartialWriteBlob::new(blob, 2, 3);
+            let write_count = faulty_blob.write_count();
+            let failed_write_len = faulty_blob.failed_write_len();
+            let append = Append::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            assert!(
+                append.resize(45).await.is_err(),
+                "phase-2 partial write should fail"
+            );
+            assert_eq!(write_count.load(Ordering::SeqCst), 2);
+            assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"full_page_shrink_invalidation")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 45);
+            let read = append.read_at(0, 45).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..45]);
+        });
+    }
+
+    #[test]
+    fn test_resize_multi_page_to_partial_survives_interrupted_crc_stage() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size = PAGE_SIZE.get() as usize;
+            let target_len = page_size + 45;
+            let data: Vec<u8> = (0..page_size * 3).map(|i| i as u8).collect();
+
+            let (blob, size) = context
+                .open("test_partition", b"multi_page_shrink_stage")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"multi_page_shrink_stage")
+                .await
+                .unwrap();
+            let faulty_blob = PartialWriteBlob::new(blob, 1, 3);
+            let write_count = faulty_blob.write_count();
+            let failed_write_len = faulty_blob.failed_write_len();
+            let append = Append::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let result = append.resize(target_len as u64).await;
+            if result.is_ok() {
+                assert!(
+                    append.sync().await.is_err(),
+                    "persisting the resized partial page should fail"
+                );
+            }
+            assert_eq!(write_count.load(Ordering::SeqCst), 1);
+            if result.is_err() {
+                assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
+            }
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"multi_page_shrink_stage")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, (page_size * 2) as u64);
+            let read = append
+                .read_at(0, page_size * 2)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[..page_size * 2]);
+        });
+    }
+
+    #[test]
+    fn test_resize_multi_page_to_partial_survives_interrupted_crc_invalidation() {
+        let executor = deterministic::Runner::default();
+
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size = PAGE_SIZE.get() as usize;
+            let target_len = page_size + 45;
+            let data: Vec<u8> = (0..page_size * 3).map(|i| i as u8).collect();
+
+            let (blob, size) = context
+                .open("test_partition", b"multi_page_shrink_invalidation")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"multi_page_shrink_invalidation")
+                .await
+                .unwrap();
+            let faulty_blob = PartialWriteBlob::new(blob, 2, 3);
+            let write_count = faulty_blob.write_count();
+            let failed_write_len = faulty_blob.failed_write_len();
+            let append = Append::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            assert!(
+                append.resize(target_len as u64).await.is_err(),
+                "phase-2 partial write should fail"
+            );
+            assert_eq!(write_count.load(Ordering::SeqCst), 2);
+            assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"multi_page_shrink_invalidation")
+                .await
+                .unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, target_len as u64);
+            let read = append.read_at(0, target_len).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..target_len]);
         });
     }
 
