@@ -612,10 +612,10 @@ where
         let Some(mut state) = self.state.remove(&commitment) else {
             return false;
         };
-        let mut blocker = self.blocker.clone();
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
-        let progressed = state.on_network_shard(peer, shard, InsertCtx::new(&scheme), &mut blocker);
+        let progressed =
+            state.on_network_shard(peer, shard, InsertCtx::new(&scheme), &mut self.blocker);
         if progressed {
             state = self
                 .try_transition_state(commitment, participants_len, state)
@@ -901,13 +901,12 @@ where
 
         // Ingest buffered shards into the active reconstruction state. Batch verification
         // will be triggered if there are enough shards to meet the quorum threshold.
-        let mut blocker = self.blocker.clone();
         let mut progressed = false;
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
         let ctx = InsertCtx::new(&scheme);
         for (peer, shard) in buffered {
-            progressed |= state.on_network_shard(peer, shard, ctx, &mut blocker);
+            progressed |= state.on_network_shard(peer, shard, ctx, &mut self.blocker);
         }
         if progressed {
             state = self
@@ -925,17 +924,20 @@ where
         state: ReconstructionState<P, C, H>,
     ) -> ReconstructionState<P, C, H> {
         let strategy = self.strategy.clone();
-        let mut blocker = self.blocker.clone();
         let handle = self
             .context
             .child("transition_reconstruction")
             .shared(true)
             .spawn(move |_| async move {
                 let mut state = state;
-                state.try_transition(commitment, participants_len, &strategy, &mut blocker);
-                state
+                let to_block = state.try_transition(commitment, participants_len, &strategy);
+                (state, to_block)
             });
-        handle.await.expect("strategy task failed")
+        let (state, to_block) = handle.await.expect("strategy task failed");
+        for peer in to_block {
+            commonware_p2p::block!(self.blocker, peer, "invalid shard received");
+        }
+        state
     }
 
     /// Cache a block and notify all subscribers waiting on it.
@@ -1427,17 +1429,16 @@ where
     H: Hasher,
 {
     /// Check whether quorum is met and, if so, batch-validate all pending
-    /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
+    /// shards in parallel.
     fn try_transition(
         &mut self,
         commitment: Commitment,
         participants_len: u64,
         strategy: &impl Strategy,
-        blocker: &mut impl Blocker<PublicKey = P>,
-    ) -> Option<ReadyState<P, C, H>> {
+    ) -> (Option<ReadyState<P, C, H>>, Vec<P>) {
         let minimum = usize::from(commitment.config().minimum_shards.get());
         if self.common.checked_shards.len() + self.pending_shards.len() < minimum {
-            return None;
+            return (None, Vec::new());
         }
 
         // Batch-validate all pending weak shards in parallel.
@@ -1453,16 +1454,13 @@ where
                 (peer, checked.ok())
             });
 
-        for peer in to_block {
-            commonware_p2p::block!(blocker, peer, "invalid shard received");
-        }
         for checked in new_checked {
             self.common.checked_shards.push(checked);
         }
 
         // After validation, some may have failed; recheck threshold.
         if self.common.checked_shards.len() < minimum {
-            return None;
+            return (None, to_block);
         }
 
         // Transition to Ready.
@@ -1472,7 +1470,7 @@ where
             &mut self.common,
             CommonState::new(leader, round, participants_len),
         );
-        Some(ReadyState { common })
+        (Some(ReadyState { common }), to_block)
     }
 }
 
@@ -1553,22 +1551,20 @@ where
     }
 
     /// Transition to `Ready` when enough shards have been collected.
-    fn try_transition<X>(
+    fn try_transition(
         &mut self,
         commitment: Commitment,
         participants_len: u64,
         strategy: &impl Strategy,
-        blocker: &mut X,
-    ) where
-        X: Blocker<PublicKey = P>,
-    {
+    ) -> Vec<P> {
         let Self::AwaitingQuorum(state) = self else {
-            return;
+            return Vec::new();
         };
-        if let Some(ready) = state.try_transition(commitment, participants_len, strategy, blocker)
-        {
+        let (ready, to_block) = state.try_transition(commitment, participants_len, strategy);
+        if let Some(ready) = ready {
             *self = Self::Ready(ready);
         }
+        to_block
     }
 
     /// Returns all verified shards accumulated for reconstruction.
