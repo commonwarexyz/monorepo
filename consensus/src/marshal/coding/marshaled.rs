@@ -111,7 +111,7 @@ use commonware_runtime::{
         histogram::{Buckets, Timed},
         MetricsExt as _,
     },
-    Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Spawner, Storage, Strategist,
 };
 use commonware_utils::{
     channel::{
@@ -167,7 +167,7 @@ where
 #[allow(clippy::type_complexity)]
 pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
@@ -194,7 +194,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
@@ -224,7 +224,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<
         E,
         Block = B,
@@ -630,7 +630,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<
         E,
         Block = B,
@@ -857,7 +857,11 @@ where
             build_timer.observe(&runtime_context);
 
             let erasure_timer = erasure_encode_duration.timer(&runtime_context);
-            let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
+            let coded_block = runtime_context
+                .with_strategy(strategy, move |_, strategy| {
+                    CodedBlock::<B, C, H>::new(built_block, coding_config, strategy)
+                })
+                .await;
             erasure_timer.observe(&runtime_context);
 
             let commitment = coded_block.commitment();
@@ -1064,7 +1068,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<
         E,
         Block = B,
@@ -1091,7 +1095,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<
         E,
         Block = B,
@@ -1122,7 +1126,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Rng + Storage + Spawner + Metrics + Clock + Strategist,
     A: Application<
             E,
             Block = B,
@@ -1165,7 +1169,7 @@ async fn fetch_parent<E, S, A, B, C, H>(
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 ) -> Either<Ready<Result<CodedBlock<B, C, H>, RecvError>>, oneshot::Receiver<CodedBlock<B, C, H>>>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + Strategist,
     S: CertificateScheme,
     A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
     B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,

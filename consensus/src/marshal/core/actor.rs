@@ -30,7 +30,7 @@ use commonware_resolver::{Delivery, Resolver};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Strategist,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -79,6 +79,30 @@ impl<S: CertificateScheme, V: Variant> PendingVerification<S, V> {
             Self::Notarized { response, .. } | Self::Finalized { response, .. } => {
                 response.is_closed()
             }
+        }
+    }
+
+    fn epoch(&self) -> Epoch {
+        match self {
+            Self::Notarized { notarization, .. } => notarization.epoch(),
+            Self::Finalized { finalization, .. } => finalization.epoch(),
+        }
+    }
+
+    const fn as_subject_and_certificate(&self) -> (Subject<'_, V::Commitment>, &S::Certificate) {
+        match self {
+            Self::Notarized { notarization, .. } => (
+                Subject::Notarize {
+                    proposal: &notarization.proposal,
+                },
+                &notarization.certificate,
+            ),
+            Self::Finalized { finalization, .. } => (
+                Subject::Finalize {
+                    proposal: &finalization.proposal,
+                },
+                &finalization.certificate,
+            ),
         }
     }
 }
@@ -276,7 +300,7 @@ impl Floor {
 /// behind.
 pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage + Strategist,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -341,7 +365,7 @@ where
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage + Strategist,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -1280,59 +1304,50 @@ where
             return false;
         }
 
-        // Extract (subject, certificate) pairs for batch verification.
-        let certs: Vec<_> = delivers
-            .iter()
-            .map(|item| match item {
-                PendingVerification::Finalized { finalization, .. } => (
-                    Subject::Finalize {
-                        proposal: &finalization.proposal,
-                    },
-                    &finalization.certificate,
-                ),
-                PendingVerification::Notarized { notarization, .. } => (
-                    Subject::Notarize {
-                        proposal: &notarization.proposal,
-                    },
-                    &notarization.certificate,
-                ),
-            })
-            .collect();
-
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(
-                self.context.as_mut(),
-                scheme.as_ref(),
-                &certs,
-                &self.strategy,
-            )
+            let strategy = self.strategy.clone();
+            let (returned, verified) = self
+                .context
+                .with_strategy(strategy, move |context, strategy| {
+                    let cert_refs: Vec<_> = delivers
+                        .iter()
+                        .map(PendingVerification::as_subject_and_certificate)
+                        .collect();
+                    let verified = verify_certificates(context, &scheme, &cert_refs, strategy);
+                    (delivers, verified)
+                })
+                .await;
+            delivers = returned;
+            verified
         } else {
             let mut verified = vec![false; delivers.len()];
 
             // Group indices by epoch.
             let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-            for (i, item) in delivers.iter().enumerate() {
-                let epoch = match item {
-                    PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                    PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-                };
-                by_epoch.entry(epoch).or_default().push(i);
+            for (i, cert) in delivers.iter().enumerate() {
+                by_epoch.entry(cert.epoch()).or_default().push(i);
             }
 
             // Batch verify each epoch group.
-            for (epoch, indices) in &by_epoch {
-                let Some(scheme) = self.provider.scoped(*epoch) else {
+            for (epoch, indices) in by_epoch {
+                let Some(scheme) = self.provider.scoped(epoch) else {
                     continue;
                 };
-                let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results = verify_certificates(
-                    self.context.as_mut(),
-                    scheme.as_ref(),
-                    &group,
-                    &self.strategy,
-                );
+                let strategy = self.strategy.clone();
+                let (returned, indices, results) = self
+                    .context
+                    .with_strategy(strategy, move |context, strategy| {
+                        let group_refs: Vec<_> = indices
+                            .iter()
+                            .map(|&i| delivers[i].as_subject_and_certificate())
+                            .collect();
+                        let results = verify_certificates(context, &scheme, &group_refs, strategy);
+                        (delivers, indices, results)
+                    })
+                    .await;
+                delivers = returned;
                 for (j, &idx) in indices.iter().enumerate() {
                     verified[idx] = results[j];
                 }

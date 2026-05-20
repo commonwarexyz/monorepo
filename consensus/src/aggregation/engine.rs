@@ -25,7 +25,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Strategist,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -68,7 +68,7 @@ struct DigestRequest<D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore + Strategist,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -151,7 +151,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
+        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore + Strategist,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D>,
@@ -378,18 +378,21 @@ impl<
                 }
 
                 // Validate that we need to process the ack
-                if let Err(err) = self.validate_ack(&ack, &sender) {
-                    if err.blockable() {
-                        commonware_p2p::block!(
-                            self.blocker,
-                            sender,
-                            ?err,
-                            "ack validation failure"
-                        );
-                    } else {
-                        debug!(?sender, ?err, "ack validate failed");
+                let ack = match self.validate_ack(ack, &sender).await {
+                    Ok(ack) => ack,
+                    Err(err) => {
+                        if err.blockable() {
+                            commonware_p2p::block!(
+                                self.blocker,
+                                sender,
+                                ?err,
+                                "ack validation failure"
+                            );
+                        } else {
+                            debug!(?sender, ?err, "ack validate failed");
+                        }
+                        continue;
                     }
-                    continue;
                 };
 
                 // Handle the ack
@@ -523,9 +526,16 @@ impl<
         let filtered = acks
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
+            .cloned()
             .collect::<Vec<_>>();
         if filtered.len() >= quorum as usize {
-            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy) {
+            let certificate = self
+                .context
+                .with_strategy(self.strategy.clone(), move |_, strategy| {
+                    Certificate::from_acks(&*scheme, filtered.iter(), strategy)
+                })
+                .await;
+            if let Some(certificate) = certificate {
                 self.metrics.certificates.inc();
                 self.handle_certificate(certificate).await;
             }
@@ -608,11 +618,11 @@ impl<
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns an error if the ack is invalid.
-    fn validate_ack(
+    async fn validate_ack(
         &mut self,
-        ack: &Ack<P::Scheme, D>,
+        ack: Ack<P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
-    ) -> Result<(), Error> {
+    ) -> Result<Ack<P::Scheme, D>, Error> {
         // Validate epoch
         {
             let (eb_lo, eb_hi) = self.epoch_bounds;
@@ -674,11 +684,18 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(self.context.as_mut(), &*scheme, &self.strategy) {
+        let (ack, valid) = self
+            .context
+            .with_strategy(self.strategy.clone(), move |context, strategy| {
+                let valid = ack.verify(context, &*scheme, strategy);
+                (ack, valid)
+            })
+            .await;
+        if !valid {
             return Err(Error::InvalidAckSignature);
         }
 
-        Ok(())
+        Ok(ack)
     }
 
     // ---------- Helpers ----------
