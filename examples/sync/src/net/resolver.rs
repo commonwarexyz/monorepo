@@ -232,10 +232,6 @@ where
     Op::Cfg: IsUnit,
     D: Digest,
 {
-    type Family = mmr::Family;
-    type Digest = D;
-    type Error = crate::Error;
-
     async fn current_target(
         &self,
     ) -> Result<CurrentTarget<Self::Family, Self::Digest>, Self::Error> {

@@ -29,10 +29,15 @@
 //! let mut last_accepted = None;
 //! let (accepted_tx, mut accepted_rx) = commonware_utils::channel::mpsc::channel(16);
 //!
+//! // `is_forward` is application policy, usually based on consensus metadata
+//! // (height, round, view, certificate sequence) associated with each root.
+//! // Roots are hashes and do not have a natural ordering on their own.
+//!
 //! // Consensus task: insert roots that the chain has made canonical.
 //! loop {
 //!     let trusted_root = consensus_client.canonical_root_at_tip().await?;
 //!     if let Some(target) = matcher.insert_trusted_root(trusted_root) {
+//!         // Join succeeded: this trusted root already had a resolver target cached.
 //!         if is_forward(&last_accepted, &target) {
 //!             last_accepted = Some(target.clone());
 //!             accepted_tx.clone().send(target).await?;
@@ -44,6 +49,7 @@
 //! loop {
 //!     let target = resolver.current_target().await?;
 //!     if let Some(target) = matcher.insert_candidate_target(target) {
+//!         // Join succeeded: this target's root was already trusted by consensus.
 //!         if is_forward(&last_accepted, &target) {
 //!             last_accepted = Some(target.clone());
 //!             accepted_tx.clone().send(target).await?;
@@ -161,14 +167,10 @@ pub(crate) mod tests;
 /// describe the same database state. Callers that learn trusted canonical roots from another source
 /// can cache these targets and use [`TargetMatcher`] to find a target whose root has been trusted
 /// before passing it to [`sync`].
-pub trait CurrentResolver: Send + Sync + Clone + 'static {
-    /// Merkle family used by the database.
-    type Family: Graftable;
-    /// Root digest type.
-    type Digest: Digest;
-    /// Error type returned by the resolver.
-    type Error: std::error::Error + Send + 'static;
-
+pub trait CurrentResolver: qmdb_sync::Resolver
+where
+    Self::Family: Graftable,
+{
     /// Fetch the latest full authenticated [`Target`].
     #[allow(clippy::type_complexity)]
     fn current_target(
@@ -1013,10 +1015,6 @@ macro_rules! impl_current_current_resolver {
             S: Strategy,
             $($($where_extra)+)?
         {
-            type Family = F;
-            type Digest = H::Digest;
-            type Error = qmdb::Error<F>;
-
             async fn current_target(&self) -> Result<Target<F, H::Digest>, Self::Error> {
                 let hasher = qmdb::hasher::<H>();
                 let witness = self.ops_root_witness(&hasher).await?;
@@ -1048,10 +1046,6 @@ macro_rules! impl_current_current_resolver {
             S: Strategy,
             $($($where_extra)+)?
         {
-            type Family = F;
-            type Digest = H::Digest;
-            type Error = qmdb::Error<F>;
-
             async fn current_target(&self) -> Result<Target<F, H::Digest>, Self::Error> {
                 let db = self.read().await;
                 let hasher = qmdb::hasher::<H>();
@@ -1084,10 +1078,6 @@ macro_rules! impl_current_current_resolver {
             S: Strategy,
             $($($where_extra)+)?
         {
-            type Family = F;
-            type Digest = H::Digest;
-            type Error = qmdb::Error<F>;
-
             async fn current_target(&self) -> Result<Target<F, H::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref()

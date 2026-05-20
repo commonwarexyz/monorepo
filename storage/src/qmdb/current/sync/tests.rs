@@ -968,10 +968,7 @@ mod root_sync {
         )
     }
 
-    async fn assert_current_target_matches_db(
-        db: &Db,
-        target: CurrentTarget<mmr::Family, Digest>,
-    ) {
+    async fn assert_current_target_matches_db(db: &Db, target: CurrentTarget<mmr::Family, Digest>) {
         let expected = make_current_target(db).await;
         let hasher = qmdb::hasher::<Sha256>();
         assert_eq!(target, expected);
@@ -998,8 +995,7 @@ mod root_sync {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let target_db = build_target_db(&mut context).await;
-            let resolver =
-                std::sync::Arc::new(commonware_utils::sync::AsyncRwLock::new(target_db));
+            let resolver = std::sync::Arc::new(commonware_utils::sync::AsyncRwLock::new(target_db));
             let target = CurrentResolver::current_target(&resolver).await.unwrap();
 
             {
@@ -1017,9 +1013,8 @@ mod root_sync {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let target_db = build_target_db(&mut context).await;
-            let resolver = std::sync::Arc::new(commonware_utils::sync::AsyncRwLock::new(Some(
-                target_db,
-            )));
+            let resolver =
+                std::sync::Arc::new(commonware_utils::sync::AsyncRwLock::new(Some(target_db)));
             let target = CurrentResolver::current_target(&resolver).await.unwrap();
 
             {
