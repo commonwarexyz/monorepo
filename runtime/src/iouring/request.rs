@@ -532,7 +532,7 @@ pub(super) struct WriteAtRequest {
 
 impl WriteAtRequest {
     /// Return the flags for this write request, setting `RWF_SYNC` when `sync` is set.
-    fn rw_flags(&self) -> i32 {
+    const fn rw_flags(&self) -> i32 {
         if self.sync {
             libc::RWF_SYNC
         } else {
