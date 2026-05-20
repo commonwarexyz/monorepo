@@ -1,9 +1,9 @@
 ---
 title: "A Golden Ticket to One-Round DKGs"
-description: "We've completed an initial implementation of the Golden protocol, which lets you perform a DKG in just a single round. Going from two rounds to just one is a huge improvement in simplicity and performance."
-date: "May 18th, 2026"
-published-time: "2026-05-18T00:00:00Z"
-modified-time: "2026-05-18T00:00:00Z"
+description: "We've completed an initial implementation of the Golden protocol, which lets you perform a DKG in just a single round."
+date: "May 20th, 2026"
+published-time: "2026-05-20T00:00:00Z"
+modified-time: "2026-05-20T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 url: "https://commonware.xyz/blogs/golden"
@@ -146,9 +146,9 @@ which we usually try to avoid, because assuming realtime execution is quite unre
 In practice, you can improve the situation by tying the clock to a consensus protocol,
 e.g. waiting a certain number of *blocks* rather than a certain amount of time.
 It's possible that this is correct in the
-[partial synchrony model](https://dl.acm.org/doi/10.1145/42282.42283) as well (todo: citation).
+[partial synchrony model](https://dl.acm.org/doi/10.1145/42282.42283) as well ([citation](https://eprint.iacr.org/2023/1196)).
 
-It's also operationally complicated to have multiple rounds.
+Multiple rounds are also operationally complicated.
 The protocol is stateful between the rounds.
 Players need to remember what shares they received, and what they did or didn't
 ack.
@@ -175,9 +175,9 @@ We wouldn't need any state at all: if we lost our memory completely,
 we would be able to retrieve our share and any public results just by
 looking at the log, which contains what each dealer posted.
 
-We would not need any kind of synchrony assumption.
-After all dealers have posted their log, you're ready to go,
-with no need to wait for acknowledgement.
+The protocol can proceed immediately after the dealers have posted their logs,
+without needing to wait for acknowledgments from the players.
+This lets us avoid any kind of synchrony assumption.
 In practice you would want to set a cutoff time (in terms of blocks, ideally),
 and would need to make sure that you had a supermajority of valid contributions,
 in order to prevent stalling by having malicious dealers withhold their contribution.
@@ -202,9 +202,10 @@ to the public polynomial $F_j$ we're including in our contribution.
 This is essentially the approach taken by prior non-interactive constructions
 such as [Groth's DKG](https://eprint.iacr.org/2021/339), which uses ElGamal
 encryption together with a NIZK of correct encryption.
-That achieves the properties we want, but would involve a very large,
-and thus expensive, ZK proof.
-Doing this naively would not be enough, so we need to dig a bit deeper.
+That achieves the properties we want, but would involve a ZK proof
+over an excessively large statement.
+This naive approach would be orders of magnitude slower than something practical,
+so we need to dig a bit deeper.
 
 # Making this more efficient
 
@@ -435,7 +436,7 @@ because you don't need to wait for acks, in practice this would be a lot faster.
 
 # Conclusion
 
-We hope to continue grinding on the performance, as well as testing and
+We'll continue grinding on the performance, as well as testing and
 verifying the security of our implementation, in order to make this protocol
 a trustworthy alternative to our current DKG.
 We expect that the one round protocol will be a lot simpler to use,
