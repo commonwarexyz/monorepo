@@ -46,9 +46,27 @@ pub trait BlockProvider: Send + 'static {
     ) -> impl Future<Output = Option<Self::Block>> + Send + 'static;
 }
 
-struct ExpectedParent<D> {
-    child_height: Height,
-    parent_digest: D,
+// Expected child height and parent digest for a pending fetch.
+struct ExpectedParent<D>(Height, D);
+
+impl<D: commonware_cryptography::Digest> ExpectedParent<D> {
+    fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
+        Self(child.height(), child.parent())
+    }
+
+    fn assert_matches<B: Block<Digest = D>>(self, parent: &B) {
+        let Self(child_height, parent_digest) = self;
+        assert_eq!(
+            parent.height().next(),
+            child_height,
+            "fetched parent must be contiguous in height"
+        );
+        assert_eq!(
+            parent.digest(),
+            parent_digest,
+            "fetched parent must be contiguous in ancestry"
+        );
+    }
 }
 
 /// Yields the ancestors of a block while prefetching parents, including the
@@ -94,30 +112,6 @@ impl<M: BlockProvider> AncestorStream<M> {
         }
     }
 
-    /// Captures the parent relationship expected for a pending fetch.
-    fn expected_parent(child: &M::Block) -> ExpectedParent<<M::Block as Digestible>::Digest> {
-        ExpectedParent {
-            child_height: child.height(),
-            parent_digest: child.parent(),
-        }
-    }
-
-    /// Verifies that a fetched parent is the immediate predecessor of `child`.
-    fn assert_parent(
-        expected: ExpectedParent<<M::Block as Digestible>::Digest>,
-        parent: &M::Block,
-    ) {
-        assert_eq!(
-            parent.height().next(),
-            expected.child_height,
-            "fetched parent must be contiguous in height"
-        );
-        assert_eq!(
-            parent.digest(),
-            expected.parent_digest,
-            "fetched parent must be contiguous in ancestry"
-        );
-    }
 }
 
 impl<M> Stream for AncestorStream<M>
@@ -139,7 +133,7 @@ where
             if should_walk_parent && end_of_buffered {
                 let future = this.marshal.subscribe_parent(&block).boxed();
                 *this.pending.as_mut() = Some(future).into();
-                *this.pending_expected = Some(Self::expected_parent(&block));
+                *this.pending_expected = Some(ExpectedParent::from_child(&block));
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
                 // buffer it for the next poll.
@@ -149,7 +143,7 @@ where
                             .pending_expected
                             .take()
                             .expect("pending parent expectation must exist");
-                        Self::assert_parent(expected, &parent);
+                        expected.assert_matches(&parent);
                         this.buffered.push(parent);
                     }
                     Poll::Ready(Some(None)) => {
@@ -179,13 +173,13 @@ where
                     .pending_expected
                     .take()
                     .expect("pending parent expectation must exist");
-                Self::assert_parent(expected, &block);
+                expected.assert_matches(&block);
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
                     let future = this.marshal.subscribe_parent(&block).boxed();
                     *this.pending.as_mut() = Some(future).into();
-                    *this.pending_expected = Some(Self::expected_parent(&block));
+                    *this.pending_expected = Some(ExpectedParent::from_child(&block));
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
                     // buffer it for the next poll.
@@ -195,7 +189,7 @@ where
                                 .pending_expected
                                 .take()
                                 .expect("pending parent expectation must exist");
-                            Self::assert_parent(expected, &parent);
+                            expected.assert_matches(&parent);
                             this.buffered.push(parent);
                         }
                         Poll::Ready(Some(None)) => {
