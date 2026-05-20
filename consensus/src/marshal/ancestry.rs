@@ -55,7 +55,7 @@ pub trait BlockProvider: Clone + Send + 'static {
 }
 
 /// A stream over a block's ancestry.
-pub trait AncestryStream: Send {
+pub trait AncestryStream: Send + 'static {
     /// The block type yielded by the stream.
     type Block: Block;
 
@@ -65,7 +65,7 @@ pub trait AncestryStream: Send {
 
 impl<S, B> AncestryStream for S
 where
-    S: Stream<Item = B> + Send + Unpin,
+    S: Stream<Item = B> + Send + Unpin + 'static,
     B: Block,
 {
     type Block = B;
