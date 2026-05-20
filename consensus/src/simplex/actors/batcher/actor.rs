@@ -159,12 +159,15 @@ where
 
     fn verify_round(
         &self,
+        view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, VerifiedVotes<S, D>>> + Send + 'static {
         let strategy = self.strategy.clone();
         let handle =
             self.context
                 .child("verify_round")
+                .with_attribute("epoch", self.epoch)
+                .with_attribute("view", view)
                 .shared(true)
                 .spawn(move |mut context| async move {
                     let mut round = round;
@@ -184,12 +187,15 @@ where
 
     fn try_construct_notarization(
         &self,
+        view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, Notarization<S, D>>> + Send + 'static {
         let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("construct_notarization")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
             .shared(true)
             .spawn(move |_| async move {
                 let mut round = round;
@@ -201,12 +207,15 @@ where
 
     fn try_construct_nullification(
         &self,
+        view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, Nullification<S>>> + Send + 'static {
         let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("construct_nullification")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
             .shared(true)
             .spawn(move |_| async move {
                 let mut round = round;
@@ -218,12 +227,15 @@ where
 
     fn try_construct_finalization(
         &self,
+        view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, Finalization<S, D>>> + Send + 'static {
         let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("construct_finalization")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
             .shared(true)
             .spawn(move |_| async move {
                 let mut round = round;
@@ -624,7 +636,7 @@ where
                     || round.ready_finalizes()
                 {
                     let timer = self.verify_latency.timer(self.context.as_ref());
-                    let (round, verified) = self.verify_round(round).await;
+                    let (round, verified) = self.verify_round(updated_view, round).await;
                     (round, verified.map(|verified| (timer, verified)))
                 } else {
                     (round, None)
@@ -666,7 +678,8 @@ where
                 // Try to construct and forward certificates
                 let round = if round.ready_construct_notarization() {
                     let timer = self.recover_latency.timer(self.context.as_ref());
-                    let (round, notarization) = self.try_construct_notarization(round).await;
+                    let (round, notarization) =
+                        self.try_construct_notarization(updated_view, round).await;
                     if let Some(notarization) = notarization {
                         timer.observe(self.context.as_ref());
                         debug!(view = %updated_view, "constructed notarization, forwarding to voter");
@@ -680,7 +693,8 @@ where
                 };
                 let round = if round.ready_construct_nullification() {
                     let timer = self.recover_latency.timer(self.context.as_ref());
-                    let (round, nullification) = self.try_construct_nullification(round).await;
+                    let (round, nullification) =
+                        self.try_construct_nullification(updated_view, round).await;
                     if let Some(nullification) = nullification {
                         timer.observe(self.context.as_ref());
                         debug!(view = %updated_view, "constructed nullification, forwarding to voter");
@@ -692,7 +706,8 @@ where
                 };
                 let round = if round.ready_construct_finalization() {
                     let timer = self.recover_latency.timer(self.context.as_ref());
-                    let (round, finalization) = self.try_construct_finalization(round).await;
+                    let (round, finalization) =
+                        self.try_construct_finalization(updated_view, round).await;
                     if let Some(finalization) = finalization {
                         timer.observe(self.context.as_ref());
                         debug!(view = %updated_view, "constructed finalization, forwarding to voter");

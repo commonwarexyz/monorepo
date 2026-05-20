@@ -182,6 +182,8 @@ impl<
                 let handle = self
                     .context
                     .child("verify_notarization")
+                    .with_attribute("epoch", self.epoch)
+                    .with_attribute("view", view)
                     .shared(true)
                     .spawn(move |mut context| async move {
                         let valid = notarization.verify(&mut context, &scheme, &strategy);
@@ -213,6 +215,8 @@ impl<
                 let handle = self
                     .context
                     .child("verify_finalization")
+                    .with_attribute("epoch", self.epoch)
+                    .with_attribute("view", view)
                     .shared(true)
                     .spawn(move |mut context| async move {
                         let valid = finalization.verify(&mut context, &scheme, &strategy);
@@ -244,6 +248,8 @@ impl<
                 let handle = self
                     .context
                     .child("verify_nullification")
+                    .with_attribute("epoch", self.epoch)
+                    .with_attribute("view", view)
                     .shared(true)
                     .spawn(move |mut context| async move {
                         let valid = nullification.verify::<_, D>(&mut context, &scheme, &strategy);

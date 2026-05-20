@@ -539,6 +539,8 @@ impl<
         let handle = self
             .context
             .child("construct_certificate")
+            .with_attribute("height", height)
+            .with_attribute("epoch", epoch)
             .shared(true)
             .spawn(move |_| async move {
                 let certificate = Certificate::from_acks(
@@ -708,6 +710,8 @@ impl<
         let handle =
             self.context
                 .child("verify_ack")
+                .with_attribute("height", ack.item.height)
+                .with_attribute("epoch", ack.epoch)
                 .shared(true)
                 .spawn(move |mut context| async move {
                     let valid = ack.verify(&mut context, &*scheme, &strategy);

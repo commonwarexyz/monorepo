@@ -857,9 +857,11 @@ where
             build_timer.observe(&runtime_context);
 
             let erasure_timer = erasure_encode_duration.timer(&runtime_context);
+            let round = consensus_context.round;
             let handle =
                 runtime_context
                     .child("erasure_encode")
+                    .with_attribute("round", round)
                     .shared(true)
                     .spawn(move |_| async move {
                         CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy)
@@ -874,7 +876,6 @@ where
             erasure_timer.observe(&runtime_context);
 
             let commitment = coded_block.commitment();
-            let round = consensus_context.round;
             if !marshal.proposed(round, coded_block).await {
                 debug!(?round, ?commitment, "marshal rejected proposed block");
                 return;

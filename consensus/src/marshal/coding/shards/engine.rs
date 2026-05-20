@@ -675,6 +675,7 @@ where
         let handle = self
             .context
             .child("erasure_decode")
+            .with_attribute("round", round)
             .shared(true)
             .spawn(move |_| async move {
                 let blob = C::decode(
@@ -924,9 +925,11 @@ where
         state: ReconstructionState<P, C, H>,
     ) -> ReconstructionState<P, C, H> {
         let strategy = self.strategy.clone();
+        let round = state.round();
         let handle = self
             .context
             .child("transition_reconstruction")
+            .with_attribute("round", round)
             .shared(true)
             .spawn(move |_| async move {
                 let mut state = state;
@@ -982,6 +985,7 @@ where
         let handle = self
             .context
             .child("count_shards")
+            .with_attribute("round", round)
             .shared(true)
             .spawn(move |_| async move {
                 let shard_count = block.shards(&strategy).len();
