@@ -115,6 +115,21 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.write_at(offset, bufs).await
     }
 
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        self.auditor.event(b"write_at_sync", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(&offset.to_be_bytes());
+            bufs.for_each_chunk(|chunk| hasher.update(chunk));
+        });
+        self.inner.write_at_sync(offset, bufs).await
+    }
+
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.auditor.event(b"resize", |hasher| {
             hasher.update(self.partition.as_bytes());

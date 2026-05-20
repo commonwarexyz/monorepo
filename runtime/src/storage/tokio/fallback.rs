@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{BufferPool, Error, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_formatting::hex;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
@@ -95,6 +95,20 @@ impl crate::Blob for Blob {
         } else {
             Self::write_vectored_at(&mut file, &mut bufs).await
         }
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        if !bufs.has_remaining() {
+            return Ok(());
+        }
+
+        self.write_at(offset, bufs).await?;
+        self.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

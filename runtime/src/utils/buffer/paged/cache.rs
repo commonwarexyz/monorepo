@@ -615,7 +615,7 @@ async fn fetch_cacheable_page(
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, BufferPool,
+        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
         BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
         Supervisor as _,
     };
@@ -674,6 +674,20 @@ mod tests {
             _bufs: impl Into<crate::IoBufs> + Send,
         ) -> Result<(), Error> {
             Ok(())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<crate::IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let bufs = bufs.into();
+            if !bufs.has_remaining() {
+                return Ok(());
+            }
+
+            self.write_at(offset, bufs).await?;
+            self.sync().await
         }
 
         async fn resize(&self, _len: u64) -> Result<(), Error> {
@@ -739,6 +753,20 @@ mod tests {
             _bufs: impl Into<crate::IoBufs> + Send,
         ) -> Result<(), Error> {
             Ok(())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<crate::IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let bufs = bufs.into();
+            if !bufs.has_remaining() {
+                return Ok(());
+            }
+
+            self.write_at(offset, bufs).await?;
+            self.sync().await
         }
 
         async fn resize(&self, _len: u64) -> Result<(), Error> {
