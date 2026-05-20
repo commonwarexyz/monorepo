@@ -48,9 +48,23 @@ async fn get_page_from_blob(
     page_num: u64,
     logical_page_size: u64,
 ) -> Result<IoBuf, Error> {
-    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
-    let physical_page_start = page_num * physical_page_size;
+    let (page, _) = get_page_from_blob_with_crc(blob, page_num, logical_page_size).await?;
+    Ok(page)
+}
 
+/// Read the designated page from the underlying blob and return its logical bytes plus the CRC
+/// record used to validate it.
+async fn get_page_from_blob_with_crc(
+    blob: &impl Blob,
+    page_num: u64,
+    logical_page_size: u64,
+) -> Result<(IoBuf, Checksum), Error> {
+    let physical_page_size = logical_page_size
+        .checked_add(CHECKSUM_SIZE)
+        .ok_or(Error::OffsetOverflow)?;
+    let physical_page_start = page_num
+        .checked_mul(physical_page_size)
+        .ok_or(Error::OffsetOverflow)?;
     let page = blob
         .read_at(physical_page_start, physical_page_size as usize)
         .await?
@@ -61,7 +75,7 @@ async fn get_page_from_blob(
     };
     let (len, _) = record.get_crc();
 
-    Ok(page.freeze().slice(..len as usize))
+    Ok((page.freeze().slice(..len as usize), record))
 }
 
 /// Describes a CRC record stored at the end of a page.

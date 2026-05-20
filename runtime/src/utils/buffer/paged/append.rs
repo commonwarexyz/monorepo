@@ -787,31 +787,6 @@ impl<B: Blob> Append<B> {
         }
     }
 
-    /// Read a physical page and return its validated logical bytes plus the CRC record used.
-    async fn read_valid_page_with_crc(
-        blob: &B,
-        page: u64,
-        logical_page_size: u64,
-    ) -> Result<(IoBuf, Checksum), Error> {
-        let physical_page_size = logical_page_size
-            .checked_add(CHECKSUM_SIZE)
-            .ok_or(Error::OffsetOverflow)?;
-        let physical_page_start = page
-            .checked_mul(physical_page_size)
-            .ok_or(Error::OffsetOverflow)?;
-        let page = blob
-            .read_at(physical_page_start, physical_page_size as usize)
-            .await?
-            .coalesce();
-
-        let Some(record) = Checksum::validate_page(page.as_ref()) else {
-            return Err(Error::InvalidChecksum);
-        };
-        let (len, _) = record.get_crc();
-
-        Ok((page.freeze().slice(..len as usize), record))
-    }
-
     /// Durably rewrite a committed partial page to a shorter length in the same physical page.
     ///
     /// Since larger valid lengths are authoritative, a shorter CRC cannot simply be written next to
@@ -997,9 +972,12 @@ impl<B: Blob> Append<B> {
             // logical size.
             self.cache_ref.invalidate_from(self.id, full_pages);
 
-            let (page_data, old_crc) =
-                Self::read_valid_page_with_crc(&blob_guard.blob, full_pages, logical_page_size)
-                    .await?;
+            let (page_data, old_crc) = super::get_page_from_blob_with_crc(
+                &blob_guard.blob,
+                full_pages,
+                logical_page_size,
+            )
+            .await?;
 
             // Ensure the validated data covers what we need.
             if (page_data.len() as u64) < partial_bytes {
