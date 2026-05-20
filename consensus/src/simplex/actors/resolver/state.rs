@@ -66,7 +66,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         certificate: Certificate<S, D>,
         request: Option<View>,
-        resolver: &mut impl Resolver<Key = U64>,
+        resolver: &mut impl Resolver<Key = U64, Subscriber = ()>,
     ) {
         match certificate {
             Certificate::Nullification(nullification) => {
@@ -74,7 +74,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 if self.encounter_view(view) {
                     self.nullifications
                         .insert(view, Certificate::Nullification(nullification));
-                    resolver.cancel(view.into());
+                    let request = view.into();
+                    resolver.retain(move |candidate, _| *candidate != request);
                 }
             }
             Certificate::Notarization(notarization) => {
@@ -105,7 +106,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
         success: bool,
-        resolver: &mut impl Resolver<Key = U64>,
+        resolver: &mut impl Resolver<Key = U64, Subscriber = ()>,
     ) {
         if success {
             // Certification passed - set floor to notarization if we have it.
@@ -130,13 +131,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
             // Request nullification for this view (if above floor)
             let floor = self.floor_view();
             if view > floor {
-                resolver.fetch(view.into());
+                resolver.fetch(U64::from(view));
             }
 
             // Re-request any lower views this notarization had satisfied
             if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
                 for &v in satisfied_views.iter().filter(|v| **v > floor) {
-                    resolver.fetch(v.into());
+                    resolver.fetch(U64::from(v));
                 }
             }
         }
@@ -184,7 +185,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Inform the [Resolver] of any missing nullifications.
-    fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
+    fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64, Subscriber = ()>) {
         // We must either receive a nullification at the current view or a notarization/finalization at the current
         // view or higher, so we don't need to worry about getting stuck (where peers cannot resolve our requests).
         let start = self.fetch_floor.max(self.floor_view().next());
@@ -204,13 +205,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Prune stored certificates and requests that are not higher than the floor.
-    fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
+    fn prune(&mut self, resolver: &mut impl Resolver<Key = U64, Subscriber = ()>) {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
         self.nullifications.retain(|view, _| *view > floor);
         self.satisfied_by.retain(|view, _| *view > floor);
         self.failed_views.retain(|view| *view > floor);
-        resolver.retain(move |key| *key > floor.into());
+        resolver.retain(move |request, _| *request > floor.into());
     }
 }
 
@@ -231,6 +232,7 @@ mod tests {
         certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
+    use commonware_resolver::Fetch;
     use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec, NZUsize};
     use std::{collections::BTreeSet, sync::Arc};
 
@@ -256,46 +258,54 @@ mod tests {
 
     impl Resolver for MockResolver {
         type Key = U64;
+        type Subscriber = ();
         type PublicKey = PublicKey;
 
-        fn fetch(&mut self, key: U64) -> Feedback {
+        fn fetch<R>(&mut self, request: R) -> Feedback
+        where
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            let key = request.into().key;
             self.outstanding.lock().insert(key);
             Feedback::Ok
         }
 
-        fn fetch_all(&mut self, keys: Vec<U64>) -> Feedback {
-            for key in keys {
-                self.outstanding.lock().insert(key);
+        fn fetch_all<R>(&mut self, requests: Vec<R>) -> Feedback
+        where
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            for request in requests {
+                self.outstanding.lock().insert(request.into().key);
             }
             Feedback::Ok
         }
 
-        fn fetch_targeted(&mut self, key: U64, _targets: NonEmptyVec<PublicKey>) -> Feedback {
+        fn fetch_targeted(
+            &mut self,
+            request: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<PublicKey>,
+        ) -> Feedback {
             // For testing, just treat targeted fetch the same as regular fetch
-            self.outstanding.lock().insert(key);
+            self.outstanding.lock().insert(request.into().key);
             Feedback::Ok
         }
 
-        fn fetch_all_targeted(&mut self, requests: Vec<(U64, NonEmptyVec<PublicKey>)>) -> Feedback {
+        fn fetch_all_targeted<R>(&mut self, requests: Vec<(R, NonEmptyVec<PublicKey>)>) -> Feedback
+        where
+            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
             // For testing, just treat targeted fetch the same as regular fetch
-            for (key, _targets) in requests {
-                self.outstanding.lock().insert(key);
+            for (request, _targets) in requests {
+                self.outstanding.lock().insert(request.into().key);
             }
             Feedback::Ok
         }
 
-        fn cancel(&mut self, key: U64) -> Feedback {
-            self.outstanding.lock().remove(&key);
-            Feedback::Ok
-        }
-
-        fn clear(&mut self) -> Feedback {
-            self.outstanding.lock().clear();
-            Feedback::Ok
-        }
-
-        fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) -> Feedback {
-            self.outstanding.lock().retain(|key| predicate(key));
+        fn retain(
+            &mut self,
+            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            self.outstanding.lock().retain(|key| predicate(key, &()));
             Feedback::Ok
         }
     }

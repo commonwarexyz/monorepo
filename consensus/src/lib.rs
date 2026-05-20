@@ -236,8 +236,8 @@ stability_scope!(ALPHA {
     pub mod ordered_broadcast;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::{AncestorStream, BlockProvider};
     use commonware_cryptography::certificate::Scheme;
+    use crate::marshal::ancestry::Ancestry;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand::Rng;
 
@@ -259,14 +259,20 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         type Block: Block;
 
         /// Payload used to initialize the consensus engine in the first epoch.
+        ///
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
         fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
-        /// the implementor should return [None].
-        fn propose<A: BlockProvider<Block = Self::Block>>(
+        /// or the proposer's slot should be skipped, the implementor should return [None].
+        ///
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
+        fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<A, Self::Block>,
+            ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
@@ -275,10 +281,13 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Return `false` only when the block is permanently invalid for the supplied context and
         /// ancestry. If validity may still change as additional information becomes available,
         /// continue waiting instead of returning `false`.
-        fn verify<A: BlockProvider<Block = Self::Block>>(
+        ///
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
+        fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<A, Self::Block>,
+            ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

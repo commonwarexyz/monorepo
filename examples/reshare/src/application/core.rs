@@ -5,7 +5,7 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ancestry::{AncestorStream, BlockProvider},
+    marshal::ancestry::Ancestry,
     simplex::types::Context,
     types::{Epoch, Round, View},
     Heightable,
@@ -86,10 +86,10 @@ where
         genesis_block::<H, C, V>(genesis_context)
     }
 
-    async fn propose<A: BlockProvider<Block = Self::Block>>(
+    async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
+        mut ancestry: impl Ancestry<Self::Block>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
         let parent_block = ancestry.next().await?;
@@ -111,11 +111,7 @@ where
         ))
     }
 
-    async fn verify<A: BlockProvider<Block = Self::Block>>(
-        &mut self,
-        _: (E, Self::Context),
-        _: AncestorStream<A, Self::Block>,
-    ) -> bool {
+    async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).
         //

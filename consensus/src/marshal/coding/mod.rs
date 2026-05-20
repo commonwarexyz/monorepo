@@ -65,37 +65,636 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 mod tests {
     use crate::{
         marshal::{
+            ancestry::BlockProvider,
             coding::{
                 marshaled::genesis_coding_commitment,
+                shards,
                 types::{coding_config_for_participants, CodedBlock},
-                Marshaled, MarshaledConfig,
+                Coding, Marshaled, MarshaledConfig,
             },
+            config::Config,
+            core,
             mocks::{
+                application::Application,
                 harness::{
                     self, default_leader, genesis_commitment, make_coding_block,
                     setup_network_links, setup_network_with_participants, CodingB, CodingCtx,
-                    CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE,
-                    NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK, V,
+                    CodingHarness, EmptyProvider, TestHarness, BLOCKS_PER_EPOCH, D, K, LINK,
+                    NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
+            resolver::handler,
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
-        types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
+        types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
         Automaton, CertifiableAutomaton,
     };
-    use commonware_codec::FixedSize;
-    use commonware_coding::ReedSolomon;
+    use bytes::Bytes;
+    use commonware_actor::{mailbox, Feedback};
+    use commonware_codec::{Encode, FixedSize};
+    use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider},
+        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
         sha256::Sha256,
         Committable, Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_group, test_traced};
+    use commonware_p2p::Recipients;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
-    use commonware_utils::{NZUsize, NZU16};
-    use std::time::Duration;
+    use commonware_resolver::{Delivery, Fetch, Resolver};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Spawner, Supervisor as _,
+    };
+    use commonware_storage::archive::immutable;
+    use commonware_utils::{
+        channel::oneshot, sync::Mutex, vec::NonEmptyVec, NZUsize, NZU16, NZU64,
+    };
+    use std::{sync::Arc, time::Duration};
+
+    type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
+    type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
+
+    #[test]
+    fn mailbox_provides_application_blocks() {
+        fn assert_provider<P: BlockProvider<Block = CodingB>>() {}
+        assert_provider::<core::Mailbox<S, TestCodingVariant>>();
+    }
+
+    /// A coding buffer that records subscriptions and never resolves them.
+    #[derive(Clone, Default)]
+    struct RecordingCodingBuffer {
+        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
+        sends: Arc<Mutex<Vec<CodingSendRecord>>>,
+    }
+
+    impl RecordingCodingBuffer {
+        fn subscription_count(&self) -> usize {
+            self.digest_subscriptions.lock().len() + self.commitment_subscriptions.lock().len()
+        }
+
+        fn commitment_subscription_count(&self) -> usize {
+            self.commitment_subscriptions.lock().len()
+        }
+    }
+
+    impl core::Buffer<TestCodingVariant> for RecordingCodingBuffer {
+        type PublicKey = K;
+
+        async fn find_by_digest(&self, _digest: D) -> Option<TestCodedBlock> {
+            None
+        }
+
+        async fn find_by_commitment(&self, _commitment: Commitment) -> Option<TestCodedBlock> {
+            None
+        }
+
+        fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<TestCodedBlock> {
+            let (sender, receiver) = oneshot::channel();
+            self.digest_subscriptions.lock().push(sender);
+            receiver
+        }
+
+        fn subscribe_by_commitment(
+            &self,
+            _commitment: Commitment,
+        ) -> oneshot::Receiver<TestCodedBlock> {
+            let (sender, receiver) = oneshot::channel();
+            self.commitment_subscriptions.lock().push(sender);
+            receiver
+        }
+
+        fn finalized(&self, _commitment: Commitment) {}
+
+        fn send(&self, round: Round, block: TestCodedBlock, recipients: Recipients<K>) {
+            self.sends.lock().push((round, block, recipients));
+        }
+    }
+
+    type CodingFetchRecord = Fetch<handler::Key<Commitment>, handler::Annotation>;
+    type CodingTargetedFetch = (handler::Key<Commitment>, NonEmptyVec<K>);
+
+    /// A resolver that records each fetch invocation; other methods are no-ops.
+    #[derive(Clone, Default)]
+    struct RecordingResolver {
+        fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
+        targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
+        auto_delivery: Arc<Mutex<Option<Bytes>>>,
+        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+        sender: Option<mailbox::Sender<handler::Message<Commitment>>>,
+    }
+
+    impl RecordingResolver {
+        fn holding(metrics: impl Metrics) -> (handler::Receiver<Commitment>, Self) {
+            let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
+            (
+                handler::Receiver::new(receiver),
+                Self {
+                    fetches: Arc::new(Mutex::new(Vec::new())),
+                    targeted: Arc::new(Mutex::new(Vec::new())),
+                    auto_delivery: Arc::new(Mutex::new(None)),
+                    delivery_responses: Arc::new(Mutex::new(Vec::new())),
+                    sender: Some(sender),
+                },
+            )
+        }
+
+        fn record_fetch(&self, fetch: CodingFetchRecord) {
+            self.fetches.lock().push(fetch.clone());
+            let Some(value) = self.auto_delivery.lock().take() else {
+                return;
+            };
+            let Some(sender) = &self.sender else {
+                return;
+            };
+            let (response, response_rx) = oneshot::channel();
+            self.delivery_responses.lock().push(response_rx);
+            let _ = sender.enqueue(handler::Message::Deliver {
+                delivery: Delivery {
+                    key: fetch.key,
+                    subscribers: NonEmptyVec::new(fetch.subscriber),
+                },
+                value,
+                response,
+            });
+        }
+
+        fn respond_to_next_fetch(&self, value: Bytes) {
+            let replaced = self.auto_delivery.lock().replace(value);
+            assert!(
+                replaced.is_none(),
+                "recording resolver already has an automatic delivery"
+            );
+        }
+
+        async fn wait_for_delivery_response(&self) -> bool {
+            let response = self
+                .delivery_responses
+                .lock()
+                .pop()
+                .expect("delivery response missing");
+            response.await.expect("delivery response sender dropped")
+        }
+
+        fn fetches(&self) -> Vec<CodingFetchRecord> {
+            self.fetches.lock().clone()
+        }
+
+        fn targeted(&self) -> Vec<CodingTargetedFetch> {
+            self.targeted.lock().clone()
+        }
+    }
+
+    impl Resolver for RecordingResolver {
+        type Key = handler::Key<Commitment>;
+        type Subscriber = handler::Annotation;
+        type PublicKey = K;
+
+        fn fetch<F>(&mut self, fetch: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.record_fetch(fetch.into());
+            Feedback::Ok
+        }
+
+        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            for fetch in fetches {
+                self.record_fetch(fetch.into());
+            }
+            Feedback::Ok
+        }
+
+        fn fetch_targeted(
+            &mut self,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            self.targeted.lock().push((fetch.into().key, targets));
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            let mut targeted = self.targeted.lock();
+            for (fetch, targets) in fetches {
+                targeted.push((fetch.into().key, targets));
+            }
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    async fn start_coding_actor_with_recording(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        buffer: RecordingCodingBuffer,
+    ) -> (
+        core::Mailbox<S, TestCodingVariant>,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    ) {
+        let config = Config {
+            provider,
+            epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+            mailbox_size: NZUsize!(100),
+            view_retention_timeout: ViewDelta::new(10),
+            max_repair: NZUsize!(10),
+            max_pending_acks: NZUsize!(1),
+            block_codec_config: (),
+            partition_prefix: partition_prefix.to_string(),
+            prunable_items_per_section: NZU64!(10),
+            replay_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
+            page_cache: CacheRef::from_pooler(
+                &context,
+                harness::PAGE_SIZE,
+                harness::PAGE_CACHE_SIZE,
+            ),
+            strategy: Sequential,
+        };
+
+        let finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            immutable::Config {
+                metadata_partition: format!("{partition_prefix}-finalizations-by-height-metadata"),
+                freezer_table_partition: format!(
+                    "{partition_prefix}-finalizations-by-height-freezer-table"
+                ),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_key_partition: format!(
+                    "{partition_prefix}-finalizations-by-height-freezer-key"
+                ),
+                freezer_key_page_cache: config.page_cache.clone(),
+                freezer_value_partition: format!(
+                    "{partition_prefix}-finalizations-by-height-freezer-value"
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
+                ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
+                items_per_section: NZU64!(10),
+                codec_config: S::certificate_codec_config_unbounded(),
+                replay_buffer: config.replay_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations by height archive");
+
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            immutable::Config {
+                metadata_partition: format!("{partition_prefix}-finalized_blocks-metadata"),
+                freezer_table_partition: format!(
+                    "{partition_prefix}-finalized_blocks-freezer-table"
+                ),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_key_partition: format!("{partition_prefix}-finalized_blocks-freezer-key"),
+                freezer_key_page_cache: config.page_cache.clone(),
+                freezer_value_partition: format!(
+                    "{partition_prefix}-finalized_blocks-freezer-value"
+                ),
+                freezer_value_target_size: 1024,
+                freezer_value_compression: None,
+                ordinal_partition: format!("{partition_prefix}-finalized_blocks-ordinal"),
+                items_per_section: NZU64!(10),
+                codec_config: config.block_codec_config,
+                replay_buffer: config.replay_buffer,
+                freezer_key_write_buffer: config.key_write_buffer,
+                freezer_value_write_buffer: config.value_write_buffer,
+                ordinal_write_buffer: config.key_write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+
+        let (actor, mailbox, _) = core::Actor::init(
+            context.child("actor"),
+            finalizations_by_height,
+            finalized_blocks,
+            config,
+        )
+        .await;
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let actor_handle = actor.start(
+            Application::<CodingB>::default(),
+            buffer,
+            (resolver_rx, resolver.clone()),
+        );
+        (mailbox, resolver, actor_handle)
+    }
+
+    async fn start_shard_mailbox(
+        context: deterministic::Context,
+        participants: Vec<K>,
+        provider: ConstantProvider<S, Epoch>,
+    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
+        let me = participants[0].clone();
+        let oracle =
+            setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
+                .await;
+        let control = oracle.control(me.clone());
+        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+            scheme_provider: provider,
+            blocker: control.clone(),
+            shard_codec_cfg: CodecConfig {
+                maximum_shard_size: 1024 * 1024,
+            },
+            block_codec_cfg: (),
+            strategy: Sequential,
+            mailbox_size: NZUsize!(10),
+            peer_buffer_size: NZUsize!(64),
+            background_channel_capacity: NZUsize!(1024),
+            peer_provider: oracle.manager(),
+        };
+        let (shard_engine, shard_mailbox) =
+            shards::Engine::new(context.child("shards"), shard_config);
+        let network = control.register(0, TEST_QUOTA).await.unwrap();
+        shard_engine.start(network);
+        shard_mailbox
+    }
+
+    fn genesis_block() -> CodingB {
+        let genesis_ctx = CodingCtx {
+            round: Round::zero(),
+            leader: default_leader(),
+            parent: (View::zero(), genesis_commitment()),
+        };
+        make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0)
+    }
+
+    fn missing_candidate(me: K) -> (CodingCtx, TestCodedBlock) {
+        let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+        let genesis = genesis_block();
+        let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let candidate_ctx = CodingCtx {
+            round,
+            leader: me,
+            parent: (View::zero(), genesis_parent_commitment),
+        };
+        let candidate =
+            make_coding_block(candidate_ctx.clone(), genesis.digest(), Height::new(1), 100);
+        let coded_candidate: TestCodedBlock =
+            CodedBlock::new(candidate, coding_config, &Sequential);
+        (candidate_ctx, coded_candidate)
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_block_provider_parent_fetches_by_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-provider-parent-commitment",
+                provider,
+                buffer.clone(),
+            )
+            .await;
+
+            let (parent_ctx, parent) = missing_candidate(participants[0].clone());
+            let child_ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(2)),
+                leader: participants[0].clone(),
+                parent: (parent_ctx.round.view(), parent.commitment()),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let subscription = context
+                .child("subscribe")
+                .spawn(move |_| BlockProvider::subscribe_parent(marshal, child));
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                buffer.commitment_subscription_count(),
+                1,
+                "parent walkback should use the coding parent commitment"
+            );
+            drop(subscription);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_verify_missing_candidate_waits_without_fetching() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let me = participants[0].clone();
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-verify-missing-candidate",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+            let (candidate_ctx, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(genesis_block()),
+                marshal,
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            assert!(
+                buffer.subscription_count() > 0,
+                "missing candidate should register a local buffer wait"
+            );
+            assert!(
+                resolver.fetches().is_empty(),
+                "missing candidate verify must not fetch from peers"
+            );
+            assert!(
+                resolver.targeted().is_empty(),
+                "missing candidate verify must not issue targeted fetches"
+            );
+            drop(verify_rx);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certify_missing_candidate_fetches_by_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let me = participants[0].clone();
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certify-missing-candidate",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(genesis_block()),
+                marshal,
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let (candidate_ctx, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+            let proposal = Proposal::new(round, View::zero(), commitment);
+            let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
+            resolver.respond_to_next_fetch((notarization, candidate).encode());
+            let certify_rx = marshaled.certify(round, commitment).await;
+
+            let result = certify_rx.await.expect("certify result missing");
+            assert!(result, "fetched notarized candidate should certify");
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "notarized delivery should validate"
+            );
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Notarized { round: request_round },
+                        handler::Annotation::Notarization { round: subscriber_round },
+                    ) if *request_round == round && *subscriber_round == round
+                )),
+                "certify should fetch notarized block by round"
+            );
+
+            assert!(
+                buffer.subscription_count() > 0,
+                "missing candidate should register a local buffer wait"
+            );
+            assert!(
+                resolver.targeted().is_empty(),
+                "missing candidate certify must not issue targeted fetches"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certify_pending_verify_fetches_by_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let me = participants[0].clone();
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certify-pending-verify",
+                provider.clone(),
+                buffer,
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(genesis_block()),
+                marshal,
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let (candidate_ctx, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+            let _verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+
+            let proposal = Proposal::new(round, View::zero(), commitment);
+            let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
+            resolver.respond_to_next_fetch((notarization, candidate).encode());
+            let certify_rx = marshaled.certify(round, commitment).await;
+
+            let result = certify_rx.await.expect("certify result missing");
+            assert!(
+                result,
+                "pending verify should complete after certification recovery"
+            );
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "notarized delivery should validate"
+            );
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Notarized { round: request_round },
+                        handler::Annotation::Notarization { round: subscriber_round },
+                    ) if *request_round == round && *subscriber_round == round
+                )),
+                "certify should recover a pending verify by notarized round"
+            );
+            assert!(
+                resolver.targeted().is_empty(),
+                "certify recovery must not issue targeted fetches"
+            );
+        });
+    }
 
     #[test_group("slow")]
     #[test_traced("WARN")]
@@ -203,6 +802,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_commitment_fetch_height_hint_mismatch_wakes_subscriber() {
+        harness::commitment_fetch_height_hint_mismatch_wakes_subscriber::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_subscribe_basic_block_delivery() {
         harness::subscribe_basic_block_delivery::<CodingHarness>();
     }
@@ -270,6 +874,86 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_certify_at_later_view_survives_earlier_view_pruning() {
         harness::certify_at_later_view_survives_earlier_view_pruning::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certify_first_block_fetches_genesis_parent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block_ctx = CodingCtx {
+                round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let block = make_coding_block(block_ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let coded_block = CodedBlock::new(block, coding_config, &Sequential);
+            let commitment = coded_block.commitment();
+            shards.proposed(round, coded_block);
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis);
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal,
+                shards,
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let shard_validity = marshaled
+                .verify(block_ctx, commitment)
+                .await
+                .await
+                .expect("verify result missing");
+            assert!(shard_validity, "shard validity should pass");
+
+            let certify_result = marshaled
+                .certify(round, commitment)
+                .await
+                .await
+                .expect("certify result missing");
+            assert!(
+                certify_result,
+                "height-1 block should certify with genesis as parent"
+            );
+        });
     }
 
     /// Finalizing a descendant must not height-prune the shard-engine buffer before
@@ -816,7 +1500,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_reproposal_verify_receiver_drop_does_not_synthesize_false() {
+    fn test_reproposal_certify_recovers_after_verify_receiver_drop() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -824,7 +1508,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone()).await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -857,36 +1546,54 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Re-proposal payload with valid coding config, but no block available.
-            let missing_payload = Commitment::from((
-                Sha256::hash(b"missing_block"),
-                Sha256::hash(b"missing_root"),
-                Sha256::hash(b"missing_context"),
-                coding_config,
-            ));
-            let round = Round::new(Epoch::zero(), View::new(1));
+            // Build a valid boundary re-proposal, but keep it unavailable until
+            // after the optimistic verify receiver has been dropped.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+            let boundary_context = CodingCtx {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let boundary_block = make_coding_block(
+                boundary_context,
+                genesis.digest(),
+                boundary_height,
+                boundary_height.get() * 100,
+            );
+            let coded_boundary = CodedBlock::new(boundary_block, coding_config, &Sequential);
+            let boundary_commitment = coded_boundary.commitment();
+            let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = CodingCtx {
-                round,
+                round: reproposal_round,
                 leader: me,
-                parent: (View::zero(), missing_payload),
+                parent: (View::new(boundary_height.get()), boundary_commitment),
             };
 
-            // Start verify, then drop the receiver immediately.
-            let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
+            // Start verify, then drop the receiver before the block is available.
+            let verify_rx = marshaled
+                .verify(reproposal_context, boundary_commitment)
+                .await;
             drop(verify_rx);
+            context.sleep(Duration::from_millis(10)).await;
 
-            // Certify should resolve promptly from the in-progress task, but must
-            // not synthesize `false` when verification was canceled before a verdict.
-            let certify_rx = marshaled.certify(round, missing_payload).await;
+            shards.proposed(boundary_round, coded_boundary);
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Certify should not return the stale closed verification task; it
+            // should recover through the embedded-context certification path.
+            let certify_rx = marshaled
+                .certify(reproposal_round, boundary_commitment)
+                .await;
             select! {
                 result = certify_rx => {
                     assert!(
-                        result.is_err(),
-                        "certify should resolve without an explicit verdict when verify receiver is dropped"
+                        result.expect("certify result missing"),
+                        "certify should recover after verify receiver drop"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify task should resolve promptly after verify receiver drop");
+                    panic!("certify should recover after verify receiver drop");
                 },
             }
         })
@@ -901,7 +1608,12 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone()).await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -968,19 +1680,19 @@ mod tests {
                 },
             }
 
-            // Certify should consume the same unresolved verification task.
-            let certify_rx = marshaled.certify(round, missing_payload).await;
-            select! {
-                result = certify_rx => {
-                    assert!(
-                        result.is_err(),
-                        "certify should resolve without explicit false when re-proposal block is unavailable"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify should resolve promptly when re-proposal block is unavailable");
-                },
-            }
+            // Certify should not surface the closed verification task as the final result.
+            // With no block available, it remains pending on the recovery path until the
+            // certifier's caller times out or data arrives.
+            let mut certify_rx = marshaled.certify(round, missing_payload).await;
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    certify_rx.try_recv(),
+                    Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
+                ),
+                "certify should remain pending without explicit false or stale cancellation"
+            );
+            drop(certify_rx);
         })
     }
 
@@ -1021,7 +1733,10 @@ mod tests {
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
-            let block_rx = marshal.subscribe_by_commitment(Some(round), missing_commitment);
+            let block_rx = marshal.subscribe_by_commitment(
+                missing_commitment,
+                core::CommitmentFallback::FetchByRound { round },
+            );
 
             // Allow core actor to register the underlying buffer subscription.
             context.sleep(Duration::from_millis(100)).await;
@@ -1566,7 +2281,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Regression: when backfilling by Request::Block(digest), a peer may return
+        // Regression: when backfilling by Key::Block(commitment), a peer may return
         // a coded block with matching inner digest but a different coding commitment.
         // If a finalization for this digest is already cached, marshal must reject
         // the block unless V::commitment(block) matches the finalization payload.
@@ -1652,10 +2367,10 @@ mod tests {
             let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - it fetches Request::Block(digest)
+            //   - it fetches Key::Block(commitment)
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
-            //   - finalization lookup is digest-indexed, so deliver path must still
-            //     reject because cached finalization expects commitment_a
+            //   - deliver path must reject because the response commitment does not
+            //     match the request key
             CodingHarness::report_finalization(&mut v0_mailbox, finalization).await;
 
             // Wait for the fetch cycle to complete.
