@@ -5,6 +5,7 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
+    marshal::ancestry::Ancestry,
     simplex::types::Context,
     types::{Epoch, Round, View},
     Heightable,
@@ -14,7 +15,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rand::Rng;
 use std::marker::PhantomData;
 
@@ -88,7 +89,7 @@ where
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
-        mut ancestry: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
+        mut ancestry: impl Ancestry<Self::Block>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
         let parent_block = ancestry.next().await?;
@@ -110,11 +111,7 @@ where
         ))
     }
 
-    async fn verify(
-        &mut self,
-        _: (E, Self::Context),
-        _: impl Stream<Item = Self::Block> + Send + Unpin + 'static,
-    ) -> bool {
+    async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).
         //

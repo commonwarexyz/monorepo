@@ -13,6 +13,16 @@ use std::{
     task::{Context, Poll},
 };
 
+/// A stream of blocks used by application propose and verify calls.
+pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {}
+
+impl<T, B> Ancestry<B> for T
+where
+    T: Stream<Item = B> + Send + Unpin + 'static,
+    B: Block,
+{
+}
+
 /// An interface for providing blocks.
 pub trait BlockProvider: Clone + Send + 'static {
     /// The block type the provider walks.
