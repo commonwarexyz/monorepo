@@ -11,8 +11,7 @@
     <title>commonware > Your Golden Ticket to a Better DKG</title>
     <meta name="description" content="We’ve completed an initial
 implementation of the Golden protocol, which lets you perform a DKG in
-just a single round. Going from two rounds to just one is a huge
-improvement in simplicity and performance.">
+just a single round.">
     <meta name="author" content="Lucas Meier">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -24,23 +23,21 @@ improvement in simplicity and performance.">
 DKG" />
     <meta property="og:description" content="We’ve completed an initial
 implementation of the Golden protocol, which lets you perform a DKG in
-just a single round. Going from two rounds to just one is a huge
-improvement in simplicity and performance." />
+just a single round." />
     <meta property="article:author" content="Lucas Meier" />
-    <meta property="article:published_time" content="2026-05-20T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-05-20T00:00:00Z" />
+    <meta property="article:published_time" content="2026-05-21T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-05-21T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/golden" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/golden" />
-    <meta property="twitter:title" content="Your Golden Ticket to a Better
-DKG" />
+    <meta property="twitter:title" content="Your Golden Ticket to a
+Better DKG" />
     <meta property="twitter:description" content="We’ve completed an
 initial implementation of the Golden protocol, which lets you perform a
-DKG in just a single round. Going from two rounds to just one is a huge
-improvement in simplicity and performance." />
+DKG in just a single round." />
     <meta property="twitter:image" content="" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/cronokirby" />
@@ -103,7 +100,7 @@ improvement in simplicity and performance." />
 
                         <div class="author">By <a href="https://x.com/cronokirby">Lucas
 Meier</a></div>
-                        <div class="date">May 20th, 2026</div>
+                        <div class="date">May 21st, 2026</div>
         </div>
         <p>We’ve completed an initial implementation of the <a
         href="https://eprint.iacr.org/2025/1924">Golden protocol</a>,
@@ -251,11 +248,10 @@ Meier</a></div>
         to a consensus protocol, e.g. waiting a certain number of
         <em>blocks</em> rather than a certain amount of time. It’s
         possible that this is correct in the <a
-        href="https://dl.acm.org/doi/10.1145/42282.42283">partial
-        synchrony model</a> as well (<a
-        href="https://eprint.iacr.org/2023/1196">citation</a>).</p>
-        <p>It’s also operationally complicated to have multiple rounds.
-        The protocol is stateful between the rounds. Players need to
+        href="https://eprint.iacr.org/2023/1196">partial synchrony
+        model</a> as well.</p>
+        <p>Multiple rounds are also operationally complicated. The
+        protocol is stateful between the rounds. Players need to
         remember what shares they received, and what they did or didn’t
         ack. We rely on private out-of-band communication for those
         shares, rather than a public log of messages. This makes
@@ -280,13 +276,14 @@ Meier</a></div>
         memory completely, we would be able to retrieve our share and
         any public results just by looking at the log, which contains
         what each dealer posted.</p>
-        <p>We would not need any kind of synchrony assumption. After all
-        dealers have posted their log, you’re ready to go, with no need
-        to wait for acknowledgement. In practice you would want to set a
-        cutoff time (in terms of blocks, ideally), and would need to
-        make sure that you had a supermajority of valid contributions,
-        in order to prevent stalling by having malicious dealers
-        withhold their contribution.</p>
+        <p>The protocol can proceed immediately after the dealers have
+        posted their logs, without needing to wait for acknowledgments
+        from the players. This lets us avoid any kind of synchrony
+        assumption. In practice you would want to set a cutoff time (in
+        terms of blocks, ideally), and would need to make sure that you
+        had a supermajority of valid contributions, in order to prevent
+        stalling by having malicious dealers withhold their
+        contribution.</p>
         <p>There’s also no need to reason about malicious players in
         this scheme: because dealer contributions are <em>publicly
         verifiable</em>, anyone can check that each dealer did the right
@@ -313,8 +310,9 @@ Meier</a></div>
         href="https://eprint.iacr.org/2021/339">Groth’s DKG</a>, which
         uses ElGamal encryption together with a NIZK of correct
         encryption. That achieves the properties we want, but would
-        involve a very large, and thus expensive, ZK proof. Doing this
-        naively would not be enough, so we need to dig a bit deeper.</p>
+        involve a ZK proof over an excessively large statement. This
+        naive approach would be impractical for hundreds of validators,
+        so we need to dig a bit deeper.</p>
         <h1 id="making-this-more-efficient">Making this more
         efficient</h1>
         <p>Treating encryption as a black box and doing a full ZK proof
@@ -614,7 +612,7 @@ Meier</a></div>
         because you don’t need to wait for acks, in practice this would
         be a lot faster.</p>
         <h1 id="conclusion">Conclusion</h1>
-        <p>We hope to continue grinding on the performance, as well as
+        <p>We’ll continue grinding on the performance, as well as
         testing and verifying the security of our implementation, in
         order to make this protocol a trustworthy alternative to our
         current DKG. We expect that the one round protocol will be a lot

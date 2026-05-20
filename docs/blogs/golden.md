@@ -1,9 +1,9 @@
 ---
-title: "A Golden Ticket to One-Round DKGs"
+title: "Your Golden Ticket to a Better DKG"
 description: "We've completed an initial implementation of the Golden protocol, which lets you perform a DKG in just a single round."
-date: "May 20th, 2026"
-published-time: "2026-05-20T00:00:00Z"
-modified-time: "2026-05-20T00:00:00Z"
+date: "May 21st, 2026"
+published-time: "2026-05-21T00:00:00Z"
+modified-time: "2026-05-21T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 url: "https://commonware.xyz/blogs/golden"
@@ -146,7 +146,7 @@ which we usually try to avoid, because assuming realtime execution is quite unre
 In practice, you can improve the situation by tying the clock to a consensus protocol,
 e.g. waiting a certain number of *blocks* rather than a certain amount of time.
 It's possible that this is correct in the
-[partial synchrony model](https://dl.acm.org/doi/10.1145/42282.42283) as well ([citation](https://eprint.iacr.org/2023/1196)).
+[partial synchrony model](https://eprint.iacr.org/2023/1196) as well.
 
 Multiple rounds are also operationally complicated.
 The protocol is stateful between the rounds.
@@ -204,7 +204,7 @@ such as [Groth's DKG](https://eprint.iacr.org/2021/339), which uses ElGamal
 encryption together with a NIZK of correct encryption.
 That achieves the properties we want, but would involve a ZK proof
 over an excessively large statement.
-This naive approach would be orders of magnitude slower than something practical,
+This naive approach would be impractical for hundreds of validators,
 so we need to dig a bit deeper.
 
 # Making this more efficient
