@@ -958,8 +958,7 @@ impl<B: Blob> Append<B> {
         // occupies a full physical page on disk.
         let full_pages = size / logical_page_size;
         let partial_bytes = size % logical_page_size;
-        let new_physical_size =
-            (full_pages + u64::from(partial_bytes > 0)) * physical_page_size;
+        let new_physical_size = (full_pages + u64::from(partial_bytes > 0)) * physical_page_size;
 
         // Any shrink that lands inside an existing page must transition the target page's CRC
         // through the alternate slot. The old page may have been full or partial, but rewriting it
