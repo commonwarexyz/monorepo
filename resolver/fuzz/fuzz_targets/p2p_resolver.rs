@@ -441,16 +441,17 @@ async fn set_link(
     to: PublicKey,
     link: Link,
 ) {
-    match oracle
-        .add_link(from.clone(), to.clone(), link.clone())
-        .await
-    {
-        Ok(()) => {}
-        Err(NetworkError::LinkExists) => {
-            oracle.remove_link(from.clone(), to.clone()).await.unwrap();
-            oracle.add_link(from, to, link).await.unwrap();
+    loop {
+        match oracle
+            .add_link(from.clone(), to.clone(), link.clone())
+            .await
+        {
+            Ok(()) => return,
+            Err(NetworkError::LinkExists) => {
+                let _ = oracle.remove_link(from.clone(), to.clone()).await;
+            }
+            Err(err) => panic!("failed to add link: {err}"),
         }
-        Err(err) => panic!("failed to add link: {err}"),
     }
 }
 
