@@ -6,7 +6,7 @@
 use crate::{
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, DigestFallback, Mailbox, Variant},
+        core::{Buffer, CommitmentFallback, DigestFallback, Mailbox, Variant},
     },
     types::Round,
     Block,
@@ -104,5 +104,17 @@ where
         self.subscribe_by_digest(digest, DigestFallback::Wait)
             .await
             .ok()
+    }
+
+    async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
+        let parent_height = block.height().previous()?;
+        self.subscribe_by_commitment(
+            block.parent(),
+            CommitmentFallback::FetchByCommitment {
+                height: parent_height,
+            },
+        )
+        .await
+        .ok()
     }
 }
