@@ -46,7 +46,7 @@ pub trait BlockProvider: Send + 'static {
     ) -> impl Future<Output = Option<Self::Block>> + Send + 'static;
 }
 
-// Expected child height and parent digest for a pending fetch.
+// Expected parent height and digest for a pending fetch.
 struct ExpectedParent<D>(Height, D);
 
 // Pending parent fetch paired with the relationship it must satisfy.
@@ -54,14 +54,17 @@ type PendingFetch<B> = BoxFuture<'static, Option<(ExpectedParent<<B as Digestibl
 
 impl<D: Digest> ExpectedParent<D> {
     fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
-        Self(child.height(), child.parent())
+        Self(
+            child.height().previous().expect("child must have parent"),
+            child.parent(),
+        )
     }
 
     fn assert_matches<B: Block<Digest = D>>(self, parent: &B) {
-        let Self(child_height, parent_digest) = self;
+        let Self(parent_height, parent_digest) = self;
         assert_eq!(
-            parent.height().next(),
-            child_height,
+            parent.height(),
+            parent_height,
             "fetched parent must be contiguous in height"
         );
         assert_eq!(
@@ -258,6 +261,18 @@ mod test {
         let waker = futures::task::noop_waker_ref();
         let mut cx = std::task::Context::from_waker(waker);
         let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+    }
+
+    #[test_async]
+    async fn test_yields_genesis_and_stops() {
+        let genesis = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
+        let child = Block::new::<Sha256>((), genesis.digest(), Height::new(1), 1);
+
+        let provider = MockProvider(vec![genesis.clone()]);
+        let stream = AncestorStream::new(provider, [child.clone()]);
+
+        let results = stream.collect::<Vec<_>>().await;
+        assert_eq!(results, vec![child, genesis]);
     }
 
     #[test_async]
