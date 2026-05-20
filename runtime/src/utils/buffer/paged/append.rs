@@ -996,8 +996,8 @@ impl<B: Blob> Append<B> {
 
             // If the shrink drops later physical pages, make that truncation durable before
             // changing the landing page's CRC. A crash before the shorter CRC is staged can then
-            // still recover the landing page at its old length, without reviving truncated tail
-            // pages.
+            // still recover the landing page at its old length, but recovery stops at the newly
+            // truncated physical end.
             if new_physical_size < current_physical_size {
                 blob_guard.blob.resize(new_physical_size).await?;
                 blob_guard.blob.sync().await?;
