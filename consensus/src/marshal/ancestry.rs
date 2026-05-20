@@ -49,6 +49,10 @@ pub trait BlockProvider: Send + 'static {
 // Expected child height and parent digest for a pending fetch.
 struct ExpectedParent<D>(Height, D);
 
+// Pending parent fetch paired with the relationship it must satisfy.
+type PendingFetch<B> =
+    BoxFuture<'static, Option<(ExpectedParent<<B as Digestible>::Digest>, B)>>;
+
 impl<D: Digest> ExpectedParent<D> {
     fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
         Self(child.height(), child.parent())
@@ -76,8 +80,7 @@ pub struct AncestorStream<M: BlockProvider> {
     buffered: Vec<M::Block>,
     marshal: M,
     #[pin]
-    pending: OptionFuture<BoxFuture<'static, Option<M::Block>>>,
-    pending_expected: Option<ExpectedParent<<M::Block as Digestible>::Digest>>,
+    pending: OptionFuture<PendingFetch<M::Block>>,
 }
 
 impl<M: BlockProvider> AncestorStream<M> {
@@ -108,7 +111,6 @@ impl<M: BlockProvider> AncestorStream<M> {
             marshal,
             buffered,
             pending: None.into(),
-            pending_expected: None,
         }
     }
 }
@@ -130,31 +132,29 @@ where
             let should_walk_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
-                let future = this.marshal.subscribe_parent(&block).boxed();
+                let expected = ExpectedParent::from_child(&block);
+                let future = this
+                    .marshal
+                    .subscribe_parent(&block)
+                    .map(move |parent| parent.map(|parent| (expected, parent)))
+                    .boxed();
                 *this.pending.as_mut() = Some(future).into();
-                *this.pending_expected = Some(ExpectedParent::from_child(&block));
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
                 // buffer it for the next poll.
                 match this.pending.as_mut().poll(cx) {
-                    Poll::Ready(Some(Some(parent))) => {
-                        let expected = this
-                            .pending_expected
-                            .take()
-                            .expect("pending parent expectation must exist");
+                    Poll::Ready(Some(Some((expected, parent)))) => {
                         expected.assert_matches(&parent);
                         this.buffered.push(parent);
                     }
                     Poll::Ready(Some(None)) => {
                         *this.pending.as_mut() = None.into();
-                        *this.pending_expected = None;
                     }
                     Poll::Ready(None) | Poll::Pending => {}
                 }
             } else if !should_walk_parent {
                 // No more parents to fetch; Finish the stream.
                 *this.pending.as_mut() = None.into();
-                *this.pending_expected = None;
             }
 
             return Poll::Ready(Some(block));
@@ -164,43 +164,36 @@ where
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) | Poll::Ready(Some(None)) => {
                 *this.pending.as_mut() = None.into();
-                *this.pending_expected = None;
                 Poll::Ready(None)
             }
-            Poll::Ready(Some(Some(block))) => {
-                let expected = this
-                    .pending_expected
-                    .take()
-                    .expect("pending parent expectation must exist");
+            Poll::Ready(Some(Some((expected, block)))) => {
                 expected.assert_matches(&block);
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
-                    let future = this.marshal.subscribe_parent(&block).boxed();
+                    let expected = ExpectedParent::from_child(&block);
+                    let future = this
+                        .marshal
+                        .subscribe_parent(&block)
+                        .map(move |parent| parent.map(|parent| (expected, parent)))
+                        .boxed();
                     *this.pending.as_mut() = Some(future).into();
-                    *this.pending_expected = Some(ExpectedParent::from_child(&block));
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
                     // buffer it for the next poll.
                     match this.pending.as_mut().poll(cx) {
-                        Poll::Ready(Some(Some(parent))) => {
-                            let expected = this
-                                .pending_expected
-                                .take()
-                                .expect("pending parent expectation must exist");
+                        Poll::Ready(Some(Some((expected, parent)))) => {
                             expected.assert_matches(&parent);
                             this.buffered.push(parent);
                         }
                         Poll::Ready(Some(None)) => {
                             *this.pending.as_mut() = None.into();
-                            *this.pending_expected = None;
                         }
                         Poll::Ready(None) | Poll::Pending => {}
                     }
                 } else {
                     // No more parents to fetch; Finish the stream.
                     *this.pending.as_mut() = None.into();
-                    *this.pending_expected = None;
                 }
 
                 Poll::Ready(Some(block))
