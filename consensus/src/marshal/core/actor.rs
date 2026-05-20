@@ -21,7 +21,7 @@ use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    Digestible,
+    Digest, Digestible,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
@@ -262,6 +262,56 @@ impl Floor {
     }
 }
 
+/// A floor update that cannot complete until marshal has the anchor block.
+enum FloorTransition<S: CertificateScheme, C: Digest> {
+    Idle,
+    AwaitingAnchor(Finalization<S, C>),
+}
+
+impl<S: CertificateScheme, C: Digest> FloorTransition<S, C> {
+    /// Starts a floor transition from configuration before the actor has a resolver.
+    fn awaiting_anchor(finalization: Finalization<S, C>) -> Self {
+        Self::AwaitingAnchor(finalization)
+    }
+
+    /// Returns true while repair and application dispatch must wait for the floor anchor.
+    fn blocks_progress(&self) -> bool {
+        matches!(self, Self::AwaitingAnchor(_))
+    }
+
+    /// Returns true if a pending floor already supersedes the candidate floor round.
+    fn has_anchor_at_or_after(&self, round: Round) -> bool {
+        matches!(self, Self::AwaitingAnchor(pending) if pending.round() >= round)
+    }
+
+    /// Records a verified floor finalization whose block anchor still needs to arrive.
+    fn await_anchor(&mut self, finalization: Finalization<S, C>) {
+        *self = Self::AwaitingAnchor(finalization);
+    }
+
+    /// Marks the floor transition complete.
+    fn clear(&mut self) {
+        *self = Self::Idle;
+    }
+
+    /// Clears and returns the pending floor finalization, if any.
+    fn take(&mut self) -> Option<Finalization<S, C>> {
+        match std::mem::replace(self, Self::Idle) {
+            Self::Idle => None,
+            Self::AwaitingAnchor(finalization) => Some(finalization),
+        }
+    }
+
+    /// Clears and returns the pending floor only when `commitment` is the awaited anchor.
+    fn take_if_anchor_matches(&mut self, commitment: C) -> Option<Finalization<S, C>> {
+        if !matches!(self, Self::AwaitingAnchor(pending) if pending.proposal.payload == commitment)
+        {
+            return None;
+        }
+        self.take()
+    }
+}
+
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -313,8 +363,8 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Unresolved floor finalization whose block anchor is still being fetched.
-    pending_floor: Option<Finalization<P::Scheme, V::Commitment>>,
+    // Floor update waiting for its anchor block before repair/dispatch can resume.
+    floor_transition: FloorTransition<P::Scheme, V::Commitment>,
     // Last processed height and round
     floor: Floor,
     // Pending application acknowledgements
@@ -396,7 +446,7 @@ where
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
-        let pending_floor = match config.start {
+        let floor_transition = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
                     anchor.height(),
@@ -418,9 +468,9 @@ where
                         panic!("failed to sync startup anchor: {err}");
                     }
                 }
-                None
+                FloorTransition::Idle
             }
-            Start::Floor(finalization) => Some(finalization),
+            Start::Floor(finalization) => FloorTransition::awaiting_anchor(finalization),
         };
 
         let last_processed_round =
@@ -444,7 +494,7 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                pending_floor,
+                floor_transition,
                 floor: Floor {
                     height: last_processed_height,
                     round: last_processed_round,
@@ -511,7 +561,7 @@ where
         // written before the last shutdown.
         self.cache.load_persisted_epochs().await;
 
-        if let Some(finalization) = self.pending_floor.take() {
+        if let Some(finalization) = self.floor_transition.take() {
             // A configured floor follows the same path as `SetFloor`: verify it,
             // then apply a local anchor or fetch the anchor block.
             if let Err(err) = self
@@ -675,14 +725,14 @@ where
                         // to make progress).
                         self.cache_verified(round, block.digest(), block.clone()).await;
                         if let Err(err) = self
-                            .try_apply_pending_floor(
+                            .try_apply_floor_anchor(
                                 block.clone(),
                                 &mut application,
                                 &mut resolver,
                             )
                             .await
                         {
-                            error!(?err, "failed to apply pending floor");
+                            error!(?err, "failed to apply floor anchor");
                             return;
                         }
                         // Retain the block in memory so the subsequent
@@ -700,10 +750,10 @@ where
                         // to make progress).
                         self.cache_verified(round, block.digest(), block.clone()).await;
                         if let Err(err) = self
-                            .try_apply_pending_floor(block, &mut application, &mut resolver)
+                            .try_apply_floor_anchor(block, &mut application, &mut resolver)
                             .await
                         {
-                            error!(?err, "failed to apply pending floor");
+                            error!(?err, "failed to apply floor anchor");
                             return;
                         }
                         ack.expect("durable ack present").send_lossy(());
@@ -715,10 +765,10 @@ where
                         // to make progress).
                         self.cache_block(round, block.digest(), block.clone()).await;
                         if let Err(err) = self
-                            .try_apply_pending_floor(block, &mut application, &mut resolver)
+                            .try_apply_floor_anchor(block, &mut application, &mut resolver)
                             .await
                         {
-                            error!(?err, "failed to apply pending floor");
+                            error!(?err, "failed to apply floor anchor");
                             return;
                         }
                         ack.expect("durable ack present").send_lossy(());
@@ -760,20 +810,22 @@ where
                         if let Some(block) =
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
-                            if self.pending_floor_matches(&finalization, &block) {
-                                if let Err(err) = self
-                                    .apply_floor_anchor(
-                                        finalization,
-                                        block,
-                                        &mut application,
-                                        &mut resolver,
-                                    )
-                                    .await
-                                {
-                                    error!(?err, "failed to apply pending floor");
+                            match self
+                                .try_apply_floor_anchor(
+                                    block.clone(),
+                                    &mut application,
+                                    &mut resolver,
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    continue;
+                                }
+                                Ok(false) => {}
+                                Err(err) => {
+                                    error!(?err, "failed to apply floor anchor");
                                     return;
                                 }
-                                continue;
                             }
 
                             // If found, persist the block
@@ -1212,11 +1264,7 @@ where
                 .await;
         }
 
-        if self
-            .pending_floor
-            .as_ref()
-            .is_some_and(|pending| pending.round() >= round)
-        {
+        if self.floor_transition.has_anchor_at_or_after(round) {
             return Ok(());
         }
 
@@ -1225,7 +1273,7 @@ where
             ?commitment,
             "floor block missing, fetching asynchronously"
         );
-        self.pending_floor = Some(finalization);
+        self.floor_transition.await_anchor(finalization);
         self.floor.fetch_if_permitted(
             resolver,
             Request::finalized_block_by_round(commitment, round),
@@ -1244,21 +1292,8 @@ where
         finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
     }
 
-    /// Returns true when a finalized block is the currently pending floor anchor.
-    fn pending_floor_matches(
-        &self,
-        finalization: &Finalization<P::Scheme, V::Commitment>,
-        block: &V::Block,
-    ) -> bool {
-        self.pending_floor.as_ref().is_some_and(|pending| {
-            pending.round() == finalization.round()
-                && pending.proposal.payload == finalization.proposal.payload
-                && V::commitment(block) == pending.proposal.payload
-        })
-    }
-
-    /// Applies a block if it satisfies the currently pending floor.
-    async fn try_apply_pending_floor(
+    /// Applies a block if it satisfies the current floor transition.
+    async fn try_apply_floor_anchor(
         &mut self,
         block: V::Block,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1268,14 +1303,12 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) -> Result<bool, BoxedError> {
-        let Some(pending) = self.pending_floor.as_ref() else {
+        let Some(finalization) = self
+            .floor_transition
+            .take_if_anchor_matches(V::commitment(&block))
+        else {
             return Ok(false);
         };
-        if V::commitment(&block) != pending.proposal.payload {
-            return Ok(false);
-        }
-
-        let finalization = self.pending_floor.take().expect("pending floor present");
         self.apply_floor_anchor(finalization, block, application, resolver)
             .await?;
         Ok(true)
@@ -1349,7 +1382,7 @@ where
 
         // The floor is durable, so cache/finalized data below it can be pruned.
         self.prune_after_floor(height).await?;
-        self.pending_floor = None;
+        self.floor_transition.clear();
 
         // Intentionally keep existing block subscriptions alive. Canceling
         // waiters can have catastrophic consequences (nodes can get stuck in
@@ -1389,9 +1422,9 @@ where
                 }
 
                 if self
-                    .try_apply_pending_floor(block.clone(), application, resolver)
+                    .try_apply_floor_anchor(block.clone(), application, resolver)
                     .await
-                    .unwrap_or_else(|e| panic!("failed to apply pending floor: {e}"))
+                    .unwrap_or_else(|e| panic!("failed to apply floor anchor: {e}"))
                 {
                     response.send_lossy(true);
                     return false;
@@ -1636,9 +1669,9 @@ where
                     debug!(?round, %height, "received finalization");
 
                     if self
-                        .try_apply_pending_floor(block.clone(), application, resolver)
+                        .try_apply_floor_anchor(block.clone(), application, resolver)
                         .await
-                        .unwrap_or_else(|e| panic!("failed to apply pending floor: {e}"))
+                        .unwrap_or_else(|e| panic!("failed to apply floor anchor: {e}"))
                     {
                         continue;
                     }
@@ -1691,9 +1724,9 @@ where
                         .await;
 
                     if self
-                        .try_apply_pending_floor(block.clone(), application, resolver)
+                        .try_apply_floor_anchor(block.clone(), application, resolver)
                         .await
-                        .unwrap_or_else(|e| panic!("failed to apply pending floor: {e}"))
+                        .unwrap_or_else(|e| panic!("failed to apply floor anchor: {e}"))
                     {
                         continue;
                     }
@@ -1775,7 +1808,7 @@ where
         &mut self,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
-        if self.pending_floor.is_some() {
+        if self.floor_transition.blocks_progress() {
             // Dispatch resumes after the floor anchor is durably stored.
             return;
         }
@@ -2104,8 +2137,8 @@ where
         >,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
-        if self.pending_floor.is_some() {
-            // Gap repair needs a known processed floor. A pending floor may
+        if self.floor_transition.blocks_progress() {
+            // Gap repair needs a known processed floor. A floor transition may
             // jump the lower bound once its anchor block arrives.
             return false;
         }
