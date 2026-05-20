@@ -498,50 +498,67 @@ impl<
         let scheme = self.scheme(ack.epoch)?;
         let quorum = scheme.participants().quorum::<N3f1>();
 
-        // Get the acks and check digest consistency
-        let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
-            None => {
-                // If the height is not in the pending pool, it may be confirmed
-                // (i.e. we have a certificate for it).
-                return Err(Error::AckHeight(ack.item.height));
-            }
-            Some(Pending::Unverified(acks)) => acks,
-            Some(Pending::Verified(digest, acks)) => {
-                // If we have a verified digest, ensure the ack matches it
-                if ack.item.digest != *digest {
-                    return Err(Error::AckDigest(ack.item.height));
+        let height = ack.item.height;
+        let epoch = ack.epoch;
+        let digest = ack.item.digest;
+
+        let acks = {
+            // Get the acks and check digest consistency
+            let acks_by_epoch = match self.pending.get_mut(&height) {
+                None => {
+                    // If the height is not in the pending pool, it may be confirmed
+                    // (i.e. we have a certificate for it).
+                    return Err(Error::AckHeight(height));
                 }
-                acks
+                Some(Pending::Unverified(acks)) => acks,
+                Some(Pending::Verified(verified, acks)) => {
+                    // If we have a verified digest, ensure the ack matches it
+                    if digest != *verified {
+                        return Err(Error::AckDigest(height));
+                    }
+                    acks
+                }
+            };
+
+            // Add the attestation (if not already present)
+            let acks = acks_by_epoch.entry(epoch).or_default();
+            if acks.contains_key(&ack.attestation.signer) {
+                return Ok(());
             }
+            acks.insert(ack.attestation.signer, ack.clone());
+
+            // If a quorum shares this digest, move the map into the task and return it after
+            // construction.
+            if acks.values().filter(|a| a.item.digest == digest).count() < quorum as usize {
+                return Ok(());
+            }
+            std::mem::take(acks)
         };
 
-        // Add the attestation (if not already present)
-        let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.attestation.signer) {
-            return Ok(());
-        }
-        acks.insert(ack.attestation.signer, ack.clone());
+        let strategy = self.strategy.clone();
+        let handle = self
+            .context
+            .child("construct_certificate")
+            .shared(true)
+            .spawn(move |_| async move {
+                let certificate = Certificate::from_acks(
+                    &*scheme,
+                    acks.values().filter(|ack| ack.item.digest == digest),
+                    &strategy,
+                );
+                (acks, certificate)
+            });
+        let (returned, certificate) = handle.await.expect("strategy task failed");
+        let acks_by_epoch = match self.pending.get_mut(&height) {
+            Some(Pending::Unverified(acks)) | Some(Pending::Verified(_, acks)) => acks,
+            None => panic!("pending entry not found"),
+        };
+        let replaced = acks_by_epoch.insert(epoch, returned);
+        assert!(replaced.is_some_and(|acks| acks.is_empty()));
 
-        // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
-        let filtered = acks
-            .values()
-            .filter(|a| a.item.digest == ack.item.digest)
-            .cloned()
-            .collect::<Vec<_>>();
-        if filtered.len() >= quorum as usize {
-            let strategy = self.strategy.clone();
-            let handle = self
-                .context
-                .child("construct_certificate")
-                .shared(true)
-                .spawn(move |_| async move {
-                    Certificate::from_acks(&*scheme, filtered.iter(), &strategy)
-                });
-            let certificate = handle.await.expect("strategy task failed");
-            if let Some(certificate) = certificate {
-                self.metrics.certificates.inc();
-                self.handle_certificate(certificate).await;
-            }
+        if let Some(certificate) = certificate {
+            self.metrics.certificates.inc();
+            self.handle_certificate(certificate).await;
         }
 
         Ok(())
