@@ -977,8 +977,7 @@ impl<B: Blob> Append<B> {
             self.cache_ref.invalidate_from(self.id, full_pages);
 
             let (page_data, old_crc) =
-                super::get_page_from_blob_with_crc(&blob_guard.blob, full_pages, logical_page_size)
-                    .await?;
+                super::get_page_from_blob(&blob_guard.blob, full_pages, logical_page_size).await?;
 
             // Ensure the validated data covers what we need.
             if (page_data.len() as u64) < partial_bytes {
@@ -1047,7 +1046,7 @@ impl<B: Blob> Append<B> {
 
         if partial_bytes > 0 {
             // There's a partial page. Read its data from disk with CRC validation.
-            let page_data =
+            let (page_data, _) =
                 super::get_page_from_blob(&blob_guard.blob, full_pages, logical_page_size).await?;
 
             // Ensure the validated data covers what we need.

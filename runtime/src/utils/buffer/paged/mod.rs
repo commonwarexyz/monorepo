@@ -40,21 +40,9 @@ use tracing::{debug, error};
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 const CHECKSUM_SLOT_SIZE: usize = u16::SIZE + crc32::Digest::SIZE;
 
-/// Read the designated page from the underlying blob and return its logical bytes as a vector if it
-/// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
-/// check the length of the returned vector to determine if the page was partial vs full.
-async fn get_page_from_blob(
-    blob: &impl Blob,
-    page_num: u64,
-    logical_page_size: u64,
-) -> Result<IoBuf, Error> {
-    let (page, _) = get_page_from_blob_with_crc(blob, page_num, logical_page_size).await?;
-    Ok(page)
-}
-
 /// Read the designated page from the underlying blob and return its logical bytes plus the CRC
 /// record used to validate it.
-async fn get_page_from_blob_with_crc(
+async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     logical_page_size: u64,

@@ -351,7 +351,8 @@ impl CacheRef {
                 }
                 Entry::Vacant(v) => {
                     // Nobody is currently fetching this page, so create a future that will do the
-                    // work. get_page_from_blob handles CRC validation and returns only logical bytes.
+                    // work. get_page_from_blob handles CRC validation; the cache only keeps the
+                    // logical bytes.
                     let blob = blob.clone();
                     let cache = Arc::clone(&self.cache);
                     let page_size = self.page_size;
@@ -591,7 +592,7 @@ async fn fetch_cacheable_page(
     page_num: u64,
     page_size: u64,
 ) -> Result<IoBuf, Arc<Error>> {
-    let page = get_page_from_blob(blob, page_num, page_size)
+    let (page, _) = get_page_from_blob(blob, page_num, page_size)
         .await
         .map_err(Arc::new)?;
 
