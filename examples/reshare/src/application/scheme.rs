@@ -9,7 +9,7 @@ use commonware_cryptography::{
         primitives::variant::{MinSig, Variant},
     },
     certificate::{self, Scheme},
-    ed25519, PublicKey, Signer,
+    ed25519, Digest, PublicKey, Signer,
 };
 use commonware_utils::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
@@ -79,9 +79,9 @@ pub trait EpochProvider {
     type Scheme: Scheme;
 
     /// Returns a [Scheme] for the given [EpochTransition].
-    fn scheme_for_epoch(
+    fn scheme_for_epoch<D: Digest>(
         &self,
-        transition: &EpochTransition<Self::Variant, Self::PublicKey>,
+        transition: &EpochTransition<Self::Variant, Self::PublicKey, D>,
     ) -> Self::Scheme;
 
     /// Creates an epoch-independent certificate verifier from the DKG output.
@@ -99,9 +99,9 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
     type PublicKey = ed25519::PublicKey;
     type Scheme = ThresholdScheme<V>;
 
-    fn scheme_for_epoch(
+    fn scheme_for_epoch<D: Digest>(
         &self,
-        transition: &EpochTransition<Self::Variant, Self::PublicKey>,
+        transition: &EpochTransition<Self::Variant, Self::PublicKey, D>,
     ) -> Self::Scheme {
         transition.share.as_ref().map_or_else(
             || {
@@ -145,9 +145,9 @@ impl EpochProvider for Provider<EdScheme, ed25519::PrivateKey> {
     type PublicKey = ed25519::PublicKey;
     type Scheme = EdScheme;
 
-    fn scheme_for_epoch(
+    fn scheme_for_epoch<D: Digest>(
         &self,
-        transition: &EpochTransition<Self::Variant, Self::PublicKey>,
+        transition: &EpochTransition<Self::Variant, Self::PublicKey, D>,
     ) -> Self::Scheme {
         EdScheme::signer(
             &self.namespace,

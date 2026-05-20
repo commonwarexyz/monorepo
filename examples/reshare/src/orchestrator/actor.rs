@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{genesis, Block, EpochProvider, Provider},
+    application::{Block, EpochProvider, Provider},
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
@@ -13,7 +13,7 @@ use commonware_consensus::{
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -31,31 +31,6 @@ use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
-
-/// Returns the digest Simplex should use as the floor for `epoch`.
-async fn floor_digest_for_epoch<S, H, C, V>(
-    epoch: Epoch,
-    marshal: &MarshalMailbox<S, Standard<Block<H, C, V>>>,
-) -> H::Digest
-where
-    S: Scheme,
-    H: Hasher,
-    C: Signer,
-    V: Variant,
-{
-    let Some(previous_epoch) = epoch.previous() else {
-        return genesis::<H, C, V>().digest();
-    };
-
-    let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-    let boundary_height = epocher
-        .last(previous_epoch)
-        .expect("previous epoch should exist");
-    let Some(boundary) = marshal.get_block(boundary_height).await else {
-        panic!("missing boundary block for epoch {epoch} at height {boundary_height}");
-    };
-    boundary.digest()
-}
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S, L, T>
@@ -100,7 +75,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mailbox::Receiver<Message<V, C::PublicKey>>,
+    mailbox: mailbox::Receiver<Message<V, C::PublicKey, H::Digest>>,
     application: A,
 
     oracle: B,
@@ -134,7 +109,7 @@ where
     pub fn new(
         context: E,
         config: Config<B, V, C, H, A, S, L, T>,
-    ) -> (Self, Mailbox<V, C::PublicKey>) {
+    ) -> (Self, Mailbox<V, C::PublicKey, H::Digest>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
@@ -279,6 +254,7 @@ where
                     let handle = self
                         .enter_epoch(
                             transition.epoch,
+                            transition.floor,
                             scheme,
                             &mut vote_mux,
                             &mut certificate_mux,
@@ -310,6 +286,7 @@ where
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
+        floor: H::Digest,
         scheme: S,
         vote_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
@@ -330,9 +307,7 @@ where
             .context
             .child("consensus_engine")
             .with_attribute("epoch", epoch);
-        let floor = simplex::Floor::genesis(
-            floor_digest_for_epoch::<S, H, C, V>(epoch, &self.marshal).await,
-        );
+        let floor = simplex::Floor::genesis(floor);
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
