@@ -102,13 +102,28 @@ impl crate::Blob for Blob {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
+        let mut bufs = bufs.into();
         if !bufs.has_remaining() {
             return Ok(());
         }
 
-        self.write_at(offset, bufs).await?;
-        self.sync().await
+        let mut file = self.file.lock().await;
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+
+        if let Some(buf) = bufs.as_single() {
+            Self::write_single_at(&mut file, buf.as_ref()).await?;
+        } else {
+            Self::write_vectored_at(&mut file, &mut bufs).await?;
+        }
+
+        file.sync_all()
+            .await
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
