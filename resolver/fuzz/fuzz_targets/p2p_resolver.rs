@@ -421,6 +421,11 @@ fn remote_holder(key: &Key, requester: usize, peers: usize) -> usize {
         .expect("key must have a remote holder")
 }
 
+fn oracle_fetch_timeout_floor_ms(quota_per_second: u32) -> u64 {
+    let quota_interval_ms = 1_000_u64.div_ceil(u64::from(quota_per_second));
+    2 * (quota_interval_ms + MIN_LINK_LATENCY_MS) + 1
+}
+
 fn drain_outputs(
     outputs: &mut [commonware_utils::channel::mpsc::UnboundedReceiver<(Key, Bytes)>],
     expected: &BTreeMap<Key, Bytes>,
@@ -653,7 +658,15 @@ fn run(input: FuzzInput) -> String {
                     peer,
                     key,
                     settle_ms,
-                } => {
+                } => 'complete_fetch: {
+                    // This oracle requires a request and response to complete before the engine's
+                    // configured timeout. Very small timeouts remain useful fuzz inputs, but they
+                    // cannot guarantee delivery even over a reliable, rate-limited link.
+                    if input.fetch_timeout_ms
+                        < oracle_fetch_timeout_floor_ms(input.quota_per_second)
+                    {
+                        break 'complete_fetch;
+                    }
                     let key = expected
                         .keys()
                         .nth(key as usize % expected.len())
