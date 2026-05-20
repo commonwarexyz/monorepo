@@ -5,7 +5,7 @@ use crate::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
-        core::{Buffer, DigestFallback, Mailbox, Variant},
+        core::{Buffer, CommitmentFallback, DigestFallback, Mailbox, Variant},
     },
     simplex::types::Context,
     types::{coding::Commitment, Round},
@@ -130,5 +130,19 @@ where
             .await
             .ok()
             .map(<Coding<B, C, H, P> as Variant>::into_inner)
+    }
+
+    async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
+        let parent_height = block.height().previous()?;
+        let commitment = block.context().parent.1;
+        self.subscribe_by_commitment(
+            commitment,
+            CommitmentFallback::FetchByCommitment {
+                height: parent_height,
+            },
+        )
+        .await
+        .ok()
+        .map(<Coding<B, C, H, P> as Variant>::into_inner)
     }
 }
