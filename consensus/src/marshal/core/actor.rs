@@ -263,46 +263,47 @@ impl Floor {
 }
 
 /// A floor update that cannot complete until marshal has the anchor block.
-enum FloorTransition<S: CertificateScheme, C: Digest> {
-    Resolved,
-    Pending(Finalization<S, C>),
+struct FloorTransition<S: CertificateScheme, C: Digest> {
+    pending: Option<Finalization<S, C>>,
 }
 
 impl<S: CertificateScheme, C: Digest> FloorTransition<S, C> {
+    /// Returns a floor transition with no pending anchor.
+    const fn resolved() -> Self {
+        Self { pending: None }
+    }
+
     /// Records a configured floor before the actor has a resolver.
     const fn awaiting_anchor(finalization: Finalization<S, C>) -> Self {
-        Self::Pending(finalization)
+        Self {
+            pending: Some(finalization),
+        }
     }
 
     /// Returns true while repair and application dispatch must wait for the floor anchor.
     const fn blocks_progress(&self) -> bool {
-        matches!(self, Self::Pending(_))
+        self.pending.is_some()
     }
 
     /// Returns true if a pending floor already supersedes the candidate floor round.
     fn has_anchor_at_or_after(&self, round: Round) -> bool {
-        matches!(self, Self::Pending(pending) if pending.round() >= round)
+        matches!(&self.pending, Some(pending) if pending.round() >= round)
+    }
+
+    /// Returns true when `commitment` is the awaited anchor.
+    fn matches_anchor(&self, commitment: C) -> bool {
+        matches!(&self.pending, Some(pending) if pending.proposal.payload == commitment)
     }
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.
     fn await_anchor(&mut self, finalization: Finalization<S, C>) {
-        *self = Self::Pending(finalization);
+        self.pending = Some(finalization);
     }
 
-    /// Clears and returns the pending floor finalization, if any.
-    fn take(&mut self) -> Option<Finalization<S, C>> {
-        match std::mem::replace(self, Self::Resolved) {
-            Self::Resolved => None,
-            Self::Pending(finalization) => Some(finalization),
-        }
-    }
-
-    /// Clears and returns the pending floor only when `commitment` is the awaited anchor.
-    fn take_if_anchor_matches(&mut self, commitment: C) -> Option<Finalization<S, C>> {
-        if !matches!(self, Self::Pending(pending) if pending.proposal.payload == commitment) {
-            return None;
-        }
-        self.take()
+    /// Marks the pending anchor as handled and returns its finalization.
+    #[must_use]
+    const fn resolve(&mut self) -> Option<Finalization<S, C>> {
+        self.pending.take()
     }
 }
 
@@ -462,7 +463,7 @@ where
                         panic!("failed to sync startup anchor: {err}");
                     }
                 }
-                FloorTransition::Resolved
+                FloorTransition::resolved()
             }
             Start::Floor(finalization) => FloorTransition::awaiting_anchor(finalization),
         };
@@ -557,10 +558,11 @@ where
 
         // A configured floor follows the same path as `SetFloor`: verify it,
         // then apply a local anchor or fetch the anchor block.
-        if let Some(finalization) = self.floor_transition.take() {
-            self.handle_set_floor(
+        if let Some(finalization) = self.floor_transition.resolve() {
+            self.install_floor(
                 finalization,
                 true,
+                false,
                 &mut resolver,
                 &mut buffer,
                 &mut application,
@@ -913,9 +915,10 @@ where
                         .await;
                     }
                     Message::SetFloor { finalization } => {
-                        self.handle_set_floor(
+                        self.install_floor(
                             finalization,
                             false,
+                            true,
                             &mut resolver,
                             &mut buffer,
                             &mut application,
@@ -1187,11 +1190,12 @@ where
             .fetch_if_permitted(resolver, Request::notarized(round));
     }
 
-    /// Verifies and installs a new floor, fetching the anchor block if needed.
-    async fn handle_set_floor<Buf, R>(
+    /// Verifies and installs a floor, fetching the anchor block if needed.
+    async fn install_floor<Buf, R>(
         &mut self,
         finalization: Finalization<P::Scheme, V::Commitment>,
         fatal_on_invalid: bool,
+        skip_if_superseded: bool,
         resolver: &mut R,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1229,7 +1233,7 @@ where
 
         // A pending anchor at the same or a newer floor already blocks
         // progress. Keep waiting for it instead of replacing it.
-        if self.floor_transition.has_anchor_at_or_after(round) {
+        if skip_if_superseded && self.floor_transition.has_anchor_at_or_after(round) {
             return;
         }
 
@@ -1271,9 +1275,9 @@ where
         >,
     ) -> bool {
         let commitment = V::commitment(block);
-        let Some(finalization) = self.floor_transition.take_if_anchor_matches(commitment) else {
+        if !self.floor_transition.matches_anchor(commitment) {
             return false;
-        };
+        }
         let block = (*block).clone();
 
         let height = block.height();
@@ -1293,11 +1297,17 @@ where
                 existing = %self.floor.height,
                 "floor not updated, lower than existing"
             );
+            let _ = self.floor_transition.resolve();
             self.try_dispatch_blocks(application).await;
             return true;
         }
 
         let digest = block.digest();
+        let finalization = self
+            .floor_transition
+            .resolve()
+            .expect("pending floor anchor missing");
+        let round = finalization.round();
         try_join!(
             async {
                 self.finalized_blocks
@@ -1308,7 +1318,7 @@ where
             },
             async {
                 self.finalizations_by_height
-                    .put(height, digest, finalization.clone())
+                    .put(height, digest, finalization)
                     .await
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
@@ -1318,7 +1328,6 @@ where
         self.sync_finalized().await;
         self.notify_subscribers(&block);
 
-        let round = finalization.round();
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
             self.tip = height;
