@@ -182,12 +182,13 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps metadata storage for epoch state and journaled storage for protocol messages,
 /// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
 /// the position/epoch confusion that can occur with position-based journals.
-pub struct Storage<
+pub struct Storage<E, V, P, D>
+where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
     V: Variant,
     P: PublicKey,
     D: Digest + Read<Cfg = ()>,
-> {
+{
     states: Metadata<E, u64, Epoch<V, P, D>>,
     msgs: SVJournal<E, Event<V, P>>,
 
@@ -196,12 +197,12 @@ pub struct Storage<
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
-        V: Variant,
-        P: PublicKey,
-        D: Digest + Read<Cfg = ()>,
-    > Storage<E, V, P, D>
+impl<E, V, P, D> Storage<E, V, P, D>
+where
+    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    V: Variant,
+    P: PublicKey,
+    D: Digest + Read<Cfg = ()>,
 {
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.

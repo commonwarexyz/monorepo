@@ -50,8 +50,7 @@ pub trait BlockProvider: Send + 'static {
 struct ExpectedParent<D>(Height, D);
 
 // Pending parent fetch paired with the relationship it must satisfy.
-type PendingFetch<B> =
-    BoxFuture<'static, Option<(ExpectedParent<<B as Digestible>::Digest>, B)>>;
+type PendingFetch<B> = BoxFuture<'static, Option<(ExpectedParent<<B as Digestible>::Digest>, B)>>;
 
 impl<D: Digest> ExpectedParent<D> {
     fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
