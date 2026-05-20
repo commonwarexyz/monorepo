@@ -85,8 +85,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
-        Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -132,9 +131,7 @@ mod tests {
 
             let parent = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 200);
-            let subscription = context
-                .child("subscribe")
-                .spawn(move |_| async move { mailbox.subscribe_parent(&child).await });
+            let subscription = mailbox.subscribe_parent(&child);
 
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
@@ -142,7 +139,7 @@ mod tests {
                 1,
                 "parent walkback should use the standard parent commitment"
             );
-            subscription.abort();
+            drop(subscription);
         });
     }
 
