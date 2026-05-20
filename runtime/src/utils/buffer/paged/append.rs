@@ -822,11 +822,8 @@ impl<B: Blob> Append<B> {
             0
         };
         let staged_slot = Self::checksum_slot_bytes(0, new_crc);
-        blob.write_at(
-            crc_start + new_slot_start as u64,
-            staged_slot.to_vec(),
-        )
-        .await?;
+        blob.write_at(crc_start + new_slot_start as u64, staged_slot.to_vec())
+            .await?;
         blob.sync().await?;
 
         blob.write_at(
@@ -963,6 +960,11 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
+        self.shrink(size).await
+    }
+
+    /// Coordinate the locking and dispatch logic for shrinking the blob.
+    async fn shrink(&self, target_size: u64) -> Result<(), Error> {
         let logical_page_size = self.cache_ref.page_size();
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
 
@@ -974,8 +976,8 @@ impl<B: Blob> Append<B> {
         let mut blob_guard = self.blob_state.write().await;
 
         // Calculate the physical size needed for the new logical size.
-        let full_pages = size / logical_page_size;
-        let partial_bytes = size % logical_page_size;
+        let full_pages = target_size / logical_page_size;
+        let partial_bytes = target_size % logical_page_size;
         let new_physical_size = if partial_bytes > 0 {
             // We need full_pages + 1 physical pages to hold the partial data.
             // The partial page will be padded to full physical page size.
@@ -985,94 +987,99 @@ impl<B: Blob> Append<B> {
             full_pages * physical_page_size
         };
 
-        let protected_partial_shrink = size < current_size
-            && partial_bytes > 0
-            && (full_pages < blob_guard.current_page
-                || (full_pages == blob_guard.current_page
-                    && blob_guard.partial_page_state.is_some()));
-
-        if protected_partial_shrink {
-            blob_guard.blob.resize(new_physical_size).await?;
-
-            // Evict cached pages at or beyond the new full-page boundary. The page at
-            // `full_pages` is now owned by the tip buffer, and anything above is beyond the new
-            // logical size.
-            self.cache_ref.invalidate_from(self.id, full_pages);
-
-            // Update blob state and buffer based on the desired logical size. The page data is
-            // read with CRC validation, then durably rewritten below with a shorter CRC.
-            blob_guard.current_page = full_pages;
-            buf_guard.offset = full_pages * logical_page_size;
-
-            let (page_data, old_crc) = super::get_page_with_checksum_from_blob(
-                &blob_guard.blob,
+        if partial_bytes > 0 {
+            self.shrink_protected_partial(
+                &mut buf_guard,
+                &mut blob_guard,
+                new_physical_size,
                 full_pages,
+                partial_bytes,
                 logical_page_size,
             )
-            .await?;
-
-            // Ensure the validated data covers what we need.
-            if (page_data.len() as u64) < partial_bytes {
-                return Err(Error::InvalidChecksum);
-            }
-
-            buf_guard.clear();
-            let new_data = &page_data.as_ref()[..partial_bytes as usize];
-            let over_capacity = buf_guard.append(new_data);
-            assert!(!over_capacity);
-
-            let final_record = Self::sync_partial_page_shrink(
-                &blob_guard.blob,
+            .await
+        } else {
+            self.shrink_standard(
+                &mut buf_guard,
+                &mut blob_guard,
+                new_physical_size,
                 full_pages,
-                logical_page_size,
-                partial_bytes as u16,
-                Crc32::checksum(new_data),
-                &old_crc,
             )
-            .await?;
-            blob_guard.partial_page_state = Some(final_record);
-            return Ok(());
+            .await
+        }
+    }
+
+    /// Perform a safe, torn-write-resistant shrink to a new partial page tip.
+    async fn shrink_protected_partial(
+        &self,
+        buf_guard: &mut Buffer,
+        blob_guard: &mut BlobState<B>,
+        new_physical_size: u64,
+        full_pages: u64,
+        partial_bytes: u64,
+        logical_page_size: u64,
+    ) -> Result<(), Error> {
+        blob_guard.blob.resize(new_physical_size).await?;
+
+        // Evict cached pages at or beyond the new full-page boundary. The page at
+        // `full_pages` is now owned by the tip buffer, and anything above is beyond the new
+        // logical size.
+        self.cache_ref.invalidate_from(self.id, full_pages);
+
+        // Update blob state and buffer based on the desired logical size. The page data is
+        // read with CRC validation, then durably rewritten below with a shorter CRC.
+        blob_guard.current_page = full_pages;
+        buf_guard.offset = full_pages * logical_page_size;
+
+        let (page_data, old_crc) = super::get_page_with_checksum_from_blob(
+            &blob_guard.blob,
+            full_pages,
+            logical_page_size,
+        )
+        .await?;
+
+        // Ensure the validated data covers what we need.
+        if (page_data.len() as u64) < partial_bytes {
+            return Err(Error::InvalidChecksum);
         }
 
+        buf_guard.clear();
+        let new_data = &page_data.as_ref()[..partial_bytes as usize];
+        let over_capacity = buf_guard.append(new_data);
+        assert!(!over_capacity);
+
+        let final_record = Self::sync_partial_page_shrink(
+            &blob_guard.blob,
+            full_pages,
+            logical_page_size,
+            partial_bytes as u16,
+            Crc32::checksum(new_data),
+            &old_crc,
+        )
+        .await?;
+        blob_guard.partial_page_state = Some(final_record);
+        Ok(())
+    }
+
+    /// Perform a standard shrink to a page boundary.
+    async fn shrink_standard(
+        &self,
+        buf_guard: &mut Buffer,
+        blob_guard: &mut BlobState<B>,
+        new_physical_size: u64,
+        full_pages: u64,
+    ) -> Result<(), Error> {
         // Resize the underlying blob.
         blob_guard.blob.resize(new_physical_size).await?;
         blob_guard.partial_page_state = None;
 
-        // Evict cached pages at or beyond the new full-page boundary. The page at `full_pages` (if
-        // partial) is now owned by the tip buffer, and anything above is beyond the new logical
-        // size. Leaving their pre-resize contents in the cache lets `try_read_sync` (which bypasses
-        // the tip buffer) observe stale bytes once the tip is repopulated.
+        // Evict cached pages at or beyond the new full-page boundary. Leaving pre-resize contents
+        // in the cache lets `try_read_sync` observe stale bytes once the tip is repopulated.
         self.cache_ref.invalidate_from(self.id, full_pages);
 
-        // Update blob state and buffer based on the desired logical size. The partial page data is
-        // read with CRC validation; the validated length may exceed partial_bytes (reflecting the
-        // old data length), but we only load the prefix we need. The next sync will write the
-        // correct CRC for the new length.
-        //
-        // Note: This updates state before validation completes, which could leave state
-        // inconsistent if validation fails. This is acceptable because failures from mutable
-        // methods are fatal - callers must not use the blob after any error.
-
+        // Update blob state and buffer based on the desired logical size.
         blob_guard.current_page = full_pages;
-        buf_guard.offset = full_pages * logical_page_size;
-
-        if partial_bytes > 0 {
-            // There's a partial page. Read its data from disk with CRC validation.
-            let page_data =
-                super::get_page_from_blob(&blob_guard.blob, full_pages, logical_page_size).await?;
-
-            // Ensure the validated data covers what we need.
-            if (page_data.len() as u64) < partial_bytes {
-                return Err(Error::InvalidChecksum);
-            }
-
-            buf_guard.clear();
-            let over_capacity = buf_guard.append(&page_data.as_ref()[..partial_bytes as usize]);
-            assert!(!over_capacity);
-        } else {
-            // No partial page - all pages are full or blob is empty.
-            buf_guard.clear();
-        }
+        buf_guard.offset = full_pages * self.cache_ref.page_size();
+        buf_guard.clear();
 
         Ok(())
     }
@@ -2945,7 +2952,9 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_fallback_slot")
                 .await
                 .unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref).await.unwrap();
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
             assert_eq!(append.size().await, 50);
             let read = append.read_at(0, 50).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..50]);
@@ -2983,11 +2992,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, target);
-            let read = append
-                .read_at(0, target as usize)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = append.read_at(0, target as usize).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..target as usize]);
         });
     }
