@@ -114,6 +114,7 @@ mod tests {
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
 
+    // Smallest valid coding config used to build trusted genesis commitments.
     const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
         minimum_shards: NZU16!(1),
         extra_shards: NZU16!(1),

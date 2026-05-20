@@ -1106,7 +1106,7 @@ mod tests {
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
-                GatedVerifyingApp::new(genesis.clone());
+                GatedVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,

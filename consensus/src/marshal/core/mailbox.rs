@@ -140,17 +140,14 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: Option<oneshot::Sender<()>>,
     },
-    /// Sets the sync starting point using an already-processed finalization.
+    /// Sets the sync starting point from an already-processed finalization.
     ///
-    /// Marshal enters a pending-floor pre-start phase, fetches the finalized
-    /// block asynchronously, then stores the anchor, treats its height as
-    /// processed, and delivers blocks starting at `height + 1`. Data below the
-    /// anchor height is pruned.
+    /// Marshal will sync and deliver blocks starting after the finalized block.
+    /// Data below the finalized height is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Message::Prune] instead.
     ///
-    /// The startup floor comes from [`crate::marshal::Config::start`].
     SetFloor {
         /// The candidate floor finalization, verified by the actor before use.
         finalization: Finalization<S, V::Commitment>,
@@ -753,12 +750,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.is_ok()
     }
 
-    /// Sets the sync starting point using an already-processed finalization.
+    /// Sets the sync starting point from an already-processed finalization.
     ///
-    /// Marshal fetches the corresponding block asynchronously before advancing
-    /// its processed floor and dispatching application blocks. While the floor
-    /// block is unresolved, marshal can serve local requests but remains in a
-    /// pending-floor pre-start phase.
+    /// Marshal will sync and deliver blocks starting after the finalized block.
+    /// Data below the finalized height is pruned.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Self::prune] instead.

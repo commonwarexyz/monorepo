@@ -108,7 +108,7 @@ pub struct Actor<
     automaton: A,
     relay: R,
     reporter: F,
-    floor: Floor<S, D>,
+    floor: Option<Floor<S, D>>,
 
     certificate_config: <S::Certificate as Read>::Cfg,
     partition: String,
@@ -173,7 +173,7 @@ impl<
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 reporter: cfg.reporter,
-                floor: cfg.floor,
+                floor: Some(cfg.floor),
 
                 certificate_config,
                 partition: cfg.partition,
@@ -678,7 +678,7 @@ impl<
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
         // Add initial view from the configured floor
-        let floor = self.floor.clone();
+        let floor = self.floor.take().expect("floor not initialized");
         if let Some(finalization) = self.state.set_floor(floor) {
             resolver.updated(Certificate::Finalization(finalization.clone()));
             self.reporter.report(Activity::Finalization(finalization));

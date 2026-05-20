@@ -263,7 +263,6 @@ mod tests {
             reporter: reporter.clone(),
             partition: format!("voter_test_{me}"),
             epoch: Epoch::new(333),
-
             floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
             mailbox_size: NZUsize!(128),
             leader_timeout,
@@ -407,7 +406,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "test".to_string(),
                 epoch: Epoch::new(333),
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(10),
                 leader_timeout: Duration::from_secs(5),

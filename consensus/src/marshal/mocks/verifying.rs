@@ -103,7 +103,7 @@ pub struct GatedVerifyingApp<B, S> {
 impl<B, S> GatedVerifyingApp<B, S> {
     /// Returns the gated app, a `started` receiver fired when `verify()` is entered,
     /// and a `release` sender that unblocks `verify()` once signaled.
-    pub fn new(_genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    pub fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         (

@@ -2917,6 +2917,96 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_set_floor_holds_dispatch_until_anchor_arrives() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let (application, mut started_rx) = HoldingBlockReporter::new();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "set-floor-holds-dispatch",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            mailbox.set_floor(floor_finalization);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor block fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&floor_block)
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
+            let next_round = Round::new(Epoch::zero(), View::new(6));
+            assert!(mailbox.verified(next_round, next.clone()).await);
+            let next_finalization = StandardHarness::make_finalization(
+                Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, next_finalization).await;
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+
+            let floor_fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| {
+                    matches!(
+                        fetch.key,
+                        handler::Key::Block(commitment)
+                            if commitment == StandardHarness::commitment(&floor_block)
+                    )
+                })
+                .expect("floor fetch missing");
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: floor_fetch.key,
+                        subscribers: NonEmptyVec::new(floor_fetch.subscriber),
+                    },
+                    value: floor_block.encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "floor block delivery should validate"
+            );
+
+            assert_eq!(started_rx.await.unwrap(), Height::new(6));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_notarized_delivery_wakes_fetch_by_round_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

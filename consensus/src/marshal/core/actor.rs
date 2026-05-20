@@ -313,8 +313,6 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Startup floor to apply once the resolver and buffer are available.
-    startup_floor: Option<Finalization<P::Scheme, V::Commitment>>,
     // Unresolved floor finalization whose block anchor is still being fetched.
     pending_floor: Option<Finalization<P::Scheme, V::Commitment>>,
     // Last processed height and round
@@ -363,7 +361,7 @@ where
         context: E,
         finalizations_by_height: FC,
         mut finalized_blocks: FB,
-        config: Config<V::ApplicationBlock, P, ES, T, V::Block, V::Commitment>,
+        config: Config<P, ES, T, V::ApplicationBlock, V::Block, V::Commitment>,
     ) -> (Self, Mailbox<P::Scheme, V>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
@@ -396,7 +394,9 @@ where
             .copied()
             .unwrap_or(Height::zero());
 
-        let startup_floor = match config.start {
+        // Genesis is a local anchor. A floor finalization is verified and
+        // resolved after `run` receives the resolver and buffer.
+        let pending_floor = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
                     anchor.height(),
@@ -420,7 +420,6 @@ where
                 }
                 None
             }
-            // The resolver is not available until `run`, so floor fetch starts there.
             Start::Floor(finalization) => Some(finalization),
         };
 
@@ -445,8 +444,7 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                startup_floor,
-                pending_floor: None,
+                pending_floor,
                 floor: Floor {
                     height: last_processed_height,
                     round: last_processed_round,
@@ -513,7 +511,9 @@ where
         // written before the last shutdown.
         self.cache.load_persisted_epochs().await;
 
-        if let Some(finalization) = self.startup_floor.take() {
+        if let Some(finalization) = self.pending_floor.take() {
+            // A configured floor follows the same path as `SetFloor`: verify it,
+            // then apply a local anchor or fetch the anchor block.
             if let Err(err) = self
                 .handle_set_floor(finalization, &mut resolver, &mut buffer, &mut application)
                 .await
@@ -1776,6 +1776,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
         if self.pending_floor.is_some() {
+            // Dispatch resumes after the floor anchor is durably stored.
             return;
         }
 
@@ -2104,6 +2105,8 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         if self.pending_floor.is_some() {
+            // Gap repair needs a known processed floor. A pending floor may
+            // jump the lower bound once its anchor block arrives.
             return false;
         }
 
