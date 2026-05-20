@@ -510,8 +510,7 @@ where
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut marshal,
-            )
-            .await;
+            );
 
             let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
             let parent = select! {

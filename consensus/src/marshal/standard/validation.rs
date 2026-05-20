@@ -3,7 +3,7 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::{CommitmentFallback, Mailbox, Variant},
+        core::{CommitmentFallback, Mailbox},
         standard::Standard,
     },
     simplex::types::Context,
@@ -13,8 +13,7 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use commonware_utils::channel::oneshot::{self, error::RecvError};
-use futures::future::{ready, Either, Ready};
+use commonware_utils::channel::oneshot;
 use rand::Rng;
 use tracing::debug;
 
@@ -139,8 +138,7 @@ where
             round: Round::new(context.epoch(), parent_view),
         },
         marshal,
-    )
-    .await;
+    );
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
@@ -201,10 +199,10 @@ where
     Some(application_valid)
 }
 
-/// Fetches the parent block given its commitment and missing-block behavior.
+/// Subscribes to the parent block by its commitment and missing-block behavior.
 ///
-/// If the parent is already available locally, returns it directly. Otherwise,
-/// subscribes to marshal for parent availability according to `fallback`.
+/// The marshal subscription checks local storage for the exact commitment before
+/// registering or fetching.
 ///
 /// Use `FetchByRound` for certified parent lookups when the caller knows the
 /// certified parent round and commitment, such as proposal construction or
@@ -217,23 +215,16 @@ where
 /// The returned subscription receiver may resolve with `RecvError` if marshal
 /// cancels the request.
 #[inline]
-pub(super) async fn fetch_parent<S, B>(
+pub(super) fn fetch_parent<S, B>(
     parent_commitment: B::Digest,
     fallback: CommitmentFallback,
     marshal: &mut Mailbox<S, Standard<B>>,
-) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
+) -> oneshot::Receiver<B>
 where
     S: Scheme,
     B: Block + Clone,
 {
-    if let Some(parent) = marshal.get_block(&parent_commitment).await {
-        if parent_commitment == <Standard<B> as Variant>::commitment(&parent) {
-            return Either::Left(ready(Ok(parent)));
-        }
-    }
-
-    let receiver = marshal.subscribe_by_commitment(parent_commitment, fallback);
-    Either::Right(receiver)
+    marshal.subscribe_by_commitment(parent_commitment, fallback)
 }
 
 #[cfg(test)]

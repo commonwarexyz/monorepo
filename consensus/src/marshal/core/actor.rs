@@ -1226,9 +1226,9 @@ where
             .put_finalization(round, digest, finalization.clone())
             .await;
 
+        // A pending anchor at the same or a newer floor already blocks
+        // progress. Keep waiting for it instead of replacing it.
         if self.floor_transition.has_anchor_at_or_after(round) {
-            // A pending anchor at the same or a newer floor already blocks
-            // progress. Keep waiting for it instead of replacing it.
             return;
         }
 
@@ -1381,10 +1381,10 @@ where
                     return false;
                 }
 
+                // This block may match the pending floor request. Whether it
+                // installs or is rejected as the floor anchor, do not also
+                // process it as an ordinary block delivery.
                 if self.apply_floor_anchor(&block, application, resolver).await {
-                    // This block matched the pending floor request. Whether it
-                    // installed or was rejected as the floor anchor, do not also
-                    // process it as an ordinary block delivery.
                     response.send_lossy(true);
                     return false;
                 }
@@ -1627,9 +1627,9 @@ where
                     let digest = block.digest();
                     debug!(?round, %height, "received finalization");
 
+                    // The floor-anchor path fully handles this finalization
+                    // and moves the lower bound past it.
                     if self.apply_floor_anchor(&block, application, resolver).await {
-                        // The floor-anchor path fully handles this
-                        // finalization and moves the lower bound past it.
                         continue;
                     }
 
@@ -1680,9 +1680,9 @@ where
                         .put_notarization(round, digest, notarization)
                         .await;
 
+                    // A notarized delivery can carry the pending floor block
+                    // after the finalization is cached.
                     if self.apply_floor_anchor(&block, application, resolver).await {
-                        // A notarized delivery can carry the pending floor
-                        // block after the finalization is cached.
                         continue;
                     }
                 }

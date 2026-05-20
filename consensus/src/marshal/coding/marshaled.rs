@@ -114,13 +114,9 @@ use commonware_runtime::{
     Clock, Metrics, Spawner, Storage,
 };
 use commonware_utils::{
-    channel::{
-        fallible::OneshotExt,
-        oneshot::{self, error::RecvError},
-    },
+    channel::{fallible::OneshotExt, oneshot},
     sync::AsyncMutex,
 };
-use futures::future::{ready, Either, Ready};
 use rand::Rng;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -362,7 +358,7 @@ where
             let fallback = core::CommitmentFallback::FetchByRound {
                 round: Round::new(consensus_context.epoch(), parent_view),
             };
-            let parent_request = fetch_parent(parent_commitment, fallback, &mut marshal).await;
+            let parent_request = fetch_parent(parent_commitment, fallback, &mut marshal);
             let parent = select! {
                 _ = tx.closed() => {
                     debug!(
@@ -726,8 +722,7 @@ where
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
                 &mut marshal,
-            )
-            .await;
+            );
 
             let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
             let parent = select! {
@@ -1096,36 +1091,26 @@ where
     }
 }
 
-/// Fetches the parent block given its commitment and missing-block behavior.
+/// Subscribes to the parent block by its commitment and missing-block behavior.
 ///
-/// This is a helper function used during proposal and verification to retrieve the parent
-/// block. If the parent is already available locally, it returns the parent
-/// directly. Otherwise, it subscribes to the marshal to await the parent block's
-/// availability according to `fallback`. Certified parent lookups should use the
-/// certified parent round instead of deriving a height from an unverified child.
+/// This is a helper function used during proposal and verification to retrieve
+/// the parent block. The marshal subscription checks local storage for the exact
+/// commitment before registering or fetching. Certified parent lookups should
+/// use the certified parent round instead of deriving a height from an
+/// unverified child.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[allow(clippy::type_complexity)]
-async fn fetch_parent<S, B, C, H>(
+fn fetch_parent<S, B, C, H>(
     parent_commitment: Commitment,
     fallback: core::CommitmentFallback,
     marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
-) -> Either<Ready<Result<CodedBlock<B, C, H>, RecvError>>, oneshot::Receiver<CodedBlock<B, C, H>>>
+) -> oneshot::Receiver<CodedBlock<B, C, H>>
 where
     S: CertificateScheme,
     B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
 {
-    let parent_digest =
-        <Coding<B, C, H, S::PublicKey> as core::Variant>::commitment_to_inner(parent_commitment);
-    if let Some(parent) = marshal.get_block(&parent_digest).await {
-        // A digest lookup may find a coded block with the wrong commitment.
-        // Only exact commitment matches can satisfy this parent request.
-        if parent.commitment() == parent_commitment {
-            return Either::Left(ready(Ok(parent)));
-        }
-    }
-
-    Either::Right(marshal.subscribe_by_commitment(parent_commitment, fallback))
+    marshal.subscribe_by_commitment(parent_commitment, fallback)
 }

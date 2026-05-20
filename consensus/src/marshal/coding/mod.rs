@@ -2713,8 +2713,8 @@ mod tests {
             let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
 
             // Build the block we want propose() to return. Its embedded context
-            // uses the proper genesis commitment so fetch_parent matches the
-            // cached genesis without going through the marshal subscription.
+            // uses the proper genesis commitment so the parent lookup matches
+            // the cached genesis.
             let propose_round = Round::new(Epoch::zero(), View::new(1));
             let propose_context = CodingCtx {
                 round: propose_round,
