@@ -284,7 +284,8 @@ mod tests {
 
     #[derive(Clone)]
     struct RecordingBlob {
-        chunk_counts: Arc<Mutex<Vec<usize>>>,
+        write_chunk_counts: Arc<Mutex<Vec<usize>>>,
+        sync_write_chunk_counts: Arc<Mutex<Vec<usize>>>,
     }
 
     impl crate::Blob for RecordingBlob {
@@ -306,7 +307,20 @@ mod tests {
             _offset: u64,
             bufs: impl Into<IoBufs> + Send,
         ) -> Result<(), Error> {
-            self.chunk_counts.lock().push(bufs.into().chunk_count());
+            self.write_chunk_counts
+                .lock()
+                .push(bufs.into().chunk_count());
+            Ok(())
+        }
+
+        async fn write_at_sync(
+            &self,
+            _offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.sync_write_chunk_counts
+                .lock()
+                .push(bufs.into().chunk_count());
             Ok(())
         }
 
@@ -320,14 +334,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_audited_blob_write_preserves_chunking() {
-        let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+    async fn test_audited_blob_writes_preserve_chunking() {
+        let write_chunk_counts = Arc::new(Mutex::new(Vec::new()));
+        let sync_write_chunk_counts = Arc::new(Mutex::new(Vec::new()));
         let blob = super::Blob {
             auditor: Arc::new(crate::deterministic::Auditor::default()),
             partition: "partition".into(),
             name: b"blob".to_vec(),
             inner: RecordingBlob {
-                chunk_counts: chunk_counts.clone(),
+                write_chunk_counts: write_chunk_counts.clone(),
+                sync_write_chunk_counts: sync_write_chunk_counts.clone(),
             },
         };
 
@@ -343,6 +359,22 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(*chunk_counts.lock(), vec![4]);
+        assert_eq!(*write_chunk_counts.lock(), vec![4]);
+        assert!(sync_write_chunk_counts.lock().is_empty());
+
+        blob.write_at_sync(
+            0,
+            IoBufs::from(vec![
+                IoBuf::from(b"a".to_vec()),
+                IoBuf::from(b"b".to_vec()),
+                IoBuf::from(b"c".to_vec()),
+                IoBuf::from(b"d".to_vec()),
+            ]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*write_chunk_counts.lock(), vec![4]);
+        assert_eq!(*sync_write_chunk_counts.lock(), vec![4]);
     }
 }
