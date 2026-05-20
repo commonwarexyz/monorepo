@@ -142,8 +142,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// Sets the sync starting point from an already-processed finalization.
     ///
-    /// Marshal will sync and deliver blocks starting after the finalized block.
-    /// Data below the finalized height is pruned.
+    /// Marshal will sync and deliver blocks after this finalization.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Message::Prune] instead.
@@ -744,8 +743,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Sets the sync starting point from an already-processed finalization.
     ///
-    /// Marshal will sync and deliver blocks starting after the finalized block.
-    /// Data below the finalized height is pruned.
+    /// Marshal will sync and deliver blocks after this finalization.
     ///
     /// To prune data without affecting the sync starting point (say at some trailing depth
     /// from tip), use [Self::prune] instead.

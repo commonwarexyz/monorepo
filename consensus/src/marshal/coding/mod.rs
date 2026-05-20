@@ -87,7 +87,7 @@ mod tests {
         },
         simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, CertifiableAutomaton, CertifiableBlock,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock,
     };
     use bytes::Bytes;
     use commonware_actor::{mailbox, Feedback};
@@ -241,6 +241,10 @@ mod tests {
                 .pop()
                 .expect("delivery response missing");
             response.await.expect("delivery response sender dropped")
+        }
+
+        fn delivery_response_count(&self) -> usize {
+            self.delivery_responses.lock().len()
         }
 
         fn fetches(&self) -> Vec<CodingFetchRecord> {
@@ -2394,6 +2398,85 @@ mod tests {
             assert!(
                 stored_finalization.is_none(),
                 "finalization should not be archived until matching block is available"
+            );
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_floor_anchor_rejects_parent_commitment_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "floor-parent-commitment-mismatch",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_context = CodingCtx {
+                round: parent_round,
+                leader: participants[0].clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(
+                parent_context,
+                Sha256::hash(b""),
+                Height::new(1),
+                100,
+            );
+
+            let floor_round = Round::new(Epoch::zero(), View::new(2));
+            let bad_context = CodingCtx {
+                round: floor_round,
+                leader: participants[0].clone(),
+                parent: (View::new(1), genesis_commitment()),
+            };
+            let floor_block =
+                make_coding_block(bad_context, parent.digest(), Height::new(2), 200);
+            let coded_floor = CodedBlock::new(floor_block, coding_config, &Sequential);
+            assert_ne!(
+                coded_floor.parent(),
+                coded_floor.context().parent.1.block::<D>()
+            );
+
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(1),
+                    CodingHarness::commitment(&coded_floor),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            resolver.respond_to_next_fetch(coded_floor.encode());
+            mailbox.set_floor(finalization);
+
+            for _ in 0..50 {
+                if resolver.delivery_response_count() > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "floor block delivery should be accepted at the resolver boundary"
+            );
+
+            assert!(
+                mailbox.get_block(Height::new(2)).await.is_none(),
+                "floor block with mismatched parent commitment must not be archived"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(2)).await.is_none(),
+                "floor finalization must not be archived by height without a valid anchor"
             );
         })
     }

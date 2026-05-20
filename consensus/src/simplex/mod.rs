@@ -980,6 +980,8 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_non_genesis_floor_joiner_catches_tip() {
+        // First let a quorum finalize beyond genesis so the joiner has a real
+        // floor certificate and existing tip to catch.
         let n = 5;
         let active_count = quorum(n) as usize;
         let initial_tip_target = View::new(15);
@@ -1113,6 +1115,8 @@ mod tests {
             assert!(floor_view > View::zero());
             assert!(floor_view < tip_at_join);
 
+            // Start the extra validator from the non-genesis floor and require
+            // it to catch both the existing tip and later cluster progress.
             for validator in active.iter() {
                 oracle
                     .add_link(joiner.clone(), validator.clone(), link.clone())
@@ -1619,7 +1623,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -1929,7 +1932,6 @@ mod tests {
                 partition: me.to_string(),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
-
                 floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(
                     333,
                 ))),
@@ -2070,7 +2072,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -2309,7 +2310,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -2481,7 +2481,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -2686,7 +2685,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -2886,7 +2884,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -3142,7 +3139,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -3325,7 +3321,6 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -3503,7 +3498,6 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -3837,7 +3831,6 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -4005,7 +3998,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -4100,7 +4092,6 @@ mod tests {
                 partition: validator.to_string(),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
-
                 floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(
                     333,
                 ))),
@@ -4331,7 +4322,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -4491,7 +4481,6 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -4668,7 +4657,6 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -4811,7 +4799,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -4977,7 +4964,6 @@ mod tests {
                 partition: participants[0].clone().to_string(),
                 mailbox_size: NZUsize!(64),
                 epoch: Epoch::new(333),
-
                 floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(
                     333,
                 ))),
@@ -5206,7 +5192,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -5564,7 +5549,6 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
@@ -5782,7 +5766,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -5929,7 +5912,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -6032,7 +6014,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
@@ -6534,7 +6515,6 @@ mod tests {
                             partition,
                             mailbox_size: NZUsize!(1024),
                             epoch: Epoch::new(333),
-
                             floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                                 Epoch::new(333),
                             )),
@@ -6605,7 +6585,6 @@ mod tests {
                         partition,
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
-
                         floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
