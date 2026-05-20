@@ -603,11 +603,13 @@ fn run(input: FuzzInput) -> String {
                 }
                 Operation::Cancel { peer, key } => {
                     let index = peer % mailboxes.len();
-                    assert!(mailboxes[index].cancel(Key(key)).accepted());
+                    assert!(mailboxes[index]
+                        .retain(move |fetch_key, _| fetch_key != &Key(key))
+                        .accepted());
                 }
                 Operation::Clear { peer } => {
                     let index = peer % mailboxes.len();
-                    assert!(mailboxes[index].clear().accepted());
+                    assert!(mailboxes[index].retain(|_, _| false).accepted());
                 }
                 Operation::Retain {
                     peer,
@@ -616,7 +618,7 @@ fn run(input: FuzzInput) -> String {
                 } => {
                     let index = peer % mailboxes.len();
                     assert!(mailboxes[index]
-                        .retain(move |key| key.0 % divisor == remainder % divisor)
+                        .retain(move |key, _| key.0 % divisor == remainder % divisor)
                         .accepted());
                 }
                 Operation::Sleep { duration_ms } => {
@@ -698,10 +700,13 @@ fn run(input: FuzzInput) -> String {
                                     + input.fetch_retry_timeout_ms,
                             ),
                     );
-                    assert!(mailboxes[index].clear().accepted());
+                    assert!(mailboxes[index].retain(|_, _| false).accepted());
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut delivered);
-                    assert!(mailboxes[index].cancel(key.clone()).accepted());
+                    let canceled = key.clone();
+                    assert!(mailboxes[index]
+                        .retain(move |fetch_key, _| fetch_key != &canceled)
+                        .accepted());
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut delivered);
                     let mut oracle_window = vec![BTreeSet::new(); peers.len()];
