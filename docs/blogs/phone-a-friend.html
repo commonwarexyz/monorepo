@@ -44,8 +44,13 @@ will be used to quickly verify the result." />
         <meta property="twitter:creator" content="https://x.com/gvamsip" />
     
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
     
     <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
@@ -117,15 +122,15 @@ Vamsi Policharla</a></div>
         used to decrypt an arbitrary number of ciphertexts. But building
         an application on-chain with this requires some care.</p>
         <p>Consider a sealed-bid auction where users encrypt their bid
-        to some time <span class="math inline">\(T\)</span> in the
-        future, when the auction ends. It’s now entirely possible that a
-        user’s bid is not included on chain before <span
-        class="math inline">\(T\)</span> and therefore never included as
+        to some time <span class="math inline">T</span> in the future,
+        when the auction ends. It’s now entirely possible that a user’s
+        bid is not included on chain before <span
+        class="math inline">T</span> and therefore never included as
         part of the auction, but after time <span
-        class="math inline">\(T\)</span> their bid can be decrypted.
-        While you can mitigate this by ensuring users have sufficient
-        time to have their bids included, this is not always reasonable
-        in time sensitive applications such as trading.</p>
+        class="math inline">T</span> their bid can be decrypted. While
+        you can mitigate this by ensuring users have sufficient time to
+        have their bids included, this is not always reasonable in time
+        sensitive applications such as trading.</p>
         <p><strong>Batched Threshold Encryption:</strong> This brings us
         to batched threshold encryption which allows the validator set
         to <em>specify</em> the exact set of ciphertexts that should be
@@ -139,16 +144,16 @@ Vamsi Policharla</a></div>
         href="https://eprint.iacr.org/2026/674">BNRT26</a>, <a
         href="https://eprint.iacr.org/2026/760">Pol26</a>, <a
         href="https://eprint.iacr.org/2026/754">ADG+26</a>] have reduced
-        the ciphertext size to <span
-        class="math inline">\(|\mathbb{G}_1| + |\mathsf{msg}|\)</span> –
-        just 16 bytes longer than threshold ElGamal (over ed25519) when
-        instantiated with BLS12-381. Decryption is the fastest amongst
-        all known schemes but nevertheless still requires <span
-        class="math inline">\(O(B\log{B})\)</span> group operations and
-        <span class="math inline">\(O(B)\)</span> pairings.</p>
+        the ciphertext size to <span class="math inline">|\mathbb{G}_1|
+        + |\mathsf{msg}|</span> – just 16 bytes longer than threshold
+        ElGamal (over ed25519) when instantiated with BLS12-381.
+        Decryption is the fastest amongst all known schemes but
+        nevertheless still requires <span
+        class="math inline">O(B\log{B})</span> group operations and
+        <span class="math inline">O(B)</span> pairings.</p>
         <p>Both IBE and BTE still require a few pairings to decrypt a
         ciphertext which places a lower bound of <span
-        class="math inline">\(\approx 1\)</span> ms per transaction.
+        class="math inline">\approx 1</span> ms per transaction.
         Processing 100K transactions would still require 100s in
         single-core CPU time!</p>
         <h2 id="how-do-we-scale">How do we scale?</h2>
@@ -170,7 +175,7 @@ Vamsi Policharla</a></div>
         Broadcast Encryption [<a
         href="https://eprint.iacr.org/2023/874">KMW23</a>] and more can
         be viewed as witness encryptions for relations of the form:</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \underbrace{
         \begin{bmatrix}
         A_{1,1} &amp; \cdots &amp; A_{1,n} \\
@@ -197,67 +202,65 @@ Vamsi Policharla</a></div>
         b_m
         \end{bmatrix}
         }_{\text{public statement}}
-        \]</span></p>
-        <p>Here <span class="math inline">\(\circ\)</span> denotes a
-        pairing (and its natural extension to matrix multiplication),
-        the entries of <span class="math inline">\(A\)</span> and <span
-        class="math inline">\(w\)</span> are from compatible source
-        groups, and the entries of <span
-        class="math inline">\(b\)</span> lie in <span
-        class="math inline">\(\mathbb{G}_T\)</span>. Given randomness
+        </span></p>
+        <p>Here <span class="math inline">\circ</span> denotes a pairing
+        (and its natural extension to matrix multiplication), the
+        entries of <span class="math inline">A</span> and <span
+        class="math inline">w</span> are from compatible source groups,
+        and the entries of <span class="math inline">b</span> lie in
+        <span class="math inline">\mathbb{G}_T</span>. Given randomness
         <span
-        class="math inline">\(\alpha=(\alpha_1,\ldots,\alpha_m)\)</span>,
-        encryption of a message <span class="math inline">\(M\)</span>
-        has the form <span class="math inline">\(\mathsf{Enc}(M,
-        (A,b)):\)</span></p>
-        <p><span class="math display">\[
+        class="math inline">\alpha=(\alpha_1,\ldots,\alpha_m)</span>,
+        encryption of a message <span class="math inline">M</span> has
+        the form <span class="math inline">\mathsf{Enc}(M,
+        (A,b)):</span></p>
+        <p><span class="math display">
         \mathsf{ct}_0 := M + \sum_{i=1}^{m}\alpha_i b_i,
         \qquad
         \mathsf{ct}_j := \sum_{i=1}^{m}\alpha_i A_{i,j}
         \quad\text{for }j\in[n].
-        \]</span></p>
-        <p>Given a valid witness <span class="math inline">\(w\)</span>,
+        </span></p>
+        <p>Given a valid witness <span class="math inline">w</span>,
         decryption recovers the message as <span
-        class="math inline">\(\mathsf{Dec}(\mathsf{ct}, w):\)</span></p>
-        <p><span class="math display">\[
+        class="math inline">\mathsf{Dec}(\mathsf{ct}, w):</span></p>
+        <p><span class="math display">
         M \gets \mathsf{ct}_0 - \sum_{j=1}^{n}\mathsf{ct}_j \circ w_j.
-        \]</span></p>
+        </span></p>
         <p><strong>Phone a Friend:</strong> Instead of every single
         validator carrying out the work of decryption, a
         well-provisioned helper can do the work once and broadcast
         <em>hints</em> to the network which will be used to quickly
         verify the result. More formally, there exists a method:</p>
         <p><span
-        class="math display">\[\mathsf{HintDec}((\mathsf{ct}^1,\ldots,\mathsf{ct}^B),
-        \mathsf{hint}) \to (m^1,\dots,m^B)\]</span></p>
+        class="math display">\mathsf{HintDec}((\mathsf{ct}^1,\ldots,\mathsf{ct}^B),
+        \mathsf{hint}) \to (m^1,\dots,m^B)</span></p>
         <p>which takes as input a batch of <span
-        class="math inline">\(B\)</span> ciphertexts <span
-        class="math inline">\(\mathsf{ct}^1, \ldots,
-        \mathsf{ct}^B\)</span> and a hint <span
-        class="math inline">\(\mathsf{hint}\)</span>, and outputs the
-        messages <span class="math inline">\(m^1, \ldots, m^B\)</span>
-        or <span class="math inline">\(\bot\)</span>. Of course <span
-        class="math inline">\(\mathsf{HintDec}\)</span> is non-trivial
+        class="math inline">B</span> ciphertexts <span
+        class="math inline">\mathsf{ct}^1, \ldots, \mathsf{ct}^B</span>
+        and a hint <span class="math inline">\mathsf{hint}</span>, and
+        outputs the messages <span class="math inline">m^1, \ldots,
+        m^B</span> or <span class="math inline">\bot</span>. Of course
+        <span class="math inline">\mathsf{HintDec}</span> is non-trivial
         only if it offers a speedup over the naive decryption algorithm.
         For security, we will require that it is computationally
         infeasible to produce a <span
-        class="math inline">\(\mathsf{hint}\)</span> such that:</p>
-        <p><span class="math display">\[
+        class="math inline">\mathsf{hint}</span> such that:</p>
+        <p><span class="math display">
         \mathsf{HintDec}((\mathsf{ct}^1,\ldots,\mathsf{ct}^B),
         \mathsf{hint}) \neq (\mathsf{Dec}(\mathsf{ct}^1, w^1), \ldots,
         \mathsf{Dec}(\mathsf{ct}^B, w^B))
-        \]</span></p>
+        </span></p>
         <p>even for adversarially chosen ciphertexts <span
-        class="math inline">\((\mathsf{ct}^1,\ldots,\mathsf{ct}^B)\)</span>,
+        class="math inline">(\mathsf{ct}^1,\ldots,\mathsf{ct}^B)</span>,
         where the probability is taken over the randomness of the
         adversary. Thus we only rely on the helper for liveness and a
         malicious helper cannot violate safety by equivocating
         hints.</p>
         <h3 id="a-first-attempt">A First Attempt</h3>
         <p>In some pairing based proof systems, it’s possible to reduce
-        the verification of <span class="math inline">\(N\)</span>
-        pairing product equations to MSMs of size <span
-        class="math inline">\(N\)</span> and a single pairing product
+        the verification of <span class="math inline">N</span> pairing
+        product equations to MSMs of size <span
+        class="math inline">N</span> and a single pairing product
         equation. In fact, we used this idea in our previous <a
         href="/blogs/batch-pari">blog post</a> on batch verification of
         Pari proofs.</p>
@@ -269,13 +272,12 @@ Vamsi Policharla</a></div>
         href="https://eprint.iacr.org/2008/015">FGHP09</a>. This reduces
         many checks to a single pairing-product equation. However, the
         number of pairings only reduces when there is a common input
-        across the different pairing terms: <span
-        class="math display">\[
+        across the different pairing terms: <span class="math display">
         \prod_{i=1}^B e(g_i, h)^{r_i} = e\left(\sum_{i=1}^B r_i g_i,\;
         h\right).
-        \]</span></p>
+        </span></p>
         <p>So if all ciphertexts use the same witness, the verifier can
-        fold pairings across the <span class="math inline">\(B\)</span>
+        fold pairings across the <span class="math inline">B</span>
         ciphertexts with an MSM. Fortunately, this is the case for
         Timelock encryption as the witness is a signature on the block
         height. But if each ciphertext has its own unrelated witness,
@@ -294,7 +296,7 @@ Vamsi Policharla</a></div>
         ciphertext is a valid encryption of the claimed message under
         the claimed randomness. In the linear WE notation above, this
         means checking:</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \mathsf{ct}_j
         \stackrel{?}{=}
         \sum_{i=1}^{m}\alpha_i A_{i,j}
@@ -303,30 +305,30 @@ Vamsi Policharla</a></div>
         \mathsf{ct}_0 - M
         \stackrel{?}{=}
         \sum_{i=1}^{m}\alpha_i b_i.
-        \]</span></p>
+        </span></p>
         <p>These checks use MSMs in the source groups and target group,
         but no pairings. They also batch naturally via <a
         href="https://eprint.iacr.org/2008/015">FGHP09</a>: sample
         random coefficients <span
-        class="math inline">\(r_1,\ldots,r_B\gets\mathbb{F}\)</span> and
+        class="math inline">r_1,\ldots,r_B\gets\mathbb{F}</span> and
         check the random linear combination of the claimed openings:</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \sum_{k=1}^{B} r_k\mathsf{ct}^k_j
         \stackrel{?}{=}
         \sum_{k=1}^{B}\sum_{i=1}^{m} r_k\alpha^k_i A^k_{i,j}
         \quad\text{for every }j\in[n],
-        \]</span></p>
+        </span></p>
         <p>and</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \sum_{k=1}^{B} r_k(\mathsf{ct}^k_0-M^k)
         \stackrel{?}{=}
         \sum_{k=1}^{B}\sum_{i=1}^{m} r_k\alpha^k_i b^k_i.
-        \]</span></p>
+        </span></p>
         <p>The missing piece is actually recovering the randomness from
         the ciphertext. A simple approach is to just encrypt the
         randomness in a separate ciphertext, but this comes at a <span
-        class="math inline">\(2\times\)</span> penalty in ciphertext
-        size and encryption/decryption time.</p>
+        class="math inline">2\times</span> penalty in ciphertext size
+        and encryption/decryption time.</p>
         <h3 id="randomness-recovery">Randomness Recovery</h3>
         <p>Our approach uses the <a
         href="https://link.springer.com/chapter/10.1007/3-540-48405-1_34">Fujisaki-Okamoto
@@ -337,67 +339,64 @@ Vamsi Policharla</a></div>
         So constructions such as batched threshold encryption still
         require additional mechanisms such as Simulation-Extractable
         NIZKs for CCA security.</p>
-        <p>Let <span class="math inline">\(\mathcal{K}\)</span> be the
+        <p>Let <span class="math inline">\mathcal{K}</span> be the
         message space of the underlying WE scheme, and</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         H_R:\mathcal{K}\times\{0,1\}^{\ell_m}\to\{0,1\}^{\ell_\rho},
         \qquad
         H_M:\mathcal{K}\to\{0,1\}^{\ell_m},
-        \]</span></p>
+        </span></p>
         <p>be random oracles, and let <span
-        class="math inline">\(G:\{0,1\}^{\ell_\rho}\to\mathbb{F}^m\)</span>
-        be a PRG. To encrypt a message <span class="math inline">\(M \in
-        \{0,1\}^{\ell_m}\)</span>, sample <span
-        class="math inline">\(K\gets\mathcal{K}\)</span>, derive</p>
-        <p><span class="math display">\[
+        class="math inline">G:\{0,1\}^{\ell_\rho}\to\mathbb{F}^m</span>
+        be a PRG. To encrypt a message <span class="math inline">M \in
+        \{0,1\}^{\ell_m}</span>, sample <span
+        class="math inline">K\gets\mathcal{K}</span>, derive</p>
+        <p><span class="math display">
         \rho := H_R(K,M),
         \qquad
         \alpha := G(\rho),
-        \]</span></p>
+        </span></p>
         <p>and output:</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \mathsf{ct}&#39; := \left(\mathsf{Enc}((A,b), K; \alpha),\;
         H_M(K)\oplus M\right).
-        \]</span></p>
+        </span></p>
         <p>This gives two possible choices for the hint:</p>
         <ul>
         <li><p><strong>Bandwidth-optimized:</strong> the helper sends
-        the short PRG seed <span class="math inline">\(\rho^k\)</span>
-        (16 bytes) for each ciphertext. Parse the <span
-        class="math inline">\(k\)</span>-th transformed ciphertext as
-        <span class="math inline">\(\mathsf{ct}^{\prime
+        the short PRG seed <span class="math inline">\rho^k</span> (16
+        bytes) for each ciphertext. Parse the <span
+        class="math inline">k</span>-th transformed ciphertext as <span
+        class="math inline">\mathsf{ct}^{\prime
         k}=((\mathsf{ct}^k_0,\mathsf{ct}^k_1,\ldots,\mathsf{ct}^k_n),
-        c^k)\)</span> where <span
-        class="math inline">\(c^k=H_M(K^k)\oplus M^k\)</span>. For each
-        <span class="math inline">\(k\in[B]\)</span>, the verifier
-        computes</p>
-        <p><span class="math display">\[
+        c^k)</span> where <span class="math inline">c^k=H_M(K^k)\oplus
+        M^k</span>. For each <span class="math inline">k\in[B]</span>,
+        the verifier computes</p>
+        <p><span class="math display">
         \alpha^k := G(\rho^k),
         \qquad
         K^k := \mathsf{ct}^k_0-\sum_{i=1}^{m}\alpha^k_i b^k_i,
         \qquad
         M^k := c^k\oplus H_M(K^k),
-        \]</span></p>
-        <p>checks <span
-        class="math inline">\(\rho^k=H_R(K^k,M^k)\)</span>, and then
-        batch-verifies <span
-        class="math inline">\(\mathsf{ct}^k_j=\sum_{i=1}^{m}\alpha^k_i
-        A^k_{i,j}\)</span> for every <span
-        class="math inline">\(j\in[n]\)</span>.</p></li>
+        </span></p>
+        <p>checks <span class="math inline">\rho^k=H_R(K^k,M^k)</span>,
+        and then batch-verifies <span
+        class="math inline">\mathsf{ct}^k_j=\sum_{i=1}^{m}\alpha^k_i
+        A^k_{i,j}</span> for every <span
+        class="math inline">j\in[n]</span>.</p></li>
         <li><p><strong>Verification-optimized:</strong> the helper sends
-        <span class="math inline">\(K^k\)</span> directly (576 bytes)
-        for each ciphertext. For each <span
-        class="math inline">\(k\in[B]\)</span>, the verifier
-        computes</p>
-        <p><span class="math display">\[
+        <span class="math inline">K^k</span> directly (576 bytes) for
+        each ciphertext. For each <span
+        class="math inline">k\in[B]</span>, the verifier computes</p>
+        <p><span class="math display">
         M^k := c^k\oplus H_M(K^k),
         \qquad
         \rho^k := H_R(K^k,M^k),
         \qquad
         \alpha^k := G(\rho^k).
-        \]</span></p>
+        </span></p>
         <p>It then batch-verifies:</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \mathsf{ct}^k_j
         =
         \sum_{i=1}^{m}\alpha^k_i A^k_{i,j}
@@ -406,10 +405,10 @@ Vamsi Policharla</a></div>
         \mathsf{ct}^k_0-K^k
         =
         \sum_{i=1}^{m}\alpha^k_i b^k_i.
-        \]</span></p>
+        </span></p>
         <p>This uses larger hints, but avoids the per-ciphertext
         target-group work needed to recover <span
-        class="math inline">\(K^k\)</span> from a seed.</p></li>
+        class="math inline">K^k</span> from a seed.</p></li>
         </ul>
         <h2 id="scaling-batched-threshold-encryption">Scaling Batched
         Threshold Encryption</h2>
@@ -426,7 +425,7 @@ Vamsi Policharla</a></div>
         ciphertexts. Suppose a user submits a ciphertext that fails the
         FO decryption check such that the helper cannot recover
         randomness. Observe that the helper cannot just output <span
-        class="math inline">\(\bot\)</span>, because a malicious helper
+        class="math inline">\bot</span>, because a malicious helper
         could suppress honest ciphertexts by falsely claiming they are
         malformed. Instead, the helper needs to <em>prove</em> the
         ciphertext is malformed. One can of course attach a SNARK but
@@ -439,39 +438,36 @@ Vamsi Policharla</a></div>
         <ul>
         <li><p><strong>Encrypt:</strong> An ElGamal-style
         ciphertext:</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \mathsf{ct} := \left([k]_1,\; m + [k\tau^{B+1}]_T\right)
-        \]</span></p></li>
+        </span></p></li>
         <li><p><strong>Partial Decrypt:</strong> To decrypt a batch
-        <span class="math inline">\((\mathsf{ct}_i)_{i\in[B]}\)</span>,
-        each validator <span class="math inline">\(j\)</span> holding
-        shares <span
-        class="math inline">\((\sigma^i_j)_{i\in[B]}\)</span> of <span
-        class="math inline">\((\tau^i)_{i\in[B]}\)</span>
-        broadcasts:</p>
-        <p><span class="math display">\[
+        <span class="math inline">(\mathsf{ct}_i)_{i\in[B]}</span>, each
+        validator <span class="math inline">j</span> holding shares
+        <span class="math inline">(\sigma^i_j)_{i\in[B]}</span> of <span
+        class="math inline">(\tau^i)_{i\in[B]}</span> broadcasts:</p>
+        <p><span class="math display">
         \mathsf{pd}_j := \sum_{i\in[B]} \sigma_j^i\cdot
         \mathsf{ct}_{i,1}
-        \]</span></p>
-        <p>Any <span class="math inline">\(t\)</span> partial
-        decryptions are combined via Lagrange interpolation to
-        reconstruct:</p>
-        <p><span class="math display">\[
+        </span></p>
+        <p>Any <span class="math inline">t</span> partial decryptions
+        are combined via Lagrange interpolation to reconstruct:</p>
+        <p><span class="math display">
         \mathsf{pd} = \left[\sum_{i\in[B]} k_i\tau^i\right]_1
-        \]</span></p></li>
+        </span></p></li>
         </ul>
         <p>At first glance, one might view each ciphertext as a witness
         encryption for the relation</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         [1]_1\circ w=[\tau^{B+1}]_T.
-        \]</span></p>
+        </span></p>
         <p>Clearly the only witness that can satisfy this relation is
-        <span class="math inline">\(w = [\tau^{B+1}]_2\)</span> but the
+        <span class="math inline">w = [\tau^{B+1}]_2</span> but the
         decryptor never learns it. In fact, they never should as it
         allows them to decrypt all ciphertexts (even outside the batch).
         Instead, consider the following relation <span
-        class="math inline">\(R_j\)</span>:</p>
-        <p><span class="math display">\[
+        class="math inline">R_j</span>:</p>
+        <p><span class="math display">
         \begin{bmatrix}
         [1]_1 &amp; 0 &amp; \cdots &amp; 0 &amp; [\tau]_1 \\
         0 &amp; [1]_1 &amp; \cdots &amp; 0 &amp; [\tau^2]_1 \\
@@ -494,66 +490,66 @@ Vamsi Policharla</a></div>
         \vdots\\
         0
         \end{bmatrix},
-        \]</span></p>
+        </span></p>
         <p>where the non-zero entry on the right-hand side is in the
-        <span class="math inline">\(j\)</span>-th row. If we run the WE
-        encryption algorithm for <span
-        class="math inline">\(R_j\)</span> with randomness <span
-        class="math inline">\((k_1,\ldots,k_B)\)</span>, the resulting
+        <span class="math inline">j</span>-th row. If we run the WE
+        encryption algorithm for <span class="math inline">R_j</span>
+        with randomness <span
+        class="math inline">(k_1,\ldots,k_B)</span>, the resulting
         ciphertext has the form:</p>
-        <p><span class="math display">\[
+        <p><span class="math display">
         \left(
         [k_1]_1,\ldots,[k_B]_1,\;
         \left[\sum_{i=1}^{B}k_i\tau^i\right]_1,\;
         [k_j\tau^{B+1}]_T+m
         \right).
-        \]</span></p>
+        </span></p>
         <p>As it turns out, if we want to encrypt different messages
-        <span class="math inline">\(\{m_j\}_{j \in [B]}\)</span> under
-        relations <span class="math inline">\(\{\mathcal{R}_j\}_{j \in
-        [B]}\)</span>, respectively, we can <em>securely</em> share the
-        randomness <span class="math inline">\((k_1,\dots,k_B)\)</span>
+        <span class="math inline">\{m_j\}_{j \in [B]}</span> under
+        relations <span class="math inline">\{\mathcal{R}_j\}_{j \in
+        [B]}</span>, respectively, we can <em>securely</em> share the
+        randomness <span class="math inline">(k_1,\dots,k_B)</span>
         between the ciphertexts. This can also be viewed as a <a
         href="https://eprint.iacr.org/2014/301">witness PRF</a>, where
-        <span class="math inline">\(([k_1]_1,\ldots,[k_B]_1,
-        \left[\sum_{i=1}^{B}k_i\tau^i\right]_1)\)</span> is the secret
-        key and <span
-        class="math inline">\((0,\ldots,[\tau^{B+1}]_T,\ldots,0)\)</span>
-        is the statement at which the PRF is evaluated.</p>
+        <span class="math inline">([k_1]_1,\ldots,[k_B]_1,
+        \left[\sum_{i=1}^{B}k_i\tau^i\right]_1)</span> is the secret key
+        and <span
+        class="math inline">(0,\ldots,[\tau^{B+1}]_T,\ldots,0)</span> is
+        the statement at which the PRF is evaluated.</p>
         <p>This leads to a compression in the ciphertext size from <span
-        class="math inline">\(B(B + 1)\times\mathbb{G}_1 + B\times
-        \mathbb{G}_T\)</span> group elements to <span
-        class="math inline">\((B + 1)\times\mathbb{G}_1 + B\times
-        \mathbb{G}_T\)</span> group elements.</p>
-        <p><span class="math display">\[
+        class="math inline">B(B + 1)\times\mathbb{G}_1 + B\times
+        \mathbb{G}_T</span> group elements to <span
+        class="math inline">(B + 1)\times\mathbb{G}_1 + B\times
+        \mathbb{G}_T</span> group elements.</p>
+        <p><span class="math display">
         \mathsf{ct} =\left(
         [k_1]_1,\ldots,[k_B]_1,\;
         \left[\sum_{i=1}^{B}k_i\tau^i\right]_1,\;
         [k_1\tau^{B+1}]_T+m_1,\ldots,[k_B\tau^{B+1}]_T+m_B
         \right).
-        \]</span></p>
+        </span></p>
         <div data-align="center">
         <p>This is precisely the batch of ciphertexts together with the
         partial decryption in the simple-BTE scheme! Thus the users and
         the committee produce the ciphertext <span
-        class="math inline">\(\mathsf{ct}\)</span> in a
-        <em>distributed</em> manner.</p>
+        class="math inline">\mathsf{ct}</span> in a <em>distributed</em>
+        manner.</p>
         </div>
         <p><strong>Decrypt:</strong> To decrypt the <span
-        class="math inline">\(i\)</span>-th ciphertext, we use <span
-        class="math inline">\(\{h_{\ell+B+1-i}\}_{\ell\in[0,B]\setminus\{i\}}\)</span>
+        class="math inline">i</span>-th ciphertext, we use <span
+        class="math inline">\{h_{\ell+B+1-i}\}_{\ell\in[0,B]\setminus\{i\}}</span>
         as the witness which is readily available in the public
-        parameters. <span class="math display">\[
+        parameters. <span class="math display">
           m_i = \mathsf{ct}_{i,2} - \mathsf{pd}\circ h_{B+1-i}
           + \sum_{\substack{\ell\in[B]\\\ell\ne i}}
           \mathsf{ct}_{\ell,1}\circ h_{\ell+B+1-i}
-          \]</span></p>
+          </span></p>
         <h3 id="malformed-ciphertexts">Malformed Ciphertexts</h3>
         <p>The construction above assumes the helper can recover the
         randomness for all ciphertexts. However, a malicious user can
         always submit a malformed ciphertext that fails the decryption
         checks. In this case, the helper cannot simply output <span
-        class="math inline">\(\bot\)</span>, because a malicious helper
+        class="math inline">\bot</span>, because a malicious helper
         could suppress a valid ciphertext by falsely claiming it is
         malformed.</p>
         <p>One strategy is to have the helper provide the witness for
@@ -562,17 +558,16 @@ Vamsi Policharla</a></div>
         ciphertext is malformed. Indeed, this would work for [<a
         href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
         href="https://eprint.iacr.org/2024/1575">AFP25</a>] since the
-        witness is <span class="math inline">\(O(1)\)</span> group
-        elements. But as we saw above, the witness for the Simple BTE
-        relation is actually <span class="math inline">\(O(B)\)</span>
-        group elements and decryption requires <span
-        class="math inline">\(O(B)\)</span> pairings. Naively using the
-        above strategy would quickly destroy the benefit of helper-aided
-        verification. In <a href="https://eprint.iacr.org/2026/760">our
-        paper</a>, we show how to use <a
-        href="https://eprint.iacr.org/2019/1177">Inner Pairing Product
-        Proofs</a> to certify the malformed ciphertexts more
-        efficiently.</p>
+        witness is <span class="math inline">O(1)</span> group elements.
+        But as we saw above, the witness for the Simple BTE relation is
+        actually <span class="math inline">O(B)</span> group elements
+        and decryption requires <span class="math inline">O(B)</span>
+        pairings. Naively using the above strategy would quickly destroy
+        the benefit of helper-aided verification. In <a
+        href="https://eprint.iacr.org/2026/760">our paper</a>, we show
+        how to use <a href="https://eprint.iacr.org/2019/1177">Inner
+        Pairing Product Proofs</a> to certify the malformed ciphertexts
+        more efficiently.</p>
         <h2 id="evaluation">Evaluation</h2>
         <p>We benchmarked the batch verification of decryption for the
         simple BTE scheme on an M5 MacBook Pro in single-threaded mode.
@@ -589,7 +584,7 @@ Vamsi Policharla</a></div>
         <thead>
         <tr>
         <th style="text-align: center;"><span
-        class="math inline">\(B\)</span></th>
+        class="math inline">B</span></th>
         <th style="text-align: center;">Helper</th>
         <th style="text-align: center;">Naive</th>
         <th style="text-align: center;">Bandwidth-opt.</th>
@@ -601,71 +596,71 @@ Vamsi Policharla</a></div>
         <td style="text-align: center;">32</td>
         <td style="text-align: center;">121.61 ms</td>
         <td style="text-align: center;">89.61 ms (1.4 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">11.53 ms (10.5 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">7.274 ms (16.7 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         </tr>
         <tr>
         <td style="text-align: center;">128</td>
         <td style="text-align: center;">596.13 ms</td>
         <td style="text-align: center;">415.27 ms (1.4 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">45.48 ms (13.1 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">14.93 ms (39.9 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         </tr>
         <tr>
         <td style="text-align: center;">512</td>
         <td style="text-align: center;">2.84 s</td>
         <td style="text-align: center;">1.927 s (1.5 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">179.46 ms (15.8 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">34.45 ms (82.4 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         </tr>
         <tr>
         <td style="text-align: center;">2048</td>
         <td style="text-align: center;">12.78 s</td>
         <td style="text-align: center;">8.751 s (1.5 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">726.68 ms (17.6 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">112.01 ms (114.1 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         </tr>
         <tr>
         <td style="text-align: center;">16384</td>
         <td style="text-align: center;">120.76 s</td>
         <td style="text-align: center;">82.584 s (1.5 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">5.867 s (20.6 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">611.20 ms (197.6 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         </tr>
         <tr>
         <td style="text-align: center;">32768</td>
         <td style="text-align: center;">262.54 s</td>
         <td style="text-align: center;">174.005 s (1.5 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">12.006 s (21.9 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">1.136 s (231.1 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         </tr>
         <tr>
         <td style="text-align: center;">65536</td>
         <td style="text-align: center;">556.09 s</td>
         <td style="text-align: center;">366.852 s (1.5 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">23.937 s (23.2 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         <td style="text-align: center;">1.988 s (279.7 <span
-        class="math inline">\(\times\)</span>)</td>
+        class="math inline">\times</span>)</td>
         </tr>
         </tbody>
         </table>
@@ -680,14 +675,14 @@ Vamsi Policharla</a></div>
         ciphertext.</li>
         <li><strong>Bandwidth-optimized:</strong> This is the strategy
         described above where the helper sends the short PRG seed <span
-        class="math inline">\(\rho^k\)</span> for each ciphertext but
-        this comes at the cost of <span
-        class="math inline">\(\mathbb{G}_T\)</span> exponentiations for
-        each ciphertext.</li>
+        class="math inline">\rho^k</span> for each ciphertext but this
+        comes at the cost of <span
+        class="math inline">\mathbb{G}_T</span> exponentiations for each
+        ciphertext.</li>
         <li><strong>Verification-optimized:</strong> This is the
         strategy described above where the helper sends the recovered
-        <span class="math inline">\(K^k\)</span> values directly and
-        only uses MSMs/Hashes for verification.</li>
+        <span class="math inline">K^k</span> values directly and only
+        uses MSMs/Hashes for verification.</li>
         </ul>
         <p>While these benchmarks were run in single-threaded mode on an
         M5 MacBook Pro, we expect them to scale well with
@@ -710,13 +705,13 @@ Vamsi Policharla</a></div>
         partial decryption increases from 48 bytes to 192 bytes.</p>
         <p><strong>Local Decryption:</strong> If all validators carried
         out the decryption locally, they would need to speed up
-        decryption by over <span class="math inline">\(\approx 500
-        \times\)</span>. In theory, this can be achieved by running four
+        decryption by over <span class="math inline">\approx 500
+        \times</span>. In theory, this can be achieved by running four
         large instances that come with 128 vCPUs each (say) and cost
-        <span class="math inline">\(\approx 4 \times \$6.5\)</span> per
+        <span class="math inline">\approx 4 \times \$6.5</span> per
         hour, but this is much more expensive than the <span
-        class="math inline">\(\$2\)</span>-<span
-        class="math inline">\(\$3\)</span> per hour it normally costs to
+        class="math inline">\$2</span>-<span
+        class="math inline">\$3</span> per hour it normally costs to
         rent compute as a validator.</p>
         <p>With helper aided decryption:</p>
         <ul>
@@ -734,20 +729,20 @@ Vamsi Policharla</a></div>
         about 24 s (single threaded) verifying the decryption but this
         can of course be parallelized. This allows us to retain the
         benefits of batched verification (23 <span
-        class="math inline">\(\times\)</span> speedup) with a modest
-        (~4%) increase in bandwidth usage.</li>
+        class="math inline">\times</span> speedup) with a modest (~4%)
+        increase in bandwidth usage.</li>
         </ul>
         <p>In the figure below, we provide a visual representation of
         the three different decryption strategies. Pricing is estimated
         by assuming perfect parallelization of single threaded
         performance and calculating the number of threads required to
         attain 65K TPS. For local decryption we use 4 <span
-        class="math inline">\(\times\)</span> c8id.32x large instances
-        (128 vCPUs each), for verification optimized hints we use
-        r6id.large (2 vCPUs), and for bandwidth optimized hints we use
-        z1d.6xlarge (24 vCPUs). Reducing costs through the use of
-        specialized hardware such as GPUs/FPGAs is an interesting avenue
-        for future work.</p>
+        class="math inline">\times</span> c8id.32x large instances (128
+        vCPUs each), for verification optimized hints we use r6id.large
+        (2 vCPUs), and for bandwidth optimized hints we use z1d.6xlarge
+        (24 vCPUs). Reducing costs through the use of specialized
+        hardware such as GPUs/FPGAs is an interesting avenue for future
+        work.</p>
         <figure>
         <img src="/imgs/batch-mempool-decryption.png"
         alt="Helper-aided decryption reduces validator compute requirements compared to local decryption." />

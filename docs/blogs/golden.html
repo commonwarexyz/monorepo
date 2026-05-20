@@ -287,7 +287,8 @@ Meier</a></div>
         in order to prevent stalling by having malicious dealers
         withhold their contribution.</p>
         <p>There’s also no need to reason about malicious players in
-        this scheme: it’s easy to check that each dealer did the right
+        this scheme: because dealer contributions are <em>publicly
+        verifiable</em>, anyone can check that each dealer did the right
         thing, and you just need <span class="math inline">t</span>
         valid contributions, to ensure that you can’t create signatures
         with too few signers.</p>
@@ -328,8 +329,10 @@ Meier</a></div>
         it’s only used once, then we can safely include <span
         class="math inline">c_{ji}</span> as the ciphertext.</p>
         <p>How do we establish a shared mask between a dealer and a
-        player though? A natural primitive here is a key exchange
-        primitive, the idea is that:</p>
+        player though? A natural primitive here is a key exchange. We
+        have a function <span class="math inline">\text{ke}</span>,
+        taking in one secret key, one public key, and a message, such
+        that:</p>
         <p><span class="math display">
         \text{ke}(\text{sk}_i, \text{Pk}_j, \text{msg}) =
         \text{ke}(\text{Pk}_i, \text{sk}_j, \text{msg})
@@ -351,9 +354,17 @@ Meier</a></div>
         m_{ij} \cdot G</span>, then we could perform this check,
         allowing us to make sure that each share is masked correctly.
         Instead of doing a ZK proof for a full encryption, we could just
-        do a proof that <span class="math inline">M_{ij} = m_{ij} \cdot
-        G</span>, with <span class="math inline">m_{ij}</span> being the
-        “correct” mask.</p>
+        do a proof for the relation:</p>
+        <p><span class="math display">
+        \left\{ (M_{ij}, \text{Pk}_i, \text{Pk}_j) ; (\text{sk}_j,
+        m_{ij}) \mid
+        M_{ij} = m_{ij} \cdot G \land m_{ij} = \text{ke}(\text{Pk}_i,
+        \text{sk}_j) \land
+        \text{Pk}_j = \text{sk}_j \cdot G \right\}
+        </span></p>
+        <p>i.e. that <span class="math inline">M_{ij}</span> commits to
+        the “correct” mask derived from the dealer’s secret key and the
+        player’s public key.</p>
         <p>So, what we need is a random function that either the dealer
         or the player can compute, which can also be publicly verified.
         The jargon here is a <a
@@ -400,6 +411,8 @@ Meier</a></div>
         coordinates in <span class="math inline">\mathbb{F}</span>, and
         scalar field <span class="math inline">\mathbb{K}</span>.</li>
         </ul>
+        <p>Or, in a diagram:</p>
+        <p><img src="golden-001.png" style="display: block; margin: 0 auto;" alt="diagram showing groups G, F, H, and K with a pair (x, y) mapping into H"></p>
         <p>In other words, <span class="math inline">\mathbb{H}</span>
         is a curve “over” the group <span
         class="math inline">\mathbb{G}</span>. Concretely, for the case

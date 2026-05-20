@@ -182,10 +182,10 @@ In practice you would want to set a cutoff time (in terms of blocks, ideally),
 and would need to make sure that you had a supermajority of valid contributions,
 in order to prevent stalling by having malicious dealers withhold their contribution.
 
-There's also no need to reason about malicious players in this scheme: it's
-easy to check that each dealer did the right thing, and you just need
-$t$ valid contributions, to ensure that you can't create signatures with
-too few signers.
+There's also no need to reason about malicious players in this scheme: because
+dealer contributions are *publicly verifiable*, anyone can check that each
+dealer did the right thing, and you just need $t$ valid contributions, to
+ensure that you can't create signatures with too few signers.
 
 Another advantage is that with one round, it would be easy to pro-actively
 refresh shares.
@@ -220,7 +220,9 @@ If other participants don't know this mask, and it's only used once,
 then we can safely include $c_{ji}$ as the ciphertext.
 
 How do we establish a shared mask between a dealer and a player though?
-A natural primitive here is a key exchange primitive, the idea is that:
+A natural primitive here is a key exchange.
+We have a function $\text{ke}$, taking in one secret key, one public key,
+and a message, such that:
 
 $$
 \text{ke}(\text{sk}_i, \text{Pk}_j, \text{msg}) = \text{ke}(\text{Pk}_i, \text{sk}_j, \text{msg})
@@ -242,7 +244,16 @@ $$
 If we had access to $M_{ij} := m_{ij} \cdot G$, then we could perform this check,
 allowing us to make sure that each share is masked correctly.
 Instead of doing a ZK proof for a full encryption, we could just do a proof
-that $M_{ij} = m_{ij} \cdot G$, with $m_{ij}$ being the "correct" mask.
+for the relation:
+
+$$
+\left\{ (M_{ij}, \text{Pk}_i, \text{Pk}_j) ; (\text{sk}_j, m_{ij}) \mid
+M_{ij} = m_{ij} \cdot G \land m_{ij} = \text{ke}(\text{Pk}_i, \text{sk}_j) \land
+\text{Pk}_j = \text{sk}_j \cdot G \right\}
+$$
+
+i.e. that $M_{ij}$ commits to the "correct" mask derived from the dealer's
+secret key and the player's public key.
 
 So, what we need is a random function that either the dealer or the player
 can compute, which can also be publicly verified.
@@ -284,6 +295,10 @@ The situation is that we have:
 
 - DKG group $\mathbb{G}$, scalar field $\mathbb{F}$,
 - DH curve $\mathbb{H}$ with coordinates in $\mathbb{F}$, and scalar field $\mathbb{K}$.
+
+Or, in a diagram:
+
+<img src="golden-001.png" style="display: block; margin: 0 auto;" alt="diagram showing groups G, F, H, and K with a pair (x, y) mapping into H">
 
 In other words, $\mathbb{H}$ is a curve "over" the group $\mathbb{G}$.
 Concretely, for the case of [BLS12-381](https://electriccoin.co/blog/new-snark-curve/),
