@@ -125,7 +125,7 @@ where
 {
     type Block = B;
 
-    async fn subscribe(self, block: Self::Block) -> Option<Self::Block> {
+    async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
         let parent_height = block.height().previous()?;
         let commitment = block.context().parent.1;
         self.subscribe_by_commitment(

@@ -133,7 +133,7 @@ mod tests {
             let child = make_raw_block(parent.digest(), Height::new(2), 200);
             let subscription = context
                 .child("subscribe")
-                .spawn(move |_| BlockProvider::subscribe(mailbox, child));
+                .spawn(move |_| BlockProvider::subscribe_parent(mailbox, child));
 
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(

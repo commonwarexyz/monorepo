@@ -40,7 +40,10 @@ pub trait BlockProvider: Clone + Send + 'static {
     /// the parent.
     ///
     /// The child block can carry variant-specific context needed to retrieve its parent.
-    fn subscribe(self, block: Self::Block) -> impl Future<Output = Option<Self::Block>> + Send;
+    fn subscribe_parent(
+        self,
+        block: Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send;
 }
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
@@ -106,7 +109,7 @@ where
             let should_walk_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
-                let future = this.marshal.clone().subscribe(block.clone()).boxed();
+                let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -138,7 +141,7 @@ where
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
-                    let future = this.marshal.clone().subscribe(block.clone()).boxed();
+                    let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -176,7 +179,7 @@ mod test {
     impl BlockProvider for MockProvider {
         type Block = Block<Sha256Digest, ()>;
 
-        async fn subscribe(self, block: Self::Block) -> Option<Self::Block> {
+        async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
             let parent = block.parent;
             self.0.into_iter().find(|b| b.digest() == parent)
         }
