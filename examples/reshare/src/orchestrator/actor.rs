@@ -32,6 +32,34 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
 
+/// Returns the digest Simplex should use as the floor for `epoch`.
+async fn floor_digest_for_epoch<S, H, C, V>(
+    epoch: Epoch,
+    marshal: &MarshalMailbox<S, Standard<Block<H, C, V>>>,
+) -> H::Digest
+where
+    S: Scheme,
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    let Some(previous_epoch) = epoch.previous() else {
+        return genesis::<H, C, V>().digest();
+    };
+
+    let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+    let boundary_height = epocher
+        .last(previous_epoch)
+        .expect("previous epoch should exist");
+    marshal
+        .get_block(boundary_height)
+        .await
+        .unwrap_or_else(|| {
+            panic!("missing boundary block for epoch {epoch} at height {boundary_height}")
+        })
+        .digest()
+}
+
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S, L, T>
 where
@@ -305,6 +333,9 @@ where
             .context
             .child("consensus_engine")
             .with_attribute("epoch", epoch);
+        let floor = simplex::Floor::genesis(
+            floor_digest_for_epoch::<S, H, C, V>(epoch, &self.marshal).await,
+        );
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
@@ -317,7 +348,7 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: NZUsize!(1024),
                 epoch,
-                floor: simplex::Floor::genesis(genesis::<H, C, V>().digest()),
+                floor,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

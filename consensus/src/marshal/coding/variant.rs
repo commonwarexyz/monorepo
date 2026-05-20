@@ -16,6 +16,7 @@ use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{certificate::Scheme, Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
+use std::future::Future;
 
 /// The coding variant of Marshal, which uses erasure coding for block dissemination.
 ///
@@ -125,17 +126,24 @@ where
 {
     type Block = B;
 
-    async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
-        let parent_height = block.height().previous()?;
-        let commitment = block.context().parent.1;
-        self.subscribe_by_commitment(
-            commitment,
-            CommitmentFallback::FetchByCommitment {
-                height: parent_height,
-            },
-        )
-        .await
-        .ok()
-        .map(<Coding<B, C, H, P> as Variant>::into_inner)
+    fn subscribe_parent(
+        &self,
+        block: &Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        let receiver = block.height().previous().map(|parent_height| {
+            self.subscribe_by_commitment(
+                block.context().parent.1,
+                CommitmentFallback::FetchByCommitment {
+                    height: parent_height,
+                },
+            )
+        });
+        async move {
+            let receiver = receiver?;
+            receiver
+                .await
+                .ok()
+                .map(<Coding<B, C, H, P> as Variant>::into_inner)
+        }
     }
 }
