@@ -224,14 +224,18 @@ struct Floor<S: CertificateScheme, C: Digest> {
 }
 
 impl<S: CertificateScheme, C: Digest> Floor<S, C> {
-    fn resolved(height: Height, round: Round) -> Self {
+    const fn resolved(height: Height, round: Round) -> Self {
         Self {
             processed: ProcessedFloor { height, round },
             pending: None,
         }
     }
 
-    fn awaiting_anchor(height: Height, round: Round, finalization: Finalization<S, C>) -> Self {
+    const fn awaiting_anchor(
+        height: Height,
+        round: Round,
+        finalization: Finalization<S, C>,
+    ) -> Self {
         Self {
             processed: ProcessedFloor { height, round },
             pending: Some(finalization),
@@ -246,11 +250,11 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
         self.processed.round
     }
 
-    fn set_processed_height(&mut self, height: Height) {
+    const fn set_processed_height(&mut self, height: Height) {
         self.processed.height = height;
     }
 
-    fn set_processed_round(&mut self, round: Round) {
+    const fn set_processed_round(&mut self, round: Round) {
         self.processed.round = round;
     }
 
@@ -276,7 +280,7 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
 
     /// Takes the pending anchor finalization, if any.
     #[must_use]
-    fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
+    const fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
         self.pending.take()
     }
 
@@ -500,6 +504,12 @@ where
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
         let processed_height = context.gauge("processed_height", "Processed height of application");
         let _ = processed_height.try_set(last_processed_height.get());
+        let floor = pending_floor_anchor.map_or_else(
+            || Floor::resolved(last_processed_height, last_processed_round),
+            |finalization| {
+                Floor::awaiting_anchor(last_processed_height, last_processed_round, finalization)
+            },
+        );
 
         // Initialize mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -514,14 +524,7 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                floor: match pending_floor_anchor {
-                    Some(finalization) => Floor::awaiting_anchor(
-                        last_processed_height,
-                        last_processed_round,
-                        finalization,
-                    ),
-                    None => Floor::resolved(last_processed_height, last_processed_round),
-                },
+                floor,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
