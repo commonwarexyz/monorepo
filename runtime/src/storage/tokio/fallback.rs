@@ -29,14 +29,33 @@ impl Blob {
         }
     }
 
-    async fn write_single_at(file: &mut fs::File, buf: &[u8]) -> Result<(), Error> {
-        file.write_all(buf).await.map_err(|_| Error::WriteFailed)
+    async fn write_at_inner(
+        file: &mut fs::File,
+        offset: u64,
+        bufs: &mut IoBufs,
+    ) -> Result<(), Error> {
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+
+        if let Some(buf) = bufs.as_single() {
+            file.write_all(buf.as_ref())
+                .await
+                .map_err(|_| Error::WriteFailed)
+        } else {
+            file.write_all_buf(bufs)
+                .await
+                .map_err(|_| Error::WriteFailed)
+        }
     }
 
-    async fn write_vectored_at(file: &mut fs::File, bufs: &mut IoBufs) -> Result<(), Error> {
-        file.write_all_buf(bufs)
+    async fn sync_inner(&self, file: &fs::File) -> Result<(), Error> {
+        file.sync_all()
             .await
-            .map_err(|_| Error::WriteFailed)
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 }
 
@@ -83,18 +102,7 @@ impl crate::Blob for Blob {
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let mut bufs = bufs.into();
         let mut file = self.file.lock().await;
-        let offset = offset
-            .checked_add(Header::SIZE_U64)
-            .ok_or(Error::OffsetOverflow)?;
-        file.seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-
-        if let Some(buf) = bufs.as_single() {
-            Self::write_single_at(&mut file, buf.as_ref()).await
-        } else {
-            Self::write_vectored_at(&mut file, &mut bufs).await
-        }
+        Self::write_at_inner(&mut file, offset, &mut bufs).await
     }
 
     async fn write_at_sync(
@@ -108,22 +116,8 @@ impl crate::Blob for Blob {
         }
 
         let mut file = self.file.lock().await;
-        let offset = offset
-            .checked_add(Header::SIZE_U64)
-            .ok_or(Error::OffsetOverflow)?;
-        file.seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-
-        if let Some(buf) = bufs.as_single() {
-            Self::write_single_at(&mut file, buf.as_ref()).await?;
-        } else {
-            Self::write_vectored_at(&mut file, &mut bufs).await?;
-        }
-
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+        Self::write_at_inner(&mut file, offset, &mut bufs).await?;
+        self.sync_inner(&file).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -139,8 +133,6 @@ impl crate::Blob for Blob {
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
-        file.sync_all()
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+        self.sync_inner(&file).await
     }
 }
