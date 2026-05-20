@@ -1120,7 +1120,8 @@ where
     let parent_digest =
         <Coding<B, C, H, S::PublicKey> as core::Variant>::commitment_to_inner(parent_commitment);
     if let Some(parent) = marshal.get_block(&parent_digest).await {
-        // Genesis parents are local-only because there is no certificate to fetch.
+        // A digest lookup may find a coded block with the wrong commitment.
+        // Only exact commitment matches can satisfy this parent request.
         if parent.commitment() == parent_commitment {
             return Either::Left(ready(Ok(parent)));
         }

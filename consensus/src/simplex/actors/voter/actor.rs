@@ -680,7 +680,6 @@ impl<
         // Add initial view from the configured floor
         let floor = self.floor.take().expect("floor not initialized");
         if let Some(finalization) = self.state.set_floor(floor) {
-            // Resolver and reporter messages both own the startup certificate.
             let report = finalization.clone();
             resolver.updated(Certificate::Finalization(finalization));
             self.reporter.report(Activity::Finalization(report));

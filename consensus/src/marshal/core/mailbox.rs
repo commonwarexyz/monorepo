@@ -142,11 +142,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// Sets the sync starting point from an already-processed finalization.
     ///
-    /// Marshal will sync and deliver blocks after this finalization.
+    /// Marshal verifies the finalization, anchors on its block, prunes below
+    /// it, then syncs and delivers blocks after it.
     ///
-    /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), use [Message::Prune] instead.
-    ///
+    /// To prune data without changing the sync starting point, use
+    /// [Message::Prune] instead.
     SetFloor {
         /// The candidate floor finalization, verified by the actor before use.
         finalization: Finalization<S, V::Commitment>,
@@ -743,11 +743,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Sets the sync starting point from an already-processed finalization.
     ///
-    /// Marshal will sync and deliver blocks after this finalization.
+    /// Marshal verifies the finalization, anchors on its block, prunes below
+    /// it, then syncs and delivers blocks after it.
     ///
-    /// To prune data without affecting the sync starting point (say at some trailing depth
-    /// from tip), use [Self::prune] instead.
-    ///
+    /// To prune data without changing the sync starting point, use
+    /// [Self::prune] instead.
     /// Use [`crate::marshal::Config::start`] to provide the startup anchor.
     pub fn set_floor(&self, finalization: Finalization<S, V::Commitment>) {
         let _ = self.sender.enqueue(Message::SetFloor { finalization });

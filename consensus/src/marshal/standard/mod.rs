@@ -3086,6 +3086,87 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_floor_anchor_uses_parent_digest_as_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "standard-floor-parent-digest-commitment",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_context = Ctx {
+                round: parent_round,
+                leader: me.clone(),
+                parent: (
+                    View::zero(),
+                    StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                ),
+            };
+            let parent = B::new::<Sha256>(parent_context, Sha256::hash(b""), Height::new(1), 100);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(2));
+            let bad_context = Ctx {
+                round: floor_round,
+                leader: me,
+                parent: (
+                    View::new(1),
+                    StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                ),
+            };
+            let floor_block = B::new::<Sha256>(bad_context, parent.digest(), Height::new(2), 200);
+            assert_ne!(floor_block.parent, floor_block.context.parent.1);
+
+            // Standard commitments are digests, so the generic floor-anchor
+            // parent check uses the block's parent digest. Context-parent
+            // mismatches are rejected by the standard verification wrappers.
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(1),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            resolver.respond_to_next_fetch(floor_block.encode());
+            mailbox.set_floor(finalization);
+
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor block fetch",
+                || !resolver.fetches().is_empty(),
+            )
+            .await;
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "floor block delivery should be accepted at the resolver boundary"
+            );
+
+            assert!(
+                mailbox.get_block(Height::new(2)).await.is_some(),
+                "standard floor anchor should be archived using its parent digest"
+            );
+            assert!(
+                mailbox.get_finalization(Height::new(2)).await.is_some(),
+                "standard floor finalization should be archived by height"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_notarized_delivery_wakes_fetch_by_round_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

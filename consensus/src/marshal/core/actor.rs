@@ -725,7 +725,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_verified(round, block.digest(), block.clone()).await;
-                        self.apply_floor_anchor(block.clone(), &mut application, &mut resolver)
+                        self.apply_floor_anchor(&block, &mut application, &mut resolver)
                             .await;
                         // Retain the block in memory so the subsequent
                         // `Forward` can broadcast it without reloading from
@@ -741,7 +741,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_verified(round, block.digest(), block.clone()).await;
-                        self.apply_floor_anchor(block, &mut application, &mut resolver)
+                        self.apply_floor_anchor(&block, &mut application, &mut resolver)
                             .await;
                         ack.expect("durable ack present").send_lossy(());
                     }
@@ -751,7 +751,7 @@ where
                         // the retention floor (and no longer is required by consensus
                         // to make progress).
                         self.cache_block(round, block.digest(), block.clone()).await;
-                        self.apply_floor_anchor(block, &mut application, &mut resolver)
+                        self.apply_floor_anchor(&block, &mut application, &mut resolver)
                             .await;
                         ack.expect("durable ack present").send_lossy(());
                     }
@@ -793,9 +793,12 @@ where
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
                             if self
-                                .apply_floor_anchor(block.clone(), &mut application, &mut resolver)
+                                .apply_floor_anchor(&block, &mut application, &mut resolver)
                                 .await
                             {
+                                // The anchor path stores the floor block and
+                                // finalization, advances floors, prunes below
+                                // them, and resumes dispatch.
                                 continue;
                             }
 
@@ -1224,12 +1227,14 @@ where
             .await;
 
         if self.floor_transition.has_anchor_at_or_after(round) {
+            // A pending anchor at the same or a newer floor already blocks
+            // progress. Keep waiting for it instead of replacing it.
             return;
         }
 
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor_transition.await_anchor(finalization);
-            let applied = self.apply_floor_anchor(block, application, resolver).await;
+            let applied = self.apply_floor_anchor(&block, application, resolver).await;
             debug_assert!(applied);
             return;
         }
@@ -1256,7 +1261,7 @@ where
     /// Applies a block if it satisfies the current floor transition.
     async fn apply_floor_anchor(
         &mut self,
-        block: V::Block,
+        block: &V::Block,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
@@ -1264,10 +1269,11 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) -> bool {
-        let commitment = V::commitment(&block);
+        let commitment = V::commitment(block);
         let Some(finalization) = self.floor_transition.take_if_anchor_matches(commitment) else {
             return false;
         };
+        let block = (*block).clone();
 
         let height = block.height();
         if height > Height::zero() {
@@ -1375,10 +1381,10 @@ where
                     return false;
                 }
 
-                if self
-                    .apply_floor_anchor(block.clone(), application, resolver)
-                    .await
-                {
+                if self.apply_floor_anchor(&block, application, resolver).await {
+                    // This block matched the pending floor request. Whether it
+                    // installed or was rejected as the floor anchor, do not also
+                    // process it as an ordinary block delivery.
                     response.send_lossy(true);
                     return false;
                 }
@@ -1621,10 +1627,9 @@ where
                     let digest = block.digest();
                     debug!(?round, %height, "received finalization");
 
-                    if self
-                        .apply_floor_anchor(block.clone(), application, resolver)
-                        .await
-                    {
+                    if self.apply_floor_anchor(&block, application, resolver).await {
+                        // The floor-anchor path fully handles this
+                        // finalization and moves the lower bound past it.
                         continue;
                     }
 
@@ -1675,10 +1680,9 @@ where
                         .put_notarization(round, digest, notarization)
                         .await;
 
-                    if self
-                        .apply_floor_anchor(block.clone(), application, resolver)
-                        .await
-                    {
+                    if self.apply_floor_anchor(&block, application, resolver).await {
+                        // A notarized delivery can carry the pending floor
+                        // block after the finalization is cached.
                         continue;
                     }
                 }

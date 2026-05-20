@@ -1441,7 +1441,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_leader".to_string(),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
@@ -1865,7 +1864,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Long deadlines prove nullify comes from startup timeout hint, not timer expiry.
@@ -2469,7 +2467,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_leader_nullify_fast_path_{me}"),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
@@ -2663,7 +2660,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_drop_propose_test_{me}"),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
@@ -2829,7 +2825,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_drop_verify_test_{me}"),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Use long timeouts so a fast nullify proves we did not wait for timeout.
@@ -3173,7 +3168,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_dropped_verify_after_participation_{me}"),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(250),
@@ -6342,7 +6336,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
@@ -6456,7 +6449,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition,
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
@@ -7684,7 +7676,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
@@ -7956,7 +7947,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
@@ -8209,7 +8199,6 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(1),
@@ -8327,7 +8316,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(1),
