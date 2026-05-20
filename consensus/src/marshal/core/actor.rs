@@ -1293,7 +1293,7 @@ where
         }
 
         let digest = block.digest();
-        if let Err(err) = try_join!(
+        try_join!(
             async {
                 self.finalized_blocks
                     .put(block.clone().into())
@@ -1308,9 +1308,8 @@ where
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
             }
-        ) {
-            panic!("failed to store floor anchor: {err}");
-        }
+        )
+        .expect("failed to store floor anchor");
         self.sync_finalized().await;
         self.notify_subscribers(&block);
 
@@ -1325,9 +1324,10 @@ where
         self.update_processed_height(height, resolver);
         self.update_processed_round_floor(height, round, resolver)
             .await;
-        if let Err(err) = self.application_metadata.sync().await {
-            panic!("failed to sync floor metadata: {err}");
-        }
+        self.application_metadata
+            .sync()
+            .await
+            .expect("failed to sync floor metadata");
 
         // Drop all pending acknowledgements. We must do this to prevent
         // an in-process block from being processed below the new floor and
@@ -1335,9 +1335,9 @@ where
         self.pending_acks.clear();
 
         // The floor is durable, so cache/finalized data below it can be pruned.
-        if let Err(err) = self.prune_after_floor(height).await {
-            panic!("failed to prune data below floor: {err}");
-        }
+        self.prune_after_floor(height)
+            .await
+            .expect("failed to prune data below floor");
 
         // Intentionally keep existing block subscriptions alive. Canceling
         // waiters can have catastrophic consequences (nodes can get stuck in
