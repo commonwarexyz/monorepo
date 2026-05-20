@@ -507,7 +507,7 @@ mod tests {
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let subscription = context
                 .child("subscribe")
-                .spawn(move |_| async move { BlockProvider::subscribe_parent(&marshal, &child).await });
+                .spawn(move |_| async move { marshal.subscribe_parent(&child).await });
 
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(

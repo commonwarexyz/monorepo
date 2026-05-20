@@ -51,13 +51,10 @@ where
     let boundary_height = epocher
         .last(previous_epoch)
         .expect("previous epoch should exist");
-    marshal
-        .get_block(boundary_height)
-        .await
-        .unwrap_or_else(|| {
-            panic!("missing boundary block for epoch {epoch} at height {boundary_height}")
-        })
-        .digest()
+    let Some(boundary) = marshal.get_block(boundary_height).await else {
+        panic!("missing boundary block for epoch {epoch} at height {boundary_height}");
+    };
+    boundary.digest()
 }
 
 /// Configuration for the orchestrator.

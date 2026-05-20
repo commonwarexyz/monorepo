@@ -234,8 +234,7 @@ mod test {
             block: &Self::Block,
         ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
             let parent = block.parent;
-            let blocks = self.0.clone();
-            async move { blocks.into_iter().find(|b| b.digest() == parent) }
+            std::future::ready(self.0.iter().find(|b| b.digest() == parent).cloned())
         }
     }
 
