@@ -4,7 +4,7 @@ use crate::{types::Height, Block, Heightable};
 use commonware_cryptography::Digestible;
 use futures::{
     future::{BoxFuture, OptionFuture},
-    FutureExt, Stream,
+    FutureExt, Stream, StreamExt,
 };
 use pin_project::pin_project;
 use std::{
@@ -51,6 +51,27 @@ pub trait BlockProvider: Clone + Send + 'static {
     ) -> impl Future<Output = Option<Self::Block>> + Send {
         let digest = block.parent();
         self.subscribe(digest)
+    }
+}
+
+/// A stream over a block's ancestry.
+pub trait AncestryStream: Send {
+    /// The block type yielded by the stream.
+    type Block: Block;
+
+    /// Returns the next block in the ancestry.
+    fn next(&mut self) -> impl Future<Output = Option<Self::Block>> + Send;
+}
+
+impl<S, B> AncestryStream for S
+where
+    S: Stream<Item = B> + Send + Unpin,
+    B: Block,
+{
+    type Block = B;
+
+    async fn next(&mut self) -> Option<Self::Block> {
+        StreamExt::next(self).await
     }
 }
 
@@ -180,7 +201,6 @@ mod test {
     use crate::marshal::mocks::block::Block;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
     use commonware_macros::test_async;
-    use futures::StreamExt;
 
     #[derive(Default, Clone)]
     struct MockProvider(Vec<Block<Sha256Digest, ()>>);
@@ -220,7 +240,7 @@ mod test {
     async fn test_empty_yields_none() {
         let mut stream: AncestorStream<MockProvider> =
             AncestorStream::new(MockProvider::default(), vec![]);
-        assert_eq!(stream.next().await, None);
+        assert_eq!(AncestryStream::next(&mut stream).await, None);
     }
 
     #[test_async]

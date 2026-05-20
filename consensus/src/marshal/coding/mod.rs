@@ -65,6 +65,7 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 mod tests {
     use crate::{
         marshal::{
+            ancestry::AncestryStream,
             coding::{
                 marshaled::genesis_coding_commitment,
                 shards,
@@ -807,6 +808,91 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_ancestry_stream() {
         harness::ancestry_stream::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_ancestry_stream_application_boundary() {
+        harness::ancestry_stream_application_boundary::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_ancestry_stream_fetches_parent_by_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-ancestry-parent-by-commitment",
+                provider,
+                buffer.clone(),
+            )
+            .await;
+
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let genesis = genesis_block();
+            let genesis_parent_commitment = genesis_coding_commitment::<Sha256, _>(&genesis);
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: participants[0].clone(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_coded: TestCodedBlock =
+                CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = parent_coded.commitment();
+
+            let child_ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(2)),
+                leader: participants[0].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let child_coded: TestCodedBlock =
+                CodedBlock::new(child.clone(), coding_config, &Sequential);
+
+            resolver.respond_to_next_fetch(parent_coded.encode());
+            let mut ancestry = marshal.ancestor_stream([child_coded]);
+            let first = AncestryStream::next(&mut ancestry)
+                .await
+                .expect("child should be yielded");
+            assert_eq!(first.digest(), child.digest());
+
+            let second = select! {
+                block = AncestryStream::next(&mut ancestry) => {
+                    block.expect("parent should be fetched by commitment")
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("parent fetch did not resolve")
+                },
+            };
+            assert_eq!(second.digest(), parent.digest());
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "certified parent delivery should validate"
+            );
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Block(commitment),
+                        handler::Annotation::Certified { height },
+                    ) if commitment == &parent_commitment && *height == Height::new(1)
+                )),
+                "ancestry should fetch the parent by the coded parent commitment"
+            );
+            assert!(
+                buffer.subscription_count() > 0,
+                "missing parent should register a local buffer subscription"
+            );
+        });
     }
 
     #[test_traced("WARN")]

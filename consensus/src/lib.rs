@@ -236,8 +236,8 @@ stability_scope!(ALPHA {
     pub mod ordered_broadcast;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    use crate::marshal::ancestry::AncestryStream;
     use commonware_cryptography::certificate::Scheme;
-    use futures::Stream;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand::Rng;
 
@@ -272,7 +272,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl AncestryStream<Block = Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
@@ -287,7 +287,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl AncestryStream<Block = Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

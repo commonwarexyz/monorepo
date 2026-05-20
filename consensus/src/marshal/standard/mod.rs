@@ -1191,6 +1191,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_ancestry_stream_application_boundary() {
+        harness::ancestry_stream_application_boundary::<InlineHarness>();
+        harness::ancestry_stream_application_boundary::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_finalize_same_height_different_views() {
         harness::finalize_same_height_different_views::<InlineHarness>();
         harness::finalize_same_height_different_views::<DeferredHarness>();
