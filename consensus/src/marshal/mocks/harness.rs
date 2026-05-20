@@ -5,6 +5,7 @@
 
 use crate::{
     marshal::{
+        ancestry::BlockProvider,
         coding::{
             shards,
             types::{coding_config_for_participants, hash_context, CodedBlock},
@@ -4729,7 +4730,10 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 }
 
 /// Test ancestry stream.
-pub fn ancestry_stream<H: TestHarness>() {
+pub fn ancestry_stream<H: TestHarness>()
+where
+    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+{
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         let Fixture {

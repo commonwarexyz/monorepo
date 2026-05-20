@@ -43,6 +43,7 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
+            ancestry::BlockProvider,
             config::{Config, Start},
             core::{cache, Actor, CommitmentFallback, Mailbox},
             mocks::{
@@ -84,7 +85,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+        Supervisor as _,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -104,6 +106,45 @@ mod tests {
         sync::Arc,
         time::Duration,
     };
+
+    #[test]
+    fn mailbox_provides_application_blocks() {
+        fn assert_provider<P: BlockProvider<Block = B>>() {}
+        assert_provider::<Mailbox<S, Standard<B>>>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_block_provider_parent_fetches_by_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let buffer = RecordingBuffer::default();
+            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "standard-provider-parent-commitment",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                buffer,
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let parent = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let child = make_raw_block(parent.digest(), Height::new(2), 200);
+            let subscription = context
+                .child("subscribe")
+                .spawn(move |_| BlockProvider::subscribe_parent(mailbox, child));
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                buffer.commitment_subscription_count(),
+                1,
+                "parent walkback should use the standard parent commitment"
+            );
+            subscription.abort();
+        });
+    }
 
     fn assert_finalize_deterministic<H: TestHarness>(
         seed: u64,
@@ -2435,7 +2476,8 @@ mod tests {
     /// other methods are no-ops.
     #[derive(Clone, Default)]
     struct RecordingBuffer {
-        subscriptions: Arc<Mutex<Vec<oneshot::Sender<B>>>>,
+        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<B>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<B>>>>,
         sends: Arc<Mutex<Vec<BufferSend>>>,
     }
 
@@ -2445,7 +2487,11 @@ mod tests {
         }
 
         fn subscription_count(&self) -> usize {
-            self.subscriptions.lock().len()
+            self.digest_subscriptions.lock().len() + self.commitment_subscriptions.lock().len()
+        }
+
+        fn commitment_subscription_count(&self) -> usize {
+            self.commitment_subscriptions.lock().len()
         }
     }
 
@@ -2462,13 +2508,13 @@ mod tests {
 
         fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
             let (sender, receiver) = oneshot::channel();
-            self.subscriptions.lock().push(sender);
+            self.digest_subscriptions.lock().push(sender);
             receiver
         }
 
         fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
             let (sender, receiver) = oneshot::channel();
-            self.subscriptions.lock().push(sender);
+            self.commitment_subscriptions.lock().push(sender);
             receiver
         }
 
