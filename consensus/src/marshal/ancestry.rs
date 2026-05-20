@@ -1,7 +1,7 @@
 //! A stream that yields the ancestors of a block while prefetching parents.
 
 use crate::{types::Height, Block, Heightable};
-use commonware_cryptography::Digestible;
+use commonware_cryptography::{Digest, Digestible};
 use futures::{
     future::{BoxFuture, OptionFuture},
     FutureExt, Stream,
@@ -49,7 +49,7 @@ pub trait BlockProvider: Send + 'static {
 // Expected child height and parent digest for a pending fetch.
 struct ExpectedParent<D>(Height, D);
 
-impl<D: commonware_cryptography::Digest> ExpectedParent<D> {
+impl<D: Digest> ExpectedParent<D> {
     fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
         Self(child.height(), child.parent())
     }
@@ -111,7 +111,6 @@ impl<M: BlockProvider> AncestorStream<M> {
             pending_expected: None,
         }
     }
-
 }
 
 impl<M> Stream for AncestorStream<M>
