@@ -1291,11 +1291,11 @@ where
             );
         }
 
-        if height < self.floor.height {
+        if height <= self.floor.height {
             warn!(
                 %height,
                 existing = %self.floor.height,
-                "floor not updated, lower than existing"
+                "floor not updated, at or below existing"
             );
             let _ = self.floor_transition.resolve();
             self.try_dispatch_blocks(application).await;
@@ -1661,11 +1661,22 @@ where
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
+                    let height = block.height();
+                    self.cache_block(round, digest, block.clone()).await;
+                    self.cache
+                        .put_notarization(round, digest, notarization)
+                        .await;
+
+                    // A notarized delivery can carry the pending floor block
+                    // after the finalization is cached.
+                    if self.apply_floor_anchor(&block, application, resolver).await {
+                        continue;
+                    }
+
                     // If there exists a finalization certificate for this block, we
                     // should finalize it. This could finalize the block faster when
                     // a notarization then a finalization are received via consensus
                     // and we resolve the notarization request before the block request.
-                    let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
                         self.update_processed_round_floor(height, finalization.round(), resolver)
                             .await;
@@ -1681,18 +1692,6 @@ where
                                 application,
                             )
                             .await;
-                    }
-
-                    // Cache the notarization and block.
-                    self.cache_block(round, digest, block.clone()).await;
-                    self.cache
-                        .put_notarization(round, digest, notarization)
-                        .await;
-
-                    // A notarized delivery can carry the pending floor block
-                    // after the finalization is cached.
-                    if self.apply_floor_anchor(&block, application, resolver).await {
-                        continue;
                     }
                 }
             }
