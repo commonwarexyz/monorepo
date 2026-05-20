@@ -65,6 +65,7 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 mod tests {
     use crate::{
         marshal::{
+            ancestry::BlockProvider,
             coding::{
                 marshaled::genesis_coding_commitment,
                 shards,
@@ -103,7 +104,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Resolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Spawner, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -115,16 +116,27 @@ mod tests {
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
 
+    #[test]
+    fn mailbox_provides_application_blocks() {
+        fn assert_provider<P: BlockProvider<Block = CodingB>>() {}
+        assert_provider::<core::Mailbox<S, TestCodingVariant>>();
+    }
+
     /// A coding buffer that records subscriptions and never resolves them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
-        subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
+        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
+        commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<TestCodedBlock>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
     }
 
     impl RecordingCodingBuffer {
         fn subscription_count(&self) -> usize {
-            self.subscriptions.lock().len()
+            self.digest_subscriptions.lock().len() + self.commitment_subscriptions.lock().len()
+        }
+
+        fn commitment_subscription_count(&self) -> usize {
+            self.commitment_subscriptions.lock().len()
         }
     }
 
@@ -141,7 +153,7 @@ mod tests {
 
         fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<TestCodedBlock> {
             let (sender, receiver) = oneshot::channel();
-            self.subscriptions.lock().push(sender);
+            self.digest_subscriptions.lock().push(sender);
             receiver
         }
 
@@ -150,7 +162,7 @@ mod tests {
             _commitment: Commitment,
         ) -> oneshot::Receiver<TestCodedBlock> {
             let (sender, receiver) = oneshot::channel();
-            self.subscriptions.lock().push(sender);
+            self.commitment_subscriptions.lock().push(sender);
             receiver
         }
 
@@ -450,6 +462,46 @@ mod tests {
         let coded_candidate: TestCodedBlock =
             CodedBlock::new(candidate, coding_config, &Sequential);
         (candidate_ctx, coded_candidate)
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_block_provider_parent_fetches_by_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-provider-parent-commitment",
+                provider,
+                buffer.clone(),
+            )
+            .await;
+
+            let (parent_ctx, parent) = missing_candidate(participants[0].clone());
+            let child_ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(2)),
+                leader: participants[0].clone(),
+                parent: (parent_ctx.round.view(), parent.commitment()),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let subscription = context
+                .child("subscribe")
+                .spawn(move |_| BlockProvider::subscribe_parent(marshal, child));
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                buffer.commitment_subscription_count(),
+                1,
+                "parent walkback should use the coding parent commitment"
+            );
+            drop(subscription);
+        });
     }
 
     #[test_traced("WARN")]

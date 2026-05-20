@@ -1,10 +1,11 @@
 use crate::{
     marshal::{
+        ancestry::BlockProvider,
         coding::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
-        core::{Buffer, Variant},
+        core::{Buffer, CommitmentFallback, Mailbox, Variant},
     },
     simplex::types::Context,
     types::{coding::Commitment, Round},
@@ -12,7 +13,7 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 
@@ -111,5 +112,30 @@ where
     fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
         self.proposed(round, block);
+    }
+}
+
+impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
+where
+    S: Scheme,
+    B: CertifiableBlock<Context = Context<Commitment, P>>,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    type Block = B;
+
+    async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
+        let parent_height = block.height().previous()?;
+        let commitment = block.context().parent.1;
+        self.subscribe_by_commitment(
+            commitment,
+            CommitmentFallback::FetchByCommitment {
+                height: parent_height,
+            },
+        )
+        .await
+        .ok()
+        .map(<Coding<B, C, H, P> as Variant>::into_inner)
     }
 }
