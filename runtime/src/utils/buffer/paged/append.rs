@@ -798,8 +798,9 @@ impl<B: Blob> Append<B> {
     ///
     /// Since larger valid lengths are authoritative, a shorter CRC cannot simply be written next to
     /// the old CRC. We first stage the shorter slot with length 0, then make its length durable,
-    /// then invalidate the old longer slot. A crash during any phase recovers either the old longer
-    /// page or the new shorter page, but never loses the whole page or fabricates a larger length.
+    /// then clear the old slot's CRC bytes before clearing its length bytes. A crash during any
+    /// phase recovers either the old longer page or the new shorter page, but never loses the whole
+    /// page or fabricates a larger length.
     async fn sync_partial_page_shrink(
         blob: &B,
         page: u64,
@@ -821,16 +822,15 @@ impl<B: Blob> Append<B> {
         } else {
             0
         };
+        let new_slot_offset = crc_start
+            .checked_add(new_slot_start as u64)
+            .ok_or(Error::OffsetOverflow)?;
         let staged_slot = Self::checksum_slot_bytes(0, new_crc);
-        blob.write_at(crc_start + new_slot_start as u64, staged_slot.to_vec())
-            .await?;
+        blob.write_at(new_slot_offset, staged_slot.to_vec()).await?;
         blob.sync().await?;
 
-        blob.write_at(
-            crc_start + new_slot_start as u64,
-            new_len.to_be_bytes().to_vec(),
-        )
-        .await?;
+        blob.write_at(new_slot_offset, new_len.to_be_bytes().to_vec())
+            .await?;
         blob.sync().await?;
 
         let old_slot_start = if new_slot_start == 0 {
@@ -838,17 +838,20 @@ impl<B: Blob> Append<B> {
         } else {
             0
         };
+        let old_slot_offset = crc_start
+            .checked_add(old_slot_start as u64)
+            .ok_or(Error::OffsetOverflow)?;
         let len_size = std::mem::size_of::<u16>();
         let crc_size = CHECKSUM_SLOT_SIZE - len_size;
-        blob.write_at(
-            crc_start + old_slot_start as u64 + len_size as u64,
-            vec![0u8; crc_size],
-        )
-        .await?;
+        let old_crc_offset = old_slot_offset
+            .checked_add(len_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        // Clear CRC bytes before length bytes so torn invalidation cannot create a new valid slot.
+        blob.write_at(old_crc_offset, vec![0u8; crc_size]).await?;
         blob.sync().await?;
 
-        blob.write_at(crc_start + old_slot_start as u64, vec![0u8; len_size])
-            .await?;
+        blob.write_at(old_slot_offset, vec![0u8; len_size]).await?;
         blob.sync().await?;
 
         let final_record = if new_slot_start == 0 {
