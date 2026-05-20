@@ -40,10 +40,7 @@ pub trait BlockProvider: Clone + Send + 'static {
     /// the parent.
     ///
     /// The child block can carry variant-specific context needed to retrieve its parent.
-    fn subscribe(
-        self,
-        block: Self::Block,
-    ) -> impl Future<Output = Option<Self::Block>> + Send;
+    fn subscribe(self, block: Self::Block) -> impl Future<Output = Option<Self::Block>> + Send;
 }
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
