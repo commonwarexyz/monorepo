@@ -925,11 +925,10 @@ where
         state: ReconstructionState<P, C, H>,
     ) -> ReconstructionState<P, C, H> {
         let strategy = self.strategy.clone();
-        let round = state.round();
         let handle = self
             .context
             .child("transition_reconstruction")
-            .with_attribute("round", round)
+            .with_attribute("round", state.round())
             .shared(true)
             .spawn(move |_| async move {
                 let mut state = state;

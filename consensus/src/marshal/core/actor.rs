@@ -1340,12 +1340,11 @@ where
                     continue;
                 };
                 let strategy = self.strategy.clone();
-                let count = indices.len();
                 let handle = self
                     .context
                     .child("verify_epoch_deliveries")
                     .with_attribute("epoch", epoch)
-                    .with_attribute("count", count)
+                    .with_attribute("count", indices.len())
                     .shared(true)
                     .spawn(move |mut context| async move {
                         let group_refs: Vec<_> = indices
