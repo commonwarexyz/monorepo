@@ -798,9 +798,9 @@ impl<B: Blob> Append<B> {
     ///
     /// Since larger valid lengths are authoritative, a shorter CRC cannot simply be written next to
     /// the old CRC. We first stage the shorter slot with length 0, then make its length durable,
-    /// then clear the old slot's CRC bytes before clearing its length bytes. A crash during any
-    /// phase recovers either the old longer page or the new shorter page, but never loses the whole
-    /// page or fabricates a larger length.
+    /// then clear the old slot's length bytes. A crash during any phase recovers either the old
+    /// longer page or the new shorter page, but never loses the whole page or fabricates a larger
+    /// length.
     async fn sync_partial_page_shrink(
         blob: &B,
         page: u64,
@@ -842,15 +842,8 @@ impl<B: Blob> Append<B> {
             .checked_add(old_slot_start as u64)
             .ok_or(Error::OffsetOverflow)?;
         let len_size = std::mem::size_of::<u16>();
-        let crc_size = CHECKSUM_SLOT_SIZE - len_size;
-        let old_crc_offset = old_slot_offset
-            .checked_add(len_size as u64)
-            .ok_or(Error::OffsetOverflow)?;
 
-        // Clear CRC bytes before length bytes so torn invalidation cannot create a new valid slot.
-        blob.write_at(old_crc_offset, vec![0u8; crc_size]).await?;
-        blob.sync().await?;
-
+        // A slot with length 0 is invalid regardless of its CRC.
         blob.write_at(old_slot_offset, vec![0u8; len_size]).await?;
         blob.sync().await?;
 
@@ -3058,69 +3051,73 @@ mod tests {
     }
 
     #[test]
-    fn test_resize_same_page_shrink_survives_interrupted_crc_invalidation() {
+    fn test_resize_same_page_shrink_survives_interrupted_length_invalidation() {
         let executor = deterministic::Runner::default();
 
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let data: Vec<u8> = (0..50).collect();
+            const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(600);
+            const LARGE_BUFFER_SIZE: usize = 1_200;
+
+            let cache_ref =
+                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(LARGE_BUFFER_SIZE));
+            let data: Vec<u8> = (0..300).map(|i| (i % 251) as u8).collect();
 
             let (blob, size) = context
                 .open(
                     "test_partition",
-                    b"same_page_shrink_interrupted_invalidation",
+                    b"same_page_shrink_interrupted_len_invalidation",
                 )
                 .await
                 .unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             // Put the old authoritative CRC in slot 1, so the shorter CRC will be staged in slot
-            // 0. The old slot is invalidated only after the shorter slot is durable.
-            append.append(&data[..40]).await.unwrap();
+            // 0. The old length is above 255, so a one-byte tear changes the decoded length.
+            append.append(&data[..255]).await.unwrap();
             append.sync().await.unwrap();
-            append.append(&data[40..]).await.unwrap();
+            append.append(&data[255..]).await.unwrap();
             append.sync().await.unwrap();
             drop(append);
 
             let (blob, size) = context
                 .open(
                     "test_partition",
-                    b"same_page_shrink_interrupted_invalidation",
+                    b"same_page_shrink_interrupted_len_invalidation",
                 )
                 .await
                 .unwrap();
-            let faulty_blob = PartialWriteBlob::new(blob, 3, 3);
+            let faulty_blob = PartialWriteBlob::new(blob, 3, 1);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let append = Append::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Append::new(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
             assert!(
-                append.resize(45).await.is_err(),
-                "old-slot invalidation should fail"
+                append.resize(40).await.is_err(),
+                "old-slot length invalidation should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 3);
             assert_eq!(
                 failed_write_len.load(Ordering::SeqCst),
-                CHECKSUM_SLOT_SIZE - std::mem::size_of::<u16>()
+                std::mem::size_of::<u16>()
             );
             drop(append);
 
             let (blob, size) = context
                 .open(
                     "test_partition",
-                    b"same_page_shrink_interrupted_invalidation",
+                    b"same_page_shrink_interrupted_len_invalidation",
                 )
                 .await
                 .unwrap();
-            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Append::new(blob, size, LARGE_BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            assert_eq!(append.size().await, 45);
-            let read = append.read_at(0, 45).await.unwrap().coalesce();
-            assert_eq!(read.as_ref(), &data[..45]);
+            assert_eq!(append.size().await, 40);
+            let read = append.read_at(0, 40).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..40]);
         });
     }
 
