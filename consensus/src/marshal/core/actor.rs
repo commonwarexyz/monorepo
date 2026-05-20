@@ -438,8 +438,8 @@ where
             .copied()
             .unwrap_or(Height::zero());
 
-        // Genesis is a local anchor. A floor finalization can be verified now,
-        // but its block anchor is resolved after `run` receives the resolver and buffer.
+        // Genesis is a local anchor. A floor finalization is verified and
+        // resolved after `run` receives the resolver and buffer.
         let floor_transition = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
@@ -558,8 +558,14 @@ where
         // A configured floor follows the same path as `SetFloor`: verify it,
         // then apply a local anchor or fetch the anchor block.
         if let Some(finalization) = self.floor_transition.take() {
-            self.handle_set_floor(finalization, &mut resolver, &mut buffer, &mut application)
-                .await;
+            self.handle_set_floor(
+                finalization,
+                true,
+                &mut resolver,
+                &mut buffer,
+                &mut application,
+            )
+            .await;
         }
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
@@ -762,7 +768,9 @@ where
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
                             // If found, persist the block
-                            self.cache_block(round, digest, block).await;
+                            self.cache_block(round, digest, block.clone()).await;
+                            self.apply_floor_anchor(&block, &mut application, &mut resolver)
+                                .await;
                         } else {
                             debug!(?round, "notarized block unavailable locally");
                         }
@@ -907,6 +915,7 @@ where
                     Message::SetFloor { finalization } => {
                         self.handle_set_floor(
                             finalization,
+                            false,
                             &mut resolver,
                             &mut buffer,
                             &mut application,
@@ -1182,6 +1191,7 @@ where
     async fn handle_set_floor<Buf, R>(
         &mut self,
         finalization: Finalization<P::Scheme, V::Commitment>,
+        fatal_on_invalid: bool,
         resolver: &mut R,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1204,6 +1214,9 @@ where
         }
 
         if !self.verify_finalization(&finalization) {
+            if fatal_on_invalid {
+                panic!("floor finalization must verify");
+            }
             warn!(?round, "floor finalization failed verification");
             return;
         }
@@ -1280,6 +1293,7 @@ where
                 existing = %self.floor.height,
                 "floor not updated, lower than existing"
             );
+            self.try_dispatch_blocks(application).await;
             return true;
         }
 
