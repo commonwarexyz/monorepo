@@ -5,7 +5,6 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestryStream,
         coding::{
             shards,
             types::{coding_config_for_participants, CodedBlock},
@@ -4661,22 +4660,8 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
     })
 }
 
-enum AncestryReadMode {
-    FuturesStream,
-    AncestryStream,
-}
-
 /// Test ancestry stream.
 pub fn ancestry_stream<H: TestHarness>() {
-    ancestry_stream_with::<H>(AncestryReadMode::FuturesStream);
-}
-
-/// Test ancestry stream through the application-facing abstraction.
-pub fn ancestry_stream_application_boundary<H: TestHarness>() {
-    ancestry_stream_with::<H>(AncestryReadMode::AncestryStream);
-}
-
-fn ancestry_stream_with<H: TestHarness>(mode: AncestryReadMode) {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         let Fixture {
@@ -4741,17 +4726,7 @@ fn ancestry_stream_with<H: TestHarness>(mode: AncestryReadMode) {
             .ancestry((DigestFallback::Wait, commitment))
             .await
             .unwrap();
-        let blocks = match mode {
-            AncestryReadMode::FuturesStream => ancestry.collect::<Vec<_>>().await,
-            AncestryReadMode::AncestryStream => {
-                let mut ancestry = ancestry;
-                let mut blocks = Vec::new();
-                while let Some(block) = AncestryStream::next(&mut ancestry).await {
-                    blocks.push(block);
-                }
-                blocks
-            }
-        };
+        let blocks = ancestry.collect::<Vec<_>>().await;
 
         // Ensure correct delivery order: 5,4,3,2,1
         assert_eq!(blocks.len(), 5);

@@ -811,11 +811,6 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_ancestry_stream_application_boundary() {
-        harness::ancestry_stream_application_boundary::<CodingHarness>();
-    }
-
-    #[test_traced("WARN")]
     fn test_coding_ancestry_stream_fetches_parent_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

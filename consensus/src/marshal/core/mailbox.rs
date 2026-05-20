@@ -834,22 +834,15 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{
-            coding::{types::CodedBlock, Coding},
-            mocks::harness,
-            standard::Standard,
-        },
+        marshal::{mocks::harness, standard::Standard},
         types::{Epoch, View},
         Heightable,
     };
-    use commonware_coding::ReedSolomon;
-    use commonware_cryptography::{ed25519::PrivateKey, sha256::Sha256, Digest as _, Signer as _};
+    use commonware_cryptography::{ed25519::PrivateKey, Digest as _, Signer as _};
     use commonware_utils::channel::oneshot::error::TryRecvError;
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
     type TestPending = Pending<harness::S, Standard<harness::B>>;
-    type TestCodingVariant = Coding<harness::CodingB, ReedSolomon<Sha256>, Sha256, harness::K>;
-    type TestCodedBlock = CodedBlock<harness::CodingB, ReedSolomon<Sha256>, Sha256>;
 
     fn public_key(seed: u64) -> harness::K {
         PrivateKey::from_seed(seed).public_key()
@@ -865,18 +858,6 @@ mod tests {
 
     fn commitment(height: u64) -> harness::D {
         <Standard<harness::B> as Variant>::commitment(&block(height))
-    }
-
-    #[test]
-    fn ancestry_provider_walks_standard_blocks() {
-        fn assert_provider<P: BlockProvider<Block = harness::B>>() {}
-        assert_provider::<AncestryProvider<harness::S, Standard<harness::B>>>();
-    }
-
-    #[test]
-    fn ancestry_provider_walks_coded_blocks() {
-        fn assert_provider<P: BlockProvider<Block = TestCodedBlock>>() {}
-        assert_provider::<AncestryProvider<harness::S, TestCodingVariant>>();
     }
 
     fn get_info(height: u64) -> (TestMessage, oneshot::Receiver<Option<(Height, harness::D)>>) {

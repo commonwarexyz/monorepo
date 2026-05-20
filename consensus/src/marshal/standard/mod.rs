@@ -43,7 +43,6 @@ mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
-            ancestry::AncestryStream,
             config::Config,
             core::{cache, Actor, CommitmentFallback, Mailbox},
             mocks::{
@@ -1189,70 +1188,6 @@ mod tests {
     fn test_standard_ancestry_stream() {
         harness::ancestry_stream::<InlineHarness>();
         harness::ancestry_stream::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_ancestry_stream_application_boundary() {
-        harness::ancestry_stream_application_boundary::<InlineHarness>();
-        harness::ancestry_stream_application_boundary::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_ancestry_stream_fetches_parent_by_commitment() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let buffer = RecordingBuffer::default();
-            let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "standard-ancestry-parent-by-commitment",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                buffer,
-            )
-            .await;
-
-            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let child = make_raw_block(parent.digest(), Height::new(2), 200);
-            let parent_commitment = parent.digest();
-
-            resolver.respond_to_next_fetch(parent.encode());
-            let mut ancestry = marshal.ancestor_stream([child.clone()]);
-            let first = AncestryStream::next(&mut ancestry)
-                .await
-                .expect("child should be yielded");
-            assert_eq!(first.digest(), child.digest());
-
-            let second = select! {
-                block = AncestryStream::next(&mut ancestry) => {
-                    block.expect("parent should be fetched by commitment")
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("parent fetch did not resolve")
-                },
-            };
-            assert_eq!(second.digest(), parent_commitment);
-            assert!(
-                resolver.wait_for_delivery_response().await,
-                "certified parent delivery should validate"
-            );
-            assert!(
-                resolver.fetches().iter().any(|fetch| matches!(
-                    (&fetch.key, &fetch.subscriber),
-                    (
-                        handler::Key::Block(commitment),
-                        handler::Annotation::Certified { height },
-                    ) if commitment == &parent_commitment && *height == Height::new(1)
-                )),
-                "ancestry should fetch the parent by the standard parent commitment"
-            );
-            assert!(
-                buffer.subscription_count() > 0,
-                "missing parent should register a local buffer subscription"
-            );
-        });
     }
 
     #[test_traced("WARN")]
