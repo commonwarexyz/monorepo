@@ -30,7 +30,7 @@ use commonware_resolver::{Delivery, Resolver};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Strategist,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -300,7 +300,7 @@ impl Floor {
 /// behind.
 pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage + Strategist,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -365,7 +365,7 @@ where
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
-    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage + Strategist,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -1308,17 +1308,19 @@ where
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
             let strategy = self.strategy.clone();
-            let (returned, verified) = self
+            let handle = self
                 .context
-                .with_strategy(strategy, move |context, strategy| {
+                .child("verify_deliveries")
+                .shared(true)
+                .spawn(move |mut context| async move {
                     let cert_refs: Vec<_> = delivers
                         .iter()
                         .map(PendingVerification::as_subject_and_certificate)
                         .collect();
-                    let verified = verify_certificates(context, &scheme, &cert_refs, strategy);
+                    let verified = verify_certificates(&mut context, &scheme, &cert_refs, &strategy);
                     (delivers, verified)
-                })
-                .await;
+                });
+            let (returned, verified) = handle.await.expect("strategy task failed");
             delivers = returned;
             verified
         } else {
@@ -1336,17 +1338,20 @@ where
                     continue;
                 };
                 let strategy = self.strategy.clone();
-                let (returned, indices, results) = self
+                let handle = self
                     .context
-                    .with_strategy(strategy, move |context, strategy| {
+                    .child("verify_epoch_deliveries")
+                    .shared(true)
+                    .spawn(move |mut context| async move {
                         let group_refs: Vec<_> = indices
                             .iter()
                             .map(|&i| delivers[i].as_subject_and_certificate())
                             .collect();
-                        let results = verify_certificates(context, &scheme, &group_refs, strategy);
+                        let results =
+                            verify_certificates(&mut context, &scheme, &group_refs, &strategy);
                         (delivers, indices, results)
-                    })
-                    .await;
+                    });
+                let (returned, indices, results) = handle.await.expect("strategy task failed");
                 delivers = returned;
                 for (j, &idx) in indices.iter().enumerate() {
                     verified[idx] = results[j];

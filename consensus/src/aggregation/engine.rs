@@ -25,7 +25,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{histogram, status::Status, GaugeExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Strategist,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -68,7 +68,7 @@ struct DigestRequest<D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore + Strategist,
+    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -151,7 +151,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore + Strategist,
+        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D>,
@@ -529,12 +529,15 @@ impl<
             .cloned()
             .collect::<Vec<_>>();
         if filtered.len() >= quorum as usize {
-            let certificate = self
+            let strategy = self.strategy.clone();
+            let handle = self
                 .context
-                .with_strategy(self.strategy.clone(), move |_, strategy| {
-                    Certificate::from_acks(&*scheme, filtered.iter(), strategy)
-                })
-                .await;
+                .child("construct_certificate")
+                .shared(true)
+                .spawn(move |_| async move {
+                    Certificate::from_acks(&*scheme, filtered.iter(), &strategy)
+                });
+            let certificate = handle.await.expect("strategy task failed");
             if let Some(certificate) = certificate {
                 self.metrics.certificates.inc();
                 self.handle_certificate(certificate).await;
@@ -684,13 +687,16 @@ impl<
         }
 
         // Validate signature
-        let (ack, valid) = self
+        let strategy = self.strategy.clone();
+        let handle = self
             .context
-            .with_strategy(self.strategy.clone(), move |context, strategy| {
-                let valid = ack.verify(context, &*scheme, strategy);
+            .child("verify_ack")
+            .shared(true)
+            .spawn(move |mut context| async move {
+                let valid = ack.verify(&mut context, &*scheme, &strategy);
                 (ack, valid)
-            })
-            .await;
+            });
+        let (ack, valid) = handle.await.expect("strategy task failed");
         if !valid {
             return Err(Error::InvalidAckSignature);
         }

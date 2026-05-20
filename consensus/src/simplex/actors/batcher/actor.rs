@@ -23,7 +23,7 @@ use commonware_runtime::{
         histogram::{self, Buckets},
         Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Strategist,
+    Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
@@ -40,7 +40,7 @@ struct Current {
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
 where
-    E: Spawner + Metrics + Clock + CryptoRngCore + Strategist,
+    E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -77,7 +77,7 @@ where
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
 where
-    E: Spawner + Metrics + Clock + CryptoRngCore + Strategist,
+    E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -164,20 +164,25 @@ where
         ),
     > + Send
            + 'static {
-        self.context
-            .with_strategy(self.strategy.clone(), move |context, strategy| {
+        let strategy = self.strategy.clone();
+        let handle = self
+            .context
+            .child("verify_round")
+            .shared(true)
+            .spawn(move |mut context| async move {
                 let mut round = round;
                 let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(context, strategy))
+                    Some(round.verify_notarizes(&mut context, &strategy))
                 } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(context, strategy))
+                    Some(round.verify_nullifies(&mut context, &strategy))
                 } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(context, strategy))
+                    Some(round.verify_finalizes(&mut context, &strategy))
                 } else {
                     None
                 };
                 (round, verified)
-            })
+            });
+        async move { handle.await.expect("strategy task failed") }
     }
 
     fn construct_notarization(
@@ -185,24 +190,34 @@ where
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = (Round<S, B, D, Re>, Option<Notarization<S, D>>)> + Send + 'static
     {
-        self.context
-            .with_strategy(self.strategy.clone(), move |_, strategy| {
+        let strategy = self.strategy.clone();
+        let handle = self
+            .context
+            .child("construct_notarization")
+            .shared(true)
+            .spawn(move |_| async move {
                 let mut round = round;
-                let notarization = round.try_construct_notarization(strategy);
+                let notarization = round.try_construct_notarization(&strategy);
                 (round, notarization)
-            })
+            });
+        async move { handle.await.expect("strategy task failed") }
     }
 
     fn construct_nullification(
         &self,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = (Round<S, B, D, Re>, Option<Nullification<S>>)> + Send + 'static {
-        self.context
-            .with_strategy(self.strategy.clone(), move |_, strategy| {
+        let strategy = self.strategy.clone();
+        let handle = self
+            .context
+            .child("construct_nullification")
+            .shared(true)
+            .spawn(move |_| async move {
                 let mut round = round;
-                let nullification = round.try_construct_nullification(strategy);
+                let nullification = round.try_construct_nullification(&strategy);
                 (round, nullification)
-            })
+            });
+        async move { handle.await.expect("strategy task failed") }
     }
 
     fn construct_finalization(
@@ -210,12 +225,17 @@ where
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = (Round<S, B, D, Re>, Option<Finalization<S, D>>)> + Send + 'static
     {
-        self.context
-            .with_strategy(self.strategy.clone(), move |_, strategy| {
+        let strategy = self.strategy.clone();
+        let handle = self
+            .context
+            .child("construct_finalization")
+            .shared(true)
+            .spawn(move |_| async move {
                 let mut round = round;
-                let finalization = round.try_construct_finalization(strategy);
+                let finalization = round.try_construct_finalization(&strategy);
                 (round, finalization)
-            })
+            });
+        async move { handle.await.expect("strategy task failed") }
     }
 
     /// Records the latest view message received from a participant.

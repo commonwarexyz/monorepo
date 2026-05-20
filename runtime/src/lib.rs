@@ -47,7 +47,7 @@ stability_scope!(BETA {
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
-    use commonware_parallel::{Rayon, Strategy as ParallelStrategy, ThreadPool};
+    use commonware_parallel::{Rayon, ThreadPool};
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     use iobuf::PoolError;
@@ -373,34 +373,6 @@ stability_scope!(BETA {
             self.create_thread_pool(concurrency).map(Rayon::with_pool)
         }
     }
-
-    /// Interface to run CPU-bound parallel work without blocking the current async task.
-    pub trait Strategist: Spawner {
-        /// Executes `f` with a child context and `strategy` on a blocking-friendly task and returns
-        /// an awaitable result.
-        ///
-        /// The strategy, closure, and output must be `Send + 'static` because runtimes may move the
-        /// work to another executor.
-        fn with_strategy<S, F, T>(
-            &self,
-            strategy: S,
-            f: F,
-        ) -> impl Future<Output = T> + Send + 'static + use<S, F, T, Self>
-        where
-            S: ParallelStrategy,
-            F: FnOnce(&mut Self, &S) -> T + Send + 'static,
-            T: Send + 'static,
-            Self: Sized,
-        {
-            let handle = self
-                .child("strategy")
-                .shared(true)
-                .spawn(move |mut context| async move { f(&mut context, &strategy) });
-            async move { handle.await.expect("strategy task failed") }
-        }
-    }
-
-    impl<C> Strategist for C where C: Spawner {}
 
     /// Interface to register task traces.
     pub trait Tracing: Supervisor {
@@ -889,7 +861,6 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
-    use commonware_parallel::{Sequential, Strategy};
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sync::Mutex,
@@ -4014,32 +3985,6 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
-    }
-
-    fn test_with_strategy<R: Runner>(runner: R)
-    where
-        R::Context: Strategist,
-    {
-        runner.start(|context| async move {
-            let strategy = Sequential;
-            let values = vec![1, 2, 3, 4, 5];
-            let sum = context
-                .with_strategy(strategy, move |_, strategy| {
-                    strategy.fold(values, || 0, |acc, value| acc + value, |a, b| a + b)
-                })
-                .await;
-            assert_eq!(sum, 15);
-        });
-    }
-
-    #[test]
-    fn test_with_strategy_tokio() {
-        test_with_strategy(tokio::Runner::default());
-    }
-
-    #[test]
-    fn test_with_strategy_deterministic() {
-        test_with_strategy(deterministic::Runner::default());
     }
 
     fn test_buffer_pooler<R: Runner>(

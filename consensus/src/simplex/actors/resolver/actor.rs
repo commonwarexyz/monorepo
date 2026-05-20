@@ -19,9 +19,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
-use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Strategist,
-};
+use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
@@ -29,7 +27,7 @@ use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner + Strategist,
+    E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -50,7 +48,7 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner + Strategist,
+        E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
@@ -180,13 +178,16 @@ impl<
                     return None;
                 }
                 let scheme = self.scheme.clone();
-                let (notarization, valid) = self
+                let strategy = self.strategy.clone();
+                let handle = self
                     .context
-                    .with_strategy(self.strategy.clone(), move |context, strategy| {
-                        let valid = notarization.verify(context, &scheme, strategy);
+                    .child("verify_notarization")
+                    .shared(true)
+                    .spawn(move |mut context| async move {
+                        let valid = notarization.verify(&mut context, &scheme, &strategy);
                         (notarization, valid)
-                    })
-                    .await;
+                    });
+                let (notarization, valid) = handle.await.expect("strategy task failed");
                 if !valid {
                     debug!(%view, "notarization failed verification");
                     return None;
@@ -208,13 +209,16 @@ impl<
                     return None;
                 }
                 let scheme = self.scheme.clone();
-                let (finalization, valid) = self
+                let strategy = self.strategy.clone();
+                let handle = self
                     .context
-                    .with_strategy(self.strategy.clone(), move |context, strategy| {
-                        let valid = finalization.verify(context, &scheme, strategy);
+                    .child("verify_finalization")
+                    .shared(true)
+                    .spawn(move |mut context| async move {
+                        let valid = finalization.verify(&mut context, &scheme, &strategy);
                         (finalization, valid)
-                    })
-                    .await;
+                    });
+                let (finalization, valid) = handle.await.expect("strategy task failed");
                 if !valid {
                     debug!(%view, "finalization failed verification");
                     return None;
@@ -236,13 +240,16 @@ impl<
                     return None;
                 }
                 let scheme = self.scheme.clone();
-                let (nullification, valid) = self
+                let strategy = self.strategy.clone();
+                let handle = self
                     .context
-                    .with_strategy(self.strategy.clone(), move |context, strategy| {
-                        let valid = nullification.verify::<_, D>(context, &scheme, strategy);
+                    .child("verify_nullification")
+                    .shared(true)
+                    .spawn(move |mut context| async move {
+                        let valid = nullification.verify::<_, D>(&mut context, &scheme, &strategy);
                         (nullification, valid)
-                    })
-                    .await;
+                    });
+                let (nullification, valid) = handle.await.expect("strategy task failed");
                 if !valid {
                     debug!(%view, "nullification failed verification");
                     return None;

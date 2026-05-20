@@ -166,7 +166,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{GaugeExt, HistogramExt},
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Strategist,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -285,7 +285,7 @@ where
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
-    E: BufferPooler + Rng + Spawner + Metrics + Clock + Strategist,
+    E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker,
@@ -371,7 +371,7 @@ where
 
 impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
 where
-    E: BufferPooler + Rng + Spawner + Metrics + Clock + Strategist,
+    E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
@@ -672,18 +672,20 @@ where
         // Attempt to reconstruct the encoded blob
         let start = self.context.current();
         let strategy = self.strategy.clone();
-        let (state, blob) = self
+        let handle = self
             .context
-            .with_strategy(strategy, move |_, strategy| {
+            .child("erasure_decode")
+            .shared(true)
+            .spawn(move |_| async move {
                 let blob = C::decode(
                     &commitment.config(),
                     &commitment.root(),
                     state.checked_shards().iter(),
-                    strategy,
+                    &strategy,
                 );
                 (state, blob)
-            })
-            .await;
+            });
+        let (state, blob) = handle.await.expect("strategy task failed");
         self.state.insert(commitment, state);
         let blob = blob.map_err(Error::Coding)?;
         self.metrics
@@ -924,13 +926,16 @@ where
     ) -> ReconstructionState<P, C, H> {
         let strategy = self.strategy.clone();
         let mut blocker = self.blocker.clone();
-        self.context
-            .with_strategy(strategy, move |_, strategy| {
+        let handle = self
+            .context
+            .child("transition_reconstruction")
+            .shared(true)
+            .spawn(move |_| async move {
                 let mut state = state;
-                state.try_transition(commitment, participants_len, strategy, &mut blocker);
+                state.try_transition(commitment, participants_len, &strategy, &mut blocker);
                 state
-            })
-            .await
+            });
+        handle.await.expect("strategy task failed")
     }
 
     /// Cache a block and notify all subscribers waiting on it.
@@ -972,13 +977,15 @@ where
         };
 
         let strategy = self.strategy.clone();
-        let (block, shard_count) = self
+        let handle = self
             .context
-            .with_strategy(strategy, move |_, strategy| {
-                let shard_count = block.shards(strategy).len();
+            .child("count_shards")
+            .shared(true)
+            .spawn(move |_| async move {
+                let shard_count = block.shards(&strategy).len();
                 (block, shard_count)
-            })
-            .await;
+            });
+        let (block, shard_count) = handle.await.expect("strategy task failed");
         if shard_count != participants.len() {
             warn!(
                 %commitment,
