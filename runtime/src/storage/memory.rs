@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{BufferPool, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
@@ -197,6 +197,20 @@ impl crate::Blob for Blob {
         }
         content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
         Ok(())
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), crate::Error> {
+        let bufs = bufs.into();
+        if !bufs.has_remaining() {
+            return Ok(());
+        }
+
+        self.write_at(offset, bufs).await?;
+        self.sync().await
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {

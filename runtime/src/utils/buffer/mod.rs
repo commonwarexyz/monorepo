@@ -12,7 +12,7 @@ pub use write::Write;
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
+        deterministic, Blob as _, Buf, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
         Spawner, Storage, Supervisor as _,
     };
     use commonware_macros::test_traced;
@@ -101,6 +101,20 @@ mod tests {
             }
             data[start..end].copy_from_slice(buf.as_ref());
             Ok(())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let bufs = bufs.into();
+            if !bufs.has_remaining() {
+                return Ok(());
+            }
+
+            self.write_at(offset, bufs).await?;
+            self.sync().await
         }
 
         async fn resize(&self, len: u64) -> Result<(), Error> {
