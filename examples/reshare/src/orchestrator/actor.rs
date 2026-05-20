@@ -8,7 +8,7 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
+    simplex::{self, elector::Config as Elector, scheme, types::Context, Floor, Plan},
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
     CertifiableAutomaton, Relay,
 };
@@ -246,10 +246,11 @@ where
                         continue;
                     }
 
+                    // DKG state does not persist the consensus floor; derive it from marshal's
+                    // finalized boundary block when entering each epoch.
                     let floor = match Self::floor_boundary(&epocher, transition.epoch) {
                         Some(boundary_height) => self
                             .marshal
-                            .clone()
                             .get_block(boundary_height)
                             .await
                             .unwrap_or_else(|| {
@@ -299,6 +300,8 @@ where
         }
     }
 
+    // Epoch zero uses genesis as its floor; every later epoch is anchored by the
+    // last finalized block from the previous epoch.
     fn floor_boundary(epocher: &FixedEpocher, epoch: Epoch) -> Option<Height> {
         let previous_epoch = epoch.previous()?;
         Some(
@@ -332,7 +335,6 @@ where
             .context
             .child("consensus_engine")
             .with_attribute("epoch", epoch);
-        let floor = simplex::Floor::genesis(floor);
         let engine = simplex::Engine::new(
             context,
             simplex::Config {
@@ -345,7 +347,7 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: NZUsize!(1024),
                 epoch,
-                floor,
+                floor: Floor::genesis(floor),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

@@ -8,7 +8,6 @@ use crate::{
     BLOCKS_PER_EPOCH,
 };
 use commonware_broadcast::buffered;
-use commonware_codec::Read;
 use commonware_consensus::{
     marshal::{
         self,
@@ -138,7 +137,6 @@ where
     T: Strategy,
     Batch: BatchVerifier<PublicKey = C::PublicKey>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
-    H::Digest: Read<Cfg = ()>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
