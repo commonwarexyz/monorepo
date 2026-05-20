@@ -122,7 +122,7 @@ where
         L,
         T,
     >,
-    orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey, H::Digest>,
+    orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
 }
 
 impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>

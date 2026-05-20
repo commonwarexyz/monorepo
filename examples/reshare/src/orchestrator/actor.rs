@@ -1,7 +1,7 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochProvider, Provider},
+    application::{genesis, Block, EpochProvider, Provider},
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
@@ -9,11 +9,11 @@ use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
     simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
-    types::{Epoch, Epocher, FixedEpocher, ViewDelta},
+    types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -75,7 +75,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mailbox::Receiver<Message<V, C::PublicKey, H::Digest>>,
+    mailbox: mailbox::Receiver<Message<V, C::PublicKey>>,
     application: A,
 
     oracle: B,
@@ -109,7 +109,7 @@ where
     pub fn new(
         context: E,
         config: Config<B, V, C, H, A, S, L, T>,
-    ) -> (Self, Mailbox<V, C::PublicKey, H::Digest>) {
+    ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
@@ -246,6 +246,22 @@ where
                         continue;
                     }
 
+                    let floor = match Self::floor_boundary(&epocher, transition.epoch) {
+                        Some(boundary_height) => self
+                            .marshal
+                            .clone()
+                            .get_block(boundary_height)
+                            .await
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "missing finalized boundary block at height {} for epoch {}",
+                                    boundary_height, transition.epoch
+                                )
+                            })
+                            .digest(),
+                        None => genesis::<H, C, V>().digest(),
+                    };
+
                     // Register the new signing scheme with the scheme provider.
                     let scheme = self.provider.scheme_for_epoch(&transition);
                     assert!(self.provider.register(transition.epoch, scheme.clone()));
@@ -254,7 +270,7 @@ where
                     let handle = self
                         .enter_epoch(
                             transition.epoch,
-                            transition.floor,
+                            floor,
                             scheme,
                             &mut vote_mux,
                             &mut certificate_mux,
@@ -281,6 +297,15 @@ where
                 }
             },
         }
+    }
+
+    fn floor_boundary(epocher: &FixedEpocher, epoch: Epoch) -> Option<Height> {
+        let previous_epoch = epoch.previous()?;
+        Some(
+            epocher
+                .last(previous_epoch)
+                .expect("previous epoch should be covered by epoch strategy"),
+        )
     }
 
     async fn enter_epoch(

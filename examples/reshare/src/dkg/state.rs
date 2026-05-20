@@ -23,7 +23,7 @@ use commonware_cryptography::{
         primitives::{group::Share, variant::Variant},
     },
     transcript::{Summary, Transcript},
-    BatchVerifier, Digest, PublicKey, Signer,
+    BatchVerifier, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -51,27 +51,24 @@ const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
 
 /// Epoch-level DKG state persisted across restarts.
 #[derive(Clone)]
-pub struct Epoch<V: Variant, P: PublicKey, D: Digest> {
-    pub floor: D,
+pub struct Epoch<V: Variant, P: PublicKey> {
     pub round: u64,
     pub rng_seed: Summary,
     pub output: Option<Output<V, P>>,
     pub share: Option<Share>,
 }
 
-impl<V: Variant, P: PublicKey, D: Digest> EncodeSize for Epoch<V, P, D> {
+impl<V: Variant, P: PublicKey> EncodeSize for Epoch<V, P> {
     fn encode_size(&self) -> usize {
-        self.floor.encode_size()
-            + self.round.encode_size()
+        self.round.encode_size()
             + self.rng_seed.encode_size()
             + self.output.encode_size()
             + self.share.encode_size()
     }
 }
 
-impl<V: Variant, P: PublicKey, D: Digest> Write for Epoch<V, P, D> {
+impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.floor.write(buf);
         self.round.write(buf);
         self.rng_seed.write(buf);
         self.output.write(buf);
@@ -79,17 +76,15 @@ impl<V: Variant, P: PublicKey, D: Digest> Write for Epoch<V, P, D> {
     }
 }
 
-impl<V, P, D> Read for Epoch<V, P, D>
+impl<V, P> Read for Epoch<V, P>
 where
     V: Variant,
     P: PublicKey,
-    D: Digest + Read<Cfg = ()>,
 {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            floor: ReadExt::read(buf)?,
             round: ReadExt::read(buf)?,
             rng_seed: ReadExt::read(buf)?,
             output: Read::read_cfg(buf, cfg)?,
@@ -182,27 +177,25 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps metadata storage for epoch state and journaled storage for protocol messages,
 /// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
 /// the position/epoch confusion that can occur with position-based journals.
-pub struct Storage<E, V, P, D>
+pub struct Storage<E, V, P>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
     V: Variant,
     P: PublicKey,
-    D: Digest + Read<Cfg = ()>,
 {
-    states: Metadata<E, u64, Epoch<V, P, D>>,
+    states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
     // In-memory state
-    current: Option<(EpochNum, Epoch<V, P, D>)>,
+    current: Option<(EpochNum, Epoch<V, P>)>,
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E, V, P, D> Storage<E, V, P, D>
+impl<E, V, P> Storage<E, V, P>
 where
     E: BufferPooler + Clock + RuntimeStorage + Metrics,
     V: Variant,
     P: PublicKey,
-    D: Digest + Read<Cfg = ()>,
 {
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
@@ -214,7 +207,7 @@ where
     ) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
-        let states: Metadata<E, u64, Epoch<V, P, D>> = Metadata::init(
+        let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.child("states"),
             MetadataConfig {
                 partition: format!("{partition_prefix}_states"),
@@ -323,7 +316,7 @@ where
     }
 
     /// Returns the current epoch state, if initialized.
-    pub fn epoch(&self) -> Option<(EpochNum, Epoch<V, P, D>)> {
+    pub fn epoch(&self) -> Option<(EpochNum, Epoch<V, P>)> {
         self.current.as_ref().map(|(e, s)| (*e, s.clone()))
     }
 
@@ -427,7 +420,7 @@ where
     }
 
     /// Persists epoch state.
-    pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P, D>) {
+    pub async fn set_epoch(&mut self, epoch: EpochNum, state: Epoch<V, P>) {
         // Persist to metadata using epoch number as key
         let epoch_key = epoch.get();
         if self.states.put(epoch_key, state.clone()).is_some() {
@@ -551,16 +544,15 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ///
     /// If the ack is valid and new, persists it to storage.
     /// Returns true if the ack was successfully processed.
-    pub async fn handle<E, D>(
+    pub async fn handle<E>(
         &mut self,
-        storage: &mut Storage<E, V, C::PublicKey, D>,
+        storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
     ) -> bool
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
-        D: Digest + Read<Cfg = ()>,
     {
         if !self.unsent.contains_key(&player) {
             return false;
@@ -627,9 +619,9 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E, M, D>(
+    pub async fn handle<E, M>(
         &mut self,
-        storage: &mut Storage<E, V, C::PublicKey, D>,
+        storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
@@ -637,7 +629,6 @@ impl<V: Variant, C: Signer> Player<V, C> {
     ) -> Option<PlayerAck<C::PublicKey>>
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
-        D: Digest + Read<Cfg = ()>,
         M: Faults,
     {
         // If we've already generated an ack, return the cached version
@@ -681,9 +672,7 @@ mod tests {
             dkg::Info,
             primitives::{group::Scalar, sharing::Mode, variant::MinPk},
         },
-        ed25519,
-        sha256::Digest as Sha256Digest,
-        Signer,
+        ed25519, Signer,
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::{Random, Ring};
@@ -722,7 +711,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, _, Sha256Digest>::init(
+            let mut storage = Storage::<_, MinPk, _>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -764,7 +753,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, ed25519::PublicKey, Sha256Digest>::init(
+            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -806,7 +795,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, _, Sha256Digest>::init(
+            let mut storage = Storage::<_, MinPk, _>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),
@@ -856,7 +845,7 @@ mod tests {
             let signers = create_test_signers(4);
             let round_info = create_round_info(&signers);
 
-            let mut storage = Storage::<_, MinPk, ed25519::PublicKey, Sha256Digest>::init(
+            let mut storage = Storage::<_, MinPk, ed25519::PublicKey>::init(
                 context.child("storage"),
                 "test",
                 NonZeroU32::new(10).unwrap(),

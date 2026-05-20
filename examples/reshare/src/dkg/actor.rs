@@ -3,7 +3,6 @@ use super::{
     Mailbox, Message as MailboxMessage, PostUpdate, Update, UpdateCallBack,
 };
 use crate::{
-    application::genesis,
     namespace,
     orchestrator::{self, EpochTransition},
     setup::PeerConfig,
@@ -23,7 +22,7 @@ use commonware_cryptography::{
     },
     ed25519::Batch,
     transcript::Summary,
-    BatchVerifier, Digestible, Hasher, PublicKey, Signer,
+    BatchVerifier, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
@@ -140,7 +139,6 @@ where
     C: Signer,
     Batch: BatchVerifier<PublicKey = C::PublicKey>,
     V: Variant,
-    H::Digest: Read<Cfg = ()>,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
     pub fn new(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
@@ -187,7 +185,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        orchestrator: orchestrator::Mailbox<V, C::PublicKey, H::Digest>,
+        orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         dkg: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -207,7 +205,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey, H::Digest>,
+        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -227,7 +225,6 @@ where
         .await;
         if storage.epoch().is_none() {
             let initial_state = EpochState {
-                floor: genesis::<H, C, V>().digest(),
                 round: 0,
                 rng_seed: Summary::random(self.context.as_present_mut()),
                 output,
@@ -301,9 +298,8 @@ where
             let am_player = players.position(&self_pk).is_some();
 
             // Inform the orchestrator of the epoch transition
-            let transition: EpochTransition<V, C::PublicKey, H::Digest> = EpochTransition {
+            let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
                 epoch,
-                floor: epoch_state.floor,
                 poly: epoch_state.output.as_ref().map(|o| o.public().clone()),
                 share: epoch_state.share.clone(),
                 dealers: dealers.clone(),
@@ -370,7 +366,7 @@ where
                                 Message::Dealer(pub_msg, priv_msg) => {
                                     if let Some(ref mut ps) = player_state {
                                         let response = ps
-                                            .handle::<_, N3f1, _>(
+                                            .handle::<_, N3f1>(
                                                 &mut storage,
                                                 epoch,
                                                 sender_pk.clone(),
@@ -437,7 +433,6 @@ where
                         }
                     }
                     MailboxMessage::Finalized { block, response } => {
-                        let floor = block.digest();
                         let bounds = epocher
                             .containing(block.height)
                             .expect("block height covered by epoch strategy");
@@ -558,7 +553,6 @@ where
                             .set_epoch(
                                 epoch.next(),
                                 EpochState {
-                                    floor,
                                     round: next_round,
                                     rng_seed: Summary::random(self.context.as_present_mut()),
                                     output: next_output.clone(),
@@ -604,7 +598,7 @@ where
 
     async fn distribute_shares<S: Sender<PublicKey = C::PublicKey>>(
         self_pk: &C::PublicKey,
-        storage: &mut Storage<E, V, C::PublicKey, H::Digest>,
+        storage: &mut Storage<E, V, C::PublicKey>,
         epoch: Epoch,
         dealer_state: &mut Dealer<V, C>,
         mut player_state: Option<&mut Player<V, C>>,
@@ -616,7 +610,7 @@ where
                 if let Some(ref mut ps) = player_state {
                     // Handle as player
                     let ack = match ps
-                        .handle::<_, N3f1, _>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
+                        .handle::<_, N3f1>(storage, epoch, self_pk.clone(), pub_msg, priv_msg)
                         .await
                     {
                         Some(ack) => ack,
@@ -651,7 +645,6 @@ mod tests {
     use commonware_cryptography::{
         bls12381::{dkg::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
-        sha256::Digest as Sha256Digest,
         transcript::Summary,
         Sha256, Signer,
     };
@@ -743,11 +736,10 @@ mod tests {
             .expect("deal should succeed");
             let share = shares.get_value(&first_player).cloned();
             let partition_prefix = format!("recovered_restart_{first_player}");
-            let floor = Sha256::fill(7);
 
             // Seed durable state that looks like a completed reshare several rounds in, even
             // though the restarted actor will be given stale bootstrap inputs below.
-            let mut storage = Storage::<_, MinSig, Ed25519PublicKey, Sha256Digest>::init(
+            let mut storage = Storage::<_, MinSig, Ed25519PublicKey>::init(
                 context.child("seed_storage"),
                 &partition_prefix,
                 NZU32!(peer_config.max_participants_per_round()),
@@ -758,7 +750,6 @@ mod tests {
                 .set_epoch(
                     Epoch::new(RECOVERED_EPOCH),
                     EpochState {
-                        floor,
                         round: RECOVERED_ROUND,
                         rng_seed: Summary::random(&mut context),
                         output: Some(output),
@@ -800,7 +791,6 @@ mod tests {
                 panic!("actor should emit an epoch transition");
             };
             assert_eq!(transition.epoch, Epoch::new(RECOVERED_EPOCH));
-            assert_eq!(transition.floor, floor);
             assert!(
                 transition.poly.is_some(),
                 "transition should carry the recovered public polynomial",
