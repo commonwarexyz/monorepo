@@ -420,6 +420,7 @@ where
                 }
                 None
             }
+            // The resolver is not available until `run`, so floor fetch starts there.
             Start::Floor(finalization) => Some(finalization),
         };
 
@@ -789,6 +790,8 @@ where
                                 )
                                 .await
                             {
+                                // If a floor anchor is pending, repair and dispatch
+                                // are no-ops until the anchor block is stored.
                                 self.try_repair_gaps(
                                     &mut buffer,
                                     &mut resolver,
@@ -1166,6 +1169,7 @@ where
             .fetch_if_permitted(resolver, Request::notarized(round));
     }
 
+    /// Verifies and installs a new floor, fetching the anchor block if needed.
     async fn handle_set_floor<Buf, R>(
         &mut self,
         finalization: Finalization<P::Scheme, V::Commitment>,
@@ -1229,6 +1233,7 @@ where
         Ok(())
     }
 
+    /// Verifies a finalization using the scheme for its epoch.
     fn verify_finalization(
         &mut self,
         finalization: &Finalization<P::Scheme, V::Commitment>,
@@ -1239,6 +1244,7 @@ where
         finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
     }
 
+    /// Returns true when a finalized block is the currently pending floor anchor.
     fn pending_floor_matches(
         &self,
         finalization: &Finalization<P::Scheme, V::Commitment>,
@@ -1251,6 +1257,7 @@ where
         })
     }
 
+    /// Applies a block if it satisfies the currently pending floor.
     async fn try_apply_pending_floor(
         &mut self,
         block: V::Block,
@@ -1274,6 +1281,7 @@ where
         Ok(true)
     }
 
+    /// Persists the floor anchor, advances pruning floors, and resumes delivery.
     async fn apply_floor_anchor(
         &mut self,
         finalization: Finalization<P::Scheme, V::Commitment>,

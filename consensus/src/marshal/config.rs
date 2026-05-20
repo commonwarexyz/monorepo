@@ -61,11 +61,10 @@ where
     /// Must cover every height the marshal will sync.
     pub epocher: ES,
 
-    /// Startup anchor.
+    /// Startup anchor for marshal's processed floor.
     ///
-    /// `Genesis` seeds the height-zero parent for fresh starts. `Floor` starts
-    /// from a finalization and asynchronously fetches the corresponding block
-    /// before leaving marshal's pending-floor pre-start phase.
+    /// Marshal stores or fetches this anchor before delivering later finalized
+    /// blocks.
     pub start: Start<P::Scheme, C, B>,
 
     /// The prefix to use for all partitions.

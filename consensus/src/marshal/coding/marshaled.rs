@@ -98,8 +98,6 @@ use crate::{
     Relay, Reporter,
 };
 use commonware_actor::Feedback;
-#[cfg(test)]
-use commonware_coding::Config as CodingConfig;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
@@ -115,8 +113,6 @@ use commonware_runtime::{
     },
     Clock, Metrics, Spawner, Storage,
 };
-#[cfg(test)]
-use commonware_utils::NZU16;
 use commonware_utils::{
     channel::{
         fallible::OneshotExt,
@@ -128,14 +124,6 @@ use futures::future::{ready, Either, Ready};
 use rand::Rng;
 use std::sync::Arc;
 use tracing::{debug, warn};
-
-/// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
-/// the proposal phase, and thus the configuration is irrelevant.
-#[cfg(test)]
-const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
-    minimum_shards: NZU16!(1),
-    extra_shards: NZU16!(1),
-};
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -1138,15 +1126,4 @@ where
     }
 
     Either::Right(marshal.subscribe_by_commitment(parent_commitment, fallback))
-}
-
-/// Constructs the [`Commitment`] for the genesis block.
-#[cfg(test)]
-pub(super) fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
-    Commitment::from((
-        block.digest(),
-        block.digest(),
-        hash_context::<H, _>(&block.context()),
-        GENESIS_CODING_CONFIG,
-    ))
 }

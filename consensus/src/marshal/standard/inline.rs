@@ -633,7 +633,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,
@@ -714,7 +714,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,
@@ -786,7 +786,7 @@ mod tests {
             let marshal_actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(context.child("inline"),
                 mock_app,
                 marshal.clone(),
@@ -889,7 +889,7 @@ mod tests {
             let actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -1009,7 +1009,7 @@ mod tests {
             let actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,
@@ -1273,7 +1273,7 @@ mod tests {
 
             let fresh_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
+                MockVerifyingApp::new().with_propose_result(fresh_block);
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,

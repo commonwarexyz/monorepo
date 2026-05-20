@@ -7832,7 +7832,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
@@ -8091,7 +8090,6 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-
                 floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),

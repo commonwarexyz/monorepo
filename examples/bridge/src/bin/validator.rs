@@ -4,7 +4,9 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine},
+    simplex::{
+        self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine, Floor,
+    },
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -246,7 +248,7 @@ fn main() {
                 partition: String::from("log"),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::zero(),
-                floor: simplex::Floor::genesis(application::genesis::<Sha256>()),
+                floor: Floor::genesis(application::genesis::<Sha256>()),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

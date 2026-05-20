@@ -1318,7 +1318,7 @@ mod tests {
                 let marshal = setup.mailbox;
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
@@ -1381,9 +1381,10 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     RecordingBuffer::default(),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
@@ -1450,9 +1451,10 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     RecordingBuffer::default(),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
@@ -1524,9 +1526,10 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut wrapper = Wrapper::new(
                 WrapperKind::Deferred,
                 context.child("wrapper"),
@@ -1619,9 +1622,10 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut wrapper = Wrapper::new(
                 WrapperKind::Deferred,
                 context.child("wrapper"),
@@ -1699,9 +1703,10 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     RecordingBuffer::default(),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
@@ -1888,7 +1893,7 @@ mod tests {
                 let child_digest = child.digest();
                 assert!(victim_mailbox.verified(child_round, child).await);
 
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis);
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper = Wrapper::new(
                     kind,
                     context.child("wrapper"),
@@ -1987,7 +1992,7 @@ mod tests {
                 let marshal = setup.mailbox;
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper = Wrapper::new(
                     kind,
                     context.child("wrapper_under_test"),
@@ -2083,7 +2088,7 @@ mod tests {
                 let marshal = setup.mailbox;
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
@@ -2226,7 +2231,7 @@ mod tests {
                 let marshal = setup.mailbox;
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+                let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
@@ -2368,7 +2373,7 @@ mod tests {
 
                 let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
                 let mock_app: MockVerifyingApp<B, S> =
-                    MockVerifyingApp::with_verify_result(genesis.clone(), false);
+                    MockVerifyingApp::with_verify_result(false);
                 let mut wrapper = Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
                 // 1) Set up a valid parent so structural checks can pass.
@@ -2739,33 +2744,6 @@ mod tests {
         provider: ConstantProvider<S, Epoch>,
         application: R,
         buffer: Buf,
-    ) -> (
-        Mailbox<S, Standard<B>>,
-        Buf,
-        RecordingResolver,
-        commonware_runtime::Handle<()>,
-    )
-    where
-        R: Reporter<Activity = Update<B>>,
-        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
-    {
-        start_standard_actor_with_start(
-            context,
-            partition_prefix,
-            provider,
-            application,
-            buffer,
-            Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-        )
-        .await
-    }
-
-    async fn start_standard_actor_with_start<R, Buf>(
-        context: deterministic::Context,
-        partition_prefix: &str,
-        provider: ConstantProvider<S, Epoch>,
-        application: R,
-        buffer: Buf,
         start: Start<S, D, B>,
     ) -> (
         Mailbox<S, Standard<B>>,
@@ -2884,7 +2862,7 @@ mod tests {
                 QUORUM,
             );
             let (application, mut started_rx) = HoldingBlockReporter::new();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor_with_start(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "start-floor-async",
                 ConstantProvider::new(schemes[0].clone()),
@@ -2956,6 +2934,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3028,6 +3007,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -3106,6 +3086,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -3175,6 +3156,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let mut mailbox = mailbox;
@@ -3208,6 +3190,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3263,6 +3246,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
             let missing = Sha256::hash(b"missing-before-set-floor");
@@ -3497,6 +3481,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3533,6 +3518,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3725,6 +3711,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3768,6 +3755,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3822,6 +3810,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3865,6 +3854,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3927,6 +3917,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -3967,6 +3958,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 
@@ -4016,6 +4008,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
 

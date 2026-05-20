@@ -24,25 +24,25 @@ pub struct MockVerifyingApp<B, S> {
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
-    _phantom: std::marker::PhantomData<S>,
+    _phantom: PhantomData<S>,
 }
 
 impl<B, S> MockVerifyingApp<B, S> {
     /// Create a new mock verifying application.
-    pub fn new(_genesis: B) -> Self {
+    pub fn new() -> Self {
         Self {
             propose_result: None,
             verify_result: true,
-            _phantom: std::marker::PhantomData,
+            _phantom: PhantomData,
         }
     }
 
     /// Create a new mock verifying application with a fixed verify result.
-    pub fn with_verify_result(_genesis: B, verify_result: bool) -> Self {
+    pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
             propose_result: None,
             verify_result,
-            _phantom: std::marker::PhantomData,
+            _phantom: PhantomData,
         }
     }
 
@@ -58,7 +58,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
-            _phantom: std::marker::PhantomData,
+            _phantom: PhantomData,
         }
     }
 }

@@ -152,7 +152,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     ///
     /// The startup floor comes from [`crate::marshal::Config::start`].
     SetFloor {
-        /// The candidate floor finalization.
+        /// The candidate floor finalization, verified by the actor before use.
         finalization: Finalization<S, V::Commitment>,
     },
     /// Prunes finalized blocks and certificates below the given height.

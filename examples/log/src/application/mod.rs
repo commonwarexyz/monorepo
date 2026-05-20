@@ -17,6 +17,10 @@ const GENESIS: &[u8] = b"commonware is neat";
 
 /// Returns the initial payload for the single consensus epoch.
 pub fn genesis<H: Hasher>() -> H::Digest {
+    // Use the hash of the genesis message as the initial payload.
+    //
+    // Since this example does not verify that proposed messages link to a
+    // parent, this only seeds the consensus floor.
     let mut hasher = H::default();
     hasher.update(GENESIS);
     hasher.finalize()

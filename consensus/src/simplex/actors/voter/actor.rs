@@ -677,7 +677,7 @@ impl<
         let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
-        // Add initial view from the configured floor.
+        // Add initial view from the configured floor
         let floor = self.floor.clone();
         if let Some(finalization) = self.state.set_floor(floor) {
             resolver.updated(Certificate::Finalization(finalization.clone()));

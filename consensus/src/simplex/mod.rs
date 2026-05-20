@@ -812,7 +812,6 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
-
                     floor: config::Floor::genesis(mocks::application::genesis::<Sha256>(
                         Epoch::new(333),
                     )),
