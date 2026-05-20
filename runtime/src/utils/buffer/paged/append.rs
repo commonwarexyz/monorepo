@@ -966,6 +966,10 @@ impl<B: Blob> Append<B> {
             full_pages * physical_page_size
         };
 
+        // Any shrink that lands inside an existing page must transition the target page's CRC
+        // through the alternate slot. The old page may have been full or partial, but rewriting it
+        // as a padded partial page before the shorter CRC is durable can make recovery discard the
+        // whole page.
         if partial_bytes > 0 {
             // Evict cached pages at or beyond the new full-page boundary. The page at
             // `full_pages` is now owned by the tip buffer, and anything above is beyond the new
@@ -989,6 +993,11 @@ impl<B: Blob> Append<B> {
                 .checked_add(u64::from(blob_guard.partial_page_state.is_some()))
                 .and_then(|pages| pages.checked_mul(physical_page_size))
                 .ok_or(Error::OffsetOverflow)?;
+
+            // If the shrink drops later physical pages, make that truncation durable before
+            // changing the landing page's CRC. A crash before the shorter CRC is staged can then
+            // still recover the landing page at its old length, without reviving truncated tail
+            // pages.
             if new_physical_size < current_physical_size {
                 blob_guard.blob.resize(new_physical_size).await?;
                 blob_guard.blob.sync().await?;
