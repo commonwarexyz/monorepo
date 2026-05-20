@@ -265,41 +265,41 @@ impl Floor {
 /// A floor update that cannot complete until marshal has the anchor block.
 enum FloorTransition<S: CertificateScheme, C: Digest> {
     Resolved,
-    Blocked(Finalization<S, C>),
+    Pending(Finalization<S, C>),
 }
 
 impl<S: CertificateScheme, C: Digest> FloorTransition<S, C> {
     /// Records a configured floor before the actor has a resolver.
     const fn awaiting_anchor(finalization: Finalization<S, C>) -> Self {
-        Self::Blocked(finalization)
+        Self::Pending(finalization)
     }
 
     /// Returns true while repair and application dispatch must wait for the floor anchor.
     const fn blocks_progress(&self) -> bool {
-        matches!(self, Self::Blocked(_))
+        matches!(self, Self::Pending(_))
     }
 
     /// Returns true if a pending floor already supersedes the candidate floor round.
     fn has_anchor_at_or_after(&self, round: Round) -> bool {
-        matches!(self, Self::Blocked(pending) if pending.round() >= round)
+        matches!(self, Self::Pending(pending) if pending.round() >= round)
     }
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.
     fn await_anchor(&mut self, finalization: Finalization<S, C>) {
-        *self = Self::Blocked(finalization);
+        *self = Self::Pending(finalization);
     }
 
     /// Clears and returns the pending floor finalization, if any.
     fn take(&mut self) -> Option<Finalization<S, C>> {
         match std::mem::replace(self, Self::Resolved) {
             Self::Resolved => None,
-            Self::Blocked(finalization) => Some(finalization),
+            Self::Pending(finalization) => Some(finalization),
         }
     }
 
     /// Clears and returns the pending floor only when `commitment` is the awaited anchor.
     fn take_if_anchor_matches(&mut self, commitment: C) -> Option<Finalization<S, C>> {
-        if !matches!(self, Self::Blocked(pending) if pending.proposal.payload == commitment) {
+        if !matches!(self, Self::Pending(pending) if pending.proposal.payload == commitment) {
             return None;
         }
         self.take()
@@ -402,7 +402,7 @@ where
 {
     /// Create a new application actor.
     pub async fn init(
-        mut context: E,
+        context: E,
         finalizations_by_height: FC,
         mut finalized_blocks: FB,
         config: Config<P, ES, T, V::ApplicationBlock, V::Block, V::Commitment>,
@@ -464,18 +464,7 @@ where
                 }
                 FloorTransition::Resolved
             }
-            Start::Floor(finalization) => {
-                let scheme = config
-                    .provider
-                    .all()
-                    .or_else(|| config.provider.scoped(finalization.epoch()))
-                    .expect("floor finalization epoch must be covered by provider");
-                assert!(
-                    finalization.verify(&mut context, scheme.as_ref(), &config.strategy),
-                    "floor finalization must verify"
-                );
-                FloorTransition::awaiting_anchor(finalization)
-            }
+            Start::Floor(finalization) => FloorTransition::awaiting_anchor(finalization),
         };
 
         let last_processed_round =
@@ -791,13 +780,13 @@ where
                         if let Some(block) =
                             self.find_block_by_commitment(&buffer, commitment).await
                         {
+                            // The anchor path stores the floor block and
+                            // finalization, advances floors, prunes below
+                            // them, and resumes dispatch.
                             if self
                                 .apply_floor_anchor(&block, &mut application, &mut resolver)
                                 .await
                             {
-                                // The anchor path stores the floor block and
-                                // finalization, advances floors, prunes below
-                                // them, and resumes dispatch.
                                 continue;
                             }
 
@@ -1276,6 +1265,8 @@ where
 
         let height = block.height();
         if height > Height::zero() {
+            // Floor anchors can bypass the local proposal-verification path.
+            // Check the parent relationship before using it for walkback.
             let parent_commitment = V::parent_commitment(&block);
             assert!(
                 block.parent() == V::commitment_to_inner(parent_commitment),
@@ -2173,9 +2164,9 @@ where
                 } else {
                     // Request the next missing commitment.
                     //
-                    // SAFETY: We can rely on this derived parent commitment because
-                    // the block is provably a member of the finalized chain due to the end
-                    // boundary of the gap being finalized.
+                    // SAFETY: Finalized blocks are archived only after the
+                    // parent relationship needed for walkback has been
+                    // validated by marshal.
                     let parent_height = cursor
                         .height()
                         .previous()
