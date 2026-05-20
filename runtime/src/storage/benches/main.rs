@@ -6,6 +6,7 @@
 //! - steady-state sequential reads and writes on fixed-size files
 //! - steady-state random reads and writes on fixed-size files
 //! - append-only writes on a growing file
+//! - durable positioned writes comparing sync strategies
 //! - mixed append-plus-read pressure with one writer and many readers
 
 mod config;
