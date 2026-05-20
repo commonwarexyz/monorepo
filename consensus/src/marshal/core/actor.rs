@@ -269,7 +269,7 @@ enum FloorTransition<S: CertificateScheme, C: Digest> {
 }
 
 impl<S: CertificateScheme, C: Digest> FloorTransition<S, C> {
-    /// Starts a floor transition from configuration before the actor has a resolver.
+    /// Records a configured floor before the actor has a resolver.
     fn awaiting_anchor(finalization: Finalization<S, C>) -> Self {
         Self::AwaitingAnchor(finalization)
     }
@@ -408,7 +408,7 @@ where
 {
     /// Create a new application actor.
     pub async fn init(
-        context: E,
+        mut context: E,
         finalizations_by_height: FC,
         mut finalized_blocks: FB,
         config: Config<P, ES, T, V::ApplicationBlock, V::Block, V::Commitment>,
@@ -444,8 +444,8 @@ where
             .copied()
             .unwrap_or(Height::zero());
 
-        // Genesis is a local anchor. A floor finalization is verified and
-        // resolved after `run` receives the resolver and buffer.
+        // Genesis is a local anchor. A floor finalization can be verified now,
+        // but its block anchor is resolved after `run` receives the resolver and buffer.
         let floor_transition = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
@@ -470,7 +470,18 @@ where
                 }
                 FloorTransition::Idle
             }
-            Start::Floor(finalization) => FloorTransition::awaiting_anchor(finalization),
+            Start::Floor(finalization) => {
+                let scheme = config
+                    .provider
+                    .all()
+                    .or_else(|| config.provider.scoped(finalization.epoch()))
+                    .expect("floor finalization epoch must be covered by provider");
+                assert!(
+                    finalization.verify(&mut context, scheme.as_ref(), &config.strategy),
+                    "floor finalization must verify"
+                );
+                FloorTransition::awaiting_anchor(finalization)
+            }
         };
 
         let last_processed_round =

@@ -2890,6 +2890,42 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    #[should_panic(expected = "floor finalization must verify")]
+    fn test_standard_start_floor_rejects_invalid_finalization() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: wrong_schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let (application, _started_rx) = HoldingBlockReporter::new();
+            let _ = start_standard_actor(
+                context.child("validator"),
+                "start-floor-invalid",
+                ConstantProvider::new(wrong_schemes[0].clone()),
+                application,
+                RecordingBuffer::default(),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_start_floor_fetches_async_and_serves_requests() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
