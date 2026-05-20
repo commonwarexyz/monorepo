@@ -8,8 +8,8 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
-    types::{Epoch, Epocher, FixedEpocher, ViewDelta},
+    simplex::{self, elector::Config as Elector, scheme, types::Context, Floor, Plan},
+    types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
@@ -246,6 +246,23 @@ where
                         continue;
                     }
 
+                    // DKG state does not persist the consensus floor; derive it from marshal's
+                    // finalized boundary block when entering each epoch.
+                    let floor = match Self::floor_boundary(&epocher, transition.epoch) {
+                        Some(boundary_height) => self
+                            .marshal
+                            .get_block(boundary_height)
+                            .await
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "missing finalized boundary block at height {} for epoch {}",
+                                    boundary_height, transition.epoch
+                                )
+                            })
+                            .digest(),
+                        None => genesis::<H, C, V>().digest(),
+                    };
+
                     // Register the new signing scheme with the scheme provider.
                     let scheme = self.provider.scheme_for_epoch(&transition);
                     assert!(self.provider.register(transition.epoch, scheme.clone()));
@@ -254,6 +271,7 @@ where
                     let handle = self
                         .enter_epoch(
                             transition.epoch,
+                            floor,
                             scheme,
                             &mut vote_mux,
                             &mut certificate_mux,
@@ -282,9 +300,21 @@ where
         }
     }
 
+    // Epoch zero uses genesis as its floor; every later epoch is anchored by the
+    // last finalized block from the previous epoch.
+    fn floor_boundary(epocher: &FixedEpocher, epoch: Epoch) -> Option<Height> {
+        let previous_epoch = epoch.previous()?;
+        Some(
+            epocher
+                .last(previous_epoch)
+                .expect("previous epoch should be covered by epoch strategy"),
+        )
+    }
+
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
+        floor: H::Digest,
         scheme: S,
         vote_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
@@ -317,7 +347,7 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: NZUsize!(1024),
                 epoch,
-                floor: simplex::Floor::genesis(genesis::<H, C, V>().digest()),
+                floor: Floor::genesis(floor),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

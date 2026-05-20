@@ -1,7 +1,7 @@
 //! A stream that yields the ancestors of a block while prefetching parents.
 
 use crate::{types::Height, Block, Heightable};
-use commonware_cryptography::Digestible;
+use commonware_cryptography::{Digest, Digestible};
 use futures::{
     future::{BoxFuture, OptionFuture},
     FutureExt, Stream,
@@ -24,7 +24,7 @@ where
 }
 
 /// An interface for providing parent blocks.
-pub trait BlockProvider: Clone + Send + 'static {
+pub trait BlockProvider: Send + 'static {
     /// The block type the provider walks.
     type Block: Block;
 
@@ -41,9 +41,38 @@ pub trait BlockProvider: Clone + Send + 'static {
     ///
     /// The child block can carry variant-specific context needed to retrieve its parent.
     fn subscribe_parent(
-        self,
-        block: Self::Block,
-    ) -> impl Future<Output = Option<Self::Block>> + Send;
+        &self,
+        block: &Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static;
+}
+
+// Expected parent height and digest for a pending fetch.
+struct ExpectedParent<D>(Height, D);
+
+// Pending parent fetch paired with the relationship it must satisfy.
+type PendingFetch<B> = BoxFuture<'static, Option<(ExpectedParent<<B as Digestible>::Digest>, B)>>;
+
+impl<D: Digest> ExpectedParent<D> {
+    fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
+        Self(
+            child.height().previous().expect("child must have parent"),
+            child.parent(),
+        )
+    }
+
+    fn assert_matches<B: Block<Digest = D>>(self, parent: &B) {
+        let Self(parent_height, parent_digest) = self;
+        assert_eq!(
+            parent.height(),
+            parent_height,
+            "fetched parent must be contiguous in height"
+        );
+        assert_eq!(
+            parent.digest(),
+            parent_digest,
+            "fetched parent must be contiguous in ancestry"
+        );
+    }
 }
 
 /// Yields the ancestors of a block while prefetching parents, including the
@@ -53,7 +82,7 @@ pub struct AncestorStream<M: BlockProvider> {
     buffered: Vec<M::Block>,
     marshal: M,
     #[pin]
-    pending: OptionFuture<BoxFuture<'static, Option<M::Block>>>,
+    pending: OptionFuture<PendingFetch<M::Block>>,
 }
 
 impl<M: BlockProvider> AncestorStream<M> {
@@ -61,7 +90,7 @@ impl<M: BlockProvider> AncestorStream<M> {
     ///
     /// # Panics
     ///
-    /// Panics if the initial blocks are not contiguous in height.
+    /// Panics if the initial blocks are not contiguous.
     pub(crate) fn new(marshal: M, initial: impl IntoIterator<Item = M::Block>) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<M::Block>>();
         buffered.sort_by_key(Heightable::height);
@@ -91,7 +120,6 @@ impl<M: BlockProvider> AncestorStream<M> {
 impl<M> Stream for AncestorStream<M>
 where
     M: BlockProvider,
-    M::Block: Clone,
 {
     type Item = M::Block;
 
@@ -106,14 +134,20 @@ where
             let should_walk_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
-                let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
+                let expected = ExpectedParent::from_child(&block);
+                let future = this
+                    .marshal
+                    .subscribe_parent(&block)
+                    .map(move |parent| parent.map(|parent| (expected, parent)))
+                    .boxed();
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
                 // buffer it for the next poll.
                 match this.pending.as_mut().poll(cx) {
-                    Poll::Ready(Some(Some(block))) => {
-                        this.buffered.push(block);
+                    Poll::Ready(Some(Some((expected, parent)))) => {
+                        expected.assert_matches(&parent);
+                        this.buffered.push(parent);
                     }
                     Poll::Ready(Some(None)) => {
                         *this.pending.as_mut() = None.into();
@@ -134,18 +168,25 @@ where
                 *this.pending.as_mut() = None.into();
                 Poll::Ready(None)
             }
-            Poll::Ready(Some(Some(block))) => {
+            Poll::Ready(Some(Some((expected, block)))) => {
+                expected.assert_matches(&block);
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
-                    let future = this.marshal.clone().subscribe_parent(block.clone()).boxed();
+                    let expected = ExpectedParent::from_child(&block);
+                    let future = this
+                        .marshal
+                        .subscribe_parent(&block)
+                        .map(move |parent| parent.map(|parent| (expected, parent)))
+                        .boxed();
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
                     // buffer it for the next poll.
                     match this.pending.as_mut().poll(cx) {
-                        Poll::Ready(Some(Some(block))) => {
-                            this.buffered.push(block);
+                        Poll::Ready(Some(Some((expected, parent)))) => {
+                            expected.assert_matches(&parent);
+                            this.buffered.push(parent);
                         }
                         Poll::Ready(Some(None)) => {
                             *this.pending.as_mut() = None.into();
@@ -176,9 +217,12 @@ mod test {
     impl BlockProvider for MockProvider {
         type Block = Block<Sha256Digest, ()>;
 
-        async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
+        fn subscribe_parent(
+            &self,
+            block: &Self::Block,
+        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
             let parent = block.parent;
-            self.0.into_iter().find(|b| b.digest() == parent)
+            std::future::ready(self.0.iter().find(|b| b.digest() == parent).cloned())
         }
     }
 
@@ -204,6 +248,31 @@ mod test {
                 Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(2), 2),
             ],
         );
+    }
+
+    #[test]
+    #[should_panic = "fetched parent must be contiguous in height"]
+    fn test_panics_on_non_contiguous_fetched_parent_height() {
+        let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
+        let child = Block::new::<Sha256>((), parent.digest(), Height::new(3), 3);
+        let stream = AncestorStream::new(MockProvider(vec![parent]), [child]);
+        futures::pin_mut!(stream);
+
+        let waker = futures::task::noop_waker_ref();
+        let mut cx = std::task::Context::from_waker(waker);
+        let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+    }
+
+    #[test_async]
+    async fn test_yields_genesis_and_stops() {
+        let genesis = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
+        let child = Block::new::<Sha256>((), genesis.digest(), Height::new(1), 1);
+
+        let provider = MockProvider(vec![genesis.clone()]);
+        let stream = AncestorStream::new(provider, [child.clone()]);
+
+        let results = stream.collect::<Vec<_>>().await;
+        assert_eq!(results, vec![child, genesis]);
     }
 
     #[test_async]

@@ -104,10 +104,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{
-            coding::types::CodedBlock,
-            mocks::block::Block as MockBlock,
-        },
+        marshal::{coding::types::CodedBlock, mocks::block::Block as MockBlock},
         simplex::{scheme::ed25519, types::Context},
         types::{coding::Commitment, FixedEpocher},
     };

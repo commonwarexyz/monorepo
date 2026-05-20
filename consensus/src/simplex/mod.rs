@@ -1083,12 +1083,16 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.child("initial_finalizer").spawn(move |_| async move {
-                    while latest < initial_tip_target {
-                        latest = monitor.recv().await.expect("event missing");
-                    }
-                    latest
-                }));
+                finalizers.push(
+                    context
+                        .child("initial_finalizer")
+                        .spawn(move |_| async move {
+                            while latest < initial_tip_target {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                            latest
+                        }),
+                );
             }
             let tip_at_join = join_all(finalizers)
                 .await
