@@ -7,6 +7,7 @@ modified-time: "2026-05-21T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 url: "https://commonware.xyz/blogs/golden"
+image: "https://commonware.xyz/blogs/golden-001.png"
 katex: true
 ---
 
