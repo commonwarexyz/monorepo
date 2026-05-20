@@ -972,12 +972,9 @@ impl<B: Blob> Append<B> {
             // logical size.
             self.cache_ref.invalidate_from(self.id, full_pages);
 
-            let (page_data, old_crc) = super::get_page_from_blob_with_crc(
-                &blob_guard.blob,
-                full_pages,
-                logical_page_size,
-            )
-            .await?;
+            let (page_data, old_crc) =
+                super::get_page_from_blob_with_crc(&blob_guard.blob, full_pages, logical_page_size)
+                    .await?;
 
             // Ensure the validated data covers what we need.
             if (page_data.len() as u64) < partial_bytes {
@@ -3045,11 +3042,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, (page_size * 2) as u64);
-            let read = append
-                .read_at(0, page_size * 2)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = append.read_at(0, page_size * 2).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..page_size * 2]);
         });
     }
