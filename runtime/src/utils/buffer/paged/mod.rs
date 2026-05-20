@@ -58,8 +58,12 @@ async fn get_page_with_checksum_from_blob(
     page_num: u64,
     logical_page_size: u64,
 ) -> Result<(IoBuf, Checksum), Error> {
-    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
-    let physical_page_start = page_num * physical_page_size;
+    let physical_page_size = logical_page_size
+        .checked_add(CHECKSUM_SIZE)
+        .ok_or(Error::OffsetOverflow)?;
+    let physical_page_start = page_num
+        .checked_mul(physical_page_size)
+        .ok_or(Error::OffsetOverflow)?;
 
     let page = blob
         .read_at(physical_page_start, physical_page_size as usize)
