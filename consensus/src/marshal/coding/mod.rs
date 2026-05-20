@@ -2426,12 +2426,7 @@ mod tests {
                 leader: participants[0].clone(),
                 parent: (View::zero(), genesis_commitment()),
             };
-            let parent = make_coding_block(
-                parent_context,
-                Sha256::hash(b""),
-                Height::new(1),
-                100,
-            );
+            let parent = make_coding_block(parent_context, Sha256::hash(b""), Height::new(1), 100);
 
             let floor_round = Round::new(Epoch::zero(), View::new(2));
             let bad_context = CodingCtx {
@@ -2439,8 +2434,7 @@ mod tests {
                 leader: participants[0].clone(),
                 parent: (View::new(1), genesis_commitment()),
             };
-            let floor_block =
-                make_coding_block(bad_context, parent.digest(), Height::new(2), 200);
+            let floor_block = make_coding_block(bad_context, parent.digest(), Height::new(2), 200);
             let coded_floor = CodedBlock::new(floor_block, coding_config, &Sequential);
             assert_ne!(
                 coded_floor.parent(),

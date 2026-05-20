@@ -3579,9 +3579,16 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
         // Advance floor beyond the stale block and prune.
         let floor = Height::new(10);
-        let floor_anchor = H::make_test_block(
-            Sha256::hash(b"floor-parent"),
+        let floor_parent = H::make_test_block(
+            Sha256::hash(b"floor-grandparent"),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            floor.previous().expect("floor must have a parent"),
+            floor.get() - 1,
+            NUM_VALIDATORS as u16,
+        );
+        let floor_anchor = H::make_test_block(
+            H::digest(&floor_parent),
+            H::commitment(&floor_parent),
             floor,
             floor.get(),
             NUM_VALIDATORS as u16,

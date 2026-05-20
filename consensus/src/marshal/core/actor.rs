@@ -1194,8 +1194,7 @@ where
         resolver: &mut R,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    )
-    where
+    ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
         R: Resolver<
             Key = ResolverRequestFor<V>,
@@ -1235,11 +1234,7 @@ where
             return;
         }
 
-        debug!(
-            ?round,
-            ?commitment,
-            "starting fetch for floor block"
-        );
+        debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor_transition.await_anchor(finalization);
         self.floor.fetch_if_permitted(
             resolver,
@@ -1270,10 +1265,7 @@ where
         >,
     ) -> bool {
         let commitment = V::commitment(&block);
-        let Some(finalization) = self
-            .floor_transition
-            .take_if_anchor_matches(commitment)
-        else {
+        let Some(finalization) = self.floor_transition.take_if_anchor_matches(commitment) else {
             return false;
         };
 
@@ -1383,7 +1375,10 @@ where
                     return false;
                 }
 
-                if self.apply_floor_anchor(block.clone(), application, resolver).await {
+                if self
+                    .apply_floor_anchor(block.clone(), application, resolver)
+                    .await
+                {
                     response.send_lossy(true);
                     return false;
                 }
@@ -1626,7 +1621,10 @@ where
                     let digest = block.digest();
                     debug!(?round, %height, "received finalization");
 
-                    if self.apply_floor_anchor(block.clone(), application, resolver).await {
+                    if self
+                        .apply_floor_anchor(block.clone(), application, resolver)
+                        .await
+                    {
                         continue;
                     }
 
@@ -1677,7 +1675,10 @@ where
                         .put_notarization(round, digest, notarization)
                         .await;
 
-                    if self.apply_floor_anchor(block.clone(), application, resolver).await {
+                    if self
+                        .apply_floor_anchor(block.clone(), application, resolver)
+                        .await
+                    {
                         continue;
                     }
                 }
