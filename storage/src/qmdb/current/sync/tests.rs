@@ -835,6 +835,75 @@ current_sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
 current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
 
+mod target_matcher {
+    use super::*;
+    use crate::{
+        merkle::{mmr, Location},
+        qmdb::current::sync::TargetMatcher,
+    };
+
+    fn target(byte: u8) -> crate::qmdb::current::sync::Target<mmr::Family, Digest> {
+        let root = Digest::from([byte; 32]);
+        dummy_current_target(
+            root,
+            root,
+            non_empty_range!(Location::new(0), Location::new(1)),
+        )
+    }
+
+    #[test]
+    fn test_trusted_root_before_candidate_target() {
+        let mut matcher = TargetMatcher::new(4, 4);
+        let target = target(1);
+
+        assert!(matcher.insert_trusted_root(target.root).is_none());
+        assert_eq!(
+            matcher.insert_candidate_target(target.clone()),
+            Some(target.clone())
+        );
+        assert!(matcher.insert_candidate_target(target).is_none());
+    }
+
+    #[test]
+    fn test_candidate_target_before_trusted_root() {
+        let mut matcher = TargetMatcher::new(4, 4);
+        let target = target(2);
+
+        assert!(matcher.insert_candidate_target(target.clone()).is_none());
+        assert_eq!(
+            matcher.insert_trusted_root(target.root),
+            Some(target.clone())
+        );
+        assert!(matcher.insert_trusted_root(target.root).is_none());
+    }
+
+    #[test]
+    fn test_matching_target_emitted_once() {
+        let mut matcher = TargetMatcher::new(4, 4);
+        let target = target(5);
+
+        assert!(matcher.insert_candidate_target(target.clone()).is_none());
+        assert_eq!(
+            matcher.insert_trusted_root(target.root),
+            Some(target.clone())
+        );
+        assert!(matcher.insert_candidate_target(target.clone()).is_none());
+        assert!(matcher.insert_trusted_root(target.root).is_none());
+    }
+
+    #[test]
+    fn test_unmatched_targets_are_evicted() {
+        let mut matcher = TargetMatcher::new(4, 1);
+        let evicted = target(3);
+        let retained = target(4);
+
+        assert!(matcher.insert_candidate_target(evicted.clone()).is_none());
+        assert!(matcher.insert_candidate_target(retained.clone()).is_none());
+        assert!(matcher.insert_trusted_root(evicted.root).is_none());
+        assert_eq!(matcher.insert_trusted_root(retained.root), Some(retained));
+    }
+}
+
 mod root_sync {
     use super::*;
     use crate::{
@@ -843,7 +912,7 @@ mod root_sync {
             self,
             current::{
                 proof::OpsRootWitness,
-                sync::{self as current_sync, Target as CurrentTarget},
+                sync::{self as current_sync, CurrentResolver, Target as CurrentTarget},
                 tests::variable_config,
             },
         },
@@ -897,6 +966,85 @@ mod root_sync {
             witness,
             non_empty_range!(lower, upper),
         )
+    }
+
+    async fn assert_current_target_matches_db(
+        db: &Db,
+        target: CurrentTarget<mmr::Family, Digest>,
+    ) {
+        let expected = make_current_target(db).await;
+        let hasher = qmdb::hasher::<Sha256>();
+        assert_eq!(target, expected);
+        assert!(target.verify(&hasher));
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_resolver_arc_db_returns_atomic_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let resolver = std::sync::Arc::new(target_db);
+            let target = CurrentResolver::current_target(&resolver).await.unwrap();
+
+            assert_current_target_matches_db(resolver.as_ref(), target).await;
+
+            let target_db = std::sync::Arc::into_inner(resolver).unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_resolver_locked_db_returns_atomic_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let resolver =
+                std::sync::Arc::new(commonware_utils::sync::AsyncRwLock::new(target_db));
+            let target = CurrentResolver::current_target(&resolver).await.unwrap();
+
+            {
+                let db = resolver.read().await;
+                assert_current_target_matches_db(&db, target).await;
+            }
+
+            let target_db = std::sync::Arc::into_inner(resolver).unwrap().into_inner();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_resolver_locked_option_returns_atomic_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let resolver = std::sync::Arc::new(commonware_utils::sync::AsyncRwLock::new(Some(
+                target_db,
+            )));
+            let target = CurrentResolver::current_target(&resolver).await.unwrap();
+
+            {
+                let guard = resolver.read().await;
+                assert_current_target_matches_db(guard.as_ref().unwrap(), target).await;
+            }
+
+            let target_db = std::sync::Arc::into_inner(resolver)
+                .unwrap()
+                .into_inner()
+                .unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_resolver_locked_option_empty_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context: Context| async move {
+            let resolver: std::sync::Arc<commonware_utils::sync::AsyncRwLock<Option<Db>>> =
+                std::sync::Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
+            let result = CurrentResolver::current_target(&resolver).await;
+
+            assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));
+        });
     }
 
     #[test_traced("INFO")]

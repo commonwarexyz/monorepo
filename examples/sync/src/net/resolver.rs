@@ -7,7 +7,7 @@ use commonware_storage::{
     mmr::{self, Location},
     qmdb::{
         any::sync::Target,
-        current::sync::Target as CurrentTarget,
+        current::sync::{CurrentResolver, Target as CurrentTarget},
         sync::{self, compact},
     },
 };
@@ -223,6 +223,23 @@ where
             success_tx: tx,
             pinned_nodes,
         })
+    }
+}
+
+impl<Op, D> CurrentResolver for Resolver<Op, D>
+where
+    Op: Clone + Read + EncodeShared,
+    Op::Cfg: IsUnit,
+    D: Digest,
+{
+    type Family = mmr::Family;
+    type Digest = D;
+    type Error = crate::Error;
+
+    async fn current_target(
+        &self,
+    ) -> Result<CurrentTarget<Self::Family, Self::Digest>, Self::Error> {
+        self.get_current_sync_target().await
     }
 }
 
