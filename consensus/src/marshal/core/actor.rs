@@ -470,11 +470,22 @@ where
                         "startup anchor below existing processed height, ignoring"
                     );
                 } else {
-                    if let Err(err) = finalized_blocks.put(anchor.into()).await {
-                        panic!("failed to store startup anchor: {err}");
-                    }
-                    if let Err(err) = finalized_blocks.sync().await {
-                        panic!("failed to sync startup anchor: {err}");
+                    match finalized_blocks
+                        .get(ArchiveID::Index(anchor_height.get()))
+                        .await
+                    {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            finalized_blocks
+                                .put(anchor.into())
+                                .await
+                                .expect("failed to store startup anchor");
+                            finalized_blocks
+                                .sync()
+                                .await
+                                .expect("failed to sync startup anchor");
+                        }
+                        Err(err) => panic!("failed to check startup anchor: {err}"),
                     }
                 }
                 None
