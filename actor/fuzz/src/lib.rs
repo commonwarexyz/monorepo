@@ -1,7 +1,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_actor::{mailbox, Feedback};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor};
-use commonware_utils::sync::Mutex;
+use commonware_utils::{sync::Mutex, FuzzRng};
+use rand::Rng;
 use std::{
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -24,29 +25,10 @@ enum Kind {
     Reject,
 }
 
-impl<'a> Arbitrary<'a> for Kind {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(if u.arbitrary::<bool>()? {
-            Self::Retain
-        } else {
-            Self::Reject
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct EnqueueInput {
     sender: u8,
     kind: Kind,
-}
-
-impl<'a> Arbitrary<'a> for EnqueueInput {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            sender: u.int_in_range(0..=MAX_SENDERS - 1)?,
-            kind: Kind::arbitrary(u)?,
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -77,96 +59,38 @@ enum Operation {
     },
 }
 
-impl<'a> Arbitrary<'a> for Operation {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        match u.int_in_range(0..=MAX_OPERATION_INDEX)? {
-            0 => Ok(Self::Enqueue(EnqueueInput::arbitrary(u)?)),
-            1 => {
-                let len = u.int_in_range(1..=MAX_BATCH_MESSAGES)?;
-                let messages = (0..len)
-                    .map(|_| EnqueueInput::arbitrary(u))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Self::Batch(messages))
-            }
-            2 => Ok(Self::TryRecv {
-                limit: u.int_in_range(0..=MAX_DRAIN)?,
-            }),
-            3 => Ok(Self::Recv {
-                limit: u.int_in_range(0..=MAX_DRAIN)?,
-            }),
-            4 => {
-                let len = u.int_in_range(0..=MAX_BATCH_MESSAGES)?;
-                let extra = (0..len)
-                    .map(|_| EnqueueInput::arbitrary(u))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Self::ParkedRecv {
-                    sender: u.int_in_range(0..=MAX_SENDERS - 1)?,
-                    extra,
-                })
-            }
-            5 => Ok(Self::CloneSender {
-                index: u.int_in_range(0..=MAX_SENDER_INDEX)?,
-            }),
-            6 => Ok(Self::DropSender {
-                index: u.int_in_range(0..=MAX_SENDER_INDEX)?,
-            }),
-            7 => Ok(Self::DropReceiver {
-                index: u.int_in_range(0..=MAX_SENDER_INDEX)?,
-            }),
-            8 => Ok(Self::DropReceiverWithOverflow {
-                sender: u.int_in_range(0..=MAX_SENDERS - 1)?,
-            }),
-            _ => unreachable!(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct CoalesceInput {
     sender: u8,
     coalesce: bool,
 }
 
-impl<'a> Arbitrary<'a> for CoalesceInput {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            sender: u.int_in_range(0..=MAX_SENDERS - 1)?,
-            coalesce: u.arbitrary()?,
-        })
-    }
-}
-
 #[derive(Debug)]
 pub struct FifoInput {
     capacity: usize,
-    operations: Vec<Operation>,
+    raw_bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
 pub struct CoalesceFuzzInput {
     capacity: usize,
-    coalesce: Vec<CoalesceInput>,
+    raw_bytes: Vec<u8>,
 }
 
-fn arbitrary_operations(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<Operation>> {
-    let operations_len = u.int_in_range(1..=MAX_OPERATIONS)?;
-    (0..operations_len)
-        .map(|_| Operation::arbitrary(u))
-        .collect::<Result<Vec<_>, _>>()
-}
-
-fn arbitrary_coalesce(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<CoalesceInput>> {
-    let coalesce_len = u.int_in_range(1..=MAX_OPERATIONS)?;
-    (0..coalesce_len)
-        .map(|_| CoalesceInput::arbitrary(u))
-        .collect::<Result<Vec<_>, _>>()
+fn extract_raw_bytes(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+    let remaining = u.len();
+    if remaining == 0 {
+        Ok(vec![0])
+    } else {
+        Ok(u.bytes(remaining)?.to_vec())
+    }
 }
 
 impl<'a> Arbitrary<'a> for FifoInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             capacity: u.int_in_range(1..=MAX_CAPACITY)?,
-            operations: arbitrary_operations(u)?,
+            raw_bytes: extract_raw_bytes(u)?,
         })
     }
 }
@@ -175,9 +99,79 @@ impl<'a> Arbitrary<'a> for CoalesceFuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             capacity: u.int_in_range(1..=MAX_CAPACITY)?,
-            coalesce: arbitrary_coalesce(u)?,
+            raw_bytes: extract_raw_bytes(u)?,
         })
     }
+}
+
+fn gen_kind(rng: &mut FuzzRng) -> Kind {
+    if rng.gen_bool(0.5) {
+        Kind::Retain
+    } else {
+        Kind::Reject
+    }
+}
+
+fn gen_enqueue_input(rng: &mut FuzzRng) -> EnqueueInput {
+    EnqueueInput {
+        sender: rng.gen_range(0..MAX_SENDERS),
+        kind: gen_kind(rng),
+    }
+}
+
+fn gen_operation(rng: &mut FuzzRng) -> Operation {
+    match rng.gen_range(0..=MAX_OPERATION_INDEX) {
+        0 => Operation::Enqueue(gen_enqueue_input(rng)),
+        1 => {
+            let len = rng.gen_range(1..=MAX_BATCH_MESSAGES);
+            let messages = (0..len).map(|_| gen_enqueue_input(rng)).collect();
+            Operation::Batch(messages)
+        }
+        2 => Operation::TryRecv {
+            limit: rng.gen_range(0..=MAX_DRAIN),
+        },
+        3 => Operation::Recv {
+            limit: rng.gen_range(0..=MAX_DRAIN),
+        },
+        4 => {
+            let len = rng.gen_range(0..=MAX_BATCH_MESSAGES);
+            let extra = (0..len).map(|_| gen_enqueue_input(rng)).collect();
+            Operation::ParkedRecv {
+                sender: rng.gen_range(0..MAX_SENDERS),
+                extra,
+            }
+        }
+        5 => Operation::CloneSender {
+            index: rng.gen_range(0..=MAX_SENDER_INDEX),
+        },
+        6 => Operation::DropSender {
+            index: rng.gen_range(0..=MAX_SENDER_INDEX),
+        },
+        7 => Operation::DropReceiver {
+            index: rng.gen_range(0..=MAX_SENDER_INDEX),
+        },
+        8 => Operation::DropReceiverWithOverflow {
+            sender: rng.gen_range(0..MAX_SENDERS),
+        },
+        _ => unreachable!(),
+    }
+}
+
+fn gen_operations(rng: &mut FuzzRng) -> Vec<Operation> {
+    let len = rng.gen_range(1..=MAX_OPERATIONS);
+    (0..len).map(|_| gen_operation(rng)).collect()
+}
+
+fn gen_coalesce_input(rng: &mut FuzzRng) -> CoalesceInput {
+    CoalesceInput {
+        sender: rng.gen_range(0..MAX_SENDERS),
+        coalesce: rng.gen_bool(0.5),
+    }
+}
+
+fn gen_coalesce_inputs(rng: &mut FuzzRng) -> Vec<CoalesceInput> {
+    let len = rng.gen_range(1..=MAX_OPERATIONS);
+    (0..len).map(|_| gen_coalesce_input(rng)).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -569,15 +563,19 @@ where
 }
 
 pub fn fuzz_fifo(input: FifoInput) {
+    let mut rng = FuzzRng::new(input.raw_bytes);
+    let operations = gen_operations(&mut rng);
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
-        run_fifo(context.child("fifo"), input.capacity, input.operations).await;
+        run_fifo(context.child("fifo"), input.capacity, operations).await;
     });
 }
 
 pub fn fuzz_coalesce(input: CoalesceFuzzInput) {
+    let mut rng = FuzzRng::new(input.raw_bytes);
+    let coalesce = gen_coalesce_inputs(&mut rng);
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
-        run_coalesce(context.child("coalesce"), input.capacity, input.coalesce).await;
+        run_coalesce(context.child("coalesce"), input.capacity, coalesce).await;
     });
 }
