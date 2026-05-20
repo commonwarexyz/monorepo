@@ -38,6 +38,9 @@ struct Current {
     timed_out: bool,
 }
 
+type VerifiedVotes<S, D> = (Vec<Vote<S, D>>, Vec<Participant>);
+type RoundOutput<S, B, D, Re, T> = (Round<S, B, D, Re>, Option<T>);
+
 pub struct Actor<E, S, B, D, Re, Rl, T>
 where
     E: Spawner + Metrics + Clock + CryptoRngCore,
@@ -157,39 +160,32 @@ where
     fn verify_round(
         &self,
         round: Round<S, B, D, Re>,
-    ) -> impl Future<
-        Output = (
-            Round<S, B, D, Re>,
-            Option<(Vec<Vote<S, D>>, Vec<Participant>)>,
-        ),
-    > + Send
-           + 'static {
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, VerifiedVotes<S, D>>> + Send + 'static {
         let strategy = self.strategy.clone();
-        let handle = self
-            .context
-            .child("verify_round")
-            .shared(true)
-            .spawn(move |mut context| async move {
-                let mut round = round;
-                let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(&mut context, &strategy))
-                } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(&mut context, &strategy))
-                } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(&mut context, &strategy))
-                } else {
-                    None
-                };
-                (round, verified)
-            });
+        let handle =
+            self.context
+                .child("verify_round")
+                .shared(true)
+                .spawn(move |mut context| async move {
+                    let mut round = round;
+                    let verified = if round.ready_notarizes() {
+                        Some(round.verify_notarizes(&mut context, &strategy))
+                    } else if round.ready_nullifies() {
+                        Some(round.verify_nullifies(&mut context, &strategy))
+                    } else if round.ready_finalizes() {
+                        Some(round.verify_finalizes(&mut context, &strategy))
+                    } else {
+                        None
+                    };
+                    (round, verified)
+                });
         async move { handle.await.expect("strategy task failed") }
     }
 
-    fn construct_notarization(
+    fn try_construct_notarization(
         &self,
         round: Round<S, B, D, Re>,
-    ) -> impl Future<Output = (Round<S, B, D, Re>, Option<Notarization<S, D>>)> + Send + 'static
-    {
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, Notarization<S, D>>> + Send + 'static {
         let strategy = self.strategy.clone();
         let handle = self
             .context
@@ -203,10 +199,10 @@ where
         async move { handle.await.expect("strategy task failed") }
     }
 
-    fn construct_nullification(
+    fn try_construct_nullification(
         &self,
         round: Round<S, B, D, Re>,
-    ) -> impl Future<Output = (Round<S, B, D, Re>, Option<Nullification<S>>)> + Send + 'static {
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, Nullification<S>>> + Send + 'static {
         let strategy = self.strategy.clone();
         let handle = self
             .context
@@ -220,11 +216,10 @@ where
         async move { handle.await.expect("strategy task failed") }
     }
 
-    fn construct_finalization(
+    fn try_construct_finalization(
         &self,
         round: Round<S, B, D, Re>,
-    ) -> impl Future<Output = (Round<S, B, D, Re>, Option<Finalization<S, D>>)> + Send + 'static
-    {
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, Finalization<S, D>>> + Send + 'static {
         let strategy = self.strategy.clone();
         let handle = self
             .context
@@ -671,7 +666,7 @@ where
                 // Try to construct and forward certificates
                 let round = if round.ready_construct_notarization() {
                     let timer = self.recover_latency.timer(self.context.as_ref());
-                    let (round, notarization) = self.construct_notarization(round).await;
+                    let (round, notarization) = self.try_construct_notarization(round).await;
                     if let Some(notarization) = notarization {
                         timer.observe(self.context.as_ref());
                         debug!(view = %updated_view, "constructed notarization, forwarding to voter");
@@ -685,7 +680,7 @@ where
                 };
                 let round = if round.ready_construct_nullification() {
                     let timer = self.recover_latency.timer(self.context.as_ref());
-                    let (round, nullification) = self.construct_nullification(round).await;
+                    let (round, nullification) = self.try_construct_nullification(round).await;
                     if let Some(nullification) = nullification {
                         timer.observe(self.context.as_ref());
                         debug!(view = %updated_view, "constructed nullification, forwarding to voter");
@@ -697,7 +692,7 @@ where
                 };
                 let round = if round.ready_construct_finalization() {
                     let timer = self.recover_latency.timer(self.context.as_ref());
-                    let (round, finalization) = self.construct_finalization(round).await;
+                    let (round, finalization) = self.try_construct_finalization(round).await;
                     if let Some(finalization) = finalization {
                         timer.observe(self.context.as_ref());
                         debug!(view = %updated_view, "constructed finalization, forwarding to voter");

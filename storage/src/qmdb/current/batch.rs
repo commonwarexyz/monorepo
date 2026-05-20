@@ -20,7 +20,7 @@ use crate::{
         batch_chain::Bounds,
         bitmap::Shared,
         current::{
-            db::{collect_db_root_inputs, collect_grafted_leaf_inputs, compute_db_root, compute_grafted_leaves},
+            db::{compute_db_root, compute_grafted_leaves},
             grafting,
         },
         operation::Key,
@@ -32,7 +32,6 @@ use ahash::AHasher;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::bitmap::{self, Readable as _};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -387,7 +386,7 @@ where
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
     where
-        E: Context + Spawner,
+        E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
@@ -452,7 +451,7 @@ where
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
     where
-        E: Context + Spawner,
+        E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
@@ -550,7 +549,7 @@ async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
 where
     F: Graftable,
-    E: Context + Spawner,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
@@ -618,21 +617,13 @@ where
     });
 
     let hasher = qmdb::hasher::<H>();
-    let context = current_db.metrics.context();
-    let leaf_inputs = collect_grafted_leaf_inputs::<F, H, N>(
+    let new_leaves = compute_grafted_leaves::<F, H, S, N>(
+        &hasher,
         &ops_tree_adapter,
         chunks_to_update,
+        &current_db.strategy,
     )
     .await?;
-    let hasher_for_leaves = hasher.clone();
-    let strategy = current_db.strategy.clone();
-    let handle = context
-        .child("compute_grafted_leaves")
-        .shared(true)
-        .spawn(move |_| async move {
-            compute_grafted_leaves::<H, S, N>(&hasher_for_leaves, leaf_inputs, &strategy)
-        });
-    let new_leaves = handle.await.expect("strategy task failed");
 
     // Build grafted MMR from parent batch.
     let grafted_batch = {
@@ -684,7 +675,8 @@ where
             Some((chunk, rem))
         }
     };
-    let root_inputs = collect_db_root_inputs::<F, H, _, _, N>(
+    let canonical_root = compute_db_root::<F, H, _, _, N>(
+        &hasher,
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,
@@ -693,14 +685,6 @@ where
         &ops_root,
     )
     .await?;
-    let hasher_for_root = hasher.clone();
-    let handle = context
-        .child("compute_db_root")
-        .shared(true)
-        .spawn(move |_| async move {
-            compute_db_root::<F, H, N>(&hasher_for_root, root_inputs)
-        });
-    let canonical_root = handle.await.expect("strategy task failed")?;
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
@@ -954,7 +938,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
-        E: Context + Spawner,
+        E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
@@ -988,7 +972,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
-        E: Context + Spawner,
+        E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
@@ -1035,7 +1019,7 @@ mod trait_impls {
         for CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>
     where
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
@@ -1068,7 +1052,7 @@ mod trait_impls {
         for CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>
     where
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>

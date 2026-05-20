@@ -1491,7 +1491,7 @@ impl<Sch: CertificateScheme> Clone for InsertCtx<'_, Sch> {
 impl<Sch: CertificateScheme> Copy for InsertCtx<'_, Sch> {}
 
 impl<'a, Sch: CertificateScheme> InsertCtx<'a, Sch> {
-    fn new(scheme: &'a Sch) -> Self {
+    const fn new(scheme: &'a Sch) -> Self {
         Self { scheme }
     }
 }

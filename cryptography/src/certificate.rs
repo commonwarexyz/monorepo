@@ -447,10 +447,12 @@ impl<S: Scheme> Scheme for Arc<S> {
         let Verification { verified, invalid } = self.as_ref().verify_attestations::<R, D, _>(
             rng,
             subject,
-            attestations.into_iter().map(|attestation| Attestation::<S> {
-                signer: attestation.signer,
-                signature: attestation.signature,
-            }),
+            attestations
+                .into_iter()
+                .map(|attestation| Attestation::<S> {
+                    signer: attestation.signer,
+                    signature: attestation.signature,
+                }),
             strategy,
         );
         let verified = verified
@@ -470,10 +472,12 @@ impl<S: Scheme> Scheme for Arc<S> {
         M: Faults,
     {
         self.as_ref().assemble::<_, M>(
-            attestations.into_iter().map(|attestation| Attestation::<S> {
-                signer: attestation.signer,
-                signature: attestation.signature,
-            }),
+            attestations
+                .into_iter()
+                .map(|attestation| Attestation::<S> {
+                    signer: attestation.signer,
+                    signature: attestation.signature,
+                }),
             strategy,
         )
     }

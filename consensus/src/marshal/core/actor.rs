@@ -1308,18 +1308,17 @@ where
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
             let strategy = self.strategy.clone();
-            let handle = self
-                .context
-                .child("verify_deliveries")
-                .shared(true)
-                .spawn(move |mut context| async move {
+            let handle = self.context.child("verify_deliveries").shared(true).spawn(
+                move |mut context| async move {
                     let cert_refs: Vec<_> = delivers
                         .iter()
                         .map(PendingVerification::as_subject_and_certificate)
                         .collect();
-                    let verified = verify_certificates(&mut context, &scheme, &cert_refs, &strategy);
+                    let verified =
+                        verify_certificates(&mut context, &scheme, &cert_refs, &strategy);
                     (delivers, verified)
-                });
+                },
+            );
             let (returned, verified) = handle.await.expect("strategy task failed");
             delivers = returned;
             verified

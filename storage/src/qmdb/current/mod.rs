@@ -347,7 +347,6 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 use std::sync::Arc;
 
@@ -401,7 +400,7 @@ pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
-    E: Context + Spawner,
+    E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
@@ -444,22 +443,15 @@ where
     let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = crate::merkle::Location::<F>::try_from(ops_size)?;
-    let tree_inputs = db::collect_grafted_tree_inputs::<F, H, N>(
+    let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
+        &hasher,
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
         ops_leaves,
+        &strategy,
     )
     .await?;
-    let hasher_for_tree = hasher.clone();
-    let strategy_for_tree = strategy.clone();
-    let handle = context
-        .child("build_grafted_tree")
-        .shared(true)
-        .spawn(move |_| async move {
-            db::build_grafted_tree::<F, H, S, N>(&hasher_for_tree, tree_inputs, strategy_for_tree)
-        });
-    let grafted_tree = handle.await.expect("strategy task failed")?;
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(
@@ -470,7 +462,8 @@ where
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
-    let root_inputs = db::collect_db_root_inputs::<F, H, _, _, N>(
+    let root = db::compute_db_root(
+        &hasher,
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
@@ -479,14 +472,6 @@ where
         &ops_root,
     )
     .await?;
-    let hasher_for_root = hasher.clone();
-    let handle = context
-        .child("compute_db_root")
-        .shared(true)
-        .spawn(move |_| async move {
-            db::compute_db_root::<F, H, N>(&hasher_for_root, root_inputs)
-        });
-    let root = handle.await.expect("strategy task failed")?;
 
     let metrics = Metrics::new(context);
     let db = db::Db {

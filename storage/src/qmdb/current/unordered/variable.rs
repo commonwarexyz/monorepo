@@ -38,7 +38,7 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 
 impl<
         F: Graftable,
-        E: Context + commonware_runtime::Spawner,
+        E: Context,
         K: Array,
         V: VariableValue,
         H: Hasher,
@@ -86,7 +86,7 @@ pub mod partitioned {
 
     impl<
             F: Graftable,
-            E: Context + commonware_runtime::Spawner,
+            E: Context,
             K: Array,
             V: VariableValue,
             H: Hasher,

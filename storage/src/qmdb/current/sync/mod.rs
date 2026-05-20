@@ -78,7 +78,6 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Encode, Read as CodecRead, ReadExt as _};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::{
     bitmap::Prunable as BitMap,
     channel::{mpsc, oneshot},
@@ -351,7 +350,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
 where
     F: Graftable,
-    E: Context + Spawner,
+    E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
@@ -425,22 +424,15 @@ where
     let hasher = qmdb::hasher::<H>();
     let ops_size = any.log.merkle.size();
     let ops_leaves = Location::<F>::try_from(ops_size)?;
-    let tree_inputs = db::collect_grafted_tree_inputs::<F, H, N>(
+    let grafted_tree = db::build_grafted_tree::<F, H, S, N>(
+        &hasher,
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
         ops_leaves,
+        &strategy,
     )
     .await?;
-    let hasher_for_tree = hasher.clone();
-    let strategy_for_tree = strategy.clone();
-    let handle = context
-        .child("build_grafted_tree")
-        .shared(true)
-        .spawn(move |_| async move {
-            db::build_grafted_tree::<F, H, S, N>(&hasher_for_tree, tree_inputs, strategy_for_tree)
-        });
-    let grafted_tree = handle.await.expect("strategy task failed")?;
 
     // Compute the database root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
@@ -452,24 +444,29 @@ where
         hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let ops_root = any.root();
-    let root_inputs = db::collect_db_root_inputs::<F, H, _, _, N>(
+    let grafted_root = db::compute_grafted_root(
+        &hasher,
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
-        partial,
         any.inactivity_floor_loc,
-        &ops_root,
     )
     .await?;
-    let hasher_for_root = hasher.clone();
-    let handle = context
-        .child("compute_db_root")
-        .shared(true)
-        .spawn(move |_| async move {
-            db::compute_db_root::<F, H, N>(&hasher_for_root, root_inputs)
-        });
-    let root = handle.await.expect("strategy task failed")?;
+    let ops_root = any.root();
+    let partial_digest = partial.map(|(chunk, next_bit)| {
+        let digest = hasher.digest(&chunk);
+        (next_bit, digest)
+    });
+    let pending_digest =
+        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
+            .map(|chunk| hasher.digest(&chunk));
+    let root = db::combine_roots(
+        &hasher,
+        &ops_root,
+        &grafted_root,
+        pending_digest.as_ref(),
+        partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
+    );
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =
@@ -503,7 +500,7 @@ macro_rules! impl_current_sync_database {
         impl<F, E, K, V, H, T, const N: usize, S> Database for $db<F, E, K, V, H, T, N, S>
         where
             F: Graftable,
-            E: Context + Spawner,
+            E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,

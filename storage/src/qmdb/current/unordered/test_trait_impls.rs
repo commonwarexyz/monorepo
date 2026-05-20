@@ -18,7 +18,6 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 use commonware_utils::Array;
 
 // =============================================================================
@@ -29,7 +28,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] fixed::Db<F, E, K, V, H, T, N, S>
     where {
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
@@ -48,7 +47,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] variable::Db<F, E, K, V, H, T, N, S>
     where {
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
@@ -65,7 +64,7 @@ crate::qmdb::any::traits::impl_db_any! {
 
 impl<
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -89,7 +88,7 @@ impl<
 
 impl<
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: VariableValue,
         H: Hasher,
@@ -121,7 +120,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S] fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
@@ -134,7 +133,7 @@ crate::qmdb::any::traits::impl_db_any! {
 
 impl<
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -166,7 +165,7 @@ crate::qmdb::any::traits::impl_db_any! {
     variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
@@ -179,7 +178,7 @@ crate::qmdb::any::traits::impl_db_any! {
 
 impl<
         F: Graftable,
-        E: Context + Spawner,
+        E: Context,
         K: Array,
         V: VariableValue,
         H: Hasher,

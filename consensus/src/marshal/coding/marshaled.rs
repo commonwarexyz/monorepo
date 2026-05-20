@@ -857,12 +857,13 @@ where
             build_timer.observe(&runtime_context);
 
             let erasure_timer = erasure_encode_duration.timer(&runtime_context);
-            let handle = runtime_context
-                .child("erasure_encode")
-                .shared(true)
-                .spawn(move |_| async move {
-                    CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy)
-                });
+            let handle =
+                runtime_context
+                    .child("erasure_encode")
+                    .shared(true)
+                    .spawn(move |_| async move {
+                        CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy)
+                    });
             let coded_block = handle.await.expect("strategy task failed");
             erasure_timer.observe(&runtime_context);
 

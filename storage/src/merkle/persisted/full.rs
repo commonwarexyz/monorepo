@@ -458,7 +458,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             let pos = mem.size();
             warn!(?pos, "recovering orphaned leaf");
             let batch = mem
-                .new_batch_with_strategy(cfg.strategy.clone())
+                .new_batch()
                 .add_leaf_digest(leaf)
                 .merkleize(&mem, hasher);
             mem.apply_batch(&batch)?;

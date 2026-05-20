@@ -688,14 +688,14 @@ impl<
 
         // Validate signature
         let strategy = self.strategy.clone();
-        let handle = self
-            .context
-            .child("verify_ack")
-            .shared(true)
-            .spawn(move |mut context| async move {
-                let valid = ack.verify(&mut context, &*scheme, &strategy);
-                (ack, valid)
-            });
+        let handle =
+            self.context
+                .child("verify_ack")
+                .shared(true)
+                .spawn(move |mut context| async move {
+                    let valid = ack.verify(&mut context, &*scheme, &strategy);
+                    (ack, valid)
+                });
         let (ack, valid) = handle.await.expect("strategy task failed");
         if !valid {
             return Err(Error::InvalidAckSignature);
