@@ -264,43 +264,42 @@ impl Floor {
 
 /// A floor update that cannot complete until marshal has the anchor block.
 enum FloorTransition<S: CertificateScheme, C: Digest> {
-    Idle,
-    AwaitingAnchor(Finalization<S, C>),
+    Resolved,
+    Blocked(Finalization<S, C>),
 }
 
 impl<S: CertificateScheme, C: Digest> FloorTransition<S, C> {
     /// Records a configured floor before the actor has a resolver.
     const fn awaiting_anchor(finalization: Finalization<S, C>) -> Self {
-        Self::AwaitingAnchor(finalization)
+        Self::Blocked(finalization)
     }
 
     /// Returns true while repair and application dispatch must wait for the floor anchor.
     const fn blocks_progress(&self) -> bool {
-        matches!(self, Self::AwaitingAnchor(_))
+        matches!(self, Self::Blocked(_))
     }
 
     /// Returns true if a pending floor already supersedes the candidate floor round.
     fn has_anchor_at_or_after(&self, round: Round) -> bool {
-        matches!(self, Self::AwaitingAnchor(pending) if pending.round() >= round)
+        matches!(self, Self::Blocked(pending) if pending.round() >= round)
     }
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.
     fn await_anchor(&mut self, finalization: Finalization<S, C>) {
-        *self = Self::AwaitingAnchor(finalization);
+        *self = Self::Blocked(finalization);
     }
 
     /// Clears and returns the pending floor finalization, if any.
     fn take(&mut self) -> Option<Finalization<S, C>> {
-        match std::mem::replace(self, Self::Idle) {
-            Self::Idle => None,
-            Self::AwaitingAnchor(finalization) => Some(finalization),
+        match std::mem::replace(self, Self::Resolved) {
+            Self::Resolved => None,
+            Self::Blocked(finalization) => Some(finalization),
         }
     }
 
     /// Clears and returns the pending floor only when `commitment` is the awaited anchor.
     fn take_if_anchor_matches(&mut self, commitment: C) -> Option<Finalization<S, C>> {
-        if !matches!(self, Self::AwaitingAnchor(pending) if pending.proposal.payload == commitment)
-        {
+        if !matches!(self, Self::Blocked(pending) if pending.proposal.payload == commitment) {
             return None;
         }
         self.take()
@@ -463,7 +462,7 @@ where
                         panic!("failed to sync startup anchor: {err}");
                     }
                 }
-                FloorTransition::Idle
+                FloorTransition::Resolved
             }
             Start::Floor(finalization) => {
                 let scheme = config
@@ -1278,14 +1277,10 @@ where
         let height = block.height();
         if height > Height::zero() {
             let parent_commitment = V::parent_commitment(&block);
-            if block.parent() != V::commitment_to_inner(parent_commitment) {
-                warn!(
-                    ?commitment,
-                    ?parent_commitment,
-                    "floor block parent commitment mismatch"
-                );
-                return true;
-            }
+            assert!(
+                block.parent() == V::commitment_to_inner(parent_commitment),
+                "floor block parent commitment mismatch"
+            );
         }
 
         if height < self.floor.height {

@@ -243,10 +243,6 @@ mod tests {
             response.await.expect("delivery response sender dropped")
         }
 
-        fn delivery_response_count(&self) -> usize {
-            self.delivery_responses.lock().len()
-        }
-
         fn fetches(&self) -> Vec<CodingFetchRecord> {
             self.fetches.lock().clone()
         }
@@ -2403,7 +2399,8 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_floor_anchor_rejects_parent_commitment_mismatch() {
+    #[should_panic(expected = "floor block parent commitment mismatch")]
+    fn test_coding_floor_anchor_panics_on_parent_commitment_mismatch() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -2452,26 +2449,7 @@ mod tests {
             );
             resolver.respond_to_next_fetch(coded_floor.encode());
             mailbox.set_floor(finalization);
-
-            for _ in 0..50 {
-                if resolver.delivery_response_count() > 0 {
-                    break;
-                }
-                context.sleep(Duration::from_millis(100)).await;
-            }
-            assert!(
-                resolver.wait_for_delivery_response().await,
-                "floor block delivery should be accepted at the resolver boundary"
-            );
-
-            assert!(
-                mailbox.get_block(Height::new(2)).await.is_none(),
-                "floor block with mismatched parent commitment must not be archived"
-            );
-            assert!(
-                mailbox.get_finalization(Height::new(2)).await.is_none(),
-                "floor finalization must not be archived by height without a valid anchor"
-            );
+            context.sleep(Duration::from_secs(5)).await;
         })
     }
 

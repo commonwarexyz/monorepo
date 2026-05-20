@@ -358,7 +358,7 @@ where
             let fallback = core::CommitmentFallback::FetchByRound {
                 round: Round::new(consensus_context.epoch(), parent_view),
             };
-            let parent_request = fetch_parent(parent_commitment, fallback, &mut marshal);
+            let parent_request = marshal.subscribe_by_commitment(parent_commitment, fallback);
             let parent = select! {
                 _ = tx.closed() => {
                     debug!(
@@ -638,7 +638,7 @@ where
         &mut self,
         consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
-        let mut marshal = self.marshal.clone();
+        let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
@@ -716,12 +716,11 @@ where
             // finalized tip, so this must stay round-bound until the block is
             // returned.
             let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request = fetch_parent(
+            let parent_request = marshal.subscribe_by_commitment(
                 parent_commitment,
                 core::CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
-                &mut marshal,
             );
 
             let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
@@ -1089,28 +1088,4 @@ where
         }
         self.application.report(update)
     }
-}
-
-/// Subscribes to the parent block by its commitment and missing-block behavior.
-///
-/// This is a helper function used during proposal and verification to retrieve
-/// the parent block. The marshal subscription checks local storage for the exact
-/// commitment before registering or fetching. Certified parent lookups should
-/// use the certified parent round instead of deriving a height from an
-/// unverified child.
-///
-/// Returns an error if the marshal subscription is cancelled.
-#[allow(clippy::type_complexity)]
-fn fetch_parent<S, B, C, H>(
-    parent_commitment: Commitment,
-    fallback: core::CommitmentFallback,
-    marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
-) -> oneshot::Receiver<CodedBlock<B, C, H>>
-where
-    S: CertificateScheme,
-    B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,
-    C: CodingScheme,
-    H: Hasher,
-{
-    marshal.subscribe_by_commitment(parent_commitment, fallback)
 }

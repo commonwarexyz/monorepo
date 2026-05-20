@@ -78,9 +78,7 @@ use crate::{
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            validation::{
-                fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
-            },
+            validation::{precheck_epoch_and_reproposal, verify_with_parent, Decision},
             Standard,
         },
         Update,
@@ -444,7 +442,7 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
-        let mut marshal = self.marshal.clone();
+        let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
 
@@ -504,12 +502,11 @@ where
             // finalized tip, so this must stay round-bound until the block is
             // returned.
             let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request = fetch_parent(
+            let parent_request = marshal.subscribe_by_commitment(
                 parent_commitment,
                 CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
-                &mut marshal,
             );
 
             let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);

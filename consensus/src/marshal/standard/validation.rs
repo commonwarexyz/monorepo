@@ -132,12 +132,11 @@ where
     B: Block + Clone,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let parent_request = fetch_parent(
+    let parent_request = marshal.subscribe_by_commitment(
         parent_commitment,
         CommitmentFallback::FetchByRound {
             round: Round::new(context.epoch(), parent_view),
         },
-        marshal,
     );
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
@@ -197,34 +196,6 @@ where
         return None;
     }
     Some(application_valid)
-}
-
-/// Subscribes to the parent block by its commitment and missing-block behavior.
-///
-/// The marshal subscription checks local storage for the exact commitment before
-/// registering or fetching.
-///
-/// Use `FetchByRound` for certified parent lookups when the caller knows the
-/// certified parent round and commitment, such as proposal construction or
-/// verification of a known child. Do not derive the parent height from the
-/// finalized tip or the child block: proposals may build on a certified parent
-/// that is not finalized locally yet, and an unverified child may lie about its
-/// height. Once a round-bound response arrives it is heightable, and normal
-/// ancestry validation decides whether it matches the child.
-///
-/// The returned subscription receiver may resolve with `RecvError` if marshal
-/// cancels the request.
-#[inline]
-pub(super) fn fetch_parent<S, B>(
-    parent_commitment: B::Digest,
-    fallback: CommitmentFallback,
-    marshal: &mut Mailbox<S, Standard<B>>,
-) -> oneshot::Receiver<B>
-where
-    S: Scheme,
-    B: Block + Clone,
-{
-    marshal.subscribe_by_commitment(parent_commitment, fallback)
 }
 
 #[cfg(test)]
