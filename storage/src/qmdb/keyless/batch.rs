@@ -194,7 +194,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        debug_assert!(
+        assert!(
             locs.windows(2).all(|w| w[0] < w[1]),
             "locations must be strictly increasing"
         );
@@ -363,7 +363,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        debug_assert!(
+        assert!(
             locs.windows(2).all(|w| w[0] < w[1]),
             "locations must be strictly increasing"
         );

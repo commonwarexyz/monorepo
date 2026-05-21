@@ -1041,10 +1041,10 @@ where
 
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor.await_anchor(finalization);
-            let applied = self
-                .apply_floor_anchor(&block, buffer, application, resolver)
-                .await;
-            debug_assert!(applied);
+            assert!(
+                self.apply_floor_anchor(&block, buffer, application, resolver)
+                    .await
+            );
             return;
         }
 

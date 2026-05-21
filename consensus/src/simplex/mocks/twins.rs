@@ -734,8 +734,10 @@ fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec
         if seen.insert(candidate) {
             sampled.push(candidate);
         } else {
-            let inserted = seen.insert(idx);
-            debug_assert!(inserted, "tail index should be unique in Floyd sampling");
+            assert!(
+                seen.insert(idx),
+                "tail index should be unique in Floyd sampling"
+            );
             sampled.push(idx);
         }
     }
