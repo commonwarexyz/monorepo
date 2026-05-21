@@ -5,6 +5,19 @@
 //! This crate has the following features:
 //!
 //! - `portable`: Enables `portable` feature on `blst` (<https://github.com/supranational/blst?tab=readme-ov-file#platform-and-language-compatibility>).
+//!
+//! # DKG Protocols
+//!
+//! This module exports two DKG protocols:
+//!
+//! - [`dkg`], a two-round synchronous protocol,
+//! - [`golden_dkg`], a one-round asynchronous protocol (currently in ALPHA).
+//!
+//! The tradeoff is that the latter is more complicated, and more computationally
+//! expensive. However, it is less reliant on assumptions about the number of corruptions,
+//! and the single round can be very useful, operationally. At the moment,
+//! the status of our Golden implementation is experimental, so we recommend
+//! using [`dkg`] for now.
 
 pub mod certificate;
 #[cfg(feature = "std")]

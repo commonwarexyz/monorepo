@@ -157,17 +157,12 @@
 //! honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1` (for `B_2`),
 //! however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
 //!
-//! #### Future Work: Dropping the Synchrony Assumption for `f` Bounded Reveals?
+//! #### DKG without a synchrony assumption
 //!
-//! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
-//! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
-//! where at most `f` players are Byzantine). However, known constructions that satisfy this requirement require both
-//! broadcasting encrypted dealings publicly and employing Zero-Knowledge Proofs (ZKPs) to attest that encrypted dealings
-//! were generated correctly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
-//!
-//! As of January 2025, these constructions are still considered novel (2-3 years in production), require stronger
-//! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide
-//! observers the opportunity to brute force decrypt shares (even if honest players are online).
+//! Some protocols achieve one round without synchrony assumptions, by combining
+//! encryption and ZK Proofs. We have an implementation of one such protocol,
+//! [Golden](https://eprint.iacr.org/2025/1924), in [`crate::bls12381::golden_dkg`].
+//! At the moment, that implementation is still experimental.
 //!
 //! ## Handling Complaints
 //!
