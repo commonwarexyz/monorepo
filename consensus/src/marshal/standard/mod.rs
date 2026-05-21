@@ -3301,6 +3301,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+
+            // The anchor is not local yet, so SetFloor must install a pending
+            // floor before the old height 1 ack can be released.
             mailbox.set_floor(floor_finalization);
             wait_until(
                 &context,
@@ -3328,6 +3331,8 @@ mod tests {
                 floor_block.digest()
             );
 
+            // Release the stale ack after the remote floor has been applied.
+            // It must not lower the processed floor back below height 5.
             let fetches_after_floor = resolver.fetches().len();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
@@ -3400,6 +3405,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+
+            // The anchor is already local, so this covers the immediate
+            // install path where no pending-anchor fetch is started.
             buffer.insert(floor_block.clone());
             mailbox.set_floor(floor_finalization);
             assert_eq!(
@@ -3415,6 +3423,8 @@ mod tests {
                 "local floor anchor must not be fetched"
             );
 
+            // Release the old ack after the local floor is installed. It must
+            // not make lower-height commitment subscriptions eligible again.
             let fetches_after_floor = resolver.fetches().len();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
@@ -3905,6 +3915,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+
+            // Keep the anchor missing so SetFloor has to wait on a pending
+            // floor fetch while the height 1 application ack is in flight.
             mailbox.set_floor(floor_finalization);
             wait_until(
                 &context,
@@ -3922,6 +3935,8 @@ mod tests {
             )
             .await;
 
+            // Finalize the successor while the pending floor is waiting. It
+            // should not dispatch until the anchor is installed.
             let block2_round = Round::new(Epoch::zero(), View::new(2));
             let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
             let block2_finalization = StandardHarness::make_finalization(
@@ -3939,9 +3954,13 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
 
+            // This ack is released while the anchor is still unknown. The
+            // pending floor should have removed it from the active waiters.
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
 
+            // Once the anchor arrives, dispatch restarts at the floor
+            // successor instead of treating the stale ack as progress.
             assert!(mailbox.verified(floor_round, floor_block).await);
             select! {
                 height = application.acknowledged() => {
@@ -4010,6 +4029,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+
+            // The genesis anchor is already local and below the in-flight
+            // height 1 ack, so applying it must not touch pending acks.
             mailbox.set_floor(floor_finalization);
             assert!(mailbox.get_block(Height::zero()).await.is_some());
 
@@ -4104,6 +4126,8 @@ mod tests {
             )
             .await;
 
+            // Keep a round-bound resolver request live so the stale floor's
+            // round-floor side effect is covered separately from ack handling.
             let stale_floor_round = Round::new(Epoch::zero(), View::new(5));
             let missing = Sha256::hash(b"missing-before-stale-lower-floor");
             let _subscription = mailbox.subscribe_by_commitment(
@@ -4136,6 +4160,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+
+            // This lower local anchor is already behind processed height. It
+            // may advance the round floor, but must leave height 2 in flight.
             mailbox.set_floor(stale_floor_finalization);
             assert!(mailbox.get_block(Height::zero()).await.is_some());
 
