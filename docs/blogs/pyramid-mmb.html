@@ -48,8 +48,13 @@ those values (without sacrificing append-only updates)." />
         <meta property="twitter:creator" content="https://x.com/roberto_bayardo" />
     
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
     
     <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
@@ -106,14 +111,14 @@ Bayardo</a></div>
         smaller.</p>
         <p>QMDB’s original MMR-based proof scheme made updates efficient
         and grinding-resistant, but proof sizes were tied to historical
-        updates <span class="math inline">\(U\)</span> rather than
-        active values <span class="math inline">\(V\)</span>. By
-        combining an active-region-aware bagging policy, <em>pyramid
-        bagging</em>, with the Merkle Mountain Belt (MMB), our new
-        scheme makes active-value proofs small and predictable: within
-        two digests of a balanced binary Merkle tree over those values
-        (without sacrificing the append-only structure that drew us to
-        Merkle Mountain Ranges in the first place).</p>
+        updates <span class="math inline">U</span> rather than active
+        values <span class="math inline">V</span>. By combining an
+        active-region-aware bagging policy, <em>pyramid bagging</em>,
+        with the Merkle Mountain Belt (MMB), our new scheme makes
+        active-value proofs small and predictable: within two digests of
+        a balanced binary Merkle tree over those values (without
+        sacrificing the append-only structure that drew us to Merkle
+        Mountain Ranges in the first place).</p>
         <p>When restricted to k-ary hashing, the Merkle structure that
         minimizes leaf depth (and hence proof size) in both the worst
         and (uniform) average case is a balanced binary Merkle tree
@@ -134,14 +139,14 @@ Bayardo</a></div>
         resistance to grinding <a href="/blogs/its-a-grind">[5]</a>, but
         at what cost does this come with respect to proof efficiency?
         Instead of having depth logarithmic in the number of values
-        <span class="math inline">\(V\)</span> (stored in its leaves)
-        like a BMT, the MMR has depth logarithmic in the number of
-        updates <span class="math inline">\(U\)</span>. The number of
-        updates is strictly greater (sometimes much greater) than the
-        number of active values, since most updates are for existing
-        keys, and many keys eventually get deleted. The MMR may
-        introduce additional inefficiencies over a BMT depending on how
-        peaks are <em>bagged</em>, which we detail shortly. Still, it’s
+        <span class="math inline">V</span> (stored in its leaves) like a
+        BMT, the MMR has depth logarithmic in the number of updates
+        <span class="math inline">U</span>. The number of updates is
+        strictly greater (sometimes much greater) than the number of
+        active values, since most updates are for existing keys, and
+        many keys eventually get deleted. The MMR may introduce
+        additional inefficiencies over a BMT depending on how peaks are
+        <em>bagged</em>, which we detail shortly. Still, it’s
         conceivable that a typical MMR proof may not be much larger than
         those from a BMT, unlike those from Merkle structures with high
         node fan-out like Ethereum’s (hexary) state trie.</p>
@@ -165,15 +170,15 @@ Bayardo</a></div>
         (if not exclusively) in proving over active values. Define the
         <em>age</em> of an element in the log as its distance from the
         tip (the most recent update therefore has an age of 0). If there
-        are <span class="math inline">\(V\)</span> active values in the
+        are <span class="math inline">V</span> active values in the
         database, the incremental compaction policy in our
         implementation guarantees no active value has a corresponding
         update with age greater than <span
-        class="math inline">\(2V\)</span>. This means proofs in our
-        system are almost always over leaves that are far to the right
-        in the MMR, regardless of how long the update log has grown.
-        Third, proof size corresponds to the depth of the proven element
-        in the Merkle structure. Since MMRs consist of perfect trees of
+        class="math inline">2V</span>. This means proofs in our system
+        are almost always over leaves that are far to the right in the
+        MMR, regardless of how long the update log has grown. Third,
+        proof size corresponds to the depth of the proven element in the
+        Merkle structure. Since MMRs consist of perfect trees of
         strictly decreasing height, the depth of an element is, <em>on
         average,</em> smaller the further to the right it resides in the
         structure (Fig. 1).</p>
@@ -182,25 +187,25 @@ Bayardo</a></div>
         than a tree over only active values, and it occurs when the
         number of elements (leaves) is an exact power of 2. All
         mountains collapse into a single tree of depth <span
-        class="math inline">\(\log_2(U)\)</span>, where <span
-        class="math inline">\(U\)</span> is the number of updates
-        (recall that <span class="math inline">\(U \gg V\)</span>). The
-        inclusion proof for <em>any</em> value, whether or not it is
-        active, therefore requires at least <span
-        class="math inline">\(\log_2(U)\)</span> digests.</p>
+        class="math inline">\log_2(U)</span>, where <span
+        class="math inline">U</span> is the number of updates (recall
+        that <span class="math inline">U \gg V</span>). The inclusion
+        proof for <em>any</em> value, whether or not it is active,
+        therefore requires at least <span
+        class="math inline">\log_2(U)</span> digests.</p>
         <p>The average case behavior tells a better story, but still not
         a great one. Analyzing average case behavior requires we look
         beyond the degenerate case of <span
-        class="math inline">\(2^k\)</span> elements and consider how we
-        deal with more than one mountain. When there’s more than one
-        mountain in the structure, computing the <em>root</em> (aka
-        commitment) of the structure requires combining (or
-        <em>bagging</em>) the peaks into a single digest. Just as we
-        pairwise-hash leaves to derive ancestor digests in the MMR, we
-        pairwise-hash peaks in order to derive the structure’s root. And
-        the exact strategy we use to perform these <span
-        class="math inline">\(|\text{peaks}| - 1\)</span> pairwise
-        hashes can have a profound impact on proof size.</p>
+        class="math inline">2^k</span> elements and consider how we deal
+        with more than one mountain. When there’s more than one mountain
+        in the structure, computing the <em>root</em> (aka commitment)
+        of the structure requires combining (or <em>bagging</em>) the
+        peaks into a single digest. Just as we pairwise-hash leaves to
+        derive ancestor digests in the MMR, we pairwise-hash peaks in
+        order to derive the structure’s root. And the exact strategy we
+        use to perform these <span class="math inline">|\text{peaks}| -
+        1</span> pairwise hashes can have a profound impact on proof
+        size.</p>
         <p>Consider the example in Fig. 2, which shows what’s called a
         “forward” (oldest to youngest) bagging strategy. We can
         analogously define the <em>backward</em> bagging strategy which
@@ -285,11 +290,11 @@ Bayardo</a></div>
         average, it still suffers from the exact same worst-case
         behavior as the other bagging schemes, even over recent
         elements. This can be seen from the spikes in Fig. 6 (appearing
-        at <span class="math inline">\(N\)</span> a power of 2), where
-        all three schemes produce the exact same worst <em>and</em>
+        at <span class="math inline">N</span> a power of 2), where all
+        three schemes produce the exact same worst <em>and</em>
         average-case proof size of <span
-        class="math inline">\(\log_2(N)\)</span> despite all our
-        efforts. It’s also frustrating, and potentially problematic for
+        class="math inline">\log_2(N)</span> despite all our efforts.
+        It’s also frustrating, and potentially problematic for
         low-bandwidth clients, that the proof sizes vary so considerably
         even for small changes in the database size.</p>
         <p>We address these final concerns through a recent innovation
@@ -298,7 +303,7 @@ Bayardo</a></div>
         Mountain Belt (MMB) can be thought of as an MMR with a different
         update rule that adds ancestor nodes at a slightly slower pace,
         along with a special bagging policy. In an MMR, we may have to
-        add up to <span class="math inline">\(\log(U)\)</span> ancestor
+        add up to <span class="math inline">\log(U)</span> ancestor
         nodes with each new update. With an MMB, we always add <em>at
         most one</em> ancestor per update.</p>
         <figure>
@@ -315,8 +320,8 @@ Bayardo</a></div>
         direction, and in fact proofs of <em>old</em> elements within an
         MMB are larger than those from an MMR over the exact same data
         (though only by a small constant: both retain an <span
-        class="math inline">\(O(\log(U))\)</span> bound overall). But
-        the MMB has an additional remarkable property: the depth of an
+        class="math inline">O(\log(U))</span> bound overall). But the
+        MMB has an additional remarkable property: the depth of an
         element in the structure is bounded by a logarithmic function of
         its <em>age</em>. It therefore doesn’t just provide small proofs
         of recent elements on average, it guarantees it.</p>
@@ -325,31 +330,31 @@ Bayardo</a></div>
         <em>is</em> compatible is forward bagging (F-MMB). A more
         complex compatible policy proposed in the MMB paper provides
         other interesting properties such as <span
-        class="math inline">\(O(1)\)</span> root update time with each
-        tree update. But this latter property is of little interest in
-        our domain, where roots are computed only after large batches of
+        class="math inline">O(1)</span> root update time with each tree
+        update. But this latter property is of little interest in our
+        domain, where roots are computed only after large batches of
         updates (such as after processing an entire block of
         transactions).</p>
         <p>Unfortunately, a backward bagging policy when applied to an
         MMB-style update rule is not compatible with the <span
-        class="math inline">\(O(\log(\text{age}))\)</span> property. But
-        it does result in something quite interesting: the resulting
-        Merkle structure is isomorphic to a balanced binary Merkle tree
-        over all elements! In other words, each element’s proof has the
-        same size (within 1 digest), completely eliminating variance in
-        proof size.</p>
+        class="math inline">O(\log(\text{age}))</span> property. But it
+        does result in something quite interesting: the resulting Merkle
+        structure is isomorphic to a balanced binary Merkle tree over
+        all elements! In other words, each element’s proof has the same
+        size (within 1 digest), completely eliminating variance in proof
+        size.</p>
         <p>Combined with pyramid bagging, the MMB update rule gives us
         the best of all worlds: proof size is bounded by <span
-        class="math inline">\(\log_2\)</span> of the active range,
+        class="math inline">\log_2</span> of the active range,
         average-case proof size over the active range is minimized (Fig.
         8), and variance is eliminated. Applied to QMDB then, a proof
         over an active element contains at most <span
-        class="math inline">\(\log_2(2V) = \log_2(V) + 1\)</span>
-        digests. Put another way, the maximum penalty in proof size of a
-        P-MMB over the optimal structure (a BMT over the active values
-        alone) is a mere 2 digests. Analytically, the worst-case proof
-        size of a P-MMB is 50% smaller than the F-MMB over the active
-        range, and average-case proof size is 33% smaller.</p>
+        class="math inline">\log_2(2V) = \log_2(V) + 1</span> digests.
+        Put another way, the maximum penalty in proof size of a P-MMB
+        over the optimal structure (a BMT over the active values alone)
+        is a mere 2 digests. Analytically, the worst-case proof size of
+        a P-MMB is 50% smaller than the F-MMB over the active range, and
+        average-case proof size is 33% smaller.</p>
         <figure>
         <img src="/imgs/mmr_mmb_variants_worst_case_comparison.png"
         alt="Figure 8: Forward and pyramid-bagged MMB proof sizes grow only with the size of the active region (independent of N). Pyramid bagging results in an optimal Merkle structure over the active region (isomorphic to a BMT) with respect to average and worst-case proof size." />
@@ -369,7 +374,7 @@ Bayardo</a></div>
         href="https://github.com/commonwarexyz/monorepo/blob/main/storage/src/merkle/mmb/mod.rs">MMB</a>.
         If you’ve been curious about the performance of append-only
         authenticated stores but were scared off by <span
-        class="math inline">\(\log(U)\)</span> proof scaling, less than
+        class="math inline">\log(U)</span> proof scaling, less than
         ideal average-case proof size, or high proof size variance, it’s
         time to give them another look.</p>
         <div id="footer-placeholder"></div>
