@@ -587,6 +587,57 @@ impl<T, M: Mode<T>> State<T, M> {
     }
 }
 
+fn new_state<T, M: Mode<T>>(metrics: impl Metrics, capacity: NonZeroUsize) -> Arc<State<T, M>> {
+    Arc::new(State {
+        ready: Ready::new(capacity.get()),
+        overflow: OverflowState::new(),
+        backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
+        closed: AtomicBool::new(false),
+        senders: AtomicUsize::new(1),
+        waker: AtomicWaker::new(),
+    })
+}
+
+fn clone_sender_state<T, M: Mode<T>>(state: &Arc<State<T, M>>) -> Arc<State<T, M>> {
+    // Live sender count drives receiver disconnect detection.
+    state.senders.fetch_add(1, Ordering::Relaxed);
+    state.clone()
+}
+
+fn drop_sender_state<T, M: Mode<T>>(state: &State<T, M>) {
+    let previous = state.senders.fetch_sub(1, Ordering::AcqRel);
+    assert!(previous > 0);
+    // Wake a receiver that is parked waiting for data or disconnect.
+    if previous == 1 {
+        state.waker.wake();
+    }
+}
+
+fn fmt_sender_state<T, M: Mode<T>>(
+    name: &str,
+    state: &State<T, M>,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    f.debug_struct(name)
+        .field("capacity", &state.ready.capacity())
+        .field("closed", &state.closed.load(Ordering::Acquire))
+        .finish()
+}
+
+async fn recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Option<T> {
+    poll_fn(|cx| state.poll_recv(cx)).await
+}
+
+fn try_recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Result<T, TryRecvError> {
+    if let Some(message) = state.pop() {
+        return Ok(message);
+    }
+    if state.is_disconnected() {
+        return state.pop().ok_or(TryRecvError::Disconnected);
+    }
+    Err(TryRecvError::Empty)
+}
+
 /// Sender half of a mailbox.
 pub struct Sender<T: Policy> {
     state: Arc<State<T, mode::Reliable>>,
@@ -599,61 +650,41 @@ pub struct UnreliableSender<T: UnreliablePolicy> {
 
 impl<T: Policy> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        // Live sender count drives receiver disconnect detection.
-        self.state.senders.fetch_add(1, Ordering::Relaxed);
         Self {
-            state: self.state.clone(),
+            state: clone_sender_state(&self.state),
         }
     }
 }
 
 impl<T: UnreliablePolicy> Clone for UnreliableSender<T> {
     fn clone(&self) -> Self {
-        // Live sender count drives receiver disconnect detection.
-        self.state.senders.fetch_add(1, Ordering::Relaxed);
         Self {
-            state: self.state.clone(),
+            state: clone_sender_state(&self.state),
         }
     }
 }
 
 impl<T: Policy> Drop for Sender<T> {
     fn drop(&mut self) {
-        let previous = self.state.senders.fetch_sub(1, Ordering::AcqRel);
-        assert!(previous > 0);
-        // Wake a receiver that is parked waiting for data or disconnect.
-        if previous == 1 {
-            self.state.waker.wake();
-        }
+        drop_sender_state(&self.state);
     }
 }
 
 impl<T: UnreliablePolicy> Drop for UnreliableSender<T> {
     fn drop(&mut self) {
-        let previous = self.state.senders.fetch_sub(1, Ordering::AcqRel);
-        assert!(previous > 0);
-        // Wake a receiver that is parked waiting for data or disconnect.
-        if previous == 1 {
-            self.state.waker.wake();
-        }
+        drop_sender_state(&self.state);
     }
 }
 
 impl<T: Policy> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sender")
-            .field("capacity", &self.state.ready.capacity())
-            .field("closed", &self.state.closed.load(Ordering::Acquire))
-            .finish()
+        fmt_sender_state("Sender", &self.state, f)
     }
 }
 
 impl<T: UnreliablePolicy> fmt::Debug for UnreliableSender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("UnreliableSender")
-            .field("capacity", &self.state.ready.capacity())
-            .field("closed", &self.state.closed.load(Ordering::Acquire))
-            .finish()
+        fmt_sender_state("UnreliableSender", &self.state, f)
     }
 }
 
@@ -694,20 +725,12 @@ pub struct UnreliableReceiver<T: UnreliablePolicy> {
 }
 
 impl<T: Policy> Receiver<T> {
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.state.poll_recv(cx)
-    }
-
-    fn pop(&mut self) -> Option<T> {
-        self.state.pop()
-    }
-
     /// Receive the next message.
     ///
     /// Returns `None` after all senders are dropped and all buffered messages
     /// have been drained.
     pub async fn recv(&mut self) -> Option<T> {
-        poll_fn(|cx| self.poll_recv(cx)).await
+        recv_from(&self.state).await
     }
 
     /// Try to receive the next message without waiting.
@@ -715,31 +738,17 @@ impl<T: Policy> Receiver<T> {
     /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
     /// all buffered messages have been drained.
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        if let Some(message) = self.pop() {
-            return Ok(message);
-        }
-        if self.state.is_disconnected() {
-            return self.pop().ok_or(TryRecvError::Disconnected);
-        }
-        Err(TryRecvError::Empty)
+        try_recv_from(&self.state)
     }
 }
 
 impl<T: UnreliablePolicy> UnreliableReceiver<T> {
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.state.poll_recv(cx)
-    }
-
-    fn pop(&mut self) -> Option<T> {
-        self.state.pop()
-    }
-
     /// Receive the next message.
     ///
     /// Returns `None` after all senders are dropped and all buffered messages
     /// have been drained.
     pub async fn recv(&mut self) -> Option<T> {
-        poll_fn(|cx| self.poll_recv(cx)).await
+        recv_from(&self.state).await
     }
 
     /// Try to receive the next message without waiting.
@@ -747,13 +756,7 @@ impl<T: UnreliablePolicy> UnreliableReceiver<T> {
     /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
     /// all buffered messages have been drained.
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        if let Some(message) = self.pop() {
-            return Ok(message);
-        }
-        if self.state.is_disconnected() {
-            return self.pop().ok_or(TryRecvError::Disconnected);
-        }
-        Err(TryRecvError::Empty)
+        try_recv_from(&self.state)
     }
 }
 
@@ -771,14 +774,7 @@ impl<T: UnreliablePolicy> Drop for UnreliableReceiver<T> {
 
 /// Create a new bounded mailbox.
 pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-    let state = Arc::new(State {
-        ready: Ready::new(capacity.get()),
-        overflow: OverflowState::new(),
-        backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
-        closed: AtomicBool::new(false),
-        senders: AtomicUsize::new(1),
-        waker: AtomicWaker::new(),
-    });
+    let state = new_state(metrics, capacity);
     (
         Sender {
             state: state.clone(),
@@ -792,14 +788,7 @@ pub fn new_unreliable<T: UnreliablePolicy>(
     metrics: impl Metrics,
     capacity: NonZeroUsize,
 ) -> (UnreliableSender<T>, UnreliableReceiver<T>) {
-    let state = Arc::new(State {
-        ready: Ready::new(capacity.get()),
-        overflow: OverflowState::new(),
-        backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
-        closed: AtomicBool::new(false),
-        senders: AtomicUsize::new(1),
-        waker: AtomicWaker::new(),
-    });
+    let state = new_state(metrics, capacity);
     (
         UnreliableSender {
             state: state.clone(),
@@ -1127,7 +1116,7 @@ mod tests {
 
     #[test]
     fn poll_recv_drains_buffered_messages_after_senders_drop() {
-        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        let (sender, receiver) = new_unreliable(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
@@ -1143,14 +1132,14 @@ mod tests {
         drop(sender);
 
         assert_eq!(
-            receiver.poll_recv(&mut cx),
+            receiver.state.poll_recv(&mut cx),
             Poll::Ready(Some(Message::Vote(1)))
         );
         assert_eq!(
-            receiver.poll_recv(&mut cx),
+            receiver.state.poll_recv(&mut cx),
             Poll::Ready(Some(Message::Buffered(2)))
         );
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
     }
 
     #[test]
@@ -1326,18 +1315,18 @@ mod tests {
 
     #[test]
     fn pending_recv_wakes_when_senders_drop() {
-        let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
+        let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
         drop(sender);
 
         assert_eq!(wakes.count(), 1);
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
     }
 
     #[test]
@@ -1347,7 +1336,7 @@ mod tests {
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
         // Prime ready directly to isolate the overflow wake after registration.
@@ -1364,12 +1353,12 @@ mod tests {
 
     #[test]
     fn receiver_drop_blocks_ready_fast_path_feedback() {
-        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        let (sender, receiver) = new_unreliable(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         drop(receiver);
 
         assert_eq!(
@@ -1470,7 +1459,7 @@ mod tests {
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
         assert_eq!(sender.state.ready.push(SpillMessage::FillReady), Ok(()));
@@ -1702,14 +1691,14 @@ mod loom_tests {
                 drop(sender);
             });
 
-            let poll = receiver.poll_recv(&mut cx);
+            let poll = receiver.state.poll_recv(&mut cx);
             close.join().unwrap();
 
             match poll {
                 Poll::Ready(None) => {}
                 Poll::Pending => {
                     assert!(wakes.load(Ordering::Acquire) > 0);
-                    assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+                    assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
                 }
                 Poll::Ready(Some(_)) => panic!("unexpected message"),
             }
@@ -1731,7 +1720,7 @@ mod loom_tests {
                 );
             });
 
-            let poll = receiver.poll_recv(&mut cx);
+            let poll = receiver.state.poll_recv(&mut cx);
             enqueue.join().unwrap();
 
             match poll {
@@ -1739,7 +1728,7 @@ mod loom_tests {
                 Poll::Pending => {
                     assert!(wakes.load(Ordering::Acquire) > 0);
                     assert_eq!(
-                        receiver.poll_recv(&mut cx),
+                        receiver.state.poll_recv(&mut cx),
                         Poll::Ready(Some(Message::Spill(0)))
                     );
                 }
@@ -1747,7 +1736,7 @@ mod loom_tests {
                 Poll::Ready(Some(message)) => panic!("unexpected message: {message:?}"),
             }
 
-            assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+            assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
         });
     }
 
@@ -1813,7 +1802,7 @@ mod loom_tests {
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
 
-            assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+            assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
 
             let close = thread::spawn(move || {
                 drop(receiver);
