@@ -9,7 +9,7 @@ use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
+        elector::{Config as ElectorConfig, Elector, RoundRobin, RoundRobinElector},
         scheme::Scheme as SimplexScheme,
         types::{
             Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
@@ -20,7 +20,7 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
     Monitor, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
+use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest, Sha256};
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor};
@@ -223,10 +223,9 @@ enum FinalizationCertificateBranch {
     InvalidFinalization,
 }
 
-struct NodeDriver<S, E>
+struct NodeDriver<S>
 where
     S: SimplexScheme<Sha256Digest>,
-    E: Elector<S>,
     S::PublicKey: Send,
 {
     context: deterministic::Context,
@@ -243,7 +242,10 @@ where
     certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     strategy: SmallScope,
-    elector: E,
+    // Driver uses RoundRobin for its own leader-gating heuristic regardless of the target's
+    // elector: Random panics when no previous-view certificate is tracked, which is the
+    // common case for the byzantine driver running ahead of the honest engine.
+    elector: RoundRobinElector<S>,
 
     last_vote_view: u64,
     last_finalized_view: u64,
@@ -262,10 +264,9 @@ where
     leader_certificate_by_view: HashMap<u64, S::Certificate>,
 }
 
-impl<S, E> NodeDriver<S, E>
+impl<S> NodeDriver<S>
 where
     S: SimplexScheme<Sha256Digest>,
-    E: Elector<S>,
     S::PublicKey: Send,
 {
     #[allow(clippy::too_many_arguments)]
@@ -283,7 +284,7 @@ where
         vote_receivers: Vec<simulated::Receiver<S::PublicKey>>,
         certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
         resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
-        elector: E,
+        elector: RoundRobinElector<S>,
     ) -> Self {
         Self {
             context,
@@ -326,11 +327,7 @@ where
             return None;
         }
         let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
-        let certificate = if view == 1 {
-            None
-        } else {
-            Some(self.leader_certificate_by_view.get(&(view - 1))?)
-        };
+        let certificate = self.leader_certificate_by_view.get(&(view - 1));
         Some(usize::from(self.elector.elect(round, certificate)))
     }
 
@@ -1562,9 +1559,9 @@ where
         base.certify,
     );
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
-    let elector = <P::Elector as Default>::default().build(fuzzer_schemes[0].participants());
+    let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
 
-    let mut driver = NodeDriver::<P::Scheme, _>::new(
+    let mut driver = NodeDriver::<P::Scheme>::new(
         context.child("simplex_node_driver"),
         honest,
         relay,
@@ -1584,6 +1581,9 @@ where
         driver.handle_receivers().await;
         driver.drive_progress().await;
         driver.apply_event(*event).await;
+        // simulated::Sender::send is non-async; without an explicit yield the driver task
+        // holds the executor and spawned tasks (honest engine, network actor) never run.
+        context.sleep(Duration::from_millis(50)).await;
     }
 
     (participants, schemes)
