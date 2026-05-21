@@ -3873,6 +3873,208 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_local_floor_below_in_flight_keeps_pending_ack() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let application = Application::<B>::manual_ack();
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "local-floor-below-in-flight-keeps-pending-ack",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            let block1_round = Round::new(Epoch::zero(), View::new(1));
+            let block1 = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block1_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    block1_round,
+                    View::zero(),
+                    StandardHarness::commitment(&block1),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(block1_round, block1).await);
+            StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "first block dispatch",
+                || application.pending_ack_heights() == vec![Height::new(1)],
+            )
+            .await;
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&genesis),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(floor_finalization);
+            assert!(mailbox.get_block(Height::zero()).await.is_some());
+
+            assert_eq!(
+                application.pending_ack_heights(),
+                vec![Height::new(1)],
+                "local floor below the in-flight block must not clear or duplicate its ack"
+            );
+
+            let retain_before_ack = resolver.retain_count();
+            assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "first ack processed",
+                || resolver.retain_count() > retain_before_ack,
+            )
+            .await;
+            assert!(application.pending_ack_heights().is_empty());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_set_floor_below_processed_height_preserves_in_flight_ack() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let application = Application::<B>::manual_ack();
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "set-floor-below-processed-height-preserves-in-flight-ack",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            let block1_round = Round::new(Epoch::zero(), View::new(1));
+            let block1 = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block1_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    block1_round,
+                    View::zero(),
+                    StandardHarness::commitment(&block1),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "first block dispatch",
+                || application.pending_ack_heights() == vec![Height::new(1)],
+            )
+            .await;
+
+            let retain_before_block1_ack = resolver.retain_count();
+            assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "first ack processed",
+                || resolver.retain_count() > retain_before_block1_ack,
+            )
+            .await;
+
+            let block2_round = Round::new(Epoch::zero(), View::new(2));
+            let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
+            let block2_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    block2_round,
+                    View::new(1),
+                    StandardHarness::commitment(&block2),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(block2_round, block2).await);
+            StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "second block dispatch",
+                || application.pending_ack_heights() == vec![Height::new(2)],
+            )
+            .await;
+
+            let stale_floor_round = Round::new(Epoch::zero(), View::new(5));
+            let missing = Sha256::hash(b"missing-before-stale-lower-floor");
+            let _subscription = mailbox.subscribe_by_commitment(
+                missing,
+                CommitmentFallback::FetchByRound {
+                    round: stale_floor_round,
+                },
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "round-bound fetch before stale lower floor",
+                || {
+                    resolver.active_fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Notarized { round } if round == stale_floor_round
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let stale_floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    stale_floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&genesis),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(stale_floor_finalization);
+            assert!(mailbox.get_block(Height::zero()).await.is_some());
+
+            assert_eq!(
+                application.pending_ack_heights(),
+                vec![Height::new(2)],
+                "stale lower floor must not clear or duplicate in-flight acks"
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "stale lower floor round-bound prune",
+                || {
+                    resolver.active_fetches().iter().all(|fetch| {
+                        !matches!(
+                            fetch.key,
+                            handler::Key::Notarized { round } if round == stale_floor_round
+                        )
+                    })
+                },
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_same_height_floor_anchor_keeps_pending_ack() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
