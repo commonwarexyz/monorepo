@@ -54,5 +54,6 @@ where
     R: DbResolver<DB>,
     T: Target<Family = DB::Family, Digest = DB::Digest>,
 {
-    Engine::new(config).await?.sync().await
+    let engine = Box::pin(Engine::new(config)).await?;
+    engine.sync().await
 }

@@ -108,12 +108,18 @@ const RECOVERY_WATERMARK_KEY: u64 = 2;
 
 /// Return the first retained logical position in `section`.
 #[inline]
-const fn first_in_section(pruning_boundary: u64, section: u64, items_per_blob: u64) -> u64 {
-    let start = section * items_per_blob;
+fn first_in_section(
+    pruning_boundary: u64,
+    section: u64,
+    items_per_blob: u64,
+) -> Result<u64, Error> {
+    let start = section
+        .checked_mul(items_per_blob)
+        .ok_or(Error::OffsetOverflow)?;
     if pruning_boundary > start {
-        pruning_boundary
+        Ok(pruning_boundary)
     } else {
-        start
+        Ok(start)
     }
 }
 
@@ -121,9 +127,20 @@ const fn first_in_section(pruning_boundary: u64, section: u64, items_per_blob: u
 /// the pruning boundary falls mid-section (from `init_at_size`), in which case the skipped prefix
 /// reduces the capacity.
 #[inline]
-const fn section_capacity(pruning_boundary: u64, section: u64, items_per_blob: u64) -> u64 {
-    let start = section * items_per_blob;
-    items_per_blob - (first_in_section(pruning_boundary, section, items_per_blob) - start)
+fn section_capacity(
+    pruning_boundary: u64,
+    section: u64,
+    items_per_blob: u64,
+) -> Result<u64, Error> {
+    let start = section
+        .checked_mul(items_per_blob)
+        .ok_or(Error::OffsetOverflow)?;
+    let skipped = first_in_section(pruning_boundary, section, items_per_blob)?
+        .checked_sub(start)
+        .ok_or(Error::OffsetOverflow)?;
+    items_per_blob
+        .checked_sub(skipped)
+        .ok_or(Error::OffsetOverflow)
 }
 
 /// Configuration for `Journal` storage.
@@ -196,7 +213,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         }
 
         let section = pos / items_per_blob;
-        let pos_in_section = pos - first_in_section(self.pruning_boundary, section, items_per_blob);
+        let pos_in_section =
+            pos - first_in_section(self.pruning_boundary, section, items_per_blob)?;
 
         self.journal
             .get(section, pos_in_section)
@@ -226,7 +244,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return None;
         }
         let section = pos / items_per_blob;
-        let pos_in_section = pos - first_in_section(self.pruning_boundary, section, items_per_blob);
+        let pos_in_section =
+            pos - first_in_section(self.pruning_boundary, section, items_per_blob).ok()?;
         self.journal.try_get_sync_into(section, pos_in_section, buf)
     }
 }
@@ -355,7 +374,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
             }
 
             let group_len = group_end - group_start;
-            let first_position = first_in_section(pruning_boundary, section, items_per_blob);
+            let first_position = first_in_section(pruning_boundary, section, items_per_blob)?;
             let section_positions: Vec<u64> = miss_positions[group_start..group_end]
                 .iter()
                 .map(|&pos| pos - first_position)
@@ -423,7 +442,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
 
         let start_section = start_pos / items_per_blob;
         let start_pos_in_section =
-            start_pos - first_in_section(pruning_boundary, start_section, items_per_blob);
+            start_pos - first_in_section(pruning_boundary, start_section, items_per_blob)?;
 
         // Check all middle sections (not oldest, not tail) in range are complete.
         let journal = &self.guard.journal;
@@ -445,10 +464,11 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
 
         // Transform (section, pos_in_section, item) to (global_pos, item).
         let stream = inner_stream.map(move |result| {
-            result.map(|(section, pos_in_section, item)| {
-                let global_pos =
-                    first_in_section(pruning_boundary, section, items_per_blob) + pos_in_section;
-                (global_pos, item)
+            result.and_then(|(section, pos_in_section, item)| {
+                let global_pos = first_in_section(pruning_boundary, section, items_per_blob)?
+                    .checked_add(pos_in_section)
+                    .ok_or(Error::OffsetOverflow)?;
+                Ok((global_pos, item))
             })
         });
 
@@ -696,7 +716,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         meta_pruning_boundary: Option<u64>,
         meta_recovery_watermark: Option<u64>,
     ) -> Result<(u64, u64, u64, Option<RecoveryRepair>), Error> {
-        let blob_boundary = inner.oldest_section().map_or(0, |o| o * items_per_blob);
+        let blob_boundary = match inner.oldest_section() {
+            Some(oldest) => oldest
+                .checked_mul(items_per_blob)
+                .ok_or(Error::OffsetOverflow)?,
+            None => 0,
+        };
 
         // Determine the pruning boundary from metadata and blob state.
         //
@@ -781,7 +806,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
 
         let oldest_len = inner.section_len(oldest).await?;
-        let expected = section_capacity(pruning_boundary, oldest, items_per_blob);
+        let expected = section_capacity(pruning_boundary, oldest, items_per_blob)?;
 
         if oldest_len > expected {
             return Err(Error::Corruption(format!(
@@ -799,7 +824,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         section: u64,
     ) -> Result<(u64, u64), Error> {
         let len = inner.section_len(section).await?;
-        let capacity = section_capacity(pruning_boundary, section, items_per_blob);
+        let capacity = section_capacity(pruning_boundary, section, items_per_blob)?;
         if len > capacity {
             return Err(Error::Corruption(format!(
                 "section {section} has too many items: expected at most {capacity}, got {len}"
@@ -838,7 +863,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let (tail_len, _) =
             Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, newest)
                 .await?;
-        let size = first_in_section(pruning_boundary, newest, items_per_blob) + tail_len;
+        let size = first_in_section(pruning_boundary, newest, items_per_blob)?
+            .checked_add(tail_len)
+            .ok_or(Error::OffsetOverflow)?;
         Ok((size, None))
     }
 
@@ -860,8 +887,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // The oldest section's capacity was already checked before recovery mode dispatch.
         let oldest_len = inner.section_len(oldest).await?;
-        let expected_oldest = section_capacity(pruning_boundary, oldest, items_per_blob);
-        let mut size = pruning_boundary + oldest_len;
+        let expected_oldest = section_capacity(pruning_boundary, oldest, items_per_blob)?;
+        let mut size = pruning_boundary
+            .checked_add(oldest_len)
+            .ok_or(Error::OffsetOverflow)?;
 
         if oldest == newest {
             return Ok((size, None));
@@ -872,7 +901,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 size,
                 Some(RecoveryRepair {
                     section: oldest,
-                    byte_offset: oldest_len * Self::CHUNK_SIZE_U64,
+                    byte_offset: oldest_len
+                        .checked_mul(Self::CHUNK_SIZE_U64)
+                        .ok_or(Error::OffsetOverflow)?,
                 }),
             ));
         }
@@ -882,7 +913,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
                     .await?;
 
-            size += len;
+            size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
             if len < capacity {
                 if section == newest {
                     return Ok((size, None));
@@ -891,7 +922,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     size,
                     Some(RecoveryRepair {
                         section,
-                        byte_offset: len * Self::CHUNK_SIZE_U64,
+                        byte_offset: len
+                            .checked_mul(Self::CHUNK_SIZE_U64)
+                            .ok_or(Error::OffsetOverflow)?,
                     }),
                 ));
             }
@@ -1164,8 +1197,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let section = size / self.items_per_blob;
         let pos_in_section =
-            size - first_in_section(inner.pruning_boundary, section, self.items_per_blob);
-        let byte_offset = pos_in_section * Self::CHUNK_SIZE_U64;
+            size - first_in_section(inner.pruning_boundary, section, self.items_per_blob)?;
+        let byte_offset = pos_in_section
+            .checked_mul(Self::CHUNK_SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
 
         let should_sync_metadata = Self::lower_recovery_watermark(&mut inner, size)?;
         drop(inner);
