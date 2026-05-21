@@ -64,7 +64,7 @@ mod tests {
                 secp256r1, Scheme,
             },
             types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+                Artifact, Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
             },
         },
@@ -87,6 +87,7 @@ mod tests {
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
         Runner, Supervisor as _,
     };
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
@@ -305,6 +306,317 @@ mod tests {
             relay,
             reporter,
         )
+    }
+
+    async fn seed_voter_journal<S>(
+        context: deterministic::Context,
+        partition: String,
+        page_cache: CacheRef,
+        scheme: &S,
+        finalization: Finalization<S, Sha256Digest>,
+    ) where
+        S: Scheme<Sha256Digest>,
+    {
+        let view = finalization.view();
+        let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+            context.child("journal"),
+            JConfig {
+                partition,
+                compression: None,
+                codec_config: scheme.certificate_codec_config(),
+                page_cache,
+                write_buffer: NZUsize!(1024 * 1024),
+            },
+        )
+        .await
+        .expect("unable to initialize voter journal");
+        journal
+            .append(view.get(), &Artifact::Finalization(finalization))
+            .await
+            .expect("unable to append voter journal artifact");
+        journal
+            .sync(view.get())
+            .await
+            .expect("unable to sync voter journal");
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn start_voter_with_floor<S, L>(
+        context: &mut deterministic::Context,
+        oracle: &Oracle<S::PublicKey, deterministic::Context>,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+        elector: L,
+        partition: String,
+        epoch: Epoch,
+        floor: Floor<S, Sha256Digest>,
+        page_cache: CacheRef,
+    ) -> (
+        Mailbox<S, Sha256Digest>,
+        mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
+        mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
+        commonware_runtime::Handle<()>,
+    )
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: ElectorConfig<S>,
+    {
+        let me = participants[0].clone();
+        let reporter_cfg = mocks::reporter::Config {
+            participants: participants.to_vec().try_into().unwrap(),
+            scheme: schemes[0].clone(),
+            elector: elector.clone(),
+        };
+        let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+        let relay = Arc::new(mocks::relay::Relay::new());
+        let application_cfg = mocks::application::Config {
+            hasher: Sha256::default(),
+            relay: relay.clone(),
+            me: me.clone(),
+            propose_latency: (1.0, 0.0),
+            verify_latency: (1.0, 0.0),
+            certify_latency: (1.0, 0.0),
+            should_certify: mocks::application::Certifier::Always,
+        };
+        let (app_actor, application) =
+            mocks::application::Application::new(context.child("app"), application_cfg);
+        app_actor.start();
+
+        let voter_cfg = Config {
+            scheme: schemes[0].clone(),
+            elector,
+            blocker: oracle.control(me.clone()),
+            automaton: application.clone(),
+            relay: application,
+            reporter: reporter.clone(),
+            partition,
+            epoch,
+            floor,
+            mailbox_size: NZUsize!(128),
+            leader_timeout: Duration::from_secs(5),
+            certification_timeout: Duration::from_secs(5),
+            timeout_retry: Duration::from_mins(60),
+            activity_timeout: ViewDelta::new(10),
+            replay_buffer: NZUsize!(1024 * 1024),
+            write_buffer: NZUsize!(1024 * 1024),
+            page_cache,
+        };
+        let (voter, mailbox) = Actor::new(context.child("voter"), voter_cfg);
+        let (resolver_sender, resolver_receiver) =
+            mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+        let (batcher_sender, batcher_receiver) =
+            mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
+        let (vote_sender, _) = oracle
+            .control(me.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (certificate_sender, _) = oracle
+            .control(me)
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+        let handle = voter.start(
+            batcher::Mailbox::new(batcher_sender),
+            resolver::Mailbox::new(resolver_sender),
+            vote_sender,
+            certificate_sender,
+        );
+
+        (
+            mailbox,
+            batcher_receiver,
+            resolver_receiver,
+            reporter,
+            handle,
+        )
+    }
+
+    async fn expect_restarted_voter_at_floor<S>(
+        context: &mut deterministic::Context,
+        batcher_receiver: &mut mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
+        resolver_receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        finalized: View,
+    ) where
+        S: Scheme<Sha256Digest>,
+    {
+        let mut saw_update = false;
+        let mut saw_finalization = false;
+        loop {
+            select! {
+                msg = batcher_receiver.recv() => {
+                    if let batcher::Message::Update { current, finalized: found, .. } =
+                        msg.expect("batcher mailbox closed")
+                    {
+                        assert_eq!(current, finalized.next());
+                        assert_eq!(found, finalized);
+                        saw_update = true;
+                    }
+                },
+                msg = resolver_receiver.recv() => {
+                    if let resolver::MailboxMessage::Certificate(
+                        Certificate::Finalization(finalization)
+                    ) = msg.expect("resolver mailbox closed")
+                    {
+                        assert_eq!(finalization.view(), finalized);
+                        saw_finalization = true;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("timed out waiting for restarted voter at finalized view {finalized}");
+                },
+            }
+            if saw_update && saw_finalization {
+                break;
+            }
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_restart_newer_floor_skips_stale_journal() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_newer_floor".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_restart_newer_floor".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            let old_view = View::new(3);
+            let old_proposal = Proposal::new(
+                Round::new(epoch, old_view),
+                old_view.previous().unwrap(),
+                Sha256::hash(b"old-journal-finalization"),
+            );
+            let (_, old_finalization) = build_finalization(&schemes, &old_proposal, quorum);
+            seed_voter_journal(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                old_finalization,
+            )
+            .await;
+
+            let floor_view = View::new(8);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(b"newer-floor-finalization"),
+            );
+            let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
+            let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    partition,
+                    epoch,
+                    Floor::finalized(floor_finalization),
+                    page_cache,
+                )
+                .await;
+
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                floor_view,
+            )
+            .await;
+
+            let finalizations = reporter.finalizations.lock();
+            assert!(finalizations.contains_key(&floor_view));
+            assert!(
+                !finalizations.contains_key(&old_view),
+                "stale journal finalization must be skipped when the configured floor is newer"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_restart_older_floor_ignored_for_newer_journal() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_older_floor".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_restart_older_floor".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            let journal_view = View::new(8);
+            let journal_proposal = Proposal::new(
+                Round::new(epoch, journal_view),
+                journal_view.previous().unwrap(),
+                Sha256::hash(b"newer-journal-finalization"),
+            );
+            let (_, journal_finalization) = build_finalization(&schemes, &journal_proposal, quorum);
+            seed_voter_journal(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                journal_finalization,
+            )
+            .await;
+
+            let floor_view = View::new(3);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(b"older-floor-finalization"),
+            );
+            let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
+            let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    partition,
+                    epoch,
+                    Floor::finalized(floor_finalization),
+                    page_cache,
+                )
+                .await;
+
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                journal_view,
+            )
+            .await;
+
+            let finalizations = reporter.finalizations.lock();
+            assert!(finalizations.contains_key(&journal_view));
+            assert!(
+                !finalizations.contains_key(&floor_view),
+                "configured floor older than the journal must be ignored"
+            );
+        });
     }
 
     /// Helper to advance to a specific view by sending a finalization for the previous view.

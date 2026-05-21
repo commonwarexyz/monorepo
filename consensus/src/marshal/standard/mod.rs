@@ -2937,6 +2937,43 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    #[should_panic(expected = "floor finalization must verify")]
+    fn test_standard_set_floor_rejects_invalid_finalization() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: wrong_schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "set-floor-invalid",
+                ConstantProvider::new(wrong_schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            mailbox.set_floor(floor_finalization);
+            context.sleep(Duration::from_secs(1)).await;
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_start_floor_fetches_async_and_serves_requests() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -3159,6 +3196,104 @@ mod tests {
             );
 
             assert_eq!(started_rx.await.unwrap(), Height::new(6));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_set_floor_repairs_gap_after_anchor_arrives() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "set-floor-repairs-gap-after-anchor",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            mailbox.set_floor(floor_finalization);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor block fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&floor_block)
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let missing = make_raw_block(floor_block.digest(), Height::new(6), 600);
+            let later = make_raw_block(missing.digest(), Height::new(7), 700);
+            let later_round = Round::new(Epoch::zero(), View::new(7));
+            assert!(mailbox.verified(later_round, later.clone()).await);
+            let later_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    later_round,
+                    View::new(6),
+                    StandardHarness::commitment(&later),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, later_finalization).await;
+            assert!(mailbox.get_finalization(Height::new(7)).await.is_some());
+            assert!(
+                resolver.fetches().iter().all(|fetch| {
+                    !matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Key::Block(commitment),
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight { height })
+                        ) if *commitment == missing.digest() && *height == Height::new(6)
+                    )
+                }),
+                "gap repair must wait until the floor anchor is resolved"
+            );
+
+            assert!(mailbox.verified(floor_round, floor_block).await);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "missing post-floor parent fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            (&fetch.key, &fetch.subscriber),
+                            (
+                                handler::Key::Block(commitment),
+                                handler::Annotation::Finalized(
+                                    handler::Finalized::ByHeight { height }
+                                )
+                            ) if *commitment == missing.digest() && *height == Height::new(6)
+                        )
+                    })
+                },
+            )
+            .await;
         });
     }
 
@@ -3989,7 +4124,8 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_restart_keeps_existing_genesis_anchor() {
+    #[should_panic(expected = "stored genesis block does not match configured anchor")]
+    fn test_standard_restart_rejects_mismatched_genesis_anchor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -4022,7 +4158,7 @@ mod tests {
             drop(resolver);
             context.sleep(Duration::from_millis(1)).await;
 
-            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+            let (_mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator_restart"),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
@@ -4031,10 +4167,6 @@ mod tests {
                 Start::Genesis(replacement_genesis.clone()),
             )
             .await;
-
-            let stored = mailbox.get_block(Height::zero()).await.unwrap();
-            assert_eq!(stored.digest(), original_genesis.digest());
-            assert_ne!(stored.digest(), replacement_genesis.digest());
         });
     }
 

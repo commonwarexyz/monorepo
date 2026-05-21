@@ -677,14 +677,6 @@ impl<
         let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
-        // Add initial view from the configured floor
-        let floor = self.floor.take().expect("floor not initialized");
-        if let Some(finalization) = self.state.set_floor(floor) {
-            let report = finalization.clone();
-            resolver.updated(Certificate::Finalization(finalization));
-            self.reporter.report(Activity::Finalization(report));
-        }
-
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
@@ -699,9 +691,29 @@ impl<
         .await
         .expect("unable to open journal");
 
+        // Add initial view from the configured floor. A finalized floor newer
+        // than the journal supersedes all replayed artifacts; an older floor is
+        // stale and the journal remains the source of truth.
+        let floor = self.floor.take().expect("floor not initialized");
+        let newest_section = journal.newest_section();
+        let floor_supersedes_journal = match &floor {
+            Floor::Genesis(_) => false,
+            Floor::Finalized(finalization) => newest_section
+                .map(|newest| finalization.view().get() > newest)
+                .unwrap_or(true),
+        };
+        let replay_journal = !floor_supersedes_journal;
+        if matches!(&floor, Floor::Genesis(_)) || floor_supersedes_journal {
+            if let Some(finalization) = self.state.set_floor(floor) {
+                let report = finalization.clone();
+                resolver.updated(Certificate::Finalization(finalization));
+                self.reporter.report(Activity::Finalization(report));
+            }
+        }
+
         // Rebuild from journal
         let start = self.context.current();
-        {
+        if replay_journal {
             let stream = journal
                 .replay(0, 0, self.replay_buffer)
                 .await
