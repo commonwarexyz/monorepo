@@ -139,22 +139,33 @@ pub trait UnreliablePolicy: Sized {
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
 }
 
-struct ReliableMode;
+mod mode {
+    /// Uses a policy that always handles overflow messages.
+    pub(super) struct Reliable;
 
-struct UnreliableMode;
+    /// Uses a policy that may reject overflow messages.
+    pub(super) struct Unreliable;
+}
 
 trait Mode<T>: Sized {
+    /// Overflow storage used by this mode.
     type Overflow: Overflow<T>;
+    /// Feedback returned from enqueue attempts.
     type Feedback;
 
+    /// Updates overflow for a full inbox and reports whether the message was handled.
     fn handle(overflow: &mut Self::Overflow, message: T) -> bool;
+    /// Maps ready-path feedback into this mode's feedback type.
     fn ready_feedback(feedback: Feedback) -> Self::Feedback;
+    /// Maps overflow handling into this mode's feedback type.
     fn overflow_feedback(handled: bool) -> Self::Feedback;
+    /// Returns `true` when this feedback should count as backoff.
     fn is_backoff(feedback: &Self::Feedback) -> bool;
+    /// Returns `true` when this feedback means the receiver is closed.
     fn is_closed(feedback: &Self::Feedback) -> bool;
 }
 
-impl<T: Policy> Mode<T> for ReliableMode {
+impl<T: Policy> Mode<T> for mode::Reliable {
     type Overflow = T::Overflow;
     type Feedback = Feedback;
 
@@ -180,7 +191,7 @@ impl<T: Policy> Mode<T> for ReliableMode {
     }
 }
 
-impl<T: UnreliablePolicy> Mode<T> for UnreliableMode {
+impl<T: UnreliablePolicy> Mode<T> for mode::Unreliable {
     type Overflow = T::Overflow;
     type Feedback = Unreliable<Feedback>;
 
@@ -577,12 +588,12 @@ impl<T, M: Mode<T>> State<T, M> {
 
 /// Sender half of a mailbox.
 pub struct Sender<T: Policy> {
-    state: Arc<State<T, ReliableMode>>,
+    state: Arc<State<T, mode::Reliable>>,
 }
 
 /// Sender half of an unreliable mailbox.
 pub struct UnreliableSender<T: UnreliablePolicy> {
-    state: Arc<State<T, UnreliableMode>>,
+    state: Arc<State<T, mode::Unreliable>>,
 }
 
 impl<T: Policy> Clone for Sender<T> {
@@ -668,7 +679,7 @@ impl<T: UnreliablePolicy> UnreliableSender<T> {
 /// Dropping the last sender disconnects the mailbox, but the receiver continues
 /// returning buffered messages until ready and overflow are empty.
 pub struct Receiver<T: Policy> {
-    state: Arc<State<T, ReliableMode>>,
+    state: Arc<State<T, mode::Reliable>>,
 }
 
 /// Receiver half of an unreliable mailbox.
@@ -678,7 +689,7 @@ pub struct Receiver<T: Policy> {
 /// Dropping the last sender disconnects the mailbox, but the receiver continues
 /// returning buffered messages until ready and overflow are empty.
 pub struct UnreliableReceiver<T: UnreliablePolicy> {
-    state: Arc<State<T, UnreliableMode>>,
+    state: Arc<State<T, mode::Unreliable>>,
 }
 
 impl<T: Policy> Receiver<T> {
