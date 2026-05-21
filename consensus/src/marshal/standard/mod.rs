@@ -3010,6 +3010,69 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_start_floor_applies_local_anchor_without_fetch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block =
+                make_raw_block(Sha256::hash(b"local-floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let buffer = RecordingBuffer::default();
+            buffer.insert(floor_block.clone());
+
+            let (application, started_rx) = HoldingBlockReporter::new();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "start-floor-local-anchor",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                buffer,
+                Start::Floor(floor_finalization),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "local floor anchor application",
+                || resolver.retain_count() >= 2,
+            )
+            .await;
+            assert!(
+                resolver.fetches().is_empty(),
+                "local startup floor anchor must not be fetched"
+            );
+            assert_eq!(
+                mailbox.get_block(Height::new(5)).await.unwrap().digest(),
+                floor_block.digest()
+            );
+
+            let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
+            let next_round = Round::new(Epoch::zero(), View::new(6));
+            assert!(mailbox.verified(next_round, next.clone()).await);
+            let next_finalization = StandardHarness::make_finalization(
+                Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, next_finalization).await;
+            assert_eq!(started_rx.await.unwrap(), Height::new(6));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_set_floor_holds_dispatch_until_anchor_arrives() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -3096,6 +3159,176 @@ mod tests {
             );
 
             assert_eq!(started_rx.await.unwrap(), Height::new(6));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_newer_pending_floor_supersedes_older_anchor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let (application, mut started_rx) = HoldingBlockReporter::new();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "set-floor-supersedes-pending",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            let old_floor_round = Round::new(Epoch::zero(), View::new(5));
+            let old_floor_block =
+                make_raw_block(Sha256::hash(b"old-floor-parent"), Height::new(5), 500);
+            let old_floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    old_floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&old_floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(old_floor_finalization);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "old floor block fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&old_floor_block)
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let new_floor_round = Round::new(Epoch::zero(), View::new(7));
+            let new_floor_block =
+                make_raw_block(Sha256::hash(b"new-floor-parent"), Height::new(7), 700);
+            let new_floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    new_floor_round,
+                    View::new(6),
+                    StandardHarness::commitment(&new_floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(new_floor_finalization);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "new floor block fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&new_floor_block)
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let old_next_round = Round::new(Epoch::zero(), View::new(6));
+            let old_next = make_raw_block(old_floor_block.digest(), Height::new(6), 600);
+            assert!(mailbox.verified(old_next_round, old_next.clone()).await);
+            let old_next_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    old_next_round,
+                    View::new(5),
+                    StandardHarness::commitment(&old_next),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, old_next_finalization).await;
+            assert!(mailbox.get_finalization(Height::new(6)).await.is_some());
+
+            let new_next_round = Round::new(Epoch::zero(), View::new(8));
+            let new_next = make_raw_block(new_floor_block.digest(), Height::new(8), 800);
+            assert!(mailbox.verified(new_next_round, new_next.clone()).await);
+            let new_next_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    new_next_round,
+                    View::new(7),
+                    StandardHarness::commitment(&new_next),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, new_next_finalization).await;
+            assert!(mailbox.get_finalization(Height::new(8)).await.is_some());
+
+            let old_floor_fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| {
+                    matches!(
+                        fetch.key,
+                        handler::Key::Block(commitment)
+                            if commitment == StandardHarness::commitment(&old_floor_block)
+                    )
+                })
+                .expect("old floor fetch missing");
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: old_floor_fetch.key,
+                        subscribers: NonEmptyVec::new(old_floor_fetch.subscriber),
+                    },
+                    value: old_floor_block.encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx
+                    .await
+                    .expect("old floor delivery response missing"),
+                "old floor block delivery should validate"
+            );
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
+
+            let new_floor_fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| {
+                    matches!(
+                        fetch.key,
+                        handler::Key::Block(commitment)
+                            if commitment == StandardHarness::commitment(&new_floor_block)
+                    )
+                })
+                .expect("new floor fetch missing");
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: new_floor_fetch.key,
+                        subscribers: NonEmptyVec::new(new_floor_fetch.subscriber),
+                    },
+                    value: new_floor_block.encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx
+                    .await
+                    .expect("new floor delivery response missing"),
+                "new floor block delivery should validate"
+            );
+            assert_eq!(started_rx.await.unwrap(), Height::new(8));
         });
     }
 
@@ -3656,6 +3889,56 @@ mod tests {
                 fetches_before,
                 "stale finalization must not enqueue a round-bound block fetch"
             );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_restart_keeps_existing_genesis_anchor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "restart-keeps-existing-genesis";
+
+            let original_genesis =
+                make_raw_block(Sha256::hash(b"original-genesis"), Height::zero(), 0);
+            let replacement_genesis =
+                make_raw_block(Sha256::hash(b"replacement-genesis"), Height::zero(), 1);
+            assert_ne!(original_genesis.digest(), replacement_genesis.digest());
+
+            let (mailbox, buffer, resolver, actor_handle) = start_standard_actor(
+                context.child("validator"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+                Start::Genesis(original_genesis.clone()),
+            )
+            .await;
+            assert_eq!(
+                mailbox.get_block(Height::zero()).await.unwrap().digest(),
+                original_genesis.digest()
+            );
+
+            actor_handle.abort();
+            drop(mailbox);
+            drop(buffer);
+            drop(resolver);
+            context.sleep(Duration::from_millis(1)).await;
+
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator_restart"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                RecordingBuffer::default(),
+                Start::Genesis(replacement_genesis.clone()),
+            )
+            .await;
+
+            let stored = mailbox.get_block(Height::zero()).await.unwrap();
+            assert_eq!(stored.digest(), original_genesis.digest());
+            assert_ne!(stored.digest(), replacement_genesis.digest());
         });
     }
 
