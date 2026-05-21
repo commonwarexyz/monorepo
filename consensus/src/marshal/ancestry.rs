@@ -40,9 +40,6 @@ pub trait BlockProvider: Send + 'static {
     /// the parent.
     ///
     /// The child block can carry variant-specific context needed to retrieve its parent.
-    ///
-    /// The returned future must be `'static` because [AncestorStream] stores it
-    /// between polls.
     fn subscribe_parent(
         &self,
         block: &Self::Block,

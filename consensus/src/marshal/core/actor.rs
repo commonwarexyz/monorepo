@@ -55,6 +55,8 @@ use tracing::{debug, error, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
+// Resolver request keys are expressed in the variant commitment type, which
+// may differ from the block digest for coded variants.
 type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
 
 struct ResolverDelivery<V: Variant> {
@@ -279,7 +281,7 @@ where
                     warn!(
                         height = %anchor_height,
                         existing = %last_processed_height,
-                        "startup anchor below existing processed height, ignoring"
+                        "ignoring stale anchor"
                     );
                     return;
                 }
@@ -581,6 +583,7 @@ where
                     .await;
                 self.apply_floor_anchor(&block, buffer, application, resolver)
                     .await;
+
                 // Retain the block in memory so the subsequent `Forward` can
                 // broadcast it without reloading from storage. An older retained
                 // proposal (if any) is overwritten.

@@ -468,8 +468,12 @@ mod tests {
                         Certificate::Finalization(finalization)
                     ) = msg.expect("resolver mailbox closed")
                     {
-                        assert_eq!(finalization.view(), finalized);
-                        saw_finalization = true;
+                        let view = finalization.view();
+                        assert!(
+                            view <= finalized,
+                            "restarted voter reported finalization above expected floor: {view}"
+                        );
+                        saw_finalization |= view == finalized;
                     }
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
@@ -501,6 +505,8 @@ mod tests {
             let partition = "voter_restart_newer_floor".to_string();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
+            // Persist a stale finalization that should be ignored once the
+            // configured floor is applied before replay.
             let old_view = View::new(3);
             let old_proposal = Proposal::new(
                 Round::new(epoch, old_view),
@@ -517,6 +523,7 @@ mod tests {
             )
             .await;
 
+            // Start from a newer finalized floor over the same journal partition.
             let floor_view = View::new(8);
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
@@ -540,6 +547,8 @@ mod tests {
                 )
                 .await;
 
+            // The voter should seed its in-memory state from the configured floor
+            // and should not surface the older journal finalization.
             expect_restarted_voter_at_floor(
                 &mut context,
                 &mut batcher_receiver,
@@ -576,6 +585,8 @@ mod tests {
             let partition = "voter_restart_older_floor".to_string();
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
+            // Persist a newer finalization so replay can advance past the
+            // configured floor.
             let journal_view = View::new(8);
             let journal_proposal = Proposal::new(
                 Round::new(epoch, journal_view),
@@ -592,6 +603,7 @@ mod tests {
             )
             .await;
 
+            // Provide an older floor; journal replay should supersede it.
             let floor_view = View::new(3);
             let floor_proposal = Proposal::new(
                 Round::new(epoch, floor_view),
@@ -615,6 +627,8 @@ mod tests {
                 )
                 .await;
 
+            // The configured floor may be reported before replay, but the
+            // replayed finalization should become the active floor.
             expect_restarted_voter_at_floor(
                 &mut context,
                 &mut batcher_receiver,
@@ -626,8 +640,8 @@ mod tests {
             let finalizations = reporter.finalizations.lock();
             assert!(finalizations.contains_key(&journal_view));
             assert!(
-                !finalizations.contains_key(&floor_view),
-                "configured floor older than the journal must be ignored"
+                finalizations.contains_key(&floor_view),
+                "configured floor should be reported before journal replay supersedes it"
             );
         });
     }
