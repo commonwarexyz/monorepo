@@ -363,7 +363,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             // processing of gossip messages (BitVec, Peers), causing the
                             // peer connection to stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
-                            let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                            let _ =
+                                sender.enqueue_lossy(channels::Inbound((peer.clone(), data.message)));
                         }
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {

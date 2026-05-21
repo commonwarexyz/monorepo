@@ -1,7 +1,7 @@
 //! Rate-limited [`UnlimitedSender`] wrapper.
 
 use crate::{Recipients, UnlimitedSender};
-use commonware_actor::Feedback;
+use commonware_actor::{Feedback, Lossy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
 use commonware_utils::{channel::ring, sync::Mutex};
@@ -210,7 +210,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
         }
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Lossy<Feedback> {
         self.sender.send(self.recipients, message, priority)
     }
 }
@@ -260,10 +260,10 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Feedback {
+        ) -> Lossy<Feedback> {
             let message = message.into().coalesce();
             self.sent.lock().push((recipients, message, priority));
-            Feedback::Ok
+            Lossy::new(Feedback::Ok)
         }
     }
 

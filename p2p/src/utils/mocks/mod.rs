@@ -1,7 +1,7 @@
 //! Mock implementations for testing.
 
 use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_actor::Feedback;
+use commonware_actor::{Feedback, Lossy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::{Metric, Registered, Registration},
@@ -92,8 +92,8 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
         self.recipients.clone()
     }
 
-    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Feedback {
-        Feedback::Ok
+    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Lossy<Feedback> {
+        Lossy::new(Feedback::Ok)
     }
 }
 
@@ -153,8 +153,8 @@ mod tests {
             vec![self.peer.clone()]
         }
 
-        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
-            Feedback::Rejected
+        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Lossy<Feedback> {
+            Lossy::Rejected
         }
     }
 

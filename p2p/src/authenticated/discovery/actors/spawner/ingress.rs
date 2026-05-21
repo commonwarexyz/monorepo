@@ -1,5 +1,5 @@
 use crate::authenticated::{discovery::actors::tracker::Reservation, Mailbox};
-use commonware_actor::{mailbox::Policy, Feedback};
+use commonware_actor::{mailbox::Policy, Feedback, Lossy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
@@ -32,14 +32,14 @@ impl<P: PublicKey, O: Sink, I: Stream> Policy for Message<O, I, P> {
 impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
-    /// This may fail during shutdown if the spawner has already exited,
-    /// which is harmless since no new connections need to be spawned.
+    /// This may reject when the spawner is backlogged or closed, which is harmless since stale
+    /// connections do not need to be spawned.
     pub fn spawn(
         &mut self,
         connection: (Sender<O>, Receiver<I>),
         reservation: Reservation<P>,
-    ) -> Feedback {
-        self.0.enqueue(Message::Spawn {
+    ) -> Lossy<Feedback> {
+        self.0.enqueue_lossy(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
             connection,
             reservation,
@@ -157,7 +157,7 @@ mod tests {
             assert_eq!(spawner.spawn(connection_1, reservation_1), Feedback::Ok);
             assert_eq!(
                 spawner.spawn(connection_2, reservation_2),
-                Feedback::Rejected
+                Lossy::Rejected
             );
 
             let release = tracker_receiver

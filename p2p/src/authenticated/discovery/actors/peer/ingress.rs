@@ -40,11 +40,11 @@ impl<C: PublicKey> Mailbox<C> {
     }
 
     pub fn bit_vec(&self, bit_vec: types::BitVec) {
-        let _ = self.0.enqueue(Message::BitVec(bit_vec));
+        let _ = self.0.enqueue_lossy(Message::BitVec(bit_vec));
     }
 
     pub fn peers(&self, peers: Vec<types::Info<C>>) {
-        let _ = self.0.enqueue(Message::Peers(peers));
+        let _ = self.0.enqueue_lossy(Message::Peers(peers));
     }
 
     pub fn kill(&self) {

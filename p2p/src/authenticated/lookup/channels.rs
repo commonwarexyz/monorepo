@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_actor::{
     mailbox::{self, Policy},
-    Feedback,
+    Feedback, Lossy,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Metrics, Quota};
@@ -45,7 +45,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Feedback {
+    ) -> Lossy<Feedback> {
         let message = message.into();
         assert!(
             message.len() <= self.max_size as usize,

@@ -1,0 +1,27 @@
+error: lossy mailbox returns plain Feedback
+  --> $DIR/main.rs:86:9
+   |
+LL |         self.lossy.enqueue(message)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: use enqueue_lossy and return Lossy<Feedback>
+  --> $DIR/main.rs:86:9
+   |
+LL |         self.lossy.enqueue(message)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[deny(lossy_feedback)]` on by default
+
+error: lossy mailbox returns plain Feedback
+  --> $DIR/main.rs:94:9
+   |
+LL |         self.mixed.enqueue(MixedMessage::Content)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: use enqueue_lossy and return Lossy<Feedback>
+  --> $DIR/main.rs:94:9
+   |
+LL |         self.mixed.enqueue(MixedMessage::Content)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 2 previous errors
+

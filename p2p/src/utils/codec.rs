@@ -1,7 +1,7 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
 use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::{mailbox, Feedback, Lossy};
 use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -86,7 +86,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         self.sender.recipients()
     }
 
-    pub fn send(self, message: V, priority: bool) -> Feedback {
+    pub fn send(self, message: V, priority: bool) -> Lossy<Feedback> {
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority)
     }
@@ -278,7 +278,7 @@ where
         let (peer, decode_result) = result;
         match decode_result {
             Ok(value) => {
-                let _ = sender.enqueue(Decoded(peer, value));
+                let _ = sender.enqueue_lossy(Decoded(peer, value));
             }
             Err(err) => {
                 crate::block!(blocker, peer, ?err, "received invalid message");

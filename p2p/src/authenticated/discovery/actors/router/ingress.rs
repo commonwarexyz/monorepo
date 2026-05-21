@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_actor::{
     mailbox::{self, Policy},
-    Feedback,
+    Feedback, Lossy,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
@@ -120,11 +120,11 @@ impl<P: PublicKey> Messenger<P> {
         channel: Channel,
         message: IoBufs,
         priority: bool,
-    ) -> Feedback {
+    ) -> Lossy<Feedback> {
         // Build Data and encode Payload::Data once for all recipients
         let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
 
-        self.sender.0.enqueue(Message::Content {
+        self.sender.0.enqueue_lossy(Message::Content {
             recipients,
             encoded,
             priority,
@@ -177,7 +177,7 @@ mod tests {
             );
             assert_eq!(
                 messenger.content(Recipients::One(peer), 7, IoBuf::from(b"two").into(), false),
-                Feedback::Rejected
+                Lossy::Rejected
             );
             assert_eq!(
                 mailbox.release(PrivateKey::from_seed(2).public_key()),

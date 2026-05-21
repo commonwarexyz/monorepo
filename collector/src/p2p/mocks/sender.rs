@@ -1,6 +1,6 @@
 //! Mock sender implementations for testing.
 
-use commonware_actor::Feedback;
+use commonware_actor::{Feedback, Lossy};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
 use commonware_runtime::IoBufs;
@@ -43,7 +43,7 @@ impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
         Vec::new()
     }
 
-    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
-        Feedback::Closed
+    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Lossy<Feedback> {
+        Lossy::new(Feedback::Closed)
     }
 }

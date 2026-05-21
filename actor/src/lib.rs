@@ -17,8 +17,6 @@ commonware_macros::stability_scope!(BETA {
         Ok,
         /// The submission exceeded configured capacity but was handled by the overflow policy.
         Backoff,
-        /// The submission exceeded configured capacity and was rejected by the overflow policy.
-        Rejected,
         /// The endpoint is closed.
         Closed,
     }
@@ -27,6 +25,71 @@ commonware_macros::stability_scope!(BETA {
         /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             matches!(self, Self::Ok | Self::Backoff)
+        }
+    }
+
+    /// Feedback from endpoints that may drop work under backpressure.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Lossy<T> {
+        /// The work was handled by the endpoint.
+        Handled(T),
+        /// The work was rejected by the endpoint.
+        Rejected,
+    }
+
+    impl Lossy<Feedback> {
+        /// Create handled feedback for an endpoint that may reject live work.
+        pub const fn new(feedback: Feedback) -> Self {
+            Self::Handled(feedback)
+        }
+
+        /// Create rejected feedback.
+        pub const fn rejected() -> Self {
+            Self::Rejected
+        }
+
+        /// Return the underlying feedback.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the endpoint rejected the work.
+        pub fn into_inner(self) -> Feedback {
+            match self {
+                Self::Handled(feedback) => feedback,
+                Self::Rejected => panic!("lossy feedback was rejected"),
+            }
+        }
+
+        /// Returns `true` when the endpoint handled the submission.
+        pub const fn accepted(self) -> bool {
+            match self {
+                Self::Handled(feedback) => feedback.accepted(),
+                Self::Rejected => false,
+            }
+        }
+    }
+
+    impl From<Feedback> for Lossy<Feedback> {
+        fn from(feedback: Feedback) -> Self {
+            Self::new(feedback)
+        }
+    }
+
+    impl From<Lossy<Self>> for Feedback {
+        fn from(feedback: Lossy<Self>) -> Self {
+            feedback.into_inner()
+        }
+    }
+
+    impl PartialEq<Feedback> for Lossy<Feedback> {
+        fn eq(&self, other: &Feedback) -> bool {
+            matches!(self, Self::Handled(feedback) if feedback == other)
+        }
+    }
+
+    impl PartialEq<Lossy<Self>> for Feedback {
+        fn eq(&self, other: &Lossy<Self>) -> bool {
+            other == self
         }
     }
 

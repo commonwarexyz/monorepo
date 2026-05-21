@@ -14,7 +14,7 @@ use commonware_macros::{stability_mod, stability_scope};
 stability_mod!(ALPHA, pub mod simulated);
 
 stability_scope!(BETA {
-    use commonware_actor::Feedback;
+    use commonware_actor::{Feedback, Lossy};
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
@@ -62,13 +62,14 @@ stability_scope!(BETA {
         /// # Returns
         ///
         /// Feedback from submitting the message for delivery.
+        /// [`Lossy`] indicates that local submission may be rejected under backpressure.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Feedback;
+        ) -> Lossy<Feedback>;
     }
 
     /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
@@ -120,8 +121,9 @@ stability_scope!(BETA {
         /// # Returns
         ///
         /// Feedback from submitting the message for delivery.
+        /// [`Lossy`] indicates that local submission may be rejected under backpressure.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
-        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback;
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Lossy<Feedback>;
     }
 
     /// Interface for sending messages to a set of recipients.

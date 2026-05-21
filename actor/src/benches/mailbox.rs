@@ -1,4 +1,4 @@
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::{mailbox, Feedback, Lossy};
 use commonware_runtime::{
     telemetry::metrics::{Metric, Registered, Registration},
     Metrics, Name, Supervisor,
@@ -257,8 +257,8 @@ fn bench_overflow_drop(c: &mut Criterion) {
             },
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
-                    let result = sender.enqueue(black_box(Message::drop()));
-                    assert_eq!(result, Feedback::Rejected);
+                    let result = sender.enqueue_lossy(black_box(Message::drop()));
+                    assert_eq!(result, Lossy::Rejected);
                     black_box(result);
                 }
             },

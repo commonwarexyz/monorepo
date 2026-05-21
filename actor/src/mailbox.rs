@@ -39,7 +39,7 @@
 //! Enqueue calls from the same sender will be delivered in order. Concurrent enqueue calls,
 //! however, are not globally ordered and may be observed in any interleaving.
 
-use crate::Feedback;
+use crate::{Feedback, Lossy};
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Metrics,
@@ -282,13 +282,18 @@ impl<T: Policy> OverflowState<T> {
         ready.push(message)
     }
 
-    fn enqueue(&self, ready: &Ready<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback {
+    fn enqueue_lossy(
+        &self,
+        ready: &Ready<T>,
+        message: T,
+        is_closed: impl Fn() -> bool,
+    ) -> Lossy<Feedback> {
         // Mark overflow active so racing senders stay off the ready fast path.
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
         if is_closed() {
             mutation.publish(queue.is_empty());
-            return Feedback::Closed;
+            return Lossy::new(Feedback::Closed);
         }
 
         // The fast-path push may have observed stale ready fullness. Retry
@@ -298,7 +303,7 @@ impl<T: Policy> OverflowState<T> {
             match ready.push(message) {
                 Ok(()) => {
                     mutation.publish(queue.is_empty());
-                    return Feedback::Ok;
+                    return Lossy::new(Feedback::Ok);
                 }
                 Err(message) => message,
             }
@@ -310,9 +315,9 @@ impl<T: Policy> OverflowState<T> {
         let handled = T::handle(&mut queue, message);
         mutation.publish(queue.is_empty());
         if handled {
-            Feedback::Backoff
+            Lossy::new(Feedback::Backoff)
         } else {
-            Feedback::Rejected
+            Lossy::Rejected
         }
     }
 
@@ -427,11 +432,24 @@ impl<T: Policy> fmt::Debug for Sender<T> {
 
 impl<T: Policy> Sender<T> {
     /// Submit a message without waiting for inbox capacity.
+    ///
+    /// Use this for policies that handle all overflow messages. Use [`Sender::enqueue_lossy`] when
+    /// the policy may reject a message under backpressure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the overflow policy rejects the message.
     #[must_use = "caller must handle enqueue feedback"]
     pub fn enqueue(&self, message: T) -> Feedback {
+        self.enqueue_lossy(message).into_inner()
+    }
+
+    /// Submit a message without waiting for inbox capacity, allowing policy rejection.
+    #[must_use = "caller must handle enqueue feedback"]
+    pub fn enqueue_lossy(&self, message: T) -> Lossy<Feedback> {
         // Receiver closure makes new sends fail immediately.
         if self.state.closed.load(Ordering::Acquire) {
-            return Feedback::Closed;
+            return Lossy::new(Feedback::Closed);
         }
 
         // Common case: publish directly to ready without taking overflow lock.
@@ -439,18 +457,21 @@ impl<T: Policy> Sender<T> {
             Ok(()) => {
                 if self.state.closed.load(Ordering::Acquire) {
                     self.state.overflow.drain(&self.state.ready);
-                    return Feedback::Closed;
+                    return Lossy::new(Feedback::Closed);
                 }
                 self.state.waker.wake();
-                return Feedback::Ok;
+                return Lossy::new(Feedback::Ok);
             }
             Err(message) => message,
         };
 
         // Slow path: serialize through overflow and apply the policy.
-        let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
-            self.state.closed.load(Ordering::Acquire)
-        });
+        let feedback = self
+            .state
+            .overflow
+            .enqueue_lossy(&self.state.ready, message, || {
+                self.state.closed.load(Ordering::Acquire)
+            });
 
         // Record any backoff.
         if feedback == Feedback::Backoff {
@@ -754,7 +775,7 @@ mod tests {
     async fn full_inbox_rejects_non_replaceable_message() {
         let (sender, mut receiver) = new(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Rejected);
+        assert_eq!(sender.enqueue_lossy(Message::Vote(2)), Lossy::Rejected);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
@@ -797,14 +818,14 @@ mod tests {
     }
 
     #[test]
-    fn rejected_feedback_is_not_accepted_or_counted_as_backoff() {
+    fn lossy_rejected_feedback_is_not_accepted_or_counted_as_backoff() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-            let feedback = sender.enqueue(Message::Vote(2));
+            let feedback = sender.enqueue_lossy(Message::Vote(2));
 
-            assert_eq!(feedback, Feedback::Rejected);
+            assert_eq!(feedback, Lossy::Rejected);
             assert!(!feedback.accepted());
 
             let buffer = context.encode();
