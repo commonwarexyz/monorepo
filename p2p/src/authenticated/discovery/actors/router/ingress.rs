@@ -93,7 +93,7 @@ impl<P: PublicKey> Mailbox<P> {
     /// which is harmless since the router no longer tracks any peers.
     pub fn release(&self, peer: P) -> Feedback {
         match self.0.enqueue(Message::Release { peer }) {
-            Unreliable::Feedback(feedback) => feedback,
+            Unreliable::Outcome(feedback) => feedback,
             Unreliable::Rejected => unreachable!("router release cannot be rejected"),
         }
     }

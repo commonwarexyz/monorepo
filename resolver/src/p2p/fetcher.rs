@@ -292,7 +292,7 @@ where
                     payload: wire::Payload::Request(key.clone()),
                 };
                 match checked.send(message, self.priority_requests) {
-                    Unreliable::Feedback(Feedback::Ok | Feedback::Backoff) => {
+                    Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -310,7 +310,7 @@ where
                         self.key_to_id.insert(key, id);
                         return;
                     }
-                    feedback @ (Unreliable::Rejected | Unreliable::Feedback(Feedback::Closed)) => {
+                    feedback @ (Unreliable::Rejected | Unreliable::Outcome(Feedback::Closed)) => {
                         // Send was not handled, try next peer
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, ?feedback, "send failed");
