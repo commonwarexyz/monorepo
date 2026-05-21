@@ -402,7 +402,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                                     new_size = state.valid_offset,
                                                     "trailing bytes detected: truncating"
                                                 );
-                                                state.blob.resize(state.valid_offset).await.ok()?;
+                                                if let Err(err) =
+                                                    state.blob.resize(state.valid_offset).await
+                                                {
+                                                    batch.push(Err(err.into()));
+                                                    state.done = true;
+                                                    return Some((batch, state));
+                                                }
                                             }
                                             state.done = true;
                                             return if batch.is_empty() {
@@ -428,7 +434,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         new_size = state.valid_offset,
                                         "incomplete item at end: truncating"
                                     );
-                                    state.blob.resize(state.valid_offset).await.ok()?;
+                                    if let Err(err) = state.blob.resize(state.valid_offset).await {
+                                        batch.push(Err(err.into()));
+                                        state.done = true;
+                                        return Some((batch, state));
+                                    }
                                     state.done = true;
                                     return if batch.is_empty() {
                                         None
