@@ -40,15 +40,14 @@
 //!
 //! # Metadata
 //!
-//! Metadata consists of two optional keys:
+//! Metadata contains the following keys:
 //! - PRUNING_BOUNDARY_KEY: Stores the pruning boundary as a u64 when it's mid-section (not a
 //!   multiple of items_per_blob). Absent from legacy journals or when the boundary is
 //!   section-aligned, since it can be derived from the oldest blob.
-//! - RECOVERY_WATERMARK_KEY: Stores the last logical size at which the fixed journal's entries and
-//!   metadata were synced as a coherent recovery checkpoint for external consumers. Fixed-journal
-//!   recovery does not use this value to decide whether short blobs are corrupt. Absent on journals
-//!   created before this key was added; those journals recover from the newest retained blob using
-//!   the old rollover-sync invariant, then write the key before accepting new appends.
+//! - RECOVERY_WATERMARK_KEY: Stores a lower bound on the last logical size at which the fixed
+//!   journal's entries and metadata were synced as a coherent recovery checkpoint by an external
+//!   consumer. The key is durably written during initialization for any journal last opened before
+//!   this key was introduced.
 //!
 //! RECOVERY_WATERMARK_KEY is mainly useful when this journal is used as an index for a layered
 //! journal, such as the variable journal's offsets. Standalone fixed journals do not need it to
