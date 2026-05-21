@@ -1354,6 +1354,63 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_journal_replay_reports_resize_error_on_trailing_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let section = 1u64;
+            let item = 10u64;
+
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+            journal
+                .append(section, &item)
+                .await
+                .expect("Failed to append item");
+            journal
+                .append_raw(section, &[0xFF, 0xFF])
+                .await
+                .expect("Failed to append trailing bytes");
+            journal.sync(section).await.expect("Failed to sync journal");
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to re-initialize journal");
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                resize_rate: Some(1.0),
+                ..Default::default()
+            };
+
+            let stream = journal
+                .replay(0, 0, NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
+            pin_mut!(stream);
+
+            let first = stream
+                .next()
+                .await
+                .expect("expected item before trailing bytes")
+                .expect("failed to replay valid item");
+            assert_eq!(first, (section, 0, item.encode_size() as u32, item));
+
+            match stream.next().await {
+                Some(Err(_)) => {}
+                other => panic!("expected resize error while repairing trailing bytes, got {other:?}"),
+            }
+            assert!(stream.next().await.is_none());
+        });
+    }
+
+    #[test_traced]
     fn test_journal_read_item_missing() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
