@@ -1404,7 +1404,9 @@ mod tests {
 
             match stream.next().await {
                 Some(Err(_)) => {}
-                other => panic!("expected resize error while repairing trailing bytes, got {other:?}"),
+                other => {
+                    panic!("expected resize error while repairing trailing bytes, got {other:?}")
+                }
             }
             assert!(stream.next().await.is_none());
         });
