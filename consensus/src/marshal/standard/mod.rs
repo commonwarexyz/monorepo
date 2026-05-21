@@ -124,10 +124,11 @@ mod tests {
                 "standard-provider-parent-commitment",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                buffer,
+                Some(buffer),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            let buffer = buffer.expect("buffer was provided");
 
             let parent = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 200);
@@ -1418,10 +1419,11 @@ mod tests {
                     &format!("missing-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
-                    RecordingBuffer::default(),
+                    Some(RecordingBuffer::default()),
                     Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
+                let buffer = buffer.expect("buffer was provided");
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
@@ -1488,10 +1490,11 @@ mod tests {
                     &format!("missing-certify-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
-                    RecordingBuffer::default(),
+                    Some(RecordingBuffer::default()),
                     Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
+                let buffer = buffer.expect("buffer was provided");
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
@@ -1563,7 +1566,7 @@ mod tests {
                 "deferred-certify-bumps-fetch",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -1659,7 +1662,7 @@ mod tests {
                 "deferred-certify-canceled-verify",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -1740,7 +1743,7 @@ mod tests {
                     &format!("height-lie-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
-                    RecordingBuffer::default(),
+                    Some(RecordingBuffer::default()),
                     Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 )
                 .await;
@@ -2799,40 +2802,6 @@ mod tests {
         partition_prefix: &str,
         provider: ConstantProvider<S, Epoch>,
         application: R,
-        buffer: Buf,
-        start: Start<S, D, B>,
-    ) -> (
-        Mailbox<S, Standard<B>>,
-        Buf,
-        RecordingResolver,
-        commonware_runtime::Handle<()>,
-    )
-    where
-        R: Reporter<Activity = Update<B>>,
-        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
-    {
-        let (mailbox, buffer, resolver, actor_handle) = start_standard_actor_maybe_buffer(
-            context,
-            partition_prefix,
-            provider,
-            application,
-            Some(buffer),
-            start,
-        )
-        .await;
-        (
-            mailbox,
-            buffer.expect("buffer was provided"),
-            resolver,
-            actor_handle,
-        )
-    }
-
-    async fn start_standard_actor_maybe_buffer<R, Buf>(
-        context: deterministic::Context,
-        partition_prefix: &str,
-        provider: ConstantProvider<S, Epoch>,
-        application: R,
         buffer: Option<Buf>,
         start: Start<S, D, B>,
     ) -> (
@@ -2943,7 +2912,7 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor_maybe_buffer(
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "standard-no-buffer",
                 ConstantProvider::new(schemes[0].clone()),
@@ -3005,7 +2974,7 @@ mod tests {
                 "start-floor-invalid",
                 ConstantProvider::new(wrong_schemes[0].clone()),
                 application,
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Floor(floor_finalization),
             )
             .await;
@@ -3041,7 +3010,7 @@ mod tests {
                 "set-floor-invalid",
                 ConstantProvider::new(wrong_schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -3074,7 +3043,7 @@ mod tests {
                 "start-floor-async",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Floor(floor_finalization),
             )
             .await;
@@ -3151,7 +3120,7 @@ mod tests {
                 "start-floor-local-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
-                buffer,
+                Some(buffer),
                 Start::Floor(floor_finalization),
             )
             .await;
@@ -3210,7 +3179,7 @@ mod tests {
                 "set-floor-holds-dispatch",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -3289,7 +3258,7 @@ mod tests {
                 "floor-jump-ignores-stale-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -3397,7 +3366,7 @@ mod tests {
                 "set-floor-repairs-gap-after-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -3517,7 +3486,7 @@ mod tests {
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Floor(floor_finalization),
             )
             .await;
@@ -3570,7 +3539,7 @@ mod tests {
                 "set-floor-supersedes-pending",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -3750,7 +3719,7 @@ mod tests {
                 "set-floor-buffered-anchor-notarization",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
-                buffer.clone(),
+                Some(buffer.clone()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -3806,7 +3775,7 @@ mod tests {
                 "stale-floor-anchor-resumes-dispatch",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -3913,7 +3882,7 @@ mod tests {
                 "same-height-floor-keeps-pending-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4005,7 +3974,7 @@ mod tests {
                 "stale-floor-anchor-round-floor",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4103,7 +4072,7 @@ mod tests {
                 "standard-floor-parent-digest-commitment",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4186,7 +4155,7 @@ mod tests {
                 "notarized-delivery-wakes-subscriber",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4259,7 +4228,7 @@ mod tests {
                 "fetch-notarized-processed-round",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4338,7 +4307,7 @@ mod tests {
                 "finalization-processed-round-fetch",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4403,7 +4372,7 @@ mod tests {
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(original_genesis.clone()),
             )
             .await;
@@ -4423,7 +4392,7 @@ mod tests {
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(replacement_genesis.clone()),
             )
             .await;
@@ -4455,7 +4424,7 @@ mod tests {
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4489,7 +4458,7 @@ mod tests {
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4545,7 +4514,7 @@ mod tests {
                 "set-floor-round-prune",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4780,7 +4749,7 @@ mod tests {
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -4817,7 +4786,7 @@ mod tests {
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -5010,10 +4979,11 @@ mod tests {
                 &format!("forward-unknown-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            let buffer = buffer.expect("buffer was provided");
 
             mailbox.forward(
                 round,
@@ -5054,10 +5024,11 @@ mod tests {
                 &format!("proposed-cache-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            let buffer = buffer.expect("buffer was provided");
 
             assert!(mailbox.proposed(round, block.clone()).await);
 
@@ -5109,10 +5080,11 @@ mod tests {
                 &format!("forward-cached-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
+            let buffer = buffer.expect("buffer was provided");
 
             assert!(mailbox.verified(round, block.clone()).await);
 
@@ -5153,7 +5125,7 @@ mod tests {
                 &format!("hint-below-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -5216,7 +5188,7 @@ mod tests {
                 &format!("hint-already-final-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -5257,7 +5229,7 @@ mod tests {
                 &format!("hint-targets-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
@@ -5307,7 +5279,7 @@ mod tests {
                 &format!("prune-above-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
-                RecordingBuffer::default(),
+                Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             )
             .await;
