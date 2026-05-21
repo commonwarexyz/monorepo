@@ -675,20 +675,22 @@ where
         }
         // Attempt to reconstruct the encoded blob
         let start = self.context.current();
-        let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("erasure_decode")
             .with_attribute("round", round)
             .shared(true)
-            .spawn(move |_| async move {
-                let blob = C::decode(
-                    &commitment.config(),
-                    &commitment.root(),
-                    state.checked_shards().iter(),
-                    &strategy,
-                );
-                (state, blob)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let blob = C::decode(
+                        &commitment.config(),
+                        &commitment.root(),
+                        state.checked_shards().iter(),
+                        &strategy,
+                    );
+                    (state, blob)
+                }
             });
         let (state, blob) = handle.await.expect("strategy task failed");
         self.state.insert(commitment, state);
@@ -928,16 +930,18 @@ where
         participants_len: u64,
         state: ReconstructionState<P, C, H>,
     ) -> ReconstructionState<P, C, H> {
-        let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("transition_reconstruction")
             .with_attribute("round", state.round())
             .shared(true)
-            .spawn(move |_| async move {
-                let mut state = state;
-                let to_block = state.try_transition(commitment, participants_len, &strategy);
-                (state, to_block)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut state = state;
+                    let to_block = state.try_transition(commitment, participants_len, &strategy);
+                    (state, to_block)
+                }
             });
         let (state, to_block) = handle.await.expect("strategy task failed");
         for peer in to_block {
@@ -984,15 +988,17 @@ where
             return;
         };
 
-        let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("count_shards")
             .with_attribute("round", round)
             .shared(true)
-            .spawn(move |_| async move {
-                let shard_count = block.shards(&strategy).len();
-                (block, shard_count)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let shard_count = block.shards(&strategy).len();
+                    (block, shard_count)
+                }
             });
         let (block, shard_count) = handle.await.expect("strategy task failed");
         if shard_count != participants.len() {

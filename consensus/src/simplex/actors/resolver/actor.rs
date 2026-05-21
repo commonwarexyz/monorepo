@@ -178,16 +178,18 @@ impl<
                     return None;
                 }
                 let scheme = self.scheme.clone();
-                let strategy = self.strategy.clone();
                 let handle = self
                     .context
                     .child("verify_notarization")
                     .with_attribute("epoch", self.epoch)
                     .with_attribute("view", view)
                     .shared(true)
-                    .spawn(move |mut context| async move {
-                        let valid = notarization.verify(&mut context, &scheme, &strategy);
-                        (notarization, valid)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let valid = notarization.verify(&mut context, &scheme, &strategy);
+                            (notarization, valid)
+                        }
                     });
                 let (notarization, valid) = handle.await.expect("strategy task failed");
                 if !valid {
@@ -211,16 +213,18 @@ impl<
                     return None;
                 }
                 let scheme = self.scheme.clone();
-                let strategy = self.strategy.clone();
                 let handle = self
                     .context
                     .child("verify_finalization")
                     .with_attribute("epoch", self.epoch)
                     .with_attribute("view", view)
                     .shared(true)
-                    .spawn(move |mut context| async move {
-                        let valid = finalization.verify(&mut context, &scheme, &strategy);
-                        (finalization, valid)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let valid = finalization.verify(&mut context, &scheme, &strategy);
+                            (finalization, valid)
+                        }
                     });
                 let (finalization, valid) = handle.await.expect("strategy task failed");
                 if !valid {
@@ -244,16 +248,19 @@ impl<
                     return None;
                 }
                 let scheme = self.scheme.clone();
-                let strategy = self.strategy.clone();
                 let handle = self
                     .context
                     .child("verify_nullification")
                     .with_attribute("epoch", self.epoch)
                     .with_attribute("view", view)
                     .shared(true)
-                    .spawn(move |mut context| async move {
-                        let valid = nullification.verify::<_, D>(&mut context, &scheme, &strategy);
-                        (nullification, valid)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let valid =
+                                nullification.verify::<_, D>(&mut context, &scheme, &strategy);
+                            (nullification, valid)
+                        }
                     });
                 let (nullification, valid) = handle.await.expect("strategy task failed");
                 if !valid {

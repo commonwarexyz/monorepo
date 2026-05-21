@@ -1307,24 +1307,26 @@ where
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
-            let strategy = self.strategy.clone();
             let handle = self
                 .context
                 .child("verify_deliveries")
                 .with_attribute("count", delivers.len())
                 .shared(true)
-                .spawn(move |mut context| async move {
-                    let cert_refs: Vec<_> = delivers
-                        .iter()
-                        .map(PendingVerification::as_subject_and_certificate)
-                        .collect();
-                    let verified = verify_certificates(
-                        &mut context,
-                        scheme.as_ref(),
-                        &cert_refs,
-                        &strategy,
-                    );
-                    (delivers, verified)
+                .spawn({
+                    let strategy = self.strategy.clone();
+                    move |mut context| async move {
+                        let cert_refs: Vec<_> = delivers
+                            .iter()
+                            .map(PendingVerification::as_subject_and_certificate)
+                            .collect();
+                        let verified = verify_certificates(
+                            &mut context,
+                            scheme.as_ref(),
+                            &cert_refs,
+                            &strategy,
+                        );
+                        (delivers, verified)
+                    }
                 });
             let (returned, verified) = handle.await.expect("strategy task failed");
             delivers = returned;
@@ -1343,25 +1345,27 @@ where
                 let Some(scheme) = self.provider.scoped(epoch) else {
                     continue;
                 };
-                let strategy = self.strategy.clone();
                 let handle = self
                     .context
                     .child("verify_epoch_deliveries")
                     .with_attribute("epoch", epoch)
                     .with_attribute("count", indices.len())
                     .shared(true)
-                    .spawn(move |mut context| async move {
-                        let group_refs: Vec<_> = indices
-                            .iter()
-                            .map(|&i| delivers[i].as_subject_and_certificate())
-                            .collect();
-                        let results = verify_certificates(
-                            &mut context,
-                            scheme.as_ref(),
-                            &group_refs,
-                            &strategy,
-                        );
-                        (delivers, indices, results)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let group_refs: Vec<_> = indices
+                                .iter()
+                                .map(|&i| delivers[i].as_subject_and_certificate())
+                                .collect();
+                            let results = verify_certificates(
+                                &mut context,
+                                scheme.as_ref(),
+                                &group_refs,
+                                &strategy,
+                            );
+                            (delivers, indices, results)
+                        }
                     });
                 let (returned, indices, results) = handle.await.expect("strategy task failed");
                 delivers = returned;

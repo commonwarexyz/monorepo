@@ -378,21 +378,18 @@ impl<
                 }
 
                 // Validate that we need to process the ack
-                let ack = match self.validate_ack(ack, &sender).await {
-                    Ok(ack) => ack,
-                    Err(err) => {
-                        if err.blockable() {
-                            commonware_p2p::block!(
-                                self.blocker,
-                                sender,
-                                ?err,
-                                "ack validation failure"
-                            );
-                        } else {
-                            debug!(?sender, ?err, "ack validate failed");
-                        }
-                        continue;
+                if let Err(err) = self.validate_ack(&ack, &sender) {
+                    if err.blockable() {
+                        commonware_p2p::block!(
+                            self.blocker,
+                            sender,
+                            ?err,
+                            "ack validation failure"
+                        );
+                    } else {
+                        debug!(?sender, ?err, "ack validate failed");
                     }
+                    continue;
                 };
 
                 // Handle the ack
@@ -498,69 +495,40 @@ impl<
         let scheme = self.scheme(ack.epoch)?;
         let quorum = scheme.participants().quorum::<N3f1>();
 
-        let height = ack.item.height;
-        let epoch = ack.epoch;
-        let digest = ack.item.digest;
-
-        let acks = {
-            // Get the acks and check digest consistency
-            let acks_by_epoch = match self.pending.get_mut(&height) {
-                None => {
-                    // If the height is not in the pending pool, it may be confirmed
-                    // (i.e. we have a certificate for it).
-                    return Err(Error::AckHeight(height));
-                }
-                Some(Pending::Unverified(acks)) => acks,
-                Some(Pending::Verified(verified, acks)) => {
-                    // If we have a verified digest, ensure the ack matches it
-                    if digest != *verified {
-                        return Err(Error::AckDigest(height));
-                    }
-                    acks
-                }
-            };
-
-            // Add the attestation (if not already present)
-            let acks = acks_by_epoch.entry(epoch).or_default();
-            if acks.contains_key(&ack.attestation.signer) {
-                return Ok(());
+        // Get the acks and check digest consistency
+        let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
+            None => {
+                // If the height is not in the pending pool, it may be confirmed
+                // (i.e. we have a certificate for it).
+                return Err(Error::AckHeight(ack.item.height));
             }
-            acks.insert(ack.attestation.signer, ack.clone());
-
-            // If a quorum shares this digest, move the map into the task and return it after
-            // construction.
-            if acks.values().filter(|a| a.item.digest == digest).count() < quorum as usize {
-                return Ok(());
+            Some(Pending::Unverified(acks)) => acks,
+            Some(Pending::Verified(digest, acks)) => {
+                // If we have a verified digest, ensure the ack matches it
+                if ack.item.digest != *digest {
+                    return Err(Error::AckDigest(ack.item.height));
+                }
+                acks
             }
-            std::mem::take(acks)
         };
 
-        let strategy = self.strategy.clone();
-        let handle = self
-            .context
-            .child("construct_certificate")
-            .with_attribute("height", height)
-            .with_attribute("epoch", epoch)
-            .shared(true)
-            .spawn(move |_| async move {
-                let certificate = Certificate::from_acks(
-                    &*scheme,
-                    acks.values().filter(|ack| ack.item.digest == digest),
-                    &strategy,
-                );
-                (acks, certificate)
-            });
-        let (returned, certificate) = handle.await.expect("strategy task failed");
-        let acks_by_epoch = match self.pending.get_mut(&height) {
-            Some(Pending::Unverified(acks)) | Some(Pending::Verified(_, acks)) => acks,
-            None => panic!("pending entry not found"),
-        };
-        let replaced = acks_by_epoch.insert(epoch, returned);
-        assert!(replaced.is_some_and(|acks| acks.is_empty()));
+        // Add the attestation (if not already present)
+        let acks = acks_by_epoch.entry(ack.epoch).or_default();
+        if acks.contains_key(&ack.attestation.signer) {
+            return Ok(());
+        }
+        acks.insert(ack.attestation.signer, ack.clone());
 
-        if let Some(certificate) = certificate {
-            self.metrics.certificates.inc();
-            self.handle_certificate(certificate).await;
+        // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
+        let filtered = acks
+            .values()
+            .filter(|a| a.item.digest == ack.item.digest)
+            .collect::<Vec<_>>();
+        if filtered.len() >= quorum as usize {
+            if let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy) {
+                self.metrics.certificates.inc();
+                self.handle_certificate(certificate).await;
+            }
         }
 
         Ok(())
@@ -640,11 +608,11 @@ impl<
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
     /// Returns an error if the ack is invalid.
-    async fn validate_ack(
+    fn validate_ack(
         &mut self,
-        ack: Ack<P::Scheme, D>,
+        ack: &Ack<P::Scheme, D>,
         sender: &<P::Scheme as Scheme>::PublicKey,
-    ) -> Result<Ack<P::Scheme, D>, Error> {
+    ) -> Result<(), Error> {
         // Validate epoch
         {
             let (eb_lo, eb_hi) = self.epoch_bounds;
@@ -706,23 +674,11 @@ impl<
         }
 
         // Validate signature
-        let strategy = self.strategy.clone();
-        let handle =
-            self.context
-                .child("verify_ack")
-                .with_attribute("height", ack.item.height)
-                .with_attribute("epoch", ack.epoch)
-                .shared(true)
-                .spawn(move |mut context| async move {
-                    let valid = ack.verify(&mut context, &*scheme, &strategy);
-                    (ack, valid)
-                });
-        let (ack, valid) = handle.await.expect("strategy task failed");
-        if !valid {
+        if !ack.verify(self.context.as_mut(), &*scheme, &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
-        Ok(ack)
+        Ok(())
     }
 
     // ---------- Helpers ----------

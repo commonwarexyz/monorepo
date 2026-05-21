@@ -162,14 +162,15 @@ where
         view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, VerifiedVotes<S, D>>> + Send + 'static {
-        let strategy = self.strategy.clone();
-        let handle =
-            self.context
-                .child("verify_round")
-                .with_attribute("epoch", self.epoch)
-                .with_attribute("view", view)
-                .shared(true)
-                .spawn(move |mut context| async move {
+        let handle = self
+            .context
+            .child("verify_round")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |mut context| async move {
                     let mut round = round;
                     let verified = if round.ready_notarizes() {
                         Some(round.verify_notarizes(&mut context, &strategy))
@@ -181,7 +182,8 @@ where
                         None
                     };
                     (round, verified)
-                });
+                }
+            });
         async move { handle.await.expect("strategy task failed") }
     }
 
@@ -190,17 +192,19 @@ where
         view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, Notarization<S, D>>> + Send + 'static {
-        let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("construct_notarization")
             .with_attribute("epoch", self.epoch)
             .with_attribute("view", view)
             .shared(true)
-            .spawn(move |_| async move {
-                let mut round = round;
-                let notarization = round.try_construct_notarization(&strategy);
-                (round, notarization)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut round = round;
+                    let notarization = round.try_construct_notarization(&strategy);
+                    (round, notarization)
+                }
             });
         async move { handle.await.expect("strategy task failed") }
     }
@@ -210,17 +214,19 @@ where
         view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, Nullification<S>>> + Send + 'static {
-        let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("construct_nullification")
             .with_attribute("epoch", self.epoch)
             .with_attribute("view", view)
             .shared(true)
-            .spawn(move |_| async move {
-                let mut round = round;
-                let nullification = round.try_construct_nullification(&strategy);
-                (round, nullification)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut round = round;
+                    let nullification = round.try_construct_nullification(&strategy);
+                    (round, nullification)
+                }
             });
         async move { handle.await.expect("strategy task failed") }
     }
@@ -230,17 +236,19 @@ where
         view: View,
         round: Round<S, B, D, Re>,
     ) -> impl Future<Output = RoundOutput<S, B, D, Re, Finalization<S, D>>> + Send + 'static {
-        let strategy = self.strategy.clone();
         let handle = self
             .context
             .child("construct_finalization")
             .with_attribute("epoch", self.epoch)
             .with_attribute("view", view)
             .shared(true)
-            .spawn(move |_| async move {
-                let mut round = round;
-                let finalization = round.try_construct_finalization(&strategy);
-                (round, finalization)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut round = round;
+                    let finalization = round.try_construct_finalization(&strategy);
+                    (round, finalization)
+                }
             });
         async move { handle.await.expect("strategy task failed") }
     }
