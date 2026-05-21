@@ -541,7 +541,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         AncestorStream::new(self.clone(), initial.into_iter().map(V::into_inner))
     }
 
-    /// A request to retrieve the information about the highest finalized block.
+    /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
     pub async fn get_info(
         &self,
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
