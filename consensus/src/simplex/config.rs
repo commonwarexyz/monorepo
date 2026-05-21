@@ -51,16 +51,6 @@ pub enum Floor<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Floor<S, D> {
-    /// Returns a floor rooted at epoch genesis.
-    pub const fn genesis(payload: D) -> Self {
-        Self::Genesis(payload)
-    }
-
-    /// Returns a floor rooted at a finalized proposal.
-    pub const fn finalized(finalization: Finalization<S, D>) -> Self {
-        Self::Finalized(finalization)
-    }
-
     fn assert<Rng>(&self, epoch: Epoch, rng: &mut Rng, scheme: &S, strategy: &impl Strategy)
     where
         Rng: CryptoRngCore,

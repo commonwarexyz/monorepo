@@ -347,7 +347,7 @@ where
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
                 mailbox_size: NZUsize!(1024),
                 epoch,
-                floor: Floor::genesis(floor),
+                floor: Floor::Genesis(floor),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

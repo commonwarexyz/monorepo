@@ -677,14 +677,6 @@ impl<
         let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
-        // Add initial view from the configured floor
-        let floor = self.floor.take().expect("floor not initialized");
-        if let Some(finalization) = self.state.set_floor(floor) {
-            let report = finalization.clone();
-            resolver.updated(Certificate::Finalization(finalization));
-            self.reporter.report(Activity::Finalization(report));
-        }
-
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
@@ -699,6 +691,20 @@ impl<
         .await
         .expect("unable to open journal");
 
+        // Add initial view from the configured floor. Genesis starts from view
+        // zero; non-genesis floors skip replayed artifacts at or below the floor
+        // certificate view.
+        let floor = self.floor.take().expect("floor not initialized");
+        let replay_floor = match &floor {
+            Floor::Genesis(_) => View::zero(),
+            Floor::Finalized(finalization) => finalization.view(),
+        };
+        if let Some(finalization) = self.state.set_floor(floor) {
+            let report = finalization.clone();
+            resolver.updated(Certificate::Finalization(finalization));
+            self.reporter.report(Activity::Finalization(report));
+        }
+
         // Rebuild from journal
         let start = self.context.current();
         {
@@ -709,6 +715,10 @@ impl<
             pin_mut!(stream);
             while let Some(artifact) = stream.next().await {
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+                if artifact.view() <= replay_floor {
+                    continue;
+                }
+
                 self.state.replay(&artifact);
                 match artifact {
                     Artifact::Notarize(notarize) => {

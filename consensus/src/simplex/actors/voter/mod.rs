@@ -64,8 +64,8 @@ mod tests {
                 secp256r1, Scheme,
             },
             types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
-                Nullify, Proposal, Vote,
+                Artifact, Certificate, Finalization, Finalize, Notarization, Notarize,
+                Nullification, Nullify, Proposal, Vote,
             },
         },
         types::{Participant, Round, View},
@@ -87,6 +87,7 @@ mod tests {
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
         Runner, Supervisor as _,
     };
+    use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
@@ -263,7 +264,7 @@ mod tests {
             reporter: reporter.clone(),
             partition: format!("voter_test_{me}"),
             epoch: Epoch::new(333),
-            floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+            floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
             mailbox_size: NZUsize!(128),
             leader_timeout,
             certification_timeout,
@@ -305,6 +306,453 @@ mod tests {
             relay,
             reporter,
         )
+    }
+
+    async fn seed_voter_journal<S>(
+        context: deterministic::Context,
+        partition: String,
+        page_cache: CacheRef,
+        scheme: &S,
+        finalization: Finalization<S, Sha256Digest>,
+    ) where
+        S: Scheme<Sha256Digest>,
+    {
+        seed_voter_journal_artifacts(
+            context,
+            partition,
+            page_cache,
+            scheme,
+            finalization.view(),
+            vec![Artifact::Finalization(finalization)],
+        )
+        .await;
+    }
+
+    async fn seed_voter_journal_artifacts<S>(
+        context: deterministic::Context,
+        partition: String,
+        page_cache: CacheRef,
+        scheme: &S,
+        view: View,
+        artifacts: Vec<Artifact<S, Sha256Digest>>,
+    ) where
+        S: Scheme<Sha256Digest>,
+    {
+        let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+            context.child("journal"),
+            JConfig {
+                partition,
+                compression: None,
+                codec_config: scheme.certificate_codec_config(),
+                page_cache,
+                write_buffer: NZUsize!(1024 * 1024),
+            },
+        )
+        .await
+        .expect("unable to initialize voter journal");
+        for artifact in artifacts {
+            assert_eq!(artifact.view(), view);
+            journal
+                .append(view.get(), &artifact)
+                .await
+                .expect("unable to append voter journal artifact");
+        }
+        journal
+            .sync(view.get())
+            .await
+            .expect("unable to sync voter journal");
+    }
+
+    struct VoterFloorStart<S>
+    where
+        S: Scheme<Sha256Digest>,
+    {
+        partition: String,
+        epoch: Epoch,
+        floor: Floor<S, Sha256Digest>,
+        page_cache: CacheRef,
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn start_voter_with_floor<S, L>(
+        context: &mut deterministic::Context,
+        oracle: &Oracle<S::PublicKey, deterministic::Context>,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+        elector: L,
+        start: VoterFloorStart<S>,
+    ) -> (
+        Mailbox<S, Sha256Digest>,
+        mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
+        mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
+        commonware_runtime::Handle<()>,
+    )
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: ElectorConfig<S>,
+    {
+        let VoterFloorStart {
+            partition,
+            epoch,
+            floor,
+            page_cache,
+        } = start;
+        let me = participants[0].clone();
+        let reporter_cfg = mocks::reporter::Config {
+            participants: participants.to_vec().try_into().unwrap(),
+            scheme: schemes[0].clone(),
+            elector: elector.clone(),
+        };
+        let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+        let relay = Arc::new(mocks::relay::Relay::new());
+        let application_cfg = mocks::application::Config {
+            hasher: Sha256::default(),
+            relay: relay.clone(),
+            me: me.clone(),
+            propose_latency: (1.0, 0.0),
+            verify_latency: (1.0, 0.0),
+            certify_latency: (1.0, 0.0),
+            should_certify: mocks::application::Certifier::Always,
+        };
+        let (app_actor, application) =
+            mocks::application::Application::new(context.child("app"), application_cfg);
+        app_actor.start();
+
+        let voter_cfg = Config {
+            scheme: schemes[0].clone(),
+            elector,
+            blocker: oracle.control(me.clone()),
+            automaton: application.clone(),
+            relay: application,
+            reporter: reporter.clone(),
+            partition,
+            epoch,
+            floor,
+            mailbox_size: NZUsize!(128),
+            leader_timeout: Duration::from_secs(5),
+            certification_timeout: Duration::from_secs(5),
+            timeout_retry: Duration::from_mins(60),
+            activity_timeout: ViewDelta::new(10),
+            replay_buffer: NZUsize!(1024 * 1024),
+            write_buffer: NZUsize!(1024 * 1024),
+            page_cache,
+        };
+        let (voter, mailbox) = Actor::new(context.child("voter"), voter_cfg);
+        let (resolver_sender, resolver_receiver) =
+            mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+        let (batcher_sender, batcher_receiver) =
+            mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
+        let (vote_sender, _) = oracle
+            .control(me.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (certificate_sender, _) = oracle.control(me).register(1, TEST_QUOTA).await.unwrap();
+        let handle = voter.start(
+            batcher::Mailbox::new(batcher_sender),
+            resolver::Mailbox::new(resolver_sender),
+            vote_sender,
+            certificate_sender,
+        );
+
+        (
+            mailbox,
+            batcher_receiver,
+            resolver_receiver,
+            reporter,
+            handle,
+        )
+    }
+
+    async fn expect_restarted_voter_at_floor<S>(
+        context: &mut deterministic::Context,
+        batcher_receiver: &mut mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
+        resolver_receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        finalized: View,
+    ) where
+        S: Scheme<Sha256Digest>,
+    {
+        let mut saw_update = false;
+        let mut saw_finalization = false;
+        loop {
+            select! {
+                msg = batcher_receiver.recv() => {
+                    if let batcher::Message::Update { current, finalized: found, .. } =
+                        msg.expect("batcher mailbox closed")
+                    {
+                        assert_eq!(current, finalized.next());
+                        assert_eq!(found, finalized);
+                        saw_update = true;
+                    }
+                },
+                msg = resolver_receiver.recv() => {
+                    if let resolver::MailboxMessage::Certificate(
+                        Certificate::Finalization(finalization)
+                    ) = msg.expect("resolver mailbox closed")
+                    {
+                        let view = finalization.view();
+                        assert!(
+                            view <= finalized,
+                            "restarted voter reported finalization above expected floor: {view}"
+                        );
+                        saw_finalization |= view == finalized;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("timed out waiting for restarted voter at finalized view {finalized}");
+                },
+            }
+            if saw_update && saw_finalization {
+                break;
+            }
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_restart_newer_floor_skips_stale_journal() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_newer_floor".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_restart_newer_floor".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            // Persist a stale finalization that should be ignored once the
+            // configured floor is applied before replay.
+            let old_view = View::new(3);
+            let old_proposal = Proposal::new(
+                Round::new(epoch, old_view),
+                old_view.previous().unwrap(),
+                Sha256::hash(b"old-journal-finalization"),
+            );
+            let (_, old_finalization) = build_finalization(&schemes, &old_proposal, quorum);
+            seed_voter_journal(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                old_finalization,
+            )
+            .await;
+
+            // Start from a newer finalized floor over the same journal partition.
+            let floor_view = View::new(8);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(b"newer-floor-finalization"),
+            );
+            let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
+            let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Finalized(floor_finalization),
+                        page_cache,
+                    },
+                )
+                .await;
+
+            // The voter should seed its in-memory state from the configured floor
+            // and should not surface the older journal finalization.
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                floor_view,
+            )
+            .await;
+
+            let finalizations = reporter.finalizations.lock();
+            assert!(finalizations.contains_key(&floor_view));
+            assert!(
+                !finalizations.contains_key(&old_view),
+                "stale journal finalization must be skipped when the configured floor is newer"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_restart_older_floor_ignored_for_newer_journal() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_older_floor".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_restart_older_floor".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            // Persist a newer finalization so replay can advance past the
+            // configured floor.
+            let journal_view = View::new(8);
+            let journal_proposal = Proposal::new(
+                Round::new(epoch, journal_view),
+                journal_view.previous().unwrap(),
+                Sha256::hash(b"newer-journal-finalization"),
+            );
+            let (_, journal_finalization) = build_finalization(&schemes, &journal_proposal, quorum);
+            seed_voter_journal(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                journal_finalization,
+            )
+            .await;
+
+            // Provide an older floor; journal replay should supersede it.
+            let floor_view = View::new(3);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(b"older-floor-finalization"),
+            );
+            let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
+            let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Finalized(floor_finalization),
+                        page_cache,
+                    },
+                )
+                .await;
+
+            // The configured floor may be reported before replay, but the
+            // replayed finalization should become the active floor.
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                journal_view,
+            )
+            .await;
+
+            let finalizations = reporter.finalizations.lock();
+            assert!(finalizations.contains_key(&journal_view));
+            assert!(
+                finalizations.contains_key(&floor_view),
+                "configured floor should be reported before journal replay supersedes it"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_replay_floor_does_not_move_during_replay() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_replay_floor_static".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_replay_floor_static".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            let floor_view = View::new(3);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(b"static-replay-floor"),
+            );
+            let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
+
+            // Place two above-floor artifacts in the same journal section. The
+            // first one advances `last_finalized`, but the second must still
+            // replay because it is above the configured floor.
+            let journal_view = View::new(8);
+            let journal_proposal = Proposal::new(
+                Round::new(epoch, journal_view),
+                journal_view.previous().unwrap(),
+                Sha256::hash(b"same-section-finalize"),
+            );
+            let (mut finalizes, journal_finalization) =
+                build_finalization(&schemes, &journal_proposal, quorum);
+            let finalize = finalizes.remove(0);
+            let finalized_payload = finalize.proposal.payload;
+            seed_voter_journal_artifacts(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                journal_view,
+                vec![
+                    Artifact::Finalization(journal_finalization),
+                    Artifact::Finalize(finalize),
+                ],
+            )
+            .await;
+
+            let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Finalized(floor_finalization),
+                        page_cache,
+                    },
+                )
+                .await;
+
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                journal_view,
+            )
+            .await;
+
+            let finalizes = reporter.finalizes.lock();
+            let signers = finalizes
+                .get(&journal_view)
+                .and_then(|payloads| payloads.get(&finalized_payload))
+                .expect("above-floor finalize vote should replay");
+            assert!(signers.contains(&participants[0]));
+        });
     }
 
     /// Helper to advance to a specific view by sending a finalization for the previous view.
@@ -406,7 +854,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "test".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(10),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -630,7 +1078,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_actor_test_{me}"),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_millis(1000),
@@ -1256,7 +1704,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_certificate_verifies_proposal_test".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
@@ -1441,7 +1889,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_leader".to_string(),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
@@ -1634,7 +2082,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
@@ -1724,7 +2172,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "voter_populate_resolver_on_restart_test".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
@@ -1864,7 +2312,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Long deadlines prove nullify comes from startup timeout hint, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
@@ -2255,7 +2703,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_verify_fail_test_{me}"),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 // Use long timeouts to prove nullify comes immediately, not from timeout
                 leader_timeout: Duration::from_secs(10),
@@ -2467,7 +2915,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_leader_nullify_fast_path_{me}"),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
@@ -2660,7 +3108,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_drop_propose_test_{me}"),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Long timeouts prove nullify came from fast-path, not timer expiry.
                 leader_timeout: Duration::from_secs(10),
@@ -2825,7 +3273,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_drop_verify_test_{me}"),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 // Use long timeouts so a fast nullify proves we did not wait for timeout.
                 leader_timeout: Duration::from_secs(10),
@@ -3168,7 +3616,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: format!("voter_dropped_verify_after_participation_{me}"),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(250),
                 certification_timeout: Duration::from_millis(250),
@@ -3448,7 +3896,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "no_recertification_after_replay".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
@@ -3574,7 +4022,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "no_recertification_after_replay".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1000),
@@ -3713,7 +4161,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
@@ -3873,7 +4321,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
@@ -3974,7 +4422,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
@@ -4144,7 +4592,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
@@ -4256,7 +4704,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(600),
@@ -4423,7 +4871,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
@@ -4537,7 +4985,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_millis(500),
                 certification_timeout: Duration::from_secs(1),
@@ -4704,7 +5152,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -4877,7 +5325,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -4977,7 +5425,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -5155,7 +5603,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch: target_epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(target_epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(target_epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(600),
                 certification_timeout: Duration::from_secs(600),
@@ -5338,7 +5786,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "cert_cancel_test".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -5522,7 +5970,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: "cert_after_nullification_test".to_string(),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -6336,7 +6784,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -6449,7 +6897,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition,
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -7676,7 +8124,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -7801,7 +8249,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -7947,7 +8395,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -8058,7 +8506,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(5),
                 certification_timeout: Duration::from_secs(5),
@@ -8199,7 +8647,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: partition.clone(),
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
@@ -8316,7 +8764,7 @@ mod tests {
                 reporter,
                 partition,
                 epoch,
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(epoch)),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(1),
@@ -8453,7 +8901,7 @@ mod tests {
                 reporter,
                 partition: format!("batcher_timeout_test_{me}"),
                 epoch: Epoch::new(333),
-                floor: Floor::genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
                 mailbox_size: NZUsize!(128),
                 leader_timeout: Duration::from_secs(100),
                 certification_timeout: Duration::from_secs(100),
