@@ -122,9 +122,10 @@ pub trait UnreliablePolicy: Sized {
     /// the message, coalescing it with retained work, replacing older retained work, or deliberately
     /// doing no work because the message is already satisfied, superseded, or no longer needed.
     ///
-    /// Returns `false` only when the policy rejects the message under backpressure. This is the
-    /// unreliable case: the submitted work was not semantically handled, and callers that care
-    /// should retry or treat the submission as failed.
+    /// Returns `false` only when the policy rejects the message under backpressure without
+    /// retaining, coalescing, replacing, or otherwise handling it. This is the unreliable case: the
+    /// submitted work was not semantically handled, and callers that care should retry or treat the
+    /// submission as failed.
     ///
     /// # Warning
     ///

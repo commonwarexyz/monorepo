@@ -31,7 +31,7 @@ commonware_macros::stability_scope!(BETA {
     /// Feedback from endpoints that may reject work under backpressure.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Unreliable<T> {
-        /// Feedback returned by the endpoint.
+        /// Normal endpoint feedback from the submission attempt.
         Feedback(T),
         /// The work was rejected by the endpoint.
         Rejected,
@@ -54,12 +54,6 @@ commonware_macros::stability_scope!(BETA {
                 Self::Feedback(feedback) => feedback.accepted(),
                 Self::Rejected => false,
             }
-        }
-    }
-
-    impl From<Feedback> for Unreliable<Feedback> {
-        fn from(feedback: Feedback) -> Self {
-            Self::new(feedback)
         }
     }
 

@@ -32,8 +32,8 @@ impl<Si: Sink, St: Stream, P: PublicKey> UnreliablePolicy for Message<Si, St, P>
 impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
-    /// This may reject when the spawner is backlogged or closed, which is harmless since stale
-    /// connections do not need to be spawned.
+    /// This may be rejected when the spawner is backlogged, or return closed after shutdown, which
+    /// is harmless since stale connections do not need to be spawned.
     pub fn spawn(
         &mut self,
         connection: (Sender<Si>, Receiver<St>),
