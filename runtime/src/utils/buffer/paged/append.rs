@@ -803,9 +803,10 @@ impl<B: Blob> Append<B> {
         new_crc: u32,
         old_crc: &Checksum,
     ) -> Result<Checksum, Error> {
-        // Since larger valid lengths are authoritative, a shorter slot cannot simply be written
-        // next to the old slot. We stage the shorter slot with length 0, make its length durable,
-        // then clear the previous slot's length bytes.
+        // Recovery chooses the valid slot with the larger length. While shrinking, the new
+        // checksum must be made durable without becoming authoritative until the old longer slot
+        // can be disabled. The sequence below therefore lets recovery observe either the old page
+        // or the new shorter page, but not a footer where both slots were damaged by one torn write.
         let physical_page_size = logical_page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
@@ -823,13 +824,14 @@ impl<B: Blob> Append<B> {
             .checked_add(new_slot_start as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Stage the new slot with a 0 length and the shrunken page CRC.
+        // Stage the new slot with a 0 length and the shrunken page CRC. A crash here leaves the
+        // old slot as the only non-zero valid slot.
         let staged_slot = Self::checksum_slot_bytes(0, new_crc);
         blob.write_at(new_slot_offset, staged_slot.to_vec()).await?;
         blob.sync().await?;
 
-        // Make the new shrunken length durable. We cannot write the CRC and new length in one go
-        // without introducing crash safety concerns due to partial writes.
+        // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
+        // both slots may be valid, but recovery still chooses the old longer length.
         blob.write_at(new_slot_offset, new_len.to_be_bytes().to_vec())
             .await?;
         blob.sync().await?;
@@ -839,8 +841,9 @@ impl<B: Blob> Append<B> {
             .ok_or(Error::OffsetOverflow)?;
         let len_size = std::mem::size_of::<u16>();
 
-        // Clear the old slot's length. A slot with length 0 is never authoritative, so the slot
-        // representing the shrunken page becomes authoritative.
+        // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
+        // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
+        // never authoritative, so the shrunken slot wins.
         blob.write_at(old_slot_offset, vec![0u8; len_size]).await?;
         blob.sync().await?;
 
@@ -959,7 +962,9 @@ impl<B: Blob> Append<B> {
     /// Coordinate the locking and dispatch logic for shrinking the blob.
     async fn shrink(&self, target_size: u64) -> Result<(), Error> {
         let logical_page_size = self.cache_ref.page_size();
-        let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Flush any buffered data first to ensure we have a consistent state on disk.
         self.sync().await?;
@@ -971,14 +976,15 @@ impl<B: Blob> Append<B> {
         // Calculate the physical size needed for the new logical size.
         let full_pages = target_size / logical_page_size;
         let partial_bytes = target_size % logical_page_size;
-        let new_physical_size = if partial_bytes > 0 {
-            // We need full_pages + 1 physical pages to hold the partial data.
-            // The partial page will be padded to full physical page size.
-            (full_pages + 1) * physical_page_size
-        } else {
-            // No partial page needed.
-            full_pages * physical_page_size
-        };
+        let physical_pages = full_pages
+            .checked_add(u64::from(partial_bytes > 0))
+            .ok_or(Error::OffsetOverflow)?;
+        let new_physical_size = physical_pages
+            .checked_mul(physical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
+        let tail_offset = full_pages
+            .checked_mul(logical_page_size)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Drop cached pages at or beyond the new tail. Future appends may reuse those logical
         // offsets, and cache-only reads must not see pre-shrink bytes there.
@@ -993,6 +999,7 @@ impl<B: Blob> Append<B> {
                     full_pages,
                     partial_bytes,
                     logical_page_size,
+                    tail_offset,
                 )
                 .await;
         }
@@ -1000,7 +1007,7 @@ impl<B: Blob> Append<B> {
         // Shrink the blob to a page boundary, which requires no CRC-slot rewrite.
         blob_guard.partial_page_state = None;
         blob_guard.current_page = full_pages;
-        buf_guard.offset = full_pages * logical_page_size;
+        buf_guard.offset = tail_offset;
         buf_guard.clear();
 
         Ok(())
@@ -1014,11 +1021,12 @@ impl<B: Blob> Append<B> {
         full_pages: u64,
         partial_bytes: u64,
         logical_page_size: u64,
+        tail_offset: u64,
     ) -> Result<(), Error> {
         // Update blob state and buffer based on the desired logical size. The page data is
         // read with CRC validation, then durably rewritten below with a shorter CRC.
         blob_guard.current_page = full_pages;
-        buf_guard.offset = full_pages * logical_page_size;
+        buf_guard.offset = tail_offset;
 
         let (page_data, old_crc) = super::get_page_with_checksum_from_blob(
             &blob_guard.blob,
