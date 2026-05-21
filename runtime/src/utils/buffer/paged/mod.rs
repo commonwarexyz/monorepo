@@ -13,15 +13,15 @@
 //!
 //! Two checksums are stored so that partial pages can be re-written without overwriting a valid
 //! checksum for its previously committed contents. A checksum over a page is computed over the
-//! first [0,len) bytes in the page, with all other bytes in the page ignored. This implementation
-//! always 0-pads the range [len, page_size). A checksum with length 0 is never considered
-//! valid. If both checksums are valid for the page, the one with the larger `len` is considered
-//! authoritative.
+//! first [0,len) bytes in the page, with all other bytes in the page ignored. Ordinary partial-page
+//! payload writes 0-pad the range [len, page_size), but recovery does not depend on bytes outside
+//! [0,len). A checksum with length 0 is never considered valid. If both checksums are valid for the
+//! page, the one with the larger `len` is considered authoritative. Partial-page shrink first makes
+//! the shorter checksum durable in the alternate slot, then invalidates the old longer checksum.
 //!
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
-//! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
-//! it's only to add more bytes after the existing ones.
+//! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
 
 use crate::{Blob, Buf, BufMut, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
@@ -36,8 +36,9 @@ pub use cache::CacheRef;
 pub use read::Replay;
 use tracing::{debug, error};
 
-// A checksum record contains two u16 lengths and two CRCs (each 4 bytes).
+// A checksum record contains two slots. Each slot stores one u16 length and one CRC.
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
+const CHECKSUM_SLOT_SIZE: usize = u16::SIZE + crc32::Digest::SIZE;
 
 /// Read the designated page from the underlying blob and return its logical bytes as a vector if it
 /// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
@@ -47,8 +48,22 @@ async fn get_page_from_blob(
     page_num: u64,
     logical_page_size: u64,
 ) -> Result<IoBuf, Error> {
-    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
-    let physical_page_start = page_num * physical_page_size;
+    let (page, _) = get_page_with_checksum_from_blob(blob, page_num, logical_page_size).await?;
+    Ok(page)
+}
+
+/// Read the designated page and return both its logical bytes and validated checksum record.
+async fn get_page_with_checksum_from_blob(
+    blob: &impl Blob,
+    page_num: u64,
+    logical_page_size: u64,
+) -> Result<(IoBuf, Checksum), Error> {
+    let physical_page_size = logical_page_size
+        .checked_add(CHECKSUM_SIZE)
+        .ok_or(Error::OffsetOverflow)?;
+    let physical_page_start = page_num
+        .checked_mul(physical_page_size)
+        .ok_or(Error::OffsetOverflow)?;
 
     let page = blob
         .read_at(physical_page_start, physical_page_size as usize)
@@ -60,7 +75,7 @@ async fn get_page_from_blob(
     };
     let (len, _) = record.get_crc();
 
-    Ok(page.freeze().slice(..len as usize))
+    Ok((page.freeze().slice(..len as usize), record))
 }
 
 /// Describes a CRC record stored at the end of a page.

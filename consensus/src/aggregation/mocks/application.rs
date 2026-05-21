@@ -1,7 +1,4 @@
-use crate::{
-    types::{Epoch, Height},
-    Automaton as A,
-};
+use crate::{types::Height, Automaton as A};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_utils::channel::oneshot;
 use tracing::trace;
@@ -32,12 +29,6 @@ impl Application {
 impl A for Application {
     type Context = Height;
     type Digest = <Sha256 as Hasher>::Digest;
-
-    async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
-        let mut hasher = Sha256::default();
-        hasher.update(b"genesis");
-        hasher.finalize()
-    }
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();

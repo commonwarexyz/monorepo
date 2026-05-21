@@ -16,6 +16,7 @@ use commonware_codec::Read;
 use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
+use std::future::Future;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -100,15 +101,21 @@ where
 {
     type Block = B;
 
-    async fn subscribe_parent(self, block: Self::Block) -> Option<Self::Block> {
-        let parent_height = block.height().previous()?;
-        self.subscribe_by_commitment(
-            block.parent(),
-            CommitmentFallback::FetchByCommitment {
-                height: parent_height,
-            },
-        )
-        .await
-        .ok()
+    fn subscribe_parent(
+        &self,
+        block: &Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        let receiver = block.height().previous().map(|parent_height| {
+            self.subscribe_by_commitment(
+                block.parent(),
+                CommitmentFallback::FetchByCommitment {
+                    height: parent_height,
+                },
+            )
+        });
+        async move {
+            let receiver = receiver?;
+            receiver.await.ok()
+        }
     }
 }

@@ -558,7 +558,7 @@ where
         // regressions.
         {
             let mut bitmap = self.bitmap.write();
-            debug_assert!(
+            assert!(
                 bitmap.pruned_bits() <= rewind_size,
                 "bitmap pruned boundary exceeded journal retained start",
             );
@@ -670,7 +670,7 @@ where
                 let mut guard = bitmap.write();
                 // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
                 // inactivity floor; otherwise `extend_to` would silently leave gaps.
-                debug_assert!(
+                assert!(
                     guard.pruned_bits() <= *inactivity_floor_loc,
                     "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
                     guard.pruned_bits(),

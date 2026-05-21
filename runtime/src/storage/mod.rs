@@ -291,6 +291,7 @@ pub(crate) mod tests {
         test_overwrite_data(&storage).await;
         test_read_beyond_bound(&storage).await;
         test_write_at_large_offset(&storage).await;
+        test_write_at_sync(&storage).await;
         test_append_data(&storage).await;
         test_vectored_write_at(&storage).await;
         test_vectored_write_at_large_offset(&storage).await;
@@ -492,6 +493,45 @@ pub(crate) mod tests {
         // Read back the data
         let read = blob.read_at(10_000, 11).await.unwrap().coalesce();
         assert_eq!(read, b"offset data", "Data at large offset is incorrect");
+    }
+
+    /// Test writing and syncing data in one operation.
+    async fn test_write_at_sync<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_write_at_sync", b"test_blob")
+            .await
+            .unwrap();
+
+        // Empty writes should be accepted without extending the blob.
+        blob.write_at_sync(1024, Vec::<u8>::new()).await.unwrap();
+        drop(blob);
+
+        let (blob, len) = storage
+            .open("test_write_at_sync", b"test_blob")
+            .await
+            .unwrap();
+        assert_eq!(len, 0);
+
+        // Non-empty writes must be visible after reopen without a separate sync call.
+        blob.write_at_sync(0, b"hello").await.unwrap();
+        blob.write_at_sync(5, vec![IoBuf::from(b" "), IoBuf::from(b"world")])
+            .await
+            .unwrap();
+        drop(blob);
+
+        // Reopening a blob in the same process may still observe dirty kernel
+        // page-cache state, so this doesn't really prove write durability.
+        let (blob, len) = storage
+            .open("test_write_at_sync", b"test_blob")
+            .await
+            .unwrap();
+        assert_eq!(len, 11);
+        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        assert_eq!(read.as_ref(), b"hello world");
     }
 
     /// Test appending data to a blob.

@@ -236,7 +236,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        debug_assert!(
+        assert!(
             positions.windows(2).all(|w| w[0] < w[1]),
             "positions must be strictly increasing"
         );
