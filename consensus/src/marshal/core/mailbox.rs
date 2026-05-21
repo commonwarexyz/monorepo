@@ -140,10 +140,12 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: Option<oneshot::Sender<()>>,
     },
-    /// Sets the sync starting point from an already-processed finalization.
+    /// Attempts to set the sync starting point from an already-processed finalization.
     ///
-    /// Marshal verifies the finalization, anchors on its block, prunes below
-    /// it, then syncs and delivers blocks starting at the floor height + 1.
+    /// If the verified finalization advances marshal's current floor, marshal
+    /// anchors on its block, prunes below it, then syncs and delivers blocks
+    /// starting at the floor height + 1. Stale or superseded floors may be
+    /// ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -151,11 +153,10 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The candidate floor finalization, verified by the actor before use.
         finalization: Finalization<S, V::Commitment>,
     },
-    /// Prunes finalized blocks and certificates below the given height.
+    /// Requests pruning finalized blocks and certificates below the given height.
     ///
-    /// Unlike [Message::SetFloor], this does not affect the sync starting point.
-    /// Callers must only prune at or below marshal's current floor
-    /// (`last_processed_height`).
+    /// Unlike [Message::SetFloor], this does not affect the sync starting
+    /// point. Requests above marshal's current floor are ignored.
     Prune {
         /// The minimum height to keep (blocks below this are pruned).
         height: Height,
@@ -741,10 +742,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.is_ok()
     }
 
-    /// Sets the sync starting point from an already-processed finalization.
+    /// Attempts to set the sync starting point from an already-processed finalization.
     ///
-    /// Marshal verifies the finalization, anchors on its block, prunes below
-    /// it, then syncs and delivers blocks starting at the floor height + 1.
+    /// If the verified finalization advances marshal's current floor, marshal
+    /// anchors on its block, prunes below it, then syncs and delivers blocks
+    /// starting at the floor height + 1. Stale or superseded floors may be
+    /// ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Self::prune] instead.
@@ -753,11 +756,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let _ = self.sender.enqueue(Message::SetFloor { finalization });
     }
 
-    /// Prunes finalized blocks and certificates below the given height.
+    /// Requests pruning finalized blocks and certificates below the given height.
     ///
     /// Unlike [Self::set_floor], this does not affect the sync starting point.
-    /// Callers must only prune at or below marshal's current floor
-    /// (`last_processed_height`).
+    /// Requests above marshal's current floor are ignored.
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune { height });
     }

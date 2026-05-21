@@ -12,6 +12,9 @@ use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Startup anchor for marshal.
+///
+/// Durable progress from a previous run takes precedence when it already
+/// supersedes the configured anchor.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),
