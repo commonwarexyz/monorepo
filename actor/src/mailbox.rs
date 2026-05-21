@@ -143,7 +143,7 @@ struct ReliableMode;
 
 struct UnreliableMode;
 
-trait MailboxMode<T>: Sized {
+trait Mode<T>: Sized {
     type Overflow: Overflow<T>;
     type Feedback;
 
@@ -154,7 +154,7 @@ trait MailboxMode<T>: Sized {
     fn is_closed(feedback: &Self::Feedback) -> bool;
 }
 
-impl<T: Policy> MailboxMode<T> for ReliableMode {
+impl<T: Policy> Mode<T> for ReliableMode {
     type Overflow = T::Overflow;
     type Feedback = Feedback;
 
@@ -180,7 +180,7 @@ impl<T: Policy> MailboxMode<T> for ReliableMode {
     }
 }
 
-impl<T: UnreliablePolicy> MailboxMode<T> for UnreliableMode {
+impl<T: UnreliablePolicy> Mode<T> for UnreliableMode {
     type Overflow = T::Overflow;
     type Feedback = Unreliable<Feedback>;
 
@@ -354,13 +354,13 @@ cfg_if::cfg_if! {
     }
 }
 
-struct OverflowState<T, M: MailboxMode<T>> {
+struct OverflowState<T, M: Mode<T>> {
     queue: Mutex<M::Overflow>,
     activity: AtomicUsize,
     _phantom: PhantomData<fn() -> T>,
 }
 
-impl<T, M: MailboxMode<T>> OverflowState<T, M> {
+impl<T, M: Mode<T>> OverflowState<T, M> {
     #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
@@ -478,7 +478,7 @@ impl Drop for Mutation<'_> {
     }
 }
 
-struct State<T, M: MailboxMode<T>> {
+struct State<T, M: Mode<T>> {
     ready: Ready<T>,
     overflow: OverflowState<T, M>,
     backoff: Counter,
@@ -487,7 +487,7 @@ struct State<T, M: MailboxMode<T>> {
     waker: AtomicWaker,
 }
 
-impl<T, M: MailboxMode<T>> State<T, M> {
+impl<T, M: Mode<T>> State<T, M> {
     fn enqueue(&self, message: T) -> M::Feedback {
         // Receiver closure makes new sends fail immediately.
         if self.closed.load(Ordering::Acquire) {
