@@ -3768,7 +3768,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_stale_floor_anchor_resumes_dispatch() {
+    fn test_standard_pending_floor_drops_in_flight_ack_before_anchor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -3777,7 +3777,7 @@ mod tests {
             let application = Application::<B>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "stale-floor-anchor-resumes-dispatch",
+                "pending-floor-drops-in-flight-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
@@ -3852,25 +3852,23 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
 
-            let retain_before_ack = resolver.retain_count();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "first ack processed",
-                || resolver.retain_count() > retain_before_ack,
-            )
-            .await;
+            context.sleep(Duration::from_millis(100)).await;
 
             assert!(mailbox.verified(floor_round, floor_block).await);
             select! {
                 height = application.acknowledged() => {
-                    assert_eq!(height, Height::new(2));
+                    assert_eq!(
+                        height,
+                        Height::new(1),
+                        "floor install must ignore acks released while the anchor is pending"
+                    );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("stale floor anchor did not resume dispatch");
+                    panic!("pending floor anchor did not restart dispatch at its successor");
                 },
             }
+            assert_eq!(application.acknowledged().await, Height::new(2));
         });
     }
 

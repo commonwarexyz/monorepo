@@ -1042,6 +1042,10 @@ where
             return;
         }
 
+        // The pending floor owns the next application sync point. Drop any
+        // in-flight acks before they can advance the processed height past it.
+        self.pending_acks.clear();
+
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
         self.floor
