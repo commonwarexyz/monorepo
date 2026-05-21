@@ -50,7 +50,7 @@ use commonware_utils::{
 use futures::{future::join_all, try_join};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
@@ -403,30 +403,22 @@ where
             },
             // Handle application acknowledgements (drain all ready acks, sync once)
             result = self.pending_acks.current() => {
-                if !self
-                    .handle_ack(result, &mut application, &mut buffer, &mut resolver)
-                    .await
-                {
-                    return;
-                }
+                self.handle_ack(result, &mut application, &mut buffer, &mut resolver)
+                    .await;
             },
             // Handle consensus inputs before backfill or resolver traffic
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
-                if !self
-                    .handle_mailbox_message(
-                        message,
-                        &mut resolver,
-                        &mut waiters,
-                        &mut buffer,
-                        &mut application,
-                    )
-                    .await
-                {
-                    return;
-                }
+                self.handle_mailbox_message(
+                    message,
+                    &mut resolver,
+                    &mut waiters,
+                    &mut buffer,
+                    &mut application,
+                )
+                .await;
             },
             // Handle resolver messages last (batched up to max_repair, sync once)
             Some(message) = resolver_rx.recv() else {
@@ -453,8 +445,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
         resolver: &mut R,
-    ) -> bool
-    where
+    ) where
         Buf: Buffer<V>,
         R: Resolver<
             Key = ResolverRequestFor<V>,
@@ -475,12 +466,7 @@ where
                 }
                 Err(e) => {
                     // Ack failures are fatal for marshal/application coordination.
-                    error!(
-                        e = ?e,
-                        height = %height,
-                        "application did not acknowledge block"
-                    );
-                    return false;
+                    panic!("application did not acknowledge block at height {height}: {e:?}");
                 }
             }
 
@@ -493,10 +479,10 @@ where
         };
 
         // Persist buffered processed-height updates once after draining all ready acks.
-        if let Err(e) = self.application_metadata.sync().await {
-            error!(?e, "failed to sync application progress");
-            return false;
-        }
+        self.application_metadata
+            .sync()
+            .await
+            .expect("failed to sync application progress");
 
         // Anything below the last acknowledged commitment is safe for the
         // buffer to prune.
@@ -504,7 +490,6 @@ where
 
         // Refill the application dispatch pipeline.
         self.try_dispatch_blocks(application).await;
-        true
     }
 
     /// Handles a single mailbox message from local consensus/application callers.
@@ -515,8 +500,7 @@ where
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-    ) -> bool
-    where
+    ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
         R: Resolver<
             Key = ResolverRequestFor<V>,
@@ -525,7 +509,7 @@ where
         >,
     {
         if message.response_closed() {
-            return true;
+            return;
         }
 
         match message {
@@ -565,7 +549,7 @@ where
                 recipients,
             } => {
                 if matches!(&recipients, Recipients::Some(peers) if peers.is_empty()) {
-                    return true;
+                    return;
                 }
                 let block = match self.take_proposed(round, commitment) {
                     Some(block) => block,
@@ -573,7 +557,7 @@ where
                         let Some(block) = self.find_block_by_commitment(buffer, commitment).await
                         else {
                             debug!(?commitment, "block not found for forwarding");
-                            return true;
+                            return;
                         };
                         block
                     }
@@ -657,7 +641,7 @@ where
                         .apply_floor_anchor(&block, buffer, application, resolver)
                         .await
                     {
-                        return true;
+                        return;
                     }
 
                     let height = block.height();
@@ -713,7 +697,7 @@ where
             Message::HintFinalized { height, targets } => {
                 // Skip if finalization is already available locally.
                 if self.get_finalization_by_height(height).await.is_some() {
-                    return true;
+                    return;
                 }
 
                 self.floor
@@ -769,21 +753,18 @@ where
                 // Only allow pruning at or below the current floor.
                 if height > self.floor.processed_height() {
                     warn!(%height, floor = %self.floor.processed_height(), "prune height above floor, ignoring");
-                    return true;
+                    return;
                 }
 
-                if let Err(err) = self.prune_finalized_archives(height).await {
-                    error!(?err, %height, "failed to prune finalized archives");
-                    return false;
-                }
+                self.prune_finalized_archives(height)
+                    .await
+                    .expect("failed to prune finalized archives");
 
                 // Intentionally keep existing block subscriptions alive. Canceling
                 // waiters can have catastrophic consequences because actors do not
                 // retry subscriptions on failed channels.
             }
         }
-
-        true
     }
 
     /// Handles a batch of resolver messages, syncing finalized archives once if
