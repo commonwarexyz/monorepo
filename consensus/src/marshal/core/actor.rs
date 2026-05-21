@@ -1085,6 +1085,9 @@ where
             );
         }
 
+        // This anchor cannot move the application sync point, but its
+        // finalization round can still prune round-bound resolver work.
+        // Keep pending acks intact because processed_height is unchanged.
         if height <= self.floor.processed_height() {
             warn!(
                 %height,
