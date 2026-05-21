@@ -693,6 +693,10 @@ impl<
 
         // Add initial view from the configured floor.
         let floor = self.floor.take().expect("floor not initialized");
+        let replay_floor = match &floor {
+            Floor::Genesis(_) => View::zero(),
+            Floor::Finalized(finalization) => finalization.view(),
+        };
         if let Some(finalization) = self.state.set_floor(floor) {
             let report = finalization.clone();
             resolver.updated(Certificate::Finalization(finalization));
@@ -709,7 +713,7 @@ impl<
             pin_mut!(stream);
             while let Some(artifact) = stream.next().await {
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
-                if artifact.view() <= self.state.last_finalized() {
+                if artifact.view() <= replay_floor {
                     continue;
                 }
 

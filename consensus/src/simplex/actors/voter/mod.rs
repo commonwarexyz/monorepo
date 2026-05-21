@@ -317,7 +317,27 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest>,
     {
-        let view = finalization.view();
+        seed_voter_journal_artifacts(
+            context,
+            partition,
+            page_cache,
+            scheme,
+            finalization.view(),
+            vec![Artifact::Finalization(finalization)],
+        )
+        .await;
+    }
+
+    async fn seed_voter_journal_artifacts<S>(
+        context: deterministic::Context,
+        partition: String,
+        page_cache: CacheRef,
+        scheme: &S,
+        view: View,
+        artifacts: Vec<Artifact<S, Sha256Digest>>,
+    ) where
+        S: Scheme<Sha256Digest>,
+    {
         let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
             context.child("journal"),
             JConfig {
@@ -330,10 +350,13 @@ mod tests {
         )
         .await
         .expect("unable to initialize voter journal");
-        journal
-            .append(view.get(), &Artifact::Finalization(finalization))
-            .await
-            .expect("unable to append voter journal artifact");
+        for artifact in artifacts {
+            assert_eq!(artifact.view(), view);
+            journal
+                .append(view.get(), &artifact)
+                .await
+                .expect("unable to append voter journal artifact");
+        }
         journal
             .sync(view.get())
             .await
@@ -643,6 +666,92 @@ mod tests {
                 finalizations.contains_key(&floor_view),
                 "configured floor should be reported before journal replay supersedes it"
             );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_replay_floor_does_not_move_during_replay() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_replay_floor_static".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_replay_floor_static".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            let floor_view = View::new(3);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(b"static-replay-floor"),
+            );
+            let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
+
+            // Place two above-floor artifacts in the same journal section. The
+            // first one advances `last_finalized`, but the second must still
+            // replay because it is above the configured floor.
+            let journal_view = View::new(8);
+            let journal_proposal = Proposal::new(
+                Round::new(epoch, journal_view),
+                journal_view.previous().unwrap(),
+                Sha256::hash(b"same-section-finalize"),
+            );
+            let (mut finalizes, journal_finalization) =
+                build_finalization(&schemes, &journal_proposal, quorum);
+            let finalize = finalizes.remove(0);
+            let finalized_payload = finalize.proposal.payload;
+            seed_voter_journal_artifacts(
+                context.child("seed_journal"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                journal_view,
+                vec![
+                    Artifact::Finalization(journal_finalization),
+                    Artifact::Finalize(finalize),
+                ],
+            )
+            .await;
+
+            let (_mailbox, mut batcher_receiver, mut resolver_receiver, reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Finalized(floor_finalization),
+                        page_cache,
+                    },
+                )
+                .await;
+
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                journal_view,
+            )
+            .await;
+
+            let finalizes = reporter.finalizes.lock();
+            let signers = finalizes
+                .get(&journal_view)
+                .and_then(|payloads| payloads.get(&finalized_payload))
+                .expect("above-floor finalize vote should replay");
+            assert!(signers.contains(&participants[0]));
         });
     }
 
