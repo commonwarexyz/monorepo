@@ -3298,6 +3298,92 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_local_floor_anchor_resumes_gap_repair() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+
+            let next_round = Round::new(Epoch::zero(), View::new(6));
+            let next_block = make_raw_block(floor_block.digest(), Height::new(6), 600);
+            let next_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    next_round,
+                    View::new(5),
+                    StandardHarness::commitment(&next_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+
+            let partition_prefix = "local-floor-anchor-resumes-gap-repair";
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                partition_prefix,
+                &[],
+                &[(Height::new(6), next_finalization)],
+            )
+            .await;
+
+            let (application, _started_rx) = HoldingBlockReporter::new();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                RecordingBuffer::default(),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor block fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&floor_block)
+                        )
+                    })
+                },
+            )
+            .await;
+
+            assert!(mailbox.verified(floor_round, floor_block).await);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "gap repair after local floor anchor",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&next_block)
+                        )
+                    })
+                },
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_newer_pending_floor_supersedes_older_anchor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

@@ -248,7 +248,7 @@ fn main() {
                 partition: String::from("log"),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::zero(),
-                floor: Floor::genesis(application::genesis::<Sha256>()),
+                floor: Floor::Genesis(application::genesis::<Sha256>()),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),

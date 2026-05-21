@@ -466,45 +466,8 @@ where
                     Height::zero(),
                     "genesis anchor must be at height zero"
                 );
-                let anchor_height = anchor.height();
-                if anchor_height < last_processed_height {
-                    warn!(
-                        height = %anchor_height,
-                        existing = %last_processed_height,
-                        "startup anchor below existing processed height, ignoring"
-                    );
-                } else {
-                    let anchor_commitment = V::commitment(&anchor);
-                    match finalized_blocks
-                        .get(ArchiveID::Index(anchor_height.get()))
-                        .await
-                    {
-                        Ok(Some(stored)) => {
-                            let stored = stored.into();
-                            assert_eq!(
-                                stored.height(),
-                                anchor_height,
-                                "stored genesis block height mismatch"
-                            );
-                            assert!(
-                                V::commitment(&stored) == anchor_commitment,
-                                "stored genesis block does not match configured anchor"
-                            );
-                        }
-                        Ok(None) => {
-                            finalized_blocks
-                                .put(anchor.into())
-                                .await
-                                .expect("failed to store startup anchor");
-                            finalized_blocks
-                                .sync()
-                                .await
-                                .expect("failed to sync startup anchor");
-                            debug!(height = %anchor_height, "stored genesis block");
-                        }
-                        Err(err) => panic!("failed to check startup anchor: {err}"),
-                    }
-                }
+                Self::ensure_genesis_anchor(&mut finalized_blocks, anchor, last_processed_height)
+                    .await;
                 None
             }
             Start::Floor(finalization) => Some(finalization),
@@ -550,6 +513,53 @@ where
             Mailbox::new(sender),
             last_processed_height,
         )
+    }
+
+    async fn ensure_genesis_anchor(
+        finalized_blocks: &mut FB,
+        anchor: V::Block,
+        last_processed_height: Height,
+    ) {
+        let anchor_height = anchor.height();
+        let anchor_commitment = V::commitment(&anchor);
+        match finalized_blocks
+            .get(ArchiveID::Index(anchor_height.get()))
+            .await
+        {
+            Ok(Some(stored)) => {
+                let stored: V::Block = stored.into();
+                assert_eq!(
+                    stored.height(),
+                    anchor_height,
+                    "stored genesis block height mismatch"
+                );
+                assert!(
+                    V::commitment(&stored) == anchor_commitment,
+                    "stored genesis block does not match configured anchor"
+                );
+            }
+            Ok(None) => {
+                if anchor_height < last_processed_height {
+                    warn!(
+                        height = %anchor_height,
+                        existing = %last_processed_height,
+                        "startup anchor below existing processed height, ignoring"
+                    );
+                    return;
+                }
+
+                finalized_blocks
+                    .put(anchor.into())
+                    .await
+                    .expect("failed to store startup anchor");
+                finalized_blocks
+                    .sync()
+                    .await
+                    .expect("failed to sync startup anchor");
+                debug!(height = %anchor_height, "stored genesis block");
+            }
+            Err(err) => panic!("failed to check startup anchor: {err}"),
+        }
     }
 
     /// Start the actor.
@@ -769,7 +779,7 @@ where
                             &mut application,
                             &mut resolver,
                         )
-                            .await;
+                        .await;
                         // Retain the block in memory so the subsequent
                         // `Forward` can broadcast it without reloading from
                         // storage. An older retained proposal (if any) is
@@ -790,7 +800,7 @@ where
                             &mut application,
                             &mut resolver,
                         )
-                            .await;
+                        .await;
                         ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Certified { round, block, ack } => {
@@ -805,7 +815,7 @@ where
                             &mut application,
                             &mut resolver,
                         )
-                            .await;
+                        .await;
                         ack.expect("durable ack present").send_lossy(());
                     }
                     Message::Notarization { notarization } => {
@@ -834,7 +844,7 @@ where
                                 &mut application,
                                 &mut resolver,
                             )
-                                .await;
+                            .await;
                         } else {
                             debug!(?round, "notarized block unavailable locally");
                         }
@@ -1275,7 +1285,7 @@ where
     {
         let round = finalization.round();
         if round <= self.floor.processed_round() {
-            debug!(
+            warn!(
                 ?round,
                 floor = ?self.floor.processed_round(),
                 "floor not updated, below existing round floor"
@@ -1283,9 +1293,13 @@ where
             return;
         }
 
-        if !self.verify_finalization(&finalization) {
-            panic!("floor finalization must verify");
-        }
+        let Some(scheme) = self.get_scheme_certificate_verifier(finalization.epoch()) else {
+            panic!("floor finalization epoch unavailable");
+        };
+        assert!(
+            finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy),
+            "floor finalization must verify"
+        );
 
         let commitment = finalization.proposal.payload;
         let digest = V::commitment_to_inner(commitment);
@@ -1314,17 +1328,6 @@ where
             resolver,
             Request::finalized_block_by_round(commitment, round),
         );
-    }
-
-    /// Verifies a finalization using the scheme for its epoch.
-    fn verify_finalization(
-        &mut self,
-        finalization: &Finalization<P::Scheme, V::Commitment>,
-    ) -> bool {
-        let Some(scheme) = self.get_scheme_certificate_verifier(finalization.epoch()) else {
-            return false;
-        };
-        finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
     }
 
     /// Applies a block if it satisfies the current floor transition.

@@ -40,6 +40,9 @@ pub trait BlockProvider: Send + 'static {
     /// the parent.
     ///
     /// The child block can carry variant-specific context needed to retrieve its parent.
+    ///
+    /// The returned future must be `'static` because [AncestorStream] stores it
+    /// between polls.
     fn subscribe_parent(
         &self,
         block: &Self::Block,
@@ -226,6 +229,19 @@ mod test {
         }
     }
 
+    #[derive(Clone)]
+    struct WrongParentProvider(Block<Sha256Digest, ()>);
+    impl BlockProvider for WrongParentProvider {
+        type Block = Block<Sha256Digest, ()>;
+
+        fn subscribe_parent(
+            &self,
+            _block: &Self::Block,
+        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+            std::future::ready(Some(self.0.clone()))
+        }
+    }
+
     #[test]
     #[should_panic = "initial blocks must be contiguous in height"]
     fn test_panics_on_non_contiguous_initial_blocks_height() {
@@ -256,6 +272,20 @@ mod test {
         let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
         let child = Block::new::<Sha256>((), parent.digest(), Height::new(3), 3);
         let stream = AncestorStream::new(MockProvider(vec![parent]), [child]);
+        futures::pin_mut!(stream);
+
+        let waker = futures::task::noop_waker_ref();
+        let mut cx = std::task::Context::from_waker(waker);
+        let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+    }
+
+    #[test]
+    #[should_panic = "fetched parent must be contiguous in ancestry"]
+    fn test_panics_on_non_contiguous_fetched_parent_digest() {
+        let expected_parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 0);
+        let fetched_parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::zero(), 1);
+        let child = Block::new::<Sha256>((), expected_parent.digest(), Height::new(1), 2);
+        let stream = AncestorStream::new(WrongParentProvider(fetched_parent), [child]);
         futures::pin_mut!(stream);
 
         let waker = futures::task::noop_waker_ref();

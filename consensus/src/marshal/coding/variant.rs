@@ -138,6 +138,7 @@ where
                 },
             )
         });
+        // Own the receiver so the future can be stored by AncestorStream.
         async move {
             let receiver = receiver?;
             receiver
