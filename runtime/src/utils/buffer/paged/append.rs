@@ -759,6 +759,7 @@ impl<B: Blob> Append<B> {
         (write_buffer, Some(crc_record))
     }
 
+    /// Encode one checksum slot as `[len: u16][crc: u32]`, matching `Checksum::write`.
     fn checksum_slot_bytes(len: u16, crc: u32) -> [u8; CHECKSUM_SLOT_SIZE] {
         let mut bytes = [0u8; CHECKSUM_SLOT_SIZE];
         bytes[..2].copy_from_slice(&len.to_be_bytes());
