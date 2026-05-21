@@ -1449,6 +1449,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                         partition: secondary_label,
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(EPOCH),
+                        floor: Floor::Genesis(application::genesis::<Sha256>(Epoch::new(EPOCH))),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),
