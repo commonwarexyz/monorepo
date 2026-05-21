@@ -3200,6 +3200,103 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_floor_jump_ignores_stale_application_ack() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "floor-jump-ignores-stale-ack",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            let block1_round = Round::new(Epoch::zero(), View::new(1));
+            let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
+            let block1_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    block1_round,
+                    View::zero(),
+                    StandardHarness::commitment(&block1),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "first block dispatch",
+                || application.pending_ack_heights() == vec![Height::new(1)],
+            )
+            .await;
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(floor_finalization);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor block fetch",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Block(commitment)
+                                if commitment == StandardHarness::commitment(&floor_block)
+                        )
+                    })
+                },
+            )
+            .await;
+
+            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
+            assert_eq!(
+                mailbox
+                    .get_block(Height::new(5))
+                    .await
+                    .expect("floor block missing")
+                    .digest(),
+                floor_block.digest()
+            );
+
+            let fetches_after_floor = resolver.fetches().len();
+            assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+            context.sleep(Duration::from_millis(100)).await;
+
+            let _subscription = mailbox.subscribe_by_commitment(
+                Sha256::hash(b"below-floor-after-stale-ack"),
+                CommitmentFallback::FetchByCommitment {
+                    height: Height::new(2),
+                },
+            );
+            let _ = mailbox.get_block(Height::new(5)).await;
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_after_floor,
+                "stale pre-floor ack must not lower the processed height floor"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_set_floor_repairs_gap_after_anchor_arrives() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

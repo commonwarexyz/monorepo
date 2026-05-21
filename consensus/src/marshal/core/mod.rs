@@ -41,10 +41,14 @@
 mod actor;
 pub use actor::Actor;
 
+mod acks;
 pub(crate) mod cache;
+mod delivery;
+mod floor;
 
 mod mailbox;
 pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
 
+mod subscriptions;
 mod variant;
 pub use variant::{Buffer, Variant};

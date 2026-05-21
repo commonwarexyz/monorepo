@@ -64,8 +64,8 @@ mod tests {
                 secp256r1, Scheme,
             },
             types::{
-                Artifact, Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
-                Nullify, Proposal, Vote,
+                Artifact, Certificate, Finalization, Finalize, Notarization, Notarize,
+                Nullification, Nullify, Proposal, Vote,
             },
         },
         types::{Participant, Round, View},
@@ -340,6 +340,16 @@ mod tests {
             .expect("unable to sync voter journal");
     }
 
+    struct VoterFloorStart<S>
+    where
+        S: Scheme<Sha256Digest>,
+    {
+        partition: String,
+        epoch: Epoch,
+        floor: Floor<S, Sha256Digest>,
+        page_cache: CacheRef,
+    }
+
     #[allow(clippy::type_complexity)]
     async fn start_voter_with_floor<S, L>(
         context: &mut deterministic::Context,
@@ -347,10 +357,7 @@ mod tests {
         participants: &[S::PublicKey],
         schemes: &[S],
         elector: L,
-        partition: String,
-        epoch: Epoch,
-        floor: Floor<S, Sha256Digest>,
-        page_cache: CacheRef,
+        start: VoterFloorStart<S>,
     ) -> (
         Mailbox<S, Sha256Digest>,
         mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
@@ -362,6 +369,12 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         L: ElectorConfig<S>,
     {
+        let VoterFloorStart {
+            partition,
+            epoch,
+            floor,
+            page_cache,
+        } = start;
         let me = participants[0].clone();
         let reporter_cfg = mocks::reporter::Config {
             participants: participants.to_vec().try_into().unwrap(),
@@ -412,11 +425,7 @@ mod tests {
             .register(0, TEST_QUOTA)
             .await
             .unwrap();
-        let (certificate_sender, _) = oracle
-            .control(me)
-            .register(1, TEST_QUOTA)
-            .await
-            .unwrap();
+        let (certificate_sender, _) = oracle.control(me).register(1, TEST_QUOTA).await.unwrap();
         let handle = voter.start(
             batcher::Mailbox::new(batcher_sender),
             resolver::Mailbox::new(resolver_sender),
@@ -522,10 +531,12 @@ mod tests {
                     &participants,
                     &schemes,
                     RoundRobin::<Sha256>::default(),
-                    partition,
-                    epoch,
-                    Floor::Finalized(floor_finalization),
-                    page_cache,
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Finalized(floor_finalization),
+                        page_cache,
+                    },
                 )
                 .await;
 
@@ -595,10 +606,12 @@ mod tests {
                     &participants,
                     &schemes,
                     RoundRobin::<Sha256>::default(),
-                    partition,
-                    epoch,
-                    Floor::Finalized(floor_finalization),
-                    page_cache,
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Finalized(floor_finalization),
+                        page_cache,
+                    },
                 )
                 .await;
 
