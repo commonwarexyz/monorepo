@@ -815,18 +815,17 @@ impl<B: Blob> Append<B> {
             .checked_mul(physical_page_size)
             .and_then(|start| start.checked_add(logical_page_size))
             .ok_or(Error::OffsetOverflow)?;
-
         let (new_slot_start, old_slot_start) = if old_crc.len1 >= old_crc.len2 {
             (CHECKSUM_SLOT_SIZE, 0)
         } else {
             (0, CHECKSUM_SLOT_SIZE)
         };
-        let new_slot_offset = crc_start
-            .checked_add(new_slot_start as u64)
-            .ok_or(Error::OffsetOverflow)?;
 
         // Stage the new slot with a 0 length and the shrunken page CRC. A crash here leaves the
         // old slot as the only non-zero valid slot.
+        let new_slot_offset = crc_start
+            .checked_add(new_slot_start as u64)
+            .ok_or(Error::OffsetOverflow)?;
         let staged_slot = Self::checksum_slot_bytes(0, new_crc);
         blob.write_at(new_slot_offset, staged_slot.to_vec()).await?;
         blob.sync().await?;
@@ -837,14 +836,13 @@ impl<B: Blob> Append<B> {
             .await?;
         blob.sync().await?;
 
+        // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
+        // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
+        // never authoritative, so the shrunken slot wins.
         let old_slot_offset = crc_start
             .checked_add(old_slot_start as u64)
             .ok_or(Error::OffsetOverflow)?;
         let len_size = std::mem::size_of::<u16>();
-
-        // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
-        // both slots and lose the already-durable shorter checksum. Once this lands, length 0 is
-        // never authoritative, so the shrunken slot wins.
         blob.write_at(old_slot_offset, vec![0u8; len_size]).await?;
         blob.sync().await?;
 
