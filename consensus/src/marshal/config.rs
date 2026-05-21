@@ -1,11 +1,26 @@
 use crate::{
+    simplex::types::Finalization,
     types::{Epoch, Epocher, ViewDelta},
     Block,
 };
-use commonware_cryptography::certificate::Provider;
+use commonware_cryptography::{
+    certificate::{Provider, Scheme},
+    Digest, Digestible,
+};
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
+
+/// Startup anchor for marshal.
+///
+/// Durable progress from a previous run takes precedence when it already
+/// supersedes the configured anchor.
+pub enum Start<S: Scheme, C: Digest, B> {
+    /// Start from the height-zero genesis block.
+    Genesis(B),
+    /// Start from an already-processed finalized commitment.
+    Floor(Finalization<S, C>),
+}
 
 /// Marshal configuration.
 ///
@@ -26,9 +41,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// height passes a prune target. The last processed height can be
 /// derived from an `Update::Block` at height `H` as
 /// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
-pub struct Config<B, P, ES, T>
+pub struct Config<P, ES, T, AB, B, C = <AB as Digestible>::Digest>
 where
-    B: Block,
+    AB: Block,
+    C: Digest,
     P: Provider<Scope = Epoch>,
     ES: Epocher,
     T: Strategy,
@@ -42,6 +58,9 @@ where
     ///
     /// Must cover every height the marshal will sync.
     pub epocher: ES,
+
+    /// Startup anchor for marshal's processed floor.
+    pub start: Start<P::Scheme, C, B>,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
@@ -70,7 +89,7 @@ where
     pub value_write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
-    pub block_codec_config: B::Cfg,
+    pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
@@ -82,4 +101,32 @@ where
 
     /// Strategy for parallel operations.
     pub strategy: T,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        marshal::{coding::types::CodedBlock, mocks::block::Block as MockBlock},
+        simplex::{scheme::ed25519, types::Context},
+        types::{coding::Commitment, FixedEpocher},
+    };
+    use commonware_coding::ReedSolomon;
+    use commonware_cryptography::{
+        certificate::ConstantProvider,
+        ed25519::PublicKey,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
+    use commonware_parallel::Sequential;
+
+    #[test]
+    fn config_compiles_with_distinct_application_and_start_blocks() {
+        type AB = MockBlock<Sha256Digest, Context<Commitment, PublicKey>>;
+        type B = CodedBlock<AB, ReedSolomon<Sha256>, Sha256>;
+        type Provider = ConstantProvider<ed25519::Scheme, Epoch>;
+
+        fn assert_well_formed<T>() {}
+
+        assert_well_formed::<Config<Provider, FixedEpocher, Sequential, AB, B, Commitment>>();
+    }
 }

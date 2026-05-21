@@ -4,15 +4,11 @@ use super::{
     Config, Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver};
-use commonware_consensus::types::Epoch;
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use rand::Rng;
 use tracing::info;
-
-/// Genesis message to use during initialization.
-const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
 pub struct Application<R: Rng + Spawner + Metrics, H: Hasher> {
@@ -51,20 +47,6 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
     async fn run(mut self) {
         while let Some(message) = self.mailbox.recv().await {
             match message {
-                Message::Genesis { epoch, response } => {
-                    // Sanity check. We don't support multiple epochs.
-                    assert_eq!(epoch, Epoch::zero(), "epoch must be 0");
-
-                    // Use the hash of the genesis message as the initial
-                    // payload.
-                    //
-                    // Since we don't verify that proposed messages link
-                    // to some parent, this doesn't really do anything
-                    // in this example.
-                    self.hasher.update(GENESIS);
-                    let digest = self.hasher.finalize();
-                    let _ = response.send(digest);
-                }
                 Message::Propose { response } => {
                     // Generate a random message (secret to us)
                     let mut msg = vec![0; 16];

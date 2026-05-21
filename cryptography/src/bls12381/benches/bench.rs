@@ -8,6 +8,7 @@ mod combine_public_keys;
 mod combine_signatures;
 mod dkg;
 mod evaluate_point;
+mod golden_dkg;
 mod hash_to_curve;
 mod msm;
 mod scheme_batch_verify_same_message;
@@ -24,6 +25,7 @@ mod tle_encrypt;
 criterion_main!(
     batch_to_affine::benches,
     dkg::benches,
+    golden_dkg::benches,
     hash_to_curve::benches,
     threshold_recover::benches,
     combine_public_keys::benches,

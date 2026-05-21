@@ -4,15 +4,19 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    marshal::core::{Buffer, Variant},
+    marshal::{
+        ancestry::BlockProvider,
+        core::{Buffer, CommitmentFallback, Mailbox, Variant},
+    },
     types::Round,
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::Read;
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
+use std::future::Future;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -87,5 +91,31 @@ where
 
     fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
         Broadcaster::broadcast(self, recipients, block);
+    }
+}
+
+impl<S, B> BlockProvider for Mailbox<S, Standard<B>>
+where
+    S: Scheme,
+    B: Block,
+{
+    type Block = B;
+
+    fn subscribe_parent(
+        &self,
+        block: &Self::Block,
+    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        let receiver = block.height().previous().map(|parent_height| {
+            self.subscribe_by_commitment(
+                block.parent(),
+                CommitmentFallback::FetchByCommitment {
+                    height: parent_height,
+                },
+            )
+        });
+        async move {
+            let receiver = receiver?;
+            receiver.await.ok()
+        }
     }
 }

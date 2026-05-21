@@ -763,7 +763,7 @@ where
                 // moved, its new location lies above `fixed_tip` and the scan never revisits it.
                 diff.extend(floor_diff);
                 diff.sort_by(|a, b| a.0.cmp(&b.0));
-                debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
+                assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
             }
         } else {
             // DB is empty after this batch; raise floor to tip.
@@ -804,7 +804,7 @@ where
             })
             .collect();
 
-        debug_assert!(total_active_keys >= 0, "active_keys underflow");
+        assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             root,
