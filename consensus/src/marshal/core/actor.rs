@@ -59,6 +59,8 @@ const LATEST_KEY: U64 = U64::new(0xFF);
 // may differ from the block digest for coded variants.
 type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
 
+// A resolver delivery plus the peer-validity response channel. Local
+// annotations on the delivery decide how accepted data is used.
 struct ResolverDelivery<V: Variant> {
     delivery: Delivery<ResolverRequestFor<V>, Annotation>,
     value: Bytes,
