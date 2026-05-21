@@ -1664,6 +1664,26 @@ mod tests {
             self.inner.write_at(offset, bufs).await
         }
 
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let bufs = bufs.into();
+            let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if write == self.fail_on {
+                let bytes = bufs.coalesce();
+                self.failed_write_len.store(bytes.len(), Ordering::SeqCst);
+                let partial_len = self.partial_len.min(bytes.len());
+                self.inner
+                    .write_at_sync(offset, bytes.slice(..partial_len))
+                    .await?;
+                return Err(Error::Io(std::io::Error::other("injected partial write")));
+            }
+
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
         async fn resize(&self, len: u64) -> Result<(), Error> {
             self.inner.resize(len).await
         }
