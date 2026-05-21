@@ -2811,6 +2811,40 @@ mod tests {
         R: Reporter<Activity = Update<B>>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
+        let (mailbox, buffer, resolver, actor_handle) = start_standard_actor_maybe_buffer(
+            context,
+            partition_prefix,
+            provider,
+            application,
+            Some(buffer),
+            start,
+        )
+        .await;
+        (
+            mailbox,
+            buffer.expect("buffer was provided"),
+            resolver,
+            actor_handle,
+        )
+    }
+
+    async fn start_standard_actor_maybe_buffer<R, Buf>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        application: R,
+        buffer: Option<Buf>,
+        start: Start<S, D, B>,
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        Option<Buf>,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    )
+    where
+        R: Reporter<Activity = Update<B>>,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
+    {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -2897,6 +2931,49 @@ mod tests {
         let actor_handle =
             actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
         (mailbox, buffer, resolver, actor_handle)
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_actor_starts_without_buffer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor_maybe_buffer(
+                context.child("validator"),
+                "standard-no-buffer",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            let stored_genesis = mailbox
+                .get_block(Identifier::Height(Height::zero()))
+                .await
+                .expect("genesis should be available without a buffer");
+            assert_eq!(stored_genesis.digest(), genesis.digest());
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let digest = block.digest();
+            assert!(mailbox.verified(round, block).await);
+            mailbox.forward(
+                round,
+                digest,
+                Recipients::Some(vec![participants[1].clone()]),
+            );
+            let verified = mailbox
+                .get_verified(round)
+                .await
+                .expect("verified block should remain available without a buffer");
+            assert_eq!(verified.digest(), digest);
+        });
     }
 
     #[test_traced("WARN")]
@@ -4625,7 +4702,7 @@ mod tests {
             .await;
             actor.start(
                 Application::<B>::default(),
-                buffer,
+                Some(buffer),
                 (
                     handler::Receiver::new(resolver_rx),
                     RecordingResolver::default(),

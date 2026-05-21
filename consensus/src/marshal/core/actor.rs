@@ -5,6 +5,7 @@ use super::{
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
+    variant::OptionalBuffer,
     Buffer, Variant,
 };
 use crate::{
@@ -306,7 +307,7 @@ where
     pub fn start<R, Buf>(
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: Buf,
+        buffer: Option<Buf>,
         resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
@@ -317,6 +318,7 @@ where
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
+        let buffer = OptionalBuffer::new(buffer);
         spawn_cell!(self.context, self.run(application, buffer, resolver))
     }
 
@@ -324,7 +326,7 @@ where
     async fn run<R, Buf>(
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        mut buffer: Buf,
+        mut buffer: OptionalBuffer<V, Buf>,
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: Resolver<
@@ -445,7 +447,7 @@ where
         &mut self,
         result: <A::Waiter as Future>::Output,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         resolver: &mut R,
     ) where
         Buf: Buffer<V>,
@@ -500,7 +502,7 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -776,7 +778,7 @@ where
         message: handler::Message<V::Commitment>,
         resolver_rx: &mut handler::Receiver<V::Commitment>,
         resolver: &mut R,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -862,7 +864,7 @@ where
         &self,
         key: ResolverRequestFor<V>,
         response: oneshot::Sender<Bytes>,
-        buffer: &Buf,
+        buffer: &OptionalBuffer<V, Buf>,
     ) {
         match key {
             Key::Block(commitment) => {
@@ -910,7 +912,7 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
     ) {
         let digest = match key {
             SubscriptionKey::Digest(digest) => digest,
@@ -997,7 +999,7 @@ where
         finalization: Finalization<P::Scheme, V::Commitment>,
         skip_if_superseded: bool,
         resolver: &mut R,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -1060,7 +1062,7 @@ where
     async fn apply_floor_anchor<Buf: Buffer<V>>(
         &mut self,
         block: &V::Block,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
@@ -1172,7 +1174,7 @@ where
         &mut self,
         message: ResolverDelivery<V>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
@@ -1350,7 +1352,7 @@ where
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
@@ -1831,7 +1833,7 @@ where
     /// parent links).
     async fn find_block_by_digest<Buf: Buffer<V>>(
         &self,
-        buffer: &Buf,
+        buffer: &OptionalBuffer<V, Buf>,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_digest(digest).await {
@@ -1846,7 +1848,7 @@ where
     /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: Buffer<V>>(
         &self,
-        buffer: &Buf,
+        buffer: &OptionalBuffer<V, Buf>,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_commitment(commitment).await {
@@ -1871,7 +1873,7 @@ where
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
-        buffer: &mut Buf,
+        buffer: &mut OptionalBuffer<V, Buf>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,

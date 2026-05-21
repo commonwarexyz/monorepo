@@ -18,7 +18,7 @@
 //!
 //! # Usage
 //!
-//! The actor is initialized with storage archives and started with a buffer implementation:
+//! The actor is initialized with storage archives and started with an optional buffer:
 //!
 //! ```rust,ignore
 //! // Initialize with storage
@@ -30,7 +30,10 @@
 //! ).await;
 //!
 //! // Start with application and buffer
-//! actor.start(application, buffer, resolver);
+//! actor.start(application, Some(buffer), resolver);
+//!
+//! // Or omit broadcast buffering for follower-only chain tracking
+//! actor.start(application, None::<MyBuffer>, resolver);
 //! ```
 //!
 //! For standard mode, use [`crate::marshal::standard::Standard`] as the variant and

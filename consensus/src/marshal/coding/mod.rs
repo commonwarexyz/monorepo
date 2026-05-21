@@ -408,7 +408,7 @@ mod tests {
         let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
         let actor_handle = actor.start(
             Application::<CodingB>::default(),
-            buffer,
+            Some(buffer),
             (resolver_rx, resolver.clone()),
         );
         (mailbox, resolver, actor_handle)

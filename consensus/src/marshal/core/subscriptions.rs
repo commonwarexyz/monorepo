@@ -1,4 +1,4 @@
-use super::{Buffer, Variant};
+use super::{variant::OptionalBuffer, Buffer, Variant};
 use commonware_cryptography::Digestible;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -8,10 +8,10 @@ use std::collections::{btree_map::Entry, BTreeMap};
 
 /// A set of local subscribers waiting for one block.
 ///
-/// Dropping the subscription aborts the backing buffer waiter.
+/// Dropping the subscription aborts the backing buffer waiter, if one exists.
 struct BlockSubscription<V: Variant> {
     subscribers: Vec<oneshot::Sender<V::Block>>,
-    _aborter: Aborter,
+    _aborter: Option<Aborter>,
 }
 
 /// The key used to track block subscriptions.
@@ -71,7 +71,7 @@ impl<V: Variant> Subscriptions<V> {
         key: KeyFor<V>,
         response: oneshot::Sender<V::Block>,
         waiters: &mut AbortablePool<Result<V::Block, KeyFor<V>>>,
-        buffer: &mut Buf,
+        buffer: &OptionalBuffer<V, Buf>,
     ) {
         match self.entries.entry(key) {
             Entry::Occupied(mut entry) => {
@@ -82,8 +82,10 @@ impl<V: Variant> Subscriptions<V> {
                     Key::Digest(digest) => buffer.subscribe_by_digest(digest),
                     Key::Commitment(commitment) => buffer.subscribe_by_commitment(commitment),
                 };
-                let waiter_key = key;
-                let aborter = waiters.push(async move { rx.await.map_err(|_| waiter_key) });
+                let aborter = rx.map(|rx| {
+                    let waiter_key = key;
+                    waiters.push(async move { rx.await.map_err(|_| waiter_key) })
+                });
                 entry.insert(BlockSubscription {
                     subscribers: vec![response],
                     _aborter: aborter,
@@ -176,7 +178,8 @@ mod tests {
 
     #[test]
     fn insert_coalesces_duplicate_keys() {
-        let mut buffer = TestBuffer::default();
+        let test_buffer = TestBuffer::default();
+        let buffer = OptionalBuffer::new(Some(test_buffer.clone()));
         let mut waiters = TestWaiters::default();
         let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(1, 10);
@@ -186,17 +189,17 @@ mod tests {
             Key::Digest(block.digest()),
             first_sender,
             &mut waiters,
-            &mut buffer,
+            &buffer,
         );
         let (second_sender, second_receiver) = oneshot::channel();
         subscriptions.insert(
             Key::Digest(block.digest()),
             second_sender,
             &mut waiters,
-            &mut buffer,
+            &buffer,
         );
 
-        assert_eq!(buffer.digest_subscription_count(), 1);
+        assert_eq!(test_buffer.digest_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 1);
 
         subscriptions.notify(&block);
@@ -207,7 +210,8 @@ mod tests {
 
     #[test]
     fn notify_wakes_digest_and_commitment_subscribers() {
-        let mut buffer = TestBuffer::default();
+        let test_buffer = TestBuffer::default();
+        let buffer = OptionalBuffer::new(Some(test_buffer.clone()));
         let mut waiters = TestWaiters::default();
         let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(2, 20);
@@ -217,18 +221,18 @@ mod tests {
             Key::Digest(block.digest()),
             digest_sender,
             &mut waiters,
-            &mut buffer,
+            &buffer,
         );
         let (commitment_sender, commitment_receiver) = oneshot::channel();
         subscriptions.insert(
             Key::Commitment(block.digest()),
             commitment_sender,
             &mut waiters,
-            &mut buffer,
+            &buffer,
         );
 
-        assert_eq!(buffer.digest_subscription_count(), 1);
-        assert_eq!(buffer.commitment_subscription_count(), 1);
+        assert_eq!(test_buffer.digest_subscription_count(), 1);
+        assert_eq!(test_buffer.commitment_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 2);
 
         subscriptions.notify(&block);
@@ -239,7 +243,7 @@ mod tests {
 
     #[test]
     fn retain_open_drops_closed_subscribers_and_keeps_open_ones() {
-        let mut buffer = TestBuffer::default();
+        let buffer = OptionalBuffer::new(Some(TestBuffer::default()));
         let mut waiters = TestWaiters::default();
         let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(3, 30);
@@ -249,14 +253,14 @@ mod tests {
             Key::Digest(block.digest()),
             closed_sender,
             &mut waiters,
-            &mut buffer,
+            &buffer,
         );
         let (open_sender, open_receiver) = oneshot::channel();
         subscriptions.insert(
             Key::Digest(block.digest()),
             open_sender,
             &mut waiters,
-            &mut buffer,
+            &buffer,
         );
         drop(closed_receiver);
 
@@ -275,14 +279,14 @@ mod tests {
     #[test]
     fn remove_drops_waiter_and_aborts_buffer_waiter() {
         deterministic::Runner::default().start(|context| async move {
-            let mut buffer = TestBuffer::default();
+            let buffer = OptionalBuffer::new(Some(TestBuffer::default()));
             let mut waiters = TestWaiters::default();
             let mut subscriptions = Subscriptions::<TestVariant>::new();
             let block = block(4, 40);
             let key = Key::Digest(block.digest());
 
             let (sender, _receiver) = oneshot::channel();
-            subscriptions.insert(key, sender, &mut waiters, &mut buffer);
+            subscriptions.insert(key, sender, &mut waiters, &buffer);
             subscriptions.remove(&key);
 
             select! {
@@ -297,5 +301,26 @@ mod tests {
                 },
             }
         });
+    }
+
+    #[test]
+    fn insert_without_buffer_keeps_local_subscriber() {
+        let mut waiters = TestWaiters::default();
+        let mut subscriptions = Subscriptions::<TestVariant>::new();
+        let buffer = OptionalBuffer::<TestVariant, TestBuffer>::new(None);
+        let block = block(5, 50);
+
+        let (sender, receiver) = oneshot::channel();
+        subscriptions.insert::<TestBuffer>(
+            Key::Digest(block.digest()),
+            sender,
+            &mut waiters,
+            &buffer,
+        );
+
+        assert_eq!(subscriptions.entries.len(), 1);
+        subscriptions.notify(&block);
+        assert_receives(receiver, &block);
+        assert!(subscriptions.entries.is_empty());
     }
 }
