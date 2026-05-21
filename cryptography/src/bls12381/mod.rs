@@ -11,12 +11,18 @@
 //! This module exports two DKG protocols:
 //!
 //! - [`dkg`], a two-round synchronous protocol,
-//! - [`golden_dkg`], a one-round asynchronous protocol (currently in ALPHA).
+//! - [`golden_dkg`], a one-round asynchronous protocol.
 //!
 //! The tradeoff is that the latter is more complicated, and more computationally
-//! expensive. However, it is less reliant on assumptions about the number of corruptions,
-//! and the single round can be very useful, operationally. At the moment,
-//! the status of our Golden implementation is experimental, so we recommend
+//! expensive. The one round is very attractive, both to simplify operation of the
+//! protocol, and to reduce assumptions about corruption and synchrony.
+//! In the two-round protocol, you use the second round to collect complaints about
+//! dealer misbehavior in the first round. Because these complaints are critical
+//! for security, you need to make sure to wait long enough to collect honest complaints,
+//! introducing a synchrony assumption, and the need to consider malicious players.
+//! With the one round, you avoid these issues.
+//!
+//! At the moment, the status of our Golden implementation is experimental, so we recommend
 //! using [`dkg`] for now.
 
 pub mod certificate;

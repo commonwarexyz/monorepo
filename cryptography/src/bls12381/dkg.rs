@@ -162,7 +162,6 @@
 //! Some protocols achieve one round without synchrony assumptions, by combining
 //! encryption and ZK Proofs. We have an implementation of one such protocol,
 //! [Golden](https://eprint.iacr.org/2025/1924), in [`crate::bls12381::golden_dkg`].
-//! At the moment, that implementation is still experimental.
 //!
 //! ## Handling Complaints
 //!
