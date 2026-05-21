@@ -759,6 +759,11 @@ mod tests {
                 Some(block_two.clone()),
                 "block without a finalization row should still be queryable by height"
             );
+            assert_eq!(
+                recovering.mailbox.get_info(Height::new(2)).await,
+                Some((Height::new(2), block_two.digest())),
+                "block info should fall back to the finalized-block archive"
+            );
 
             // Walk the application through sequential acks. Even though
             // block_two has no finalization, it is still dispatched because

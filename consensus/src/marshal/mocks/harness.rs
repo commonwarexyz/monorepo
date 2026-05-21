@@ -4243,6 +4243,18 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         // Initially, no latest
         assert!(handle.mailbox.get_info(Identifier::Latest).await.is_none());
 
+        // The genesis anchor is stored as a finalized block without a finalization row.
+        let genesis = H::genesis_block(participants.len() as u16);
+        let genesis_digest = H::digest(&genesis);
+        assert_eq!(
+            handle.mailbox.get_info(Height::zero()).await,
+            Some((Height::zero(), genesis_digest))
+        );
+        assert_eq!(
+            handle.mailbox.get_info(&genesis_digest).await,
+            Some((Height::zero(), genesis_digest))
+        );
+
         // Before finalization, specific height returns None
         assert!(handle.mailbox.get_info(Height::new(1)).await.is_none());
 

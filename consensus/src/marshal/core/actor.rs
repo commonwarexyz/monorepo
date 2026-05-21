@@ -532,13 +532,7 @@ where
                         .ok()
                         .flatten()
                         .map(|b| (b.height(), digest)),
-                    BlockID::Height(height) => self
-                        .finalizations_by_height
-                        .get(ArchiveID::Index(height.get()))
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|f| (height, V::commitment_to_inner(f.proposal.payload))),
+                    BlockID::Height(height) => self.get_info_by_height(height).await,
                     BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
                 };
                 response.send_lossy(info);
@@ -1685,6 +1679,24 @@ where
             Ok(finalization) => finalization,
             Err(e) => panic!("failed to get finalization: {e}"),
         }
+    }
+
+    /// Get finalized block information from either the finalization archive or
+    /// the finalized-block archive.
+    async fn get_info_by_height(
+        &self,
+        height: Height,
+    ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
+        if let Some(finalization) = self.get_finalization_by_height(height).await {
+            return Some((
+                height,
+                V::commitment_to_inner(finalization.proposal.payload),
+            ));
+        }
+
+        self.get_finalized_block(height)
+            .await
+            .map(|block| (block.height(), block.digest()))
     }
 
     /// Add a finalized block, and optionally a finalization, to the archive.
