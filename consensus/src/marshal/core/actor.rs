@@ -378,7 +378,7 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Processed floor plus any floor update waiting for its anchor block.
+    // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
@@ -488,6 +488,7 @@ where
                                 .sync()
                                 .await
                                 .expect("failed to sync startup anchor");
+                            debug!(height = %anchor_height, "stored genesis block");
                         }
                         Err(err) => panic!("failed to check startup anchor: {err}"),
                     }
@@ -496,7 +497,6 @@ where
             }
             Start::Floor(finalization) => Some(finalization),
         };
-
         let last_processed_round =
             Self::latest_processed_round(&finalizations_by_height, last_processed_height).await;
 
@@ -1311,10 +1311,10 @@ where
         }
         let block = (*block).clone();
 
+        // Floor anchors can bypass the local proposal-verification path. Check
+        // the parent relationship before using a non-genesis anchor for walkback.
         let height = block.height();
         if height > Height::zero() {
-            // Floor anchors can bypass the local proposal-verification path.
-            // Check the parent relationship before using it for walkback.
             let parent_commitment = V::parent_commitment(&block);
             assert!(
                 block.parent() == V::commitment_to_inner(parent_commitment),
@@ -1374,9 +1374,8 @@ where
             .await
             .expect("failed to sync floor metadata");
 
-        // Drop all pending acknowledgements. We must do this to prevent
-        // an in-process block from being processed below the new floor and
-        // rewriting the processed floor height.
+        // Drop all pending acknowledgement waiters so any in-flight application
+        // acks for blocks below the new floor cannot rewrite the processed floor.
         self.pending_acks.clear();
 
         // The floor is durable, so cache/finalized data below it can be pruned.
@@ -1692,6 +1691,7 @@ where
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
+                    // Cache the notarization and block.
                     let height = block.height();
                     self.cache_block(round, digest, block.clone()).await;
                     self.cache
