@@ -691,7 +691,7 @@ impl<
         .await
         .expect("unable to open journal");
 
-        // Add initial view from the configured floor.
+        // Add initial view from the configured floor
         let floor = self.floor.take().expect("floor not initialized");
         let replay_floor = match &floor {
             Floor::Genesis(_) => View::zero(),
