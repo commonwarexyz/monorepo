@@ -1042,6 +1042,10 @@ where
             return;
         }
 
+        // The pending floor owns the next application sync point. Drop any
+        // in-flight acks before they can advance the processed height past it.
+        self.pending_acks.clear();
+
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
         self.floor
@@ -1081,6 +1085,9 @@ where
             );
         }
 
+        // This anchor cannot move the application sync point, but its
+        // finalization round can still prune round-bound resolver work.
+        // Keep pending acks intact because processed_height is unchanged.
         if height <= self.floor.processed_height() {
             warn!(
                 %height,
