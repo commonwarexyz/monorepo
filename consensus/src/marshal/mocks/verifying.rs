@@ -15,38 +15,33 @@ use std::{marker::PhantomData, sync::Arc};
 /// A mock application that implements `Application` for testing.
 ///
 /// This mock:
-/// - Returns the provided genesis block from `genesis()`
 /// - Returns the configured block (if any) from `propose()`
 /// - Returns a configurable result from `verify()`
 #[derive(Clone)]
 pub struct MockVerifyingApp<B, S> {
-    /// The genesis block to return.
-    pub genesis: B,
     /// The block returned by `propose`. If `None`, `propose` returns `None`.
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
-    _phantom: std::marker::PhantomData<S>,
+    _phantom: PhantomData<S>,
 }
 
 impl<B, S> MockVerifyingApp<B, S> {
-    /// Create a new mock verifying application with the given genesis block.
-    pub fn new(genesis: B) -> Self {
+    /// Create a new mock verifying application.
+    pub fn new() -> Self {
         Self {
-            genesis,
             propose_result: None,
             verify_result: true,
-            _phantom: std::marker::PhantomData,
+            _phantom: PhantomData,
         }
     }
 
     /// Create a new mock verifying application with a fixed verify result.
-    pub fn with_verify_result(genesis: B, verify_result: bool) -> Self {
+    pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
-            genesis,
             propose_result: None,
             verify_result,
-            _phantom: std::marker::PhantomData,
+            _phantom: PhantomData,
         }
     }
 
@@ -54,6 +49,16 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn with_propose_result(mut self, block: B) -> Self {
         self.propose_result = Some(block);
         self
+    }
+}
+
+impl<B, S> Default for MockVerifyingApp<B, S> {
+    fn default() -> Self {
+        Self {
+            propose_result: None,
+            verify_result: true,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -66,10 +71,6 @@ where
     type Block = B;
     type Context = B::Context;
     type SigningScheme = S;
-
-    async fn genesis(&mut self) -> Self::Block {
-        self.genesis.clone()
-    }
 
     async fn propose(
         &mut self,
@@ -93,21 +94,19 @@ where
 /// the application verdict races with marshal shutdown.
 #[derive(Clone)]
 pub struct GatedVerifyingApp<B, S> {
-    genesis: B,
     started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
-    _phantom: PhantomData<S>,
+    _phantom: PhantomData<(B, S)>,
 }
 
 impl<B, S> GatedVerifyingApp<B, S> {
     /// Returns the gated app, a `started` receiver fired when `verify()` is entered,
     /// and a `release` sender that unblocks `verify()` once signaled.
-    pub fn new(genesis: B) -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+    pub fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         (
             Self {
-                genesis,
                 started: Arc::new(Mutex::new(Some(started_tx))),
                 release: Arc::new(Mutex::new(Some(release_rx))),
                 _phantom: PhantomData,
@@ -127,10 +126,6 @@ where
     type Block = B;
     type Context = B::Context;
     type SigningScheme = S;
-
-    async fn genesis(&mut self) -> Self::Block {
-        self.genesis.clone()
-    }
 
     async fn propose(
         &mut self,

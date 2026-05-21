@@ -39,7 +39,7 @@ impl Array {
     /// In debug builds, this asserts the same invariants enforced by decoding:
     /// values must be sorted, unique, and `len <= MAX_CARDINALITY`.
     pub(super) fn from(values: Vec<u16>) -> Self {
-        debug_assert!(
+        assert!(
             validate_values(&values).is_ok(),
             "Array::from requires sorted unique values with len <= MAX_CARDINALITY"
         );
@@ -172,12 +172,12 @@ impl Array {
                 range_val += 1;
                 exist_idx += 1;
             } else {
-                debug_assert!(range_val < e);
+                assert!(range_val < e);
                 new_vec.push(range_val);
                 range_val += 1;
             }
         }
-        debug_assert!(exist_idx == end_pos);
+        assert!(exist_idx == end_pos);
 
         while range_val < end {
             new_vec.push(range_val);
