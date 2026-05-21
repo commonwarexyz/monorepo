@@ -22,7 +22,6 @@ use commonware_runtime::{
 };
 use commonware_utils::{ordered::Set, vec::NonEmptyVec, FuzzRng, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use rand::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroUsize},
@@ -477,9 +476,9 @@ async fn make_reliable(
 fn run(input: FuzzInput) -> String {
     let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
     let executor = deterministic::Runner::new(cfg);
-    executor.start(|mut context| async move {
+    executor.start(|context| async move {
         let schemes = (0..input.peers)
-            .map(|_| PrivateKey::from_seed(context.gen()))
+            .map(|index| PrivateKey::from_seed(index as u64))
             .collect::<Vec<_>>();
         let peers = schemes
             .iter()
@@ -700,7 +699,11 @@ fn run(input: FuzzInput) -> String {
                                     + input.fetch_retry_timeout_ms,
                             ),
                     );
-                    assert!(mailboxes[index].retain(|_, _| false).accepted());
+                    // Isolate this liveness oracle from background fetch retries
+                    // created by earlier fuzz operations.
+                    for mailbox in &mut mailboxes {
+                        assert!(mailbox.retain(|_, _| false).accepted());
+                    }
                     context.sleep(settle).await;
                     drain_outputs(&mut outputs, &expected, &mut delivered);
                     let canceled = key.clone();
