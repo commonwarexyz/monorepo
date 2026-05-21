@@ -6,7 +6,7 @@ use rand::Rng;
 use std::{
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{Arc, Once},
     time::Duration,
 };
 
@@ -18,6 +18,7 @@ const MAX_BATCH_MESSAGES: usize = 8;
 const MAX_DRAIN: usize = 8;
 const MAX_OPERATION_INDEX: u8 = 8;
 const PARK_SLEEP_DURATION: u64 = 1;
+static FIFO_COVERAGE: Once = Once::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -77,20 +78,17 @@ pub struct CoalesceFuzzInput {
     raw_bytes: Vec<u8>,
 }
 
-fn extract_raw_bytes(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
-    let remaining = u.len();
-    if remaining == 0 {
-        Ok(vec![0])
-    } else {
-        Ok(u.bytes(remaining)?.to_vec())
-    }
+fn extract_raw_bytes(u: &mut Unstructured<'_>) -> Vec<u8> {
+    std::mem::replace(u, Unstructured::new(&[]))
+        .take_rest()
+        .to_vec()
 }
 
 impl<'a> Arbitrary<'a> for FifoInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             capacity: u.int_in_range(1..=MAX_CAPACITY)?,
-            raw_bytes: extract_raw_bytes(u)?,
+            raw_bytes: extract_raw_bytes(u),
         })
     }
 }
@@ -99,7 +97,7 @@ impl<'a> Arbitrary<'a> for CoalesceFuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self {
             capacity: u.int_in_range(1..=MAX_CAPACITY)?,
-            raw_bytes: extract_raw_bytes(u)?,
+            raw_bytes: extract_raw_bytes(u),
         })
     }
 }
@@ -172,6 +170,37 @@ fn gen_coalesce_input(rng: &mut FuzzRng) -> CoalesceInput {
 fn gen_coalesce_inputs(rng: &mut FuzzRng) -> Vec<CoalesceInput> {
     let len = rng.gen_range(1..=MAX_OPERATIONS);
     (0..len).map(|_| gen_coalesce_input(rng)).collect()
+}
+
+fn retain(sender: u8) -> EnqueueInput {
+    EnqueueInput {
+        sender,
+        kind: Kind::Retain,
+    }
+}
+
+fn reject(sender: u8) -> EnqueueInput {
+    EnqueueInput {
+        sender,
+        kind: Kind::Reject,
+    }
+}
+
+fn fifo_live_coverage_operations() -> Vec<Operation> {
+    vec![
+        Operation::Enqueue(retain(0)),
+        Operation::Recv { limit: 1 },
+        Operation::Batch(vec![retain(1), reject(1)]),
+        Operation::TryRecv { limit: 1 },
+        Operation::ParkedRecv {
+            sender: 0,
+            extra: vec![retain(0)],
+        },
+    ]
+}
+
+fn fifo_closed_coverage_operations() -> Vec<Operation> {
+    vec![Operation::DropReceiver { index: 0 }]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,9 +341,10 @@ fn assert_metric(metrics: &str, name: &str, expected: usize) {
 
 fn assert_only_mailbox_counter(metrics: &str, prefix: &str, expected: &str) {
     for line in metrics.lines().filter(|line| !line.starts_with('#')) {
-        let Some(sample) = line.split_once(' ').map(|(sample, _)| sample) else {
-            continue;
-        };
+        let sample = line
+            .split_once(' ')
+            .map(|(sample, _)| sample)
+            .expect("invalid metric sample");
         let base = sample.split_once('{').map_or(sample, |(base, _)| base);
         if base.starts_with(prefix) {
             assert_eq!(sample, expected, "{metrics}");
@@ -338,7 +368,7 @@ async fn drain_recv_fifo(
     }
 }
 
-async fn run_fifo<C>(context: C, capacity: usize, operations: Vec<Operation>)
+async fn run_fifo<C>(context: C, capacity: usize, operations: Vec<Operation>, metric_prefix: &str)
 where
     C: Clock + Metrics + Spawner,
 {
@@ -466,14 +496,18 @@ where
         drop(anchor);
         drain_recv_fifo(&mut receiver, &mut state, usize::MAX).await;
         let metrics = context.encode();
-        assert_metric(&metrics, "fifo_mailbox_backoff_total", state.backoffs);
-        assert_only_mailbox_counter(&metrics, "fifo_mailbox_", "fifo_mailbox_backoff_total");
+        let backoff_metric = format!("{metric_prefix}_mailbox_backoff_total");
+        let mailbox_prefix = format!("{metric_prefix}_mailbox_");
+        assert_metric(&metrics, &backoff_metric, state.backoffs);
+        assert_only_mailbox_counter(&metrics, &mailbox_prefix, &backoff_metric);
         drop(receiver);
     } else {
         drop(senders);
         let metrics = context.encode();
-        assert_metric(&metrics, "fifo_mailbox_backoff_total", state.backoffs);
-        assert_only_mailbox_counter(&metrics, "fifo_mailbox_", "fifo_mailbox_backoff_total");
+        let backoff_metric = format!("{metric_prefix}_mailbox_backoff_total");
+        let mailbox_prefix = format!("{metric_prefix}_mailbox_");
+        assert_metric(&metrics, &backoff_metric, state.backoffs);
+        assert_only_mailbox_counter(&metrics, &mailbox_prefix, &backoff_metric);
         drop(anchor);
     }
     assert_eq!(state.pending(), 0);
@@ -565,9 +599,31 @@ where
 pub fn fuzz_fifo(input: FifoInput) {
     let mut rng = FuzzRng::new(input.raw_bytes);
     let operations = gen_operations(&mut rng);
+
+    // Empty-seed fuzzing rarely reaches these FIFO orders; one fixed run covers them.
+    FIFO_COVERAGE.call_once(|| {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_fifo(
+                context.child("fifo_live"),
+                1,
+                fifo_live_coverage_operations(),
+                "fifo_live",
+            )
+            .await;
+            run_fifo(
+                context.child("fifo_closed"),
+                1,
+                fifo_closed_coverage_operations(),
+                "fifo_closed",
+            )
+            .await;
+        });
+    });
+
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
-        run_fifo(context.child("fifo"), input.capacity, operations).await;
+        run_fifo(context.child("fifo"), input.capacity, operations, "fifo").await;
     });
 }
 
