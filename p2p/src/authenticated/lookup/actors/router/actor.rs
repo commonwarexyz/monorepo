@@ -19,7 +19,7 @@ use tracing::debug;
 pub struct Actor<E: Spawner + BufferPooler + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
-    control: mailbox::LossyReceiver<Message<P>>,
+    control: mailbox::UnreliableReceiver<Message<P>>,
     connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 }
@@ -30,7 +30,7 @@ impl<E: Spawner + BufferPooler + Metrics, P: PublicKey> Actor<E, P> {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<P>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) =
-            mailbox::new_lossy::<Message<P>>(context.child("mailbox"), cfg.mailbox_size);
+            mailbox::new_unreliable::<Message<P>>(context.child("mailbox"), cfg.mailbox_size);
         let pool = context.network_buffer_pool().clone();
 
         // Create actor

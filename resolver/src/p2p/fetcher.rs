@@ -1,5 +1,5 @@
 use crate::p2p::wire;
-use commonware_actor::{Feedback, Lossy};
+use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{utils::codec::WrappedSender, Recipients, Sender};
 use commonware_runtime::{
@@ -292,7 +292,7 @@ where
                     payload: wire::Payload::Request(key.clone()),
                 };
                 match checked.send(message, self.priority_requests) {
-                    Lossy::Handled(Feedback::Ok | Feedback::Backoff) => {
+                    Unreliable::Feedback(Feedback::Ok | Feedback::Backoff) => {
                         // Success - move from pending to active
                         self.requests_sent.inc(Status::Success);
                         self.pending.remove(&key);
@@ -310,7 +310,7 @@ where
                         self.key_to_id.insert(key, id);
                         return;
                     }
-                    feedback @ (Lossy::Rejected | Lossy::Handled(Feedback::Closed)) => {
+                    feedback @ (Unreliable::Rejected | Unreliable::Feedback(Feedback::Closed)) => {
                         // Send was not handled, try next peer
                         self.requests_sent.inc(Status::Dropped);
                         debug!(?peer, ?feedback, "send failed");
@@ -536,7 +536,7 @@ where
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
-    use commonware_actor::Lossy;
+    use commonware_actor::Unreliable;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -566,7 +566,7 @@ mod tests {
             }
         }
 
-        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Lossy<Feedback> {
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
             self.sender.send(self.recipients, message, priority)
         }
     }
@@ -582,8 +582,8 @@ mod tests {
             _recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Lossy<Feedback> {
-            Lossy::Rejected
+        ) -> Unreliable<Feedback> {
+            Unreliable::Rejected
         }
     }
 
@@ -618,9 +618,9 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             _message: impl Into<IoBufs> + Send,
             _priority: bool,
-        ) -> Lossy<Feedback> {
+        ) -> Unreliable<Feedback> {
             match recipients {
-                Recipients::One(_) => Lossy::new(Feedback::Ok),
+                Recipients::One(_) => Unreliable::new(Feedback::Ok),
                 _ => unimplemented!(),
             }
         }

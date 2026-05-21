@@ -8,8 +8,8 @@ use crate::{
     Channel, Recipients,
 };
 use commonware_actor::{
-    mailbox::{self, LossyPolicy},
-    Feedback, Lossy,
+    mailbox::{self, UnreliablePolicy},
+    Feedback, Unreliable,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
@@ -39,7 +39,7 @@ pub enum Message<P: PublicKey> {
     SubscribePeers { sender: ring::Sender<Vec<P>> },
 }
 
-impl<P: PublicKey> LossyPolicy for Message<P> {
+impl<P: PublicKey> UnreliablePolicy for Message<P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
@@ -54,7 +54,7 @@ impl<P: PublicKey> LossyPolicy for Message<P> {
 }
 
 /// Mailbox for the router actor.
-pub struct Mailbox<P: PublicKey>(mailbox::LossySender<Message<P>>);
+pub struct Mailbox<P: PublicKey>(mailbox::UnreliableSender<Message<P>>);
 
 impl<P: PublicKey> Clone for Mailbox<P> {
     fn clone(&self) -> Self {
@@ -70,7 +70,7 @@ impl<P: PublicKey> fmt::Debug for Mailbox<P> {
 
 impl<P: PublicKey> Mailbox<P> {
     /// Returns a router mailbox around the provided sender.
-    pub const fn new(sender: mailbox::LossySender<Message<P>>) -> Self {
+    pub const fn new(sender: mailbox::UnreliableSender<Message<P>>) -> Self {
         Self(sender)
     }
 
@@ -93,8 +93,8 @@ impl<P: PublicKey> Mailbox<P> {
     /// which is harmless since the router no longer tracks any peers.
     pub fn release(&self, peer: P) -> Feedback {
         match self.0.enqueue(Message::Release { peer }) {
-            Lossy::Handled(feedback) => feedback,
-            Lossy::Rejected => unreachable!("router release cannot be rejected"),
+            Unreliable::Feedback(feedback) => feedback,
+            Unreliable::Rejected => unreachable!("router release cannot be rejected"),
         }
     }
 }
@@ -123,7 +123,7 @@ impl<P: PublicKey> Messenger<P> {
         channel: Channel,
         message: IoBufs,
         priority: bool,
-    ) -> Lossy<Feedback> {
+    ) -> Unreliable<Feedback> {
         // Build Data and encode Message::Data once for all recipients
         let encoded = types::Message::encode_data(&self.pool, channel, message);
 

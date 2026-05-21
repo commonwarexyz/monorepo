@@ -4,8 +4,8 @@ use crate::{
     Channel, Message as NetworkMessage, Recipients,
 };
 use commonware_actor::{
-    mailbox::{self, LossyPolicy},
-    Feedback, Lossy,
+    mailbox::{self, UnreliablePolicy},
+    Feedback, Unreliable,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Metrics, Quota};
@@ -18,7 +18,7 @@ use std::{
 
 pub(crate) struct Inbound<P: PublicKey>(pub(crate) NetworkMessage<P>);
 
-impl<P: PublicKey> LossyPolicy for Inbound<P> {
+impl<P: PublicKey> UnreliablePolicy for Inbound<P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -44,7 +44,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         recipients: Recipients<Self::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Lossy<Feedback> {
+    ) -> Unreliable<Feedback> {
         let message = message.into();
         assert!(
             message.len() <= self.max_size as usize,
@@ -110,7 +110,7 @@ where
 
 /// Channel to asynchronously receive messages from a channel.
 pub struct Receiver<P: PublicKey> {
-    receiver: mailbox::LossyReceiver<Inbound<P>>,
+    receiver: mailbox::UnreliableReceiver<Inbound<P>>,
 }
 
 impl<P: PublicKey> Debug for Receiver<P> {
@@ -120,7 +120,7 @@ impl<P: PublicKey> Debug for Receiver<P> {
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) const fn new(receiver: mailbox::LossyReceiver<Inbound<P>>) -> Self {
+    pub(super) const fn new(receiver: mailbox::UnreliableReceiver<Inbound<P>>) -> Self {
         Self { receiver }
     }
 }
@@ -146,7 +146,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,
-    receivers: BTreeMap<Channel, (Quota, mailbox::LossySender<Inbound<P>>)>,
+    receivers: BTreeMap<Channel, (Quota, mailbox::UnreliableSender<Inbound<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
@@ -166,7 +166,7 @@ impl<P: PublicKey> Channels<P> {
         context: C,
     ) -> (Sender<P, C>, Receiver<P>) {
         let backlog = NonZeroUsize::new(backlog).expect("message backlog must be non-zero");
-        let (sender, receiver) = mailbox::new_lossy(context.child("mailbox"), backlog);
+        let (sender, receiver) = mailbox::new_unreliable(context.child("mailbox"), backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }
@@ -182,7 +182,7 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u64, (Quota, mailbox::LossySender<Inbound<P>>)> {
+    pub fn collect(self) -> BTreeMap<u64, (Quota, mailbox::UnreliableSender<Inbound<P>>)> {
         self.receivers
     }
 }

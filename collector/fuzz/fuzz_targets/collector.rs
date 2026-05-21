@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_actor::{Feedback, Lossy};
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
     Write,
@@ -231,8 +231,8 @@ impl CheckedSender for MockCheckedSender {
         Vec::new()
     }
 
-    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Lossy<Feedback> {
-        Lossy::new(Feedback::Ok)
+    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
+        Unreliable::new(Feedback::Ok)
     }
 }
 

@@ -28,19 +28,19 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// Feedback from endpoints that may drop work under backpressure.
+    /// Feedback from endpoints that may reject work under backpressure.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Lossy<T> {
-        /// The work was handled by the endpoint.
-        Handled(T),
+    pub enum Unreliable<T> {
+        /// Feedback returned by the endpoint.
+        Feedback(T),
         /// The work was rejected by the endpoint.
         Rejected,
     }
 
-    impl Lossy<Feedback> {
-        /// Create handled feedback for an endpoint that may reject live work.
+    impl Unreliable<Feedback> {
+        /// Wrap endpoint feedback for an endpoint that may reject work.
         pub const fn new(feedback: Feedback) -> Self {
-            Self::Handled(feedback)
+            Self::Feedback(feedback)
         }
 
         /// Create rejected feedback.
@@ -51,27 +51,15 @@ commonware_macros::stability_scope!(BETA {
         /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             match self {
-                Self::Handled(feedback) => feedback.accepted(),
+                Self::Feedback(feedback) => feedback.accepted(),
                 Self::Rejected => false,
             }
         }
     }
 
-    impl From<Feedback> for Lossy<Feedback> {
+    impl From<Feedback> for Unreliable<Feedback> {
         fn from(feedback: Feedback) -> Self {
             Self::new(feedback)
-        }
-    }
-
-    impl PartialEq<Feedback> for Lossy<Feedback> {
-        fn eq(&self, other: &Feedback) -> bool {
-            matches!(self, Self::Handled(feedback) if feedback == other)
-        }
-    }
-
-    impl PartialEq<Lossy<Self>> for Feedback {
-        fn eq(&self, other: &Lossy<Self>) -> bool {
-            other == self
         }
     }
 

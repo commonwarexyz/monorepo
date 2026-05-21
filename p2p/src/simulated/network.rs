@@ -14,7 +14,7 @@ use crate::{
     Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
     UnlimitedSender as _,
 };
-use commonware_actor::{Feedback, Lossy};
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -960,7 +960,7 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
         recipients: Recipients<P>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Lossy<Feedback> {
+    ) -> Unreliable<Feedback> {
         let message = message.into().coalesce();
         assert!(
             message.len() <= self.max_size as usize,
@@ -970,7 +970,7 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
         );
 
         if !self.active.load(Ordering::Acquire) || self.sender.is_closed() {
-            return Lossy::new(Feedback::Closed);
+            return Unreliable::new(Feedback::Closed);
         }
 
         // The simulated network handles send submissions and topology updates
@@ -983,9 +983,9 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
             message,
             priority,
         }) {
-            Lossy::new(Feedback::Ok)
+            Unreliable::new(Feedback::Ok)
         } else {
-            Lossy::new(Feedback::Closed)
+            Unreliable::new(Feedback::Closed)
         }
     }
 }
@@ -1141,13 +1141,13 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         crate::CheckedSender::recipients(&self.checked)
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Lossy<Feedback> {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
         // Convert to IoBuf here since forwarder needs to inspect the message
         let message = message.into().coalesce();
 
         // Determine the set of recipients that will receive the message
         let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
-            return Lossy::Rejected;
+            return Unreliable::Rejected;
         };
 
         // Extract the inner sender and send directly with the new recipients

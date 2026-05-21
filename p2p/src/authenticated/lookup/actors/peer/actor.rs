@@ -29,8 +29,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     send_batch_size: usize,
 
     control: ring::Receiver<Message>,
-    high: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
-    low: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+    high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+    low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -99,8 +99,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
         control: &mut ring::Receiver<Message>,
-        high: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+        high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
@@ -127,8 +127,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
     async fn recv_prioritized(
         control: &mut ring::Receiver<Message>,
-        high: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+        high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
     ) -> Prioritized<Message, EncodedData> {
         select! {
             msg = control.next() => msg.map_or(Prioritized::Closed, Prioritized::Control),
@@ -405,7 +405,7 @@ mod tests {
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
-        let (router_sender, _router_receiver) = commonware_actor::mailbox::new_lossy::<
+        let (router_sender, _router_receiver) = commonware_actor::mailbox::new_unreliable::<
             router::Message<PublicKey>,
         >(
             context.child("router_mailbox"), NZUsize!(10)

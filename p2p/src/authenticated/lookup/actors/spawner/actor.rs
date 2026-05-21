@@ -30,7 +30,7 @@ pub struct Actor<
     send_batch_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
 
-    receiver: mailbox::LossyReceiver<Message<Si, St, C>>,
+    receiver: mailbox::UnreliableReceiver<Message<Si, St, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,

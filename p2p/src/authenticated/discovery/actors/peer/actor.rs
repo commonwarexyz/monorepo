@@ -34,9 +34,9 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_peers: usize,
 
     mailbox: Mailbox<C>,
-    control: mailbox::LossyReceiver<Message<C>>,
-    high: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
-    low: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+    control: mailbox::UnreliableReceiver<Message<C>>,
+    high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+    low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -124,10 +124,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mailbox::LossyReceiver<Message<C>>,
+        control: &mut mailbox::UnreliableReceiver<Message<C>>,
         pool: &commonware_runtime::BufferPool,
-        high: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+        high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
@@ -459,7 +459,7 @@ mod tests {
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
-        let (router_sender, _router_receiver) = commonware_actor::mailbox::new_lossy::<
+        let (router_sender, _router_receiver) = commonware_actor::mailbox::new_unreliable::<
             router::Message<PublicKey>,
         >(
             context.child("router_mailbox"), NZUsize!(10)
