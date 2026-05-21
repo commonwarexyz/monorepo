@@ -2,34 +2,39 @@ use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoB
 use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
-/// Buffered tip data, blob handle, and durability bookkeeping.
+/// Shared writer state.
 struct State<B: Blob> {
     /// The underlying blob to write to.
     blob: B,
 
-    /// The buffer containing the data yet to be appended to the tip of the
-    /// underlying blob.
+    /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
 
-    /// Whether prior blob mutation requires a full sync barrier.
+    /// Whether a prior plain mutation must be persisted with [`Blob::sync`].
     ///
-    /// Set after plain [Blob::write_at] or [Blob::resize]. While set, [Write::sync]
-    /// cannot use [Blob::write_at_sync] because that only makes the current write
-    /// durable.
+    /// [`State::write_at_sync`] uses [`Blob::write_at_sync`] only when this is
+    /// false, otherwise it must use [`Blob::sync`] to cover earlier unsynced
+    /// mutations.
     needs_sync: bool,
 }
 
 impl<B: Blob> State<B> {
+    /// Read bytes from the underlying blob.
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         Ok(self.blob.read_at(offset, len).await?.freeze())
     }
 
+    /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.blob.write_at(offset, bufs).await?;
         self.needs_sync = true;
         Ok(())
     }
 
+    /// Write bytes to the underlying blob and make them durable.
+    ///
+    /// Uses [`Blob::write_at_sync`] when there are no earlier unsynced
+    /// mutations. Otherwise, writes the bytes and then syncs the blob.
     async fn write_at_sync(
         &mut self,
         offset: u64,
@@ -43,12 +48,14 @@ impl<B: Blob> State<B> {
         }
     }
 
+    /// Resize the underlying blob and mark the resize as needing sync.
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
         self.needs_sync = true;
         Ok(())
     }
 
+    /// Sync the underlying blob if there are unsynced mutations.
     async fn sync(&mut self) -> Result<(), Error> {
         if !self.needs_sync {
             return Ok(());
@@ -247,7 +254,7 @@ impl<B: Blob> Write<B> {
     /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
     /// before resizing the underlying blob.
     pub async fn resize(&self, len: u64) -> Result<(), Error> {
-        // Acquire a write lock on the buffer.
+        // Acquire a write lock on the buffer state.
         let mut state = self.state.write().await;
 
         // Flush buffered data to the underlying blob.
