@@ -468,10 +468,13 @@ where
             let (height, commitment, result) = pending.take().expect("pending ack must exist");
             match result {
                 Ok(()) => {
+                    // Apply in-memory progress updates for this acknowledged
+                    // block. The metadata sync below makes drained updates durable.
                     self.update_processed_height(height, resolver);
                     self.update_processed_round(height, resolver).await;
                 }
                 Err(e) => {
+                    // Ack failures are fatal for marshal/application coordination.
                     error!(
                         e = ?e,
                         height = %height,
@@ -489,6 +492,7 @@ where
             }
         };
 
+        // Persist buffered processed-height updates once after draining all ready acks.
         if let Err(e) = self.application_metadata.sync().await {
             error!(?e, "failed to sync application progress");
             return false;
@@ -497,6 +501,8 @@ where
         // Anything below the last acknowledged commitment is safe for the
         // buffer to prune.
         buffer.finalized(last_acked_commitment);
+
+        // Refill the application dispatch pipeline.
         self.try_dispatch_blocks(application).await;
         true
     }
@@ -617,6 +623,7 @@ where
                 let commitment = notarization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
 
+                // Cache notarization by round.
                 self.cache
                     .put_notarization(round, digest, notarization.clone())
                     .await;
@@ -636,11 +643,16 @@ where
                 let round = finalization.round();
                 let commitment = finalization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
+
+                // Cache finalization by round.
                 self.cache
                     .put_finalization(round, digest, finalization.clone())
                     .await;
 
+                // Search for the finalized block locally, otherwise fetch it remotely.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                    // The anchor path stores the floor block and finalization,
+                    // advances floors, prunes below them, and resumes dispatch.
                     if self
                         .apply_floor_anchor(&block, buffer, application, resolver)
                         .await
@@ -699,6 +711,7 @@ where
                 response.send_lossy(finalization);
             }
             Message::HintFinalized { height, targets } => {
+                // Skip if finalization is already available locally.
                 if self.get_finalization_by_height(height).await.is_some() {
                     return true;
                 }
@@ -794,6 +807,10 @@ where
         let mut handled = false;
         let mut produces = Vec::new();
         let mut delivers = Vec::new();
+
+        // Drain up to max_repair resolver messages. Block deliveries are handled
+        // immediately, certificate-bearing deliveries are batched for verification,
+        // and produce responses wait until repair has had a chance to fill gaps.
         for msg in std::iter::once(message)
             .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
             .take(self.max_repair.get())
@@ -832,6 +849,7 @@ where
             return;
         }
 
+        // Batch verify and process all certificate-bearing deliveries.
         needs_sync |= self
             .verify_delivered(delivers, buffer, application, resolver)
             .await;
@@ -841,10 +859,13 @@ where
         needs_sync |= self.try_repair_gaps(buffer, resolver, application).await;
 
         if needs_sync {
+            // Sync archives before responding to peers so accepted repair data is
+            // durable before this node serves it.
             self.sync_finalized().await;
             self.try_dispatch_blocks(application).await;
         }
 
+        // Handle produce requests in parallel.
         join_all(
             produces
                 .into_iter()
@@ -2090,6 +2111,7 @@ where
 
     /// Prunes finalized blocks and certificates below the given height.
     async fn prune_finalized_archives(&mut self, height: Height) -> Result<(), BoxedError> {
+        // Prune the finalized block and finalization certificate archives in parallel.
         try_join!(
             async {
                 self.finalized_blocks

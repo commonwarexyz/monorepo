@@ -7,6 +7,8 @@ use commonware_utils::{
 use std::collections::{btree_map::Entry, BTreeMap};
 
 /// A set of local subscribers waiting for one block.
+///
+/// Dropping the subscription aborts the backing buffer waiter.
 struct BlockSubscription<V: Variant> {
     subscribers: Vec<oneshot::Sender<V::Block>>,
     _aborter: Aborter,
@@ -49,6 +51,7 @@ impl<V: Variant> Subscriptions<V> {
         });
     }
 
+    /// Notify any digest- or commitment-scoped subscribers for the provided block.
     pub(super) fn notify(&mut self, block: &V::Block) {
         if let Some(mut subscription) = self.entries.remove(&Key::Digest(block.digest())) {
             for subscriber in subscription.subscribers.drain(..) {
