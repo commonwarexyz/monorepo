@@ -102,3 +102,91 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
         Some(self.complete_current(result))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        marshal::{mocks::block::Block, standard::Standard},
+        types::Height,
+    };
+    use commonware_cryptography::sha256::{Digest, Sha256};
+    use commonware_utils::acknowledgement::Exact;
+
+    type TestBlock = Block<Digest, ()>;
+    type TestVariant = Standard<TestBlock>;
+
+    fn digest(byte: u8) -> Digest {
+        Sha256::fill(byte)
+    }
+
+    fn pending_ack(height: u64, byte: u8) -> (PendingAck<TestVariant, Exact>, Exact) {
+        let (ack, receiver) = Exact::handle();
+        (
+            PendingAck {
+                height: Height::new(height),
+                commitment: digest(byte),
+                receiver,
+            },
+            ack,
+        )
+    }
+
+    #[test]
+    fn enqueue_tracks_capacity_and_fifo_ready_order() {
+        let mut pending = PendingAcks::<TestVariant, Exact>::new(2);
+        assert!(pending.has_capacity());
+        assert_eq!(pending.next_dispatch_height(Height::new(7)), Height::new(8));
+
+        let (first, first_ack) = pending_ack(8, 1);
+        pending.enqueue(first);
+        assert!(pending.has_capacity());
+        assert_eq!(pending.next_dispatch_height(Height::new(7)), Height::new(9));
+
+        let (second, second_ack) = pending_ack(9, 2);
+        pending.enqueue(second);
+        assert!(!pending.has_capacity());
+        assert_eq!(
+            pending.next_dispatch_height(Height::new(7)),
+            Height::new(10)
+        );
+
+        second_ack.acknowledge();
+        assert!(pending.pop_ready().is_none());
+
+        first_ack.acknowledge();
+        let (height, commitment, result) = pending.pop_ready().expect("first ack should be ready");
+        assert_eq!(height, Height::new(8));
+        assert_eq!(commitment, digest(1));
+        assert!(result.is_ok());
+
+        let (height, commitment, result) = pending
+            .pop_ready()
+            .expect("queued ready ack should be armed next");
+        assert_eq!(height, Height::new(9));
+        assert_eq!(commitment, digest(2));
+        assert!(result.is_ok());
+        assert!(pending.has_capacity());
+    }
+
+    #[test]
+    fn clear_drops_all_pending_acks() {
+        let mut pending = PendingAcks::<TestVariant, Exact>::new(2);
+        let (first, first_ack) = pending_ack(3, 1);
+        let (second, second_ack) = pending_ack(4, 2);
+        pending.enqueue(first);
+        pending.enqueue(second);
+        assert!(!pending.has_capacity());
+
+        pending.clear();
+        first_ack.acknowledge();
+        second_ack.acknowledge();
+
+        assert!(pending.pop_ready().is_none());
+        assert!(pending.has_capacity());
+        assert_eq!(
+            pending.next_dispatch_height(Height::new(9)),
+            Height::new(10)
+        );
+    }
+}
