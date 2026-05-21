@@ -240,6 +240,11 @@ impl<B: Blob> Write<B> {
             state.needs_sync = false;
             return Ok(());
         }
+
+        if !state.needs_sync {
+            return Ok(());
+        }
+
         self.blob.sync().await?;
         state.needs_sync = false;
         Ok(())

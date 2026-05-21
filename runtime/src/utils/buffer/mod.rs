@@ -1491,11 +1491,25 @@ mod tests {
             let blob = RangeSyncBlob::new();
             let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
 
+            // A fresh writer has no buffered bytes or prior plain blob mutation, so sync is a no-op.
+            writer.sync().await.unwrap();
+            let (durable, full_syncs, range_syncs) = blob.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
             // The write remains entirely buffered, so sync can make just this range durable.
             writer.write_at(0, b"abc").await.unwrap();
             writer.sync().await.unwrap();
 
             // No prior plain blob mutation required a full sync barrier.
+            let (durable, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 1);
+
+            // The prior sync used write_at_sync, so there is still no pending full-sync barrier.
+            writer.sync().await.unwrap();
             let (durable, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abc");
             assert_eq!(full_syncs, 0);
@@ -1516,6 +1530,13 @@ mod tests {
             writer.sync().await.unwrap();
 
             // The final sync must cover both the prior plain write and the buffered tip.
+            let (durable, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdefg");
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // With no new writes, sync has no work left.
+            writer.sync().await.unwrap();
             let (durable, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abcdefg");
             assert_eq!(full_syncs, 1);
