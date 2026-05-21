@@ -1,12 +1,15 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_actor::{mailbox, Feedback};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor};
-use commonware_utils::{sync::Mutex, FuzzRng};
+use commonware_utils::{
+    sync::{Mutex, Once},
+    FuzzRng,
+};
 use rand::Rng;
 use std::{
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
-    sync::{Arc, Once},
+    sync::Arc,
     time::Duration,
 };
 
