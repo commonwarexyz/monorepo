@@ -1682,7 +1682,7 @@ mod loom_tests {
     #[test]
     fn sender_drop_racing_waker_registration_wakes_or_disconnects() {
         loom::model(|| {
-            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1708,7 +1708,7 @@ mod loom_tests {
     #[test]
     fn sender_enqueue_then_drop_racing_poll_recv_drains_message() {
         loom::model(|| {
-            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1797,7 +1797,7 @@ mod loom_tests {
     #[test]
     fn receiver_drop_racing_ready_fast_path_feedback_wakes_if_ready() {
         loom::model(|| {
-            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
