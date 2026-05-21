@@ -1318,8 +1318,12 @@ where
                         .iter()
                         .map(PendingVerification::as_subject_and_certificate)
                         .collect();
-                    let verified =
-                        verify_certificates(&mut context, &scheme, &cert_refs, &strategy);
+                    let verified = verify_certificates(
+                        &mut context,
+                        scheme.as_ref(),
+                        &cert_refs,
+                        &strategy,
+                    );
                     (delivers, verified)
                 });
             let (returned, verified) = handle.await.expect("strategy task failed");
@@ -1351,8 +1355,12 @@ where
                             .iter()
                             .map(|&i| delivers[i].as_subject_and_certificate())
                             .collect();
-                        let results =
-                            verify_certificates(&mut context, &scheme, &group_refs, &strategy);
+                        let results = verify_certificates(
+                            &mut context,
+                            scheme.as_ref(),
+                            &group_refs,
+                            &strategy,
+                        );
                         (delivers, indices, results)
                     });
                 let (returned, indices, results) = handle.await.expect("strategy task failed");

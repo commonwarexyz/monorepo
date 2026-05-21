@@ -614,8 +614,12 @@ where
         };
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
-        let progressed =
-            state.on_network_shard(peer, shard, InsertCtx::new(&scheme), &mut self.blocker);
+        let progressed = state.on_network_shard(
+            peer,
+            shard,
+            InsertCtx::new(scheme.as_ref()),
+            &mut self.blocker,
+        );
         if progressed {
             state = self
                 .try_transition_state(commitment, participants_len, state)
@@ -905,7 +909,7 @@ where
         let mut progressed = false;
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
-        let ctx = InsertCtx::new(&scheme);
+        let ctx = InsertCtx::new(scheme.as_ref());
         for (peer, shard) in buffered {
             progressed |= state.on_network_shard(peer, shard, ctx, &mut self.blocker);
         }
