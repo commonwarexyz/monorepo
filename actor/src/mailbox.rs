@@ -139,6 +139,7 @@ pub trait UnreliablePolicy: Sized {
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
 }
 
+// Marker types that select the mailbox overflow policy.
 mod mode {
     /// Uses a policy that always handles overflow messages.
     pub(super) struct Reliable;
