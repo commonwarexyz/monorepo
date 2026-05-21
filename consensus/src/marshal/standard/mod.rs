@@ -3598,6 +3598,102 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_stale_floor_anchor_advances_round_floor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "stale-floor-anchor-round-floor",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                RecordingBuffer::default(),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let mut mailbox = mailbox;
+
+            let block_round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b"processed-parent"), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    block_round,
+                    View::zero(),
+                    StandardHarness::commitment(&block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(block_round, block.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            assert_eq!(application.acknowledged().await, Height::new(1));
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let missing = Sha256::hash(b"missing-before-stale-floor");
+            let _subscription = mailbox.subscribe_by_commitment(
+                missing,
+                CommitmentFallback::FetchByRound { round: floor_round },
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "round-bound fetch before stale floor",
+                || {
+                    resolver.active_fetches().iter().any(|fetch| {
+                        matches!(
+                            fetch.key,
+                            handler::Key::Notarized { round } if round == floor_round
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let stale_floor = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::zero(),
+                    StandardHarness::commitment(&block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(stale_floor);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "stale floor round-bound prune",
+                || {
+                    resolver.active_fetches().iter().all(|fetch| {
+                        !matches!(
+                            fetch.key,
+                            handler::Key::Notarized { round } if round == floor_round
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let fetches_before = resolver.fetches().len();
+            mailbox.hint_notarized(floor_round, Sha256::hash(b"missing-after-stale-floor"));
+            let barrier = make_raw_block(block.digest(), Height::new(2), 200);
+            assert!(
+                mailbox
+                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                    .await
+            );
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "stale floor anchor must apply its round floor to future fetches"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_floor_anchor_uses_parent_digest_as_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

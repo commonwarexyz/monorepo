@@ -1328,7 +1328,12 @@ where
                 existing = %self.floor.processed_height(),
                 "floor not updated, at or below existing"
             );
-            let _ = self.floor.take_pending_anchor();
+            let finalization = self
+                .floor
+                .take_pending_anchor()
+                .expect("pending floor anchor missing");
+            self.update_processed_round_floor(height, finalization.round(), resolver)
+                .await;
             self.try_dispatch_blocks(application).await;
             return true;
         }
