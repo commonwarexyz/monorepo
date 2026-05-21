@@ -48,18 +48,6 @@ commonware_macros::stability_scope!(BETA {
             Self::Rejected
         }
 
-        /// Return the underlying feedback.
-        ///
-        /// # Panics
-        ///
-        /// Panics if the endpoint rejected the work.
-        pub fn into_inner(self) -> Feedback {
-            match self {
-                Self::Handled(feedback) => feedback,
-                Self::Rejected => panic!("lossy feedback was rejected"),
-            }
-        }
-
         /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             match self {
@@ -72,12 +60,6 @@ commonware_macros::stability_scope!(BETA {
     impl From<Feedback> for Lossy<Feedback> {
         fn from(feedback: Feedback) -> Self {
             Self::new(feedback)
-        }
-    }
-
-    impl From<Lossy<Self>> for Feedback {
-        fn from(feedback: Lossy<Self>) -> Self {
-            feedback.into_inner()
         }
     }
 

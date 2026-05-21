@@ -34,9 +34,9 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_peers: usize,
 
     mailbox: Mailbox<C>,
-    control: mailbox::Receiver<Message<C>>,
-    high: mailbox::Receiver<RelayMessage<EncodedData>>,
-    low: mailbox::Receiver<RelayMessage<EncodedData>>,
+    control: mailbox::LossyReceiver<Message<C>>,
+    high: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+    low: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -124,10 +124,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
-        control: &mut mailbox::Receiver<Message<C>>,
+        control: &mut mailbox::LossyReceiver<Message<C>>,
         pool: &commonware_runtime::BufferPool,
-        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        high: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
@@ -363,8 +363,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             // processing of gossip messages (BitVec, Peers), causing the
                             // peer connection to stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
-                            let _ =
-                                sender.enqueue_lossy(channels::Inbound((peer.clone(), data.message)));
+                            let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
                         }
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
@@ -460,7 +459,7 @@ mod tests {
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
-        let (router_sender, _router_receiver) = commonware_actor::mailbox::new::<
+        let (router_sender, _router_receiver) = commonware_actor::mailbox::new_lossy::<
             router::Message<PublicKey>,
         >(
             context.child("router_mailbox"), NZUsize!(10)

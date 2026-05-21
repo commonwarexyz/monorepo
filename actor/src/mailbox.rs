@@ -48,6 +48,7 @@ use std::{
     collections::VecDeque,
     fmt,
     future::poll_fn,
+    marker::PhantomData,
     num::NonZeroUsize,
     sync::mpsc::TryRecvError,
     task::{Context, Poll},
@@ -93,11 +94,32 @@ pub trait Policy: Sized {
 
     /// Handle `message` when it cannot enter the bounded ready queue immediately.
     ///
-    /// Returns `true` when the policy considered the message's effects. This includes
-    /// retaining the message, coalescing it with retained work, replacing older retained work,
-    /// or deliberately doing no work because the message is already satisfied, superseded, or no
-    /// longer needed (for example, a request whose response channel is already closed). These
-    /// no-op cases are still handled: there is no remaining work, so there is no loss to report.
+    /// This may retain the message, coalesce it with retained work, replace older retained work,
+    /// or deliberately do no work because the message is already satisfied, superseded, or no
+    /// longer needed (for example, a request whose response channel is already closed).
+    ///
+    /// # Warning
+    ///
+    /// Do not enqueue into the same mailbox from this method or from destructors triggered by
+    /// editing `overflow`. This method runs while the mailbox holds its overflow lock, so same
+    /// mailbox re-entry can deadlock.
+    ///
+    /// This method should not unwind after mutating `overflow`. A panic, including one from a
+    /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
+    /// the mailbox.
+    fn handle(overflow: &mut Self::Overflow, message: Self);
+}
+
+/// Overflow behavior for actor messages that can be rejected when an inbox is full.
+pub trait LossyPolicy: Sized {
+    /// Overflow storage used by this policy.
+    type Overflow: Overflow<Self>;
+
+    /// Handle `message` when it cannot enter the bounded ready queue immediately.
+    ///
+    /// Returns `true` when the policy considered the message's effects. This includes retaining
+    /// the message, coalescing it with retained work, replacing older retained work, or deliberately
+    /// doing no work because the message is already satisfied, superseded, or no longer needed.
     ///
     /// Returns `false` only when the policy rejects the message under backpressure. This is the
     /// lossy case: the submitted work was not semantically handled, and callers that care should
@@ -113,6 +135,76 @@ pub trait Policy: Sized {
     /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
     /// the mailbox.
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
+}
+
+struct Infallible;
+
+struct LossyMode;
+
+trait MailboxMode<T>: Sized {
+    type Overflow: Overflow<T>;
+    type Feedback;
+
+    fn handle(overflow: &mut Self::Overflow, message: T) -> bool;
+    fn ready_feedback(feedback: Feedback) -> Self::Feedback;
+    fn overflow_feedback(handled: bool) -> Self::Feedback;
+    fn is_backoff(feedback: &Self::Feedback) -> bool;
+    fn is_closed(feedback: &Self::Feedback) -> bool;
+}
+
+impl<T: Policy> MailboxMode<T> for Infallible {
+    type Overflow = T::Overflow;
+    type Feedback = Feedback;
+
+    fn handle(overflow: &mut Self::Overflow, message: T) -> bool {
+        T::handle(overflow, message);
+        true
+    }
+
+    fn ready_feedback(feedback: Feedback) -> Self::Feedback {
+        feedback
+    }
+
+    fn overflow_feedback(_handled: bool) -> Self::Feedback {
+        Feedback::Backoff
+    }
+
+    fn is_backoff(feedback: &Self::Feedback) -> bool {
+        *feedback == Feedback::Backoff
+    }
+
+    fn is_closed(feedback: &Self::Feedback) -> bool {
+        *feedback == Feedback::Closed
+    }
+}
+
+impl<T: LossyPolicy> MailboxMode<T> for LossyMode {
+    type Overflow = T::Overflow;
+    type Feedback = Lossy<Feedback>;
+
+    fn handle(overflow: &mut Self::Overflow, message: T) -> bool {
+        T::handle(overflow, message)
+    }
+
+    fn ready_feedback(feedback: Feedback) -> Self::Feedback {
+        Lossy::new(feedback)
+    }
+
+    fn overflow_feedback(handled: bool) -> Self::Feedback {
+        if handled {
+            Lossy::new(Feedback::Backoff)
+        } else {
+            Lossy::Rejected
+        }
+    }
+
+    fn is_backoff(feedback: &Self::Feedback) -> bool {
+        *feedback == Feedback::Backoff
+    }
+
+    fn is_closed(feedback: &Self::Feedback) -> bool {
+        *feedback == Feedback::Closed
+    }
 }
 
 // `activity` packs the published overflow state and in-flight overflow
@@ -260,17 +352,19 @@ cfg_if::cfg_if! {
     }
 }
 
-struct OverflowState<T: Policy> {
-    queue: Mutex<T::Overflow>,
+struct OverflowState<T, M: MailboxMode<T>> {
+    queue: Mutex<M::Overflow>,
     activity: AtomicUsize,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<T: Policy> OverflowState<T> {
+impl<T, M: MailboxMode<T>> OverflowState<T, M> {
     #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
-            queue: Mutex::new(T::Overflow::default()),
+            queue: Mutex::new(M::Overflow::default()),
             activity: AtomicUsize::new(0),
+            _phantom: PhantomData,
         }
     }
 
@@ -282,18 +376,18 @@ impl<T: Policy> OverflowState<T> {
         ready.push(message)
     }
 
-    fn enqueue_lossy(
+    fn enqueue_overflow(
         &self,
         ready: &Ready<T>,
         message: T,
         is_closed: impl Fn() -> bool,
-    ) -> Lossy<Feedback> {
+    ) -> M::Feedback {
         // Mark overflow active so racing senders stay off the ready fast path.
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
         if is_closed() {
             mutation.publish(queue.is_empty());
-            return Lossy::new(Feedback::Closed);
+            return M::ready_feedback(Feedback::Closed);
         }
 
         // The fast-path push may have observed stale ready fullness. Retry
@@ -303,7 +397,7 @@ impl<T: Policy> OverflowState<T> {
             match ready.push(message) {
                 Ok(()) => {
                     mutation.publish(queue.is_empty());
-                    return Lossy::new(Feedback::Ok);
+                    return M::ready_feedback(Feedback::Ok);
                 }
                 Err(message) => message,
             }
@@ -312,13 +406,9 @@ impl<T: Policy> OverflowState<T> {
         };
 
         // Preserve overflow order, or handle a still-full ready queue.
-        let handled = T::handle(&mut queue, message);
+        let handled = M::handle(&mut queue, message);
         mutation.publish(queue.is_empty());
-        if handled {
-            Lossy::new(Feedback::Backoff)
-        } else {
-            Lossy::Rejected
-        }
+        M::overflow_feedback(handled)
     }
 
     fn refill(&self, ready: &Ready<T>) {
@@ -386,21 +476,124 @@ impl Drop for Mutation<'_> {
     }
 }
 
-struct State<T: Policy> {
+struct State<T, M: MailboxMode<T>> {
     ready: Ready<T>,
-    overflow: OverflowState<T>,
+    overflow: OverflowState<T, M>,
     backoff: Counter,
     closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
 }
 
+impl<T, M: MailboxMode<T>> State<T, M> {
+    fn enqueue(&self, message: T) -> M::Feedback {
+        // Receiver closure makes new sends fail immediately.
+        if self.closed.load(Ordering::Acquire) {
+            return M::ready_feedback(Feedback::Closed);
+        }
+
+        // Common case: publish directly to ready without taking overflow lock.
+        let message = match self.overflow.try_ready(&self.ready, message) {
+            Ok(()) => {
+                if self.closed.load(Ordering::Acquire) {
+                    self.overflow.drain(&self.ready);
+                    return M::ready_feedback(Feedback::Closed);
+                }
+                self.waker.wake();
+                return M::ready_feedback(Feedback::Ok);
+            }
+            Err(message) => message,
+        };
+
+        // Slow path: serialize through overflow and apply the policy.
+        let feedback = self
+            .overflow
+            .enqueue_overflow(&self.ready, message, || self.closed.load(Ordering::Acquire));
+
+        // Record any backoff.
+        if M::is_backoff(&feedback) {
+            self.backoff.inc();
+        }
+
+        // Wake after any non-closed slow-path enqueue because a receiver may
+        // have skipped refill while this overflow mutation was active. By the
+        // time we wake, the mutation has published its overflow state. Spurious
+        // wakes are acceptable.
+        if !M::is_closed(&feedback) {
+            self.waker.wake();
+        }
+        feedback
+    }
+
+    fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        // Fast path avoids waker churn when a message is already ready.
+        if let Some(message) = self.pop() {
+            return Poll::Ready(Some(message));
+        }
+
+        if self.is_disconnected() {
+            return Poll::Ready(self.pop());
+        }
+
+        register_waker(&self.waker, cx.waker());
+
+        // A sender can enqueue and wake after the first pop but before this
+        // waker is installed. Re-check before sleeping so the wake is not lost.
+        if let Some(message) = self.pop() {
+            return Poll::Ready(Some(message));
+        }
+
+        if self.is_disconnected() {
+            Poll::Ready(self.pop())
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn pop(&self) -> Option<T> {
+        if let Some(message) = self.ready.pop() {
+            // A freed ready slot may let the oldest overflow message advance.
+            self.overflow.refill(&self.ready);
+            return Some(message);
+        }
+
+        // Empty ready may race with stale activity, so let `refill`
+        // decide whether overflow is worth locking.
+        self.overflow.refill(&self.ready);
+        self.ready.pop()
+    }
+
+    fn is_disconnected(&self) -> bool {
+        self.closed.load(Ordering::Acquire) || self.senders.load(Ordering::Acquire) == 0
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.overflow.drain(&self.ready);
+    }
+}
+
 /// Sender half of a mailbox.
 pub struct Sender<T: Policy> {
-    state: Arc<State<T>>,
+    state: Arc<State<T, Infallible>>,
+}
+
+/// Sender half of a lossy mailbox.
+pub struct LossySender<T: LossyPolicy> {
+    state: Arc<State<T, LossyMode>>,
 }
 
 impl<T: Policy> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        // Live sender count drives receiver disconnect detection.
+        self.state.senders.fetch_add(1, Ordering::Relaxed);
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<T: LossyPolicy> Clone for LossySender<T> {
     fn clone(&self) -> Self {
         // Live sender count drives receiver disconnect detection.
         self.state.senders.fetch_add(1, Ordering::Relaxed);
@@ -421,6 +614,17 @@ impl<T: Policy> Drop for Sender<T> {
     }
 }
 
+impl<T: LossyPolicy> Drop for LossySender<T> {
+    fn drop(&mut self) {
+        let previous = self.state.senders.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous > 0);
+        // Wake a receiver that is parked waiting for data or disconnect.
+        if previous == 1 {
+            self.state.waker.wake();
+        }
+    }
+}
+
 impl<T: Policy> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Sender")
@@ -430,62 +634,28 @@ impl<T: Policy> fmt::Debug for Sender<T> {
     }
 }
 
+impl<T: LossyPolicy> fmt::Debug for LossySender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LossySender")
+            .field("capacity", &self.state.ready.capacity())
+            .field("closed", &self.state.closed.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
 impl<T: Policy> Sender<T> {
     /// Submit a message without waiting for inbox capacity.
-    ///
-    /// Use this for policies that handle all overflow messages. Use [`Sender::enqueue_lossy`] when
-    /// the policy may reject a message under backpressure.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the overflow policy rejects the message.
     #[must_use = "caller must handle enqueue feedback"]
     pub fn enqueue(&self, message: T) -> Feedback {
-        self.enqueue_lossy(message).into_inner()
+        self.state.enqueue(message)
     }
+}
 
+impl<T: LossyPolicy> LossySender<T> {
     /// Submit a message without waiting for inbox capacity, allowing policy rejection.
     #[must_use = "caller must handle enqueue feedback"]
-    pub fn enqueue_lossy(&self, message: T) -> Lossy<Feedback> {
-        // Receiver closure makes new sends fail immediately.
-        if self.state.closed.load(Ordering::Acquire) {
-            return Lossy::new(Feedback::Closed);
-        }
-
-        // Common case: publish directly to ready without taking overflow lock.
-        let message = match self.state.overflow.try_ready(&self.state.ready, message) {
-            Ok(()) => {
-                if self.state.closed.load(Ordering::Acquire) {
-                    self.state.overflow.drain(&self.state.ready);
-                    return Lossy::new(Feedback::Closed);
-                }
-                self.state.waker.wake();
-                return Lossy::new(Feedback::Ok);
-            }
-            Err(message) => message,
-        };
-
-        // Slow path: serialize through overflow and apply the policy.
-        let feedback = self
-            .state
-            .overflow
-            .enqueue_lossy(&self.state.ready, message, || {
-                self.state.closed.load(Ordering::Acquire)
-            });
-
-        // Record any backoff.
-        if feedback == Feedback::Backoff {
-            self.state.backoff.inc();
-        }
-
-        // Wake after any non-closed slow-path enqueue because a receiver may
-        // have skipped refill while this overflow mutation was active. By the
-        // time we wake, the mutation has published its overflow state. Spurious
-        // wakes are acceptable.
-        if feedback != Feedback::Closed {
-            self.state.waker.wake();
-        }
-        feedback
+    pub fn enqueue(&self, message: T) -> Lossy<Feedback> {
+        self.state.enqueue(message)
     }
 }
 
@@ -496,50 +666,26 @@ impl<T: Policy> Sender<T> {
 /// Dropping the last sender disconnects the mailbox, but the receiver continues
 /// returning buffered messages until ready and overflow are empty.
 pub struct Receiver<T: Policy> {
-    state: Arc<State<T>>,
+    state: Arc<State<T, Infallible>>,
+}
+
+/// Receiver half of a lossy mailbox.
+///
+/// Dropping the receiver closes the mailbox and drains buffered messages.
+///
+/// Dropping the last sender disconnects the mailbox, but the receiver continues
+/// returning buffered messages until ready and overflow are empty.
+pub struct LossyReceiver<T: LossyPolicy> {
+    state: Arc<State<T, LossyMode>>,
 }
 
 impl<T: Policy> Receiver<T> {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        // Fast path avoids waker churn when a message is already ready.
-        if let Some(message) = self.pop() {
-            return Poll::Ready(Some(message));
-        }
-
-        if self.is_disconnected() {
-            return Poll::Ready(self.pop());
-        }
-
-        register_waker(&self.state.waker, cx.waker());
-
-        // A sender can enqueue and wake after the first pop but before this
-        // waker is installed. Re-check before sleeping so the wake is not lost.
-        if let Some(message) = self.pop() {
-            return Poll::Ready(Some(message));
-        }
-
-        if self.is_disconnected() {
-            Poll::Ready(self.pop())
-        } else {
-            Poll::Pending
-        }
+        self.state.poll_recv(cx)
     }
 
     fn pop(&mut self) -> Option<T> {
-        if let Some(message) = self.state.ready.pop() {
-            // A freed ready slot may let the oldest overflow message advance.
-            self.state.overflow.refill(&self.state.ready);
-            return Some(message);
-        }
-
-        // Empty ready may race with stale activity, so let `refill`
-        // decide whether overflow is worth locking.
-        self.state.overflow.refill(&self.state.ready);
-        self.state.ready.pop()
-    }
-
-    fn is_disconnected(&self) -> bool {
-        self.state.closed.load(Ordering::Acquire) || self.state.senders.load(Ordering::Acquire) == 0
+        self.state.pop()
     }
 
     /// Receive the next message.
@@ -558,7 +704,39 @@ impl<T: Policy> Receiver<T> {
         if let Some(message) = self.pop() {
             return Ok(message);
         }
-        if self.is_disconnected() {
+        if self.state.is_disconnected() {
+            return self.pop().ok_or(TryRecvError::Disconnected);
+        }
+        Err(TryRecvError::Empty)
+    }
+}
+
+impl<T: LossyPolicy> LossyReceiver<T> {
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        self.state.poll_recv(cx)
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.state.pop()
+    }
+
+    /// Receive the next message.
+    ///
+    /// Returns `None` after all senders are dropped and all buffered messages
+    /// have been drained.
+    pub async fn recv(&mut self) -> Option<T> {
+        poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// Try to receive the next message without waiting.
+    ///
+    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
+    /// all buffered messages have been drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        if let Some(message) = self.pop() {
+            return Ok(message);
+        }
+        if self.state.is_disconnected() {
             return self.pop().ok_or(TryRecvError::Disconnected);
         }
         Err(TryRecvError::Empty)
@@ -567,8 +745,13 @@ impl<T: Policy> Receiver<T> {
 
 impl<T: Policy> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.state.closed.store(true, Ordering::Release);
-        self.state.overflow.drain(&self.state.ready);
+        self.state.close();
+    }
+}
+
+impl<T: LossyPolicy> Drop for LossyReceiver<T> {
+    fn drop(&mut self) {
+        self.state.close();
     }
 }
 
@@ -587,6 +770,27 @@ pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<
             state: state.clone(),
         },
         Receiver { state },
+    )
+}
+
+/// Create a new bounded lossy mailbox.
+pub fn new_lossy<T: LossyPolicy>(
+    metrics: impl Metrics,
+    capacity: NonZeroUsize,
+) -> (LossySender<T>, LossyReceiver<T>) {
+    let state = Arc::new(State {
+        ready: Ready::new(capacity.get()),
+        overflow: OverflowState::new(),
+        backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
+        closed: AtomicBool::new(false),
+        senders: AtomicUsize::new(1),
+        waker: AtomicWaker::new(),
+    });
+    (
+        LossySender {
+            state: state.clone(),
+        },
+        LossyReceiver { state },
     )
 }
 
@@ -652,6 +856,10 @@ mod tests {
         super::new(mocks::Metrics, capacity)
     }
 
+    fn new_lossy<T: LossyPolicy>(capacity: NonZeroUsize) -> (LossySender<T>, LossyReceiver<T>) {
+        super::new_lossy(mocks::Metrics, capacity)
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Message {
         Update(u64),
@@ -661,7 +869,7 @@ mod tests {
         Hint(u64),
     }
 
-    impl Policy for Message {
+    impl LossyPolicy for Message {
         type Overflow = VecDeque<Self>;
 
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -703,9 +911,8 @@ mod tests {
     impl Policy for Ack {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
@@ -749,7 +956,7 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_replaces_stale_overflow_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Update(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
@@ -760,7 +967,7 @@ mod tests {
 
     #[test_async]
     async fn policy_can_replace_stale_overflow_at_back() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
@@ -773,16 +980,16 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_rejects_non_replaceable_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue_lossy(Message::Vote(2)), Lossy::Rejected);
+        assert_eq!(sender.enqueue(Message::Vote(2)), Lossy::Rejected);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
 
     #[test_async]
     async fn full_inbox_retains_required_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
 
@@ -792,7 +999,7 @@ mod tests {
 
     #[test]
     fn try_recv_refills_from_overflow() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
 
@@ -804,7 +1011,7 @@ mod tests {
     fn backoff_metric_counts_backoff_feedback() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
+            let (sender, _receiver) = super::new_lossy(context.child("mailbox"), NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
             assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
             assert_eq!(sender.enqueue(Message::Buffered(3)), Feedback::Backoff);
@@ -821,9 +1028,9 @@ mod tests {
     fn lossy_rejected_feedback_is_not_accepted_or_counted_as_backoff() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
+            let (sender, _receiver) = super::new_lossy(context.child("mailbox"), NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-            let feedback = sender.enqueue_lossy(Message::Vote(2));
+            let feedback = sender.enqueue(Message::Vote(2));
 
             assert_eq!(feedback, Lossy::Rejected);
             assert!(!feedback.accepted());
@@ -838,7 +1045,7 @@ mod tests {
 
     #[test]
     fn try_recv_drains_buffered_messages_after_senders_drop() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
         drop(sender);
@@ -850,7 +1057,7 @@ mod tests {
 
     #[test]
     fn poll_recv_drains_buffered_messages_after_senders_drop() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
@@ -872,7 +1079,7 @@ mod tests {
 
     #[test]
     fn enqueue_uses_ready_capacity_after_partial_drain() {
-        let (sender, mut receiver) = new(NZUsize!(2));
+        let (sender, mut receiver) = new_lossy(NZUsize!(2));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
@@ -887,7 +1094,7 @@ mod tests {
 
     #[test]
     fn receiver_refills_overflow_after_partial_drain() {
-        let (sender, mut receiver) = new(NZUsize!(3));
+        let (sender, mut receiver) = new_lossy(NZUsize!(3));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Vote(3)), Feedback::Ok);
@@ -904,7 +1111,7 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_retains_unmatched_replaceable_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
 
@@ -914,7 +1121,7 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_replaces_stale_overflow_after_ready_fills() {
-        let (sender, mut receiver) = new(NZUsize!(2));
+        let (sender, mut receiver) = new_lossy(NZUsize!(2));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
@@ -927,7 +1134,7 @@ mod tests {
 
     #[test_async]
     async fn mailbox_capacity_is_soft_limit_for_required_messages() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
@@ -939,7 +1146,7 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_rejects_hint() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Backoff);
 
@@ -948,7 +1155,7 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_can_replace_or_drop_by_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
         assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
         assert_eq!(sender.enqueue(Message::Hint(3)), Feedback::Backoff);
@@ -959,7 +1166,7 @@ mod tests {
 
     #[test_async]
     async fn empty_inbox_wakes_on_enqueue() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
 
         let next = receiver.recv();
         pin_mut!(next);
@@ -971,7 +1178,7 @@ mod tests {
 
     #[test]
     fn pending_recv_wakes_when_senders_drop() {
-        let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
@@ -987,7 +1194,7 @@ mod tests {
 
     #[test]
     fn pending_recv_wakes_on_handled_overflow_enqueue() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
@@ -1006,7 +1213,7 @@ mod tests {
 
     #[test]
     fn receiver_drop_blocks_ready_fast_path_feedback() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
@@ -1020,7 +1227,7 @@ mod tests {
 
     #[test_async]
     async fn empty_inbox_closes_when_senders_drop() {
-        let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+        let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
         drop(sender);
 
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
@@ -1029,7 +1236,7 @@ mod tests {
 
     #[test]
     fn enqueue_after_receiver_drop_returns_closed() {
-        let (sender, receiver) = new(NZUsize!(1));
+        let (sender, receiver) = new_lossy(NZUsize!(1));
         drop(receiver);
 
         assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Closed);
@@ -1063,10 +1270,9 @@ mod tests {
     impl Policy for ClearingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
             overflow.clear();
-            true
         }
     }
 
@@ -1095,9 +1301,8 @@ mod tests {
     impl Policy for SpillMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
@@ -1139,6 +1344,10 @@ mod loom_tests {
 
     fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
         super::new(mocks::Metrics, capacity)
+    }
+
+    fn new_lossy<T: LossyPolicy>(capacity: NonZeroUsize) -> (LossySender<T>, LossyReceiver<T>) {
+        super::new_lossy(mocks::Metrics, capacity)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1186,7 +1395,7 @@ mod loom_tests {
         }
     }
 
-    impl Policy for Message {
+    impl LossyPolicy for Message {
         type Overflow = VecDeque<Self>;
 
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -1203,7 +1412,7 @@ mod loom_tests {
     impl Policy for OrderedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             let gate = match &message {
                 Self::Item(_) => None,
                 Self::Coordinated(_, gate) => Some(gate.clone()),
@@ -1215,11 +1424,10 @@ mod loom_tests {
                     thread::yield_now();
                 }
             }
-            true
         }
     }
 
-    impl Policy for ReplacingMessage {
+    impl LossyPolicy for ReplacingMessage {
         type Overflow = VecDeque<Self>;
 
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -1244,18 +1452,16 @@ mod loom_tests {
     impl Policy for TrackedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
     impl Policy for CyclicMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
@@ -1328,7 +1534,7 @@ mod loom_tests {
     #[test]
     fn sender_drop_racing_waker_registration_wakes_or_disconnects() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1354,7 +1560,7 @@ mod loom_tests {
     #[test]
     fn sender_enqueue_then_drop_racing_poll_recv_drains_message() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1386,7 +1592,7 @@ mod loom_tests {
     #[test]
     fn sender_enqueue_then_drop_racing_try_recv_drains_message() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
 
             let enqueue = thread::spawn(move || {
                 assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
@@ -1413,7 +1619,7 @@ mod loom_tests {
     #[test]
     fn handled_enqueue_wakes_registered_receiver() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1434,7 +1640,7 @@ mod loom_tests {
     #[test]
     fn receiver_drop_racing_ready_fast_path_feedback_wakes_if_ready() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1586,7 +1792,7 @@ mod loom_tests {
     #[test]
     fn concurrent_close_and_ready_enqueue_remains_closed() {
         loom::model(|| {
-            let (sender, receiver) = new::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_lossy::<Message>(NZUsize!(1));
 
             let enqueue_sender = sender.clone();
             let enqueue = thread::spawn(move || {
@@ -1606,7 +1812,7 @@ mod loom_tests {
     #[test]
     fn concurrent_close_and_overflow_enqueue_remains_closed() {
         loom::model(|| {
-            let (sender, receiver) = new::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_lossy::<Message>(NZUsize!(1));
             assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
 
             let enqueue_sender = sender.clone();
@@ -1627,7 +1833,7 @@ mod loom_tests {
     #[test]
     fn concurrent_spill_and_refill_preserves_messages() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
             let idle_sender = sender.clone();
             assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
 
@@ -1660,7 +1866,7 @@ mod loom_tests {
     #[test]
     fn concurrent_spill_senders_preserve_messages() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(1));
             let idle_sender = sender.clone();
             assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
 
@@ -1685,7 +1891,7 @@ mod loom_tests {
     #[test]
     fn concurrent_replace_keeps_one_overflow_message() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<ReplacingMessage>(NZUsize!(1));
+            let (sender, mut receiver) = new_lossy::<ReplacingMessage>(NZUsize!(1));
             let idle_sender = sender.clone();
             assert_eq!(sender.enqueue(ReplacingMessage::FillReady), Feedback::Ok);
             assert_eq!(
@@ -1711,7 +1917,7 @@ mod loom_tests {
     #[test]
     fn stale_overflow_hint_retries_ready_before_policy() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(2));
+            let (sender, mut receiver) = new_lossy::<Message>(NZUsize!(2));
             assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
             assert_eq!(sender.enqueue(Message::Drop(1)), Feedback::Ok);
             assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Backoff);

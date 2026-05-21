@@ -143,9 +143,8 @@ pub enum Message<C: PublicKey> {
 impl<C: PublicKey> Policy for Message<C> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         overflow.push_back(message);
-        true
     }
 }
 

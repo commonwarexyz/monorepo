@@ -1,5 +1,5 @@
 use crate::authenticated::{discovery::actors::tracker::Reservation, Mailbox};
-use commonware_actor::{mailbox::Policy, Feedback, Lossy};
+use commonware_actor::{mailbox::LossyPolicy, Feedback, Lossy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
@@ -18,7 +18,7 @@ pub enum Message<O: Sink, I: Stream, P: PublicKey> {
     },
 }
 
-impl<P: PublicKey, O: Sink, I: Stream> Policy for Message<O, I, P> {
+impl<P: PublicKey, O: Sink, I: Stream> LossyPolicy for Message<O, I, P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -39,7 +39,7 @@ impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
         connection: (Sender<O>, Receiver<I>),
         reservation: Reservation<P>,
     ) -> Lossy<Feedback> {
-        self.0.enqueue_lossy(Message::Spawn {
+        self.0.enqueue(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
             connection,
             reservation,

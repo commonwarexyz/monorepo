@@ -134,7 +134,7 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// messages are dropped (they would likely no longer be useful by the time we get back to them).
 struct Decoded<P: PublicKey, V>(P, V);
 
-impl<P: PublicKey, V> mailbox::Policy for Decoded<P, V> {
+impl<P: PublicKey, V> mailbox::LossyPolicy for Decoded<P, V> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -144,7 +144,7 @@ impl<P: PublicKey, V> mailbox::Policy for Decoded<P, V> {
 
 /// Receiver half for successfully decoded messages from a [`WrappedBackgroundReceiver`].
 pub struct BackgroundReceiver<P: PublicKey, V> {
-    receiver: mailbox::Receiver<Decoded<P, V>>,
+    receiver: mailbox::LossyReceiver<Decoded<P, V>>,
 }
 
 impl<P: PublicKey, V> BackgroundReceiver<P, V> {
@@ -169,7 +169,7 @@ where
     receiver: R,
     codec_config: V::Cfg,
     blocker: B,
-    sender: mailbox::Sender<Decoded<P, V>>,
+    sender: mailbox::LossySender<Decoded<P, V>>,
     max_concurrency: usize,
 }
 
@@ -194,7 +194,7 @@ where
         channel_capacity: NonZeroUsize,
         strategy: &impl Strategy,
     ) -> (Self, BackgroundReceiver<P, V>) {
-        let (tx, rx) = mailbox::new(context.child("mailbox"), channel_capacity);
+        let (tx, rx) = mailbox::new_lossy(context.child("mailbox"), channel_capacity);
         (
             Self {
                 context: ContextCell::new(context),
@@ -272,13 +272,13 @@ where
 
     fn handle_decode_result(
         blocker: &mut B,
-        sender: &mut mailbox::Sender<Decoded<P, V>>,
+        sender: &mut mailbox::LossySender<Decoded<P, V>>,
         result: (P, Result<V, commonware_codec::Error>),
     ) {
         let (peer, decode_result) = result;
         match decode_result {
             Ok(value) => {
-                let _ = sender.enqueue_lossy(Decoded(peer, value));
+                let _ = sender.enqueue(Decoded(peer, value));
             }
             Err(err) => {
                 crate::block!(blocker, peer, ?err, "received invalid message");

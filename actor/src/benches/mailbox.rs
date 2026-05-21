@@ -51,10 +51,10 @@ impl Metrics for NoopMetrics {
     }
 }
 
-fn new<T: mailbox::Policy>(
+fn new<T: mailbox::LossyPolicy>(
     capacity: std::num::NonZeroUsize,
-) -> (mailbox::Sender<T>, mailbox::Receiver<T>) {
-    mailbox::new(NoopMetrics, capacity)
+) -> (mailbox::LossySender<T>, mailbox::LossyReceiver<T>) {
+    mailbox::new_lossy(NoopMetrics, capacity)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +89,7 @@ impl Message {
     }
 }
 
-impl mailbox::Policy for Message {
+impl mailbox::LossyPolicy for Message {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -257,7 +257,7 @@ fn bench_overflow_drop(c: &mut Criterion) {
             },
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
-                    let result = sender.enqueue_lossy(black_box(Message::drop()));
+                    let result = sender.enqueue(black_box(Message::drop()));
                     assert_eq!(result, Lossy::Rejected);
                     black_box(result);
                 }
@@ -294,7 +294,12 @@ fn bench_overflow_spill(c: &mut Criterion) {
     group.finish();
 }
 
-fn replace_queue(newest: bool) -> (mailbox::Sender<Message>, mailbox::Receiver<Message>) {
+fn replace_queue(
+    newest: bool,
+) -> (
+    mailbox::LossySender<Message>,
+    mailbox::LossyReceiver<Message>,
+) {
     let (sender, receiver) = new::<Message>(NZUsize!(REPLACE_CAPACITY));
 
     for _ in 0..REPLACE_CAPACITY {

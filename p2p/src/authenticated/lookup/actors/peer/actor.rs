@@ -29,8 +29,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     send_batch_size: usize,
 
     control: ring::Receiver<Message>,
-    high: mailbox::Receiver<RelayMessage<EncodedData>>,
-    low: mailbox::Receiver<RelayMessage<EncodedData>>,
+    high: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+    low: mailbox::LossyReceiver<RelayMessage<EncodedData>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -99,8 +99,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
         control: &mut ring::Receiver<Message>,
-        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        high: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
     ) -> Result<(), Error> {
@@ -127,8 +127,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
     async fn recv_prioritized(
         control: &mut ring::Receiver<Message>,
-        high: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::Receiver<RelayMessage<EncodedData>>,
+        high: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
+        low: &mut mailbox::LossyReceiver<RelayMessage<EncodedData>>,
     ) -> Prioritized<Message, EncodedData> {
         select! {
             msg = control.next() => msg.map_or(Prioritized::Closed, Prioritized::Control),
@@ -306,8 +306,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 // processing of Ping messages, causing the peer connection to
                                 // stall and potentially disconnect.
                                 let sender = senders.get_mut(&data.channel).unwrap();
-                                let _ = sender
-                                    .enqueue_lossy(channels::Inbound((peer.clone(), data.message)));
+                                let _ =
+                                    sender.enqueue(channels::Inbound((peer.clone(), data.message)));
                             }
                             types::Message::Ping => {
                                 // We ignore ping messages, they are only used to keep
@@ -405,7 +405,7 @@ mod tests {
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
-        let (router_sender, _router_receiver) = commonware_actor::mailbox::new::<
+        let (router_sender, _router_receiver) = commonware_actor::mailbox::new_lossy::<
             router::Message<PublicKey>,
         >(
             context.child("router_mailbox"), NZUsize!(10)

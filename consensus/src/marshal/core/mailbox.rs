@@ -477,10 +477,10 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         // A closed responder cannot be served
         if message.response_closed() {
-            return true;
+            return;
         }
         match message {
             // Coalesce hints: a single entry per height with a unioned target set
@@ -498,14 +498,13 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             // Queue if the new message is still useful
             message => {
                 if message.stale(overflow.height()) {
-                    return true;
+                    return;
                 }
                 overflow
                     .messages
                     .push_back(PendingMessage::Message(message));
             }
         }
-        true
     }
 }
 
@@ -1087,12 +1086,9 @@ mod tests {
             },
         );
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, wait));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, by_round));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            by_commitment
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, wait);
+        <TestMessage as Policy>::handle(&mut overflow, by_round);
+        <TestMessage as Policy>::handle(&mut overflow, by_commitment);
 
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);
@@ -1139,10 +1135,7 @@ mod tests {
 
         let (current_closed, current_closed_rx) = subscribe_by_digest(3);
         drop(current_closed_rx);
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            current_closed
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, current_closed);
 
         assert!(!has_subscription(&overflow, 1));
         assert!(has_subscription(&overflow, 2));
@@ -1170,10 +1163,7 @@ mod tests {
 
         let (current_closed, current_closed_rx) = get_finalization(3);
         drop(current_closed_rx);
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            current_closed
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, current_closed);
 
         assert!(!has_get_block(&overflow, 1));
         assert!(has_get_info(&overflow, 2));

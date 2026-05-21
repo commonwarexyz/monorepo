@@ -5,7 +5,7 @@ use crate::{
     Channel, Message as NetworkMessage, Recipients,
 };
 use commonware_actor::{
-    mailbox::{self, Policy},
+    mailbox::{self, LossyPolicy},
     Feedback, Lossy,
 };
 use commonware_cryptography::PublicKey;
@@ -19,7 +19,7 @@ use std::{
 
 pub(crate) struct Inbound<P: PublicKey>(pub(crate) NetworkMessage<P>);
 
-impl<P: PublicKey> Policy for Inbound<P> {
+impl<P: PublicKey> LossyPolicy for Inbound<P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -111,7 +111,7 @@ where
 
 /// Channel to asynchronously receive messages from a channel.
 pub struct Receiver<P: PublicKey> {
-    receiver: mailbox::Receiver<Inbound<P>>,
+    receiver: mailbox::LossyReceiver<Inbound<P>>,
 }
 
 impl<P: PublicKey> Debug for Receiver<P> {
@@ -121,7 +121,7 @@ impl<P: PublicKey> Debug for Receiver<P> {
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) const fn new(receiver: mailbox::Receiver<Inbound<P>>) -> Self {
+    pub(super) const fn new(receiver: mailbox::LossyReceiver<Inbound<P>>) -> Self {
         Self { receiver }
     }
 }
@@ -147,7 +147,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: router::Messenger<P>,
     max_size: u32,
-    receivers: BTreeMap<Channel, (Quota, mailbox::Sender<Inbound<P>>)>,
+    receivers: BTreeMap<Channel, (Quota, mailbox::LossySender<Inbound<P>>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
@@ -167,7 +167,7 @@ impl<P: PublicKey> Channels<P> {
         context: C,
     ) -> (Sender<P, C>, Receiver<P>) {
         let backlog = NonZeroUsize::new(backlog).expect("message backlog must be non-zero");
-        let (sender, receiver) = mailbox::new(context.child("mailbox"), backlog);
+        let (sender, receiver) = mailbox::new_lossy(context.child("mailbox"), backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }
@@ -183,7 +183,7 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u64, (Quota, mailbox::Sender<Inbound<P>>)> {
+    pub fn collect(self) -> BTreeMap<u64, (Quota, mailbox::LossySender<Inbound<P>>)> {
         self.receivers
     }
 }

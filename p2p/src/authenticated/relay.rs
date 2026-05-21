@@ -1,5 +1,5 @@
 use commonware_actor::{
-    mailbox::{self, Policy},
+    mailbox::{self, LossyPolicy},
     Feedback, Lossy,
 };
 use commonware_macros::select;
@@ -14,7 +14,7 @@ impl<T> Message<T> {
     }
 }
 
-impl<T> Policy for Message<T> {
+impl<T> LossyPolicy for Message<T> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -23,21 +23,21 @@ impl<T> Policy for Message<T> {
 }
 
 pub(crate) struct Receivers<T> {
-    pub(crate) low: mailbox::Receiver<Message<T>>,
-    pub(crate) high: mailbox::Receiver<Message<T>>,
+    pub(crate) low: mailbox::LossyReceiver<Message<T>>,
+    pub(crate) high: mailbox::LossyReceiver<Message<T>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Relay<T> {
-    low: mailbox::Sender<Message<T>>,
-    high: mailbox::Sender<Message<T>>,
+    low: mailbox::LossySender<Message<T>>,
+    high: mailbox::LossySender<Message<T>>,
 }
 
 impl<T> Relay<T> {
     /// Creates a prioritized relay backed by bounded low and high priority mailboxes.
     pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, Receivers<T>) {
-        let (low_sender, low_receiver) = mailbox::new(metrics.child("low"), size);
-        let (high_sender, high_receiver) = mailbox::new(metrics.child("high"), size);
+        let (low_sender, low_receiver) = mailbox::new_lossy(metrics.child("low"), size);
+        let (high_sender, high_receiver) = mailbox::new_lossy(metrics.child("high"), size);
         (
             Self {
                 low: low_sender,
@@ -56,7 +56,7 @@ impl<T> Relay<T> {
     /// and did not handle the message, and [`Feedback::Closed`] means the receiver is gone.
     pub fn send(&self, message: T, priority: bool) -> Lossy<Feedback> {
         let sender = if priority { &self.high } else { &self.low };
-        sender.enqueue_lossy(Message(message))
+        sender.enqueue(Message(message))
     }
 }
 
@@ -71,10 +71,10 @@ pub enum Prioritized<C, D> {
 }
 
 /// Awaits a message from control, high, or low priority receivers.
-pub async fn recv_prioritized<C: Policy, D>(
-    control: &mut mailbox::Receiver<C>,
-    high: &mut mailbox::Receiver<Message<D>>,
-    low: &mut mailbox::Receiver<Message<D>>,
+pub async fn recv_prioritized<C: LossyPolicy, D>(
+    control: &mut mailbox::LossyReceiver<C>,
+    high: &mut mailbox::LossyReceiver<Message<D>>,
+    low: &mut mailbox::LossyReceiver<Message<D>>,
 ) -> Prioritized<C, D> {
     select! {
         msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
@@ -88,7 +88,7 @@ pub async fn recv_prioritized<C: Policy, D>(
 }
 
 /// Attempts to receive one data message from a relay receiver.
-pub(crate) fn try_recv<T>(receiver: &mut mailbox::Receiver<Message<T>>) -> Option<T> {
+pub(crate) fn try_recv<T>(receiver: &mut mailbox::LossyReceiver<Message<T>>) -> Option<T> {
     receiver.try_recv().ok().map(Message::into_inner)
 }
 

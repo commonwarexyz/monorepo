@@ -37,7 +37,7 @@ pub struct Actor<
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
 
-    receiver: mailbox::Receiver<Message<O, I, C>>,
+    receiver: mailbox::LossyReceiver<Message<O, I, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,

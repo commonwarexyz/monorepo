@@ -1,5 +1,5 @@
 use crate::authenticated::discovery::types;
-use commonware_actor::mailbox::{self, Policy};
+use commonware_actor::mailbox::{self, LossyPolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Metrics;
 use std::{collections::VecDeque, fmt, num::NonZeroUsize};
@@ -17,7 +17,7 @@ pub enum Message<C: PublicKey> {
     Kill,
 }
 
-impl<C: PublicKey> Policy for Message<C> {
+impl<C: PublicKey> LossyPolicy for Message<C> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
@@ -31,20 +31,23 @@ impl<C: PublicKey> Policy for Message<C> {
     }
 }
 
-pub struct Mailbox<C: PublicKey>(mailbox::Sender<Message<C>>);
+pub struct Mailbox<C: PublicKey>(mailbox::LossySender<Message<C>>);
 
 impl<C: PublicKey> Mailbox<C> {
-    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, mailbox::Receiver<Message<C>>) {
-        let (sender, receiver) = mailbox::new(metrics, size);
+    pub fn new(
+        metrics: impl Metrics,
+        size: NonZeroUsize,
+    ) -> (Self, mailbox::LossyReceiver<Message<C>>) {
+        let (sender, receiver) = mailbox::new_lossy(metrics, size);
         (Self(sender), receiver)
     }
 
     pub fn bit_vec(&self, bit_vec: types::BitVec) {
-        let _ = self.0.enqueue_lossy(Message::BitVec(bit_vec));
+        let _ = self.0.enqueue(Message::BitVec(bit_vec));
     }
 
     pub fn peers(&self, peers: Vec<types::Info<C>>) {
-        let _ = self.0.enqueue_lossy(Message::Peers(peers));
+        let _ = self.0.enqueue(Message::Peers(peers));
     }
 
     pub fn kill(&self) {
