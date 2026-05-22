@@ -89,12 +89,11 @@ where
     let clock = clock.clone();
     marshal
         .subscribe_parent(child)
-        .map(move |parent| match parent {
-            Some(parent) => {
+        .map(move |parent| {
+            parent.map(|parent| {
                 timer.observe(clock.as_ref());
-                Some((expected, parent))
-            }
-            None => None,
+                (expected, parent)
+            })
         })
         .boxed()
 }
