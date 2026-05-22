@@ -53,6 +53,7 @@ impl<E: Context> Stream<E> {
         let metadata = Metadata::init(
             context,
             metadata::Config {
+                // The application metadata name is retained for legacy support.
                 partition: format!("{partition_prefix}-application-metadata"),
                 codec_config: (),
             },

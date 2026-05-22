@@ -177,11 +177,7 @@ where
         )
         .await;
 
-        let stream = Stream::new(
-            context.child("application_metadata"),
-            &config.partition_prefix,
-        )
-        .await;
+        let stream = Stream::new(context.child("stream"), &config.partition_prefix).await;
         let last_processed_height = stream.processed_height().unwrap_or_else(Height::zero);
 
         // Genesis is a local anchor. A floor finalization is verified and
