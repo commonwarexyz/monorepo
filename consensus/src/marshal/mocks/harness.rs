@@ -1323,7 +1323,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             parent = digest;
             parent_commitment = commitment;
         }
-        while (application.blocks().len() as u64) < CHAIN_LEN {
+        while application.tip().map(|(height, _)| height) != Some(Height::new(CHAIN_LEN)) {
             context.sleep(Duration::from_millis(10)).await;
         }
         context.sleep(Duration::from_millis(100)).await;
@@ -1491,13 +1491,18 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                 H::verify(&mut handle, round, &block, &mut peers).await;
                 H::report_finalization(&mut mailbox, finalization.clone()).await;
 
-                let height = application.acknowledged().await;
-                assert_eq!(
-                    height,
-                    Height::new(1),
-                    "expected the first delivered finalized block to become visible at height 1 \
-                     before restart (seed={seed})"
-                );
+                loop {
+                    let height = application.acknowledged().await;
+                    if height == Height::new(1) {
+                        break;
+                    }
+                    assert_eq!(
+                        height,
+                        Height::zero(),
+                        "only genesis may precede the first finalized block before restart \
+                         (seed={seed})"
+                    );
+                }
             }
         });
 
@@ -2925,7 +2930,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             }
             finished = true;
             for app in applications.values() {
-                if app.blocks().len() != NUM_BLOCKS as usize {
+                if app.blocks().len() != (NUM_BLOCKS + 1) as usize {
                     finished = false;
                     break;
                 }
@@ -2981,6 +2986,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             extra: setup.extra,
         }];
         let mut handle = handles[0].clone();
+        assert_eq!(application.acknowledged().await, Height::zero());
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut parent = Sha256::hash(b"");
@@ -3077,6 +3083,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             extra: setup.extra,
         }];
         let mut handle = handles[0].clone();
+        assert_eq!(application.acknowledged().await, Height::zero());
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut parent = Sha256::hash(b"");
@@ -3142,6 +3149,67 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         )
         .await;
         assert_eq!(restart.height, Height::new(3));
+    });
+}
+
+/// Test that genesis is delivered once and then suppressed after its ack is durable.
+pub fn genesis_emitted_once<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let validator = participants[0].clone();
+        let setup = H::setup_validator_with(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            validator.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::<H::ApplicationBlock>::manual_ack(),
+        )
+        .await;
+        assert_eq!(setup.height, Height::zero());
+        assert_eq!(setup.application.acknowledged().await, Height::zero());
+        assert!(setup.application.blocks().contains_key(&Height::zero()));
+
+        // Let marshal persist the height-zero acknowledgement before restart.
+        context.sleep(Duration::from_millis(10)).await;
+        setup.actor_handle.abort();
+        drop(setup.mailbox);
+        drop(setup.extra);
+        context.sleep(Duration::from_millis(10)).await;
+
+        let restart = H::setup_validator_with(
+            context
+                .child("validator_restart")
+                .with_attribute("index", 0),
+            &mut oracle,
+            validator,
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::<H::ApplicationBlock>::manual_ack(),
+        )
+        .await;
+        assert_eq!(restart.height, Height::zero());
+        context.sleep(Duration::from_millis(100)).await;
+        assert!(
+            restart.application.blocks().is_empty(),
+            "genesis should not be emitted again after height zero is acknowledged"
+        );
+        assert!(
+            restart.application.pending_ack_heights().is_empty(),
+            "restart should not leave a duplicate genesis ack pending"
+        );
     });
 }
 
@@ -3240,7 +3308,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             context.sleep(Duration::from_secs(1)).await;
             finished = true;
             for app in applications.values().skip(1) {
-                if app.blocks().len() != NUM_BLOCKS as usize {
+                if app.blocks().len() != (NUM_BLOCKS + 1) as usize {
                     finished = false;
                     break;
                 }
@@ -3289,7 +3357,7 @@ pub fn sync_height_floor<H: TestHarness>() {
         while !finished {
             context.sleep(Duration::from_secs(1)).await;
             finished = true;
-            if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR + 1) as usize {
+            if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR + 2) as usize {
                 finished = false;
                 continue;
             }
@@ -3393,7 +3461,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             H::report_finalization(&mut mailbox, finalization).await;
         }
 
-        while application.blocks().len() < 20 {
+        while application.tip().map(|(height, _)| height) != Some(Height::new(20)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 
@@ -4712,7 +4780,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         }
 
         // Wait for validator 0 to process all blocks
-        while app0.blocks().len() < 5 {
+        while app0.tip().map(|(height, _)| height) != Some(Height::new(5)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 
@@ -5027,7 +5095,7 @@ pub fn init_processed_height<H: TestHarness>() {
         }
 
         // Wait for application to process all blocks
-        while app.blocks().len() < 5 {
+        while app.tip().map(|(height, _)| height) != Some(Height::new(5)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 

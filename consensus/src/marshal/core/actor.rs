@@ -68,6 +68,40 @@ struct ResolverDelivery<V: Variant> {
     response: oneshot::Sender<bool>,
 }
 
+/// Last block acknowledged by the application.
+#[derive(Clone, Copy)]
+enum ApplicationFloor {
+    BeforeGenesis,
+    Acknowledged(Height),
+}
+
+impl ApplicationFloor {
+    const fn from_metadata(height: Option<Height>) -> Self {
+        match height {
+            Some(height) => Self::Acknowledged(height),
+            None => Self::BeforeGenesis,
+        }
+    }
+
+    const fn processed_height(self) -> Height {
+        match self {
+            Self::BeforeGenesis => Height::zero(),
+            Self::Acknowledged(height) => height,
+        }
+    }
+
+    fn next_dispatch_height(self) -> Height {
+        match self {
+            Self::BeforeGenesis => Height::zero(),
+            Self::Acknowledged(height) => height.next(),
+        }
+    }
+
+    const fn acknowledge(&mut self, height: Height) {
+        *self = Self::Acknowledged(height);
+    }
+}
+
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
@@ -121,6 +155,8 @@ where
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
+    // Application delivery cursor
+    application_floor: ApplicationFloor,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
     // Highest known finalized height
@@ -193,10 +229,9 @@ where
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_processed_height = application_metadata
-            .get(&LATEST_KEY)
-            .copied()
-            .unwrap_or(Height::zero());
+        let application_floor =
+            ApplicationFloor::from_metadata(application_metadata.get(&LATEST_KEY).copied());
+        let last_processed_height = application_floor.processed_height();
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
@@ -245,6 +280,7 @@ where
                 strategy: config.strategy,
                 last_proposed_block: None,
                 floor,
+                application_floor,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
@@ -1586,7 +1622,7 @@ where
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
-                .next_dispatch_height(self.floor.processed_height());
+                .next_dispatch_height(self.application_floor.next_dispatch_height());
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
@@ -2042,6 +2078,7 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
+        self.application_floor.acknowledge(height);
         self.application_metadata.put(LATEST_KEY, height);
         self.floor.set_processed_height(height);
         let _ = self
