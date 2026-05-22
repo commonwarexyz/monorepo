@@ -418,13 +418,17 @@ async fn wait_for_validator_height<H: TestHarness>(
 async fn assert_validator_matches_canonical<H: TestHarness>(
     validator: &HailstormValidator<H>,
     canonical: &[CanonicalEntry<H>],
+    num_participants: u16,
     label: &str,
 ) {
+    let genesis_digest = H::digest(&H::genesis_block(num_participants));
     let delivered = validator.application.blocks();
     for (height, block) in delivered {
-        let (_, expected_digest, _) = canonical
+        let expected_digest = canonical
             .iter()
             .find(|(expected_height, _, _)| *expected_height == height)
+            .map(|(_, digest, _)| *digest)
+            .or_else(|| (height == Height::zero()).then_some(genesis_digest))
             .unwrap_or_else(|| {
                 panic!(
                     "{label}: unexpected delivered block at height {}",
@@ -433,25 +437,27 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
             });
         assert_eq!(
             block.digest(),
-            *expected_digest,
+            expected_digest,
             "{label}: application delivered wrong digest at height {}",
             height.get()
         );
     }
 
     if let Some((height, digest)) = validator.application.tip() {
-        let (_, expected_digest, _) = canonical
-            .iter()
-            .find(|(expected_height, _, _)| *expected_height == height)
-            .unwrap_or_else(|| {
-                panic!(
-                    "{label}: unexpected delivered tip at height {}",
-                    height.get()
-                )
-            });
+        let (expected_height, expected_digest) =
+            if let Some((expected_height, expected_digest, _)) = canonical.last() {
+                (*expected_height, *expected_digest)
+            } else {
+                (Height::zero(), genesis_digest)
+            };
+        assert_eq!(
+            height,
+            expected_height,
+            "{label}: application reported wrong tip height",
+        );
         assert_eq!(
             digest,
-            *expected_digest,
+            expected_digest,
             "{label}: application reported wrong tip digest at height {}",
             height.get()
         );
@@ -508,12 +514,19 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
 async fn assert_active_validators_match_canonical<H: TestHarness>(
     validators: &[Option<HailstormValidator<H>>],
     canonical: &[CanonicalEntry<H>],
+    num_participants: u16,
 ) {
     for idx in active_validator_indices(validators) {
         let validator = validators[idx]
             .as_ref()
             .expect("active validator should be present");
-        assert_validator_matches_canonical(validator, canonical, &format!("validator_{idx}")).await;
+        assert_validator_matches_canonical(
+            validator,
+            canonical,
+            num_participants,
+            &format!("validator_{idx}"),
+        )
+        .await;
     }
 }
 
@@ -650,7 +663,12 @@ async fn advance_hailstorm_to<H: TestHarness>(
         finalize_hailstorm_height(pending, context, state).await;
     }
 
-    assert_active_validators_match_canonical(state.validators, state.canonical).await;
+    assert_active_validators_match_canonical(
+        state.validators,
+        state.canonical,
+        state.participants.len() as u16,
+    )
+    .await;
 }
 
 /// Stress marshal with repeated validator crashes and recoveries while a
@@ -857,7 +875,12 @@ pub fn hailstorm<H: TestHarness>(
                     .await;
                 }
             }
-            assert_active_validators_match_canonical(&validators, &canonical).await;
+            assert_active_validators_match_canonical(
+                &validators,
+                &canonical,
+                participants.len() as u16,
+            )
+            .await;
             info!(
                 seed,
                 shutdown_idx,
