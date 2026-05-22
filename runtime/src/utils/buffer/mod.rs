@@ -1518,6 +1518,27 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_sync_failed_range_sync_does_not_mark_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let name = b"failed_range_sync";
+            let (blob, size) = context.open("partition", name).await.unwrap();
+            let writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+
+            // Keep the write buffered so sync attempts the clean `write_at_sync` path.
+            writer.write_at(0, b"abc").await.unwrap();
+
+            // Removing the blob makes the range-sync flush fail.
+            context.remove("partition", Some(name)).await.unwrap();
+            assert!(writer.sync().await.is_err());
+
+            // The failed `write_at_sync` must leave a pending full-sync barrier, so a
+            // later sync cannot report success.
+            assert!(writer.sync().await.is_err());
+        });
+    }
+
+    #[test_traced]
     fn test_write_sync_persists_prior_direct_flushes_with_buffered_tip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

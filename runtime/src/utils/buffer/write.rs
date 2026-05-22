@@ -44,7 +44,12 @@ impl<B: Blob> State<B> {
             self.write_at(offset, bufs).await?;
             self.sync().await
         } else {
-            self.blob.write_at_sync(offset, bufs).await
+            // If `write_at_sync` fails, a later sync must not treat the drained
+            // buffer as durable.
+            self.needs_sync = true;
+            self.blob.write_at_sync(offset, bufs).await?;
+            self.needs_sync = false;
+            Ok(())
         }
     }
 
