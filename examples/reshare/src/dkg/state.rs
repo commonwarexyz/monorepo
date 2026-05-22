@@ -16,7 +16,7 @@ use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
-        dkg::{
+        dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
@@ -656,8 +656,10 @@ impl<V: Variant, C: Signer> Player<V, C> {
         rng: &mut impl CryptoRngCore,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
-    {
+    ) -> Result<
+        (Output<V, C::PublicKey>, Share),
+        commonware_cryptography::bls12381::dkg::feldman_desmedt::Error,
+    > {
         self.player.finalize::<M, B>(rng, logs, strategy)
     }
 }
@@ -669,7 +671,7 @@ mod tests {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
-            dkg::Info,
+            dkg::feldman_desmedt::Info,
             primitives::{group::Scalar, sharing::Mode, variant::MinPk},
         },
         ed25519, Signer,

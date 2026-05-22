@@ -883,7 +883,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::{self, deal_anonymous},
+            dkg::feldman_desmedt as dkg,
             primitives::{
                 group::Scalar,
                 ops::threshold,
@@ -952,7 +952,7 @@ mod tests {
         let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 5);
         let (polynomial, shares) =
-            deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::signer(
             NAMESPACE,
             participants.keys().clone(),
@@ -976,7 +976,8 @@ mod tests {
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, _) = deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
+        let (polynomial, _) =
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
     }
 

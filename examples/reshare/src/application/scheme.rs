@@ -5,7 +5,7 @@ use crate::orchestrator::EpochTransition;
 use commonware_consensus::{simplex, types::Epoch};
 use commonware_cryptography::{
     bls12381::{
-        dkg,
+        dkg::feldman_desmedt as dkg,
         primitives::variant::{MinSig, Variant},
     },
     certificate::{self, Scheme},

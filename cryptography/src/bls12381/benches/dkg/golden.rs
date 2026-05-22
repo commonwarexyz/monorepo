@@ -1,5 +1,5 @@
 use commonware_codec::EncodeSize as _;
-use commonware_cryptography::bls12381::golden_dkg::{
+use commonware_cryptography::bls12381::dkg::golden::{
     self, DealerLog, Info, PrivateKey, PublicKey, Setup, SignedDealerLog,
 };
 use commonware_math::algebra::Random;
@@ -48,13 +48,13 @@ impl Bench {
     }
 
     fn deal(&self, rng: &mut impl CryptoRngCore) -> SignedDealerLog {
-        golden_dkg::deal(rng, &SETUP, &self.info, &self.me, None, &Sequential)
+        golden::deal(rng, &SETUP, &self.info, &self.me, None, &Sequential)
             .expect("honest deal should succeed")
     }
 }
 
 /// Time for a dealer to produce a [`SignedDealerLog`] addressed to `n` receivers.
-fn bench_golden_dkg_deal(c: &mut Criterion) {
+fn bench_deal(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
@@ -69,7 +69,7 @@ fn bench_golden_dkg_deal(c: &mut Criterion) {
                 },
                 |(info, me, mut rng)| {
                     black_box(
-                        golden_dkg::deal(&mut rng, &SETUP, &info, &me, None, &Sequential).unwrap(),
+                        golden::deal(&mut rng, &SETUP, &info, &me, None, &Sequential).unwrap(),
                     );
                 },
                 BatchSize::SmallInput,
@@ -82,8 +82,8 @@ fn bench_golden_dkg_deal(c: &mut Criterion) {
 ///
 /// Performs the full verification a real receiver does: the signature check
 /// via `SignedDealerLog::identify`, plus the eVRF batch check and per-dealing
-/// linear check via `golden_dkg::observe`.
-fn bench_golden_dkg_verify(c: &mut Criterion) {
+/// linear check via `golden::observe`.
+fn bench_verify(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
@@ -95,9 +95,7 @@ fn bench_golden_dkg_verify(c: &mut Criterion) {
                     let (pk, log) = signed.identify(&info).expect("honest log should identify");
                     let mut logs = BTreeMap::<PublicKey, DealerLog>::new();
                     logs.insert(pk, log);
-                    black_box(
-                        golden_dkg::observe(&mut rng, &SETUP, &info, logs, &Sequential).unwrap(),
-                    );
+                    black_box(golden::observe(&mut rng, &SETUP, &info, logs, &Sequential).unwrap());
                 },
                 BatchSize::SmallInput,
             );
@@ -109,7 +107,7 @@ fn bench_golden_dkg_verify(c: &mut Criterion) {
 ///
 /// Reported via stdout (no measured timing) in the same style as
 /// `coding/src/benches/bench_size.rs`.
-fn bench_golden_dkg_dealing_size(_c: &mut Criterion) {
+fn bench_dealing_size(_c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
@@ -127,7 +125,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
     targets =
-        bench_golden_dkg_deal,
-        bench_golden_dkg_verify,
-        bench_golden_dkg_dealing_size,
+        bench_deal,
+        bench_verify,
+        bench_dealing_size,
 }
