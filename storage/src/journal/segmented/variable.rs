@@ -1326,10 +1326,9 @@ mod tests {
             let mut incomplete_data = Vec::new();
             UInt(u32::MAX).write(&mut incomplete_data);
             incomplete_data.truncate(1);
-            blob.write_at(0, incomplete_data)
+            blob.write_at_sync(0, incomplete_data)
                 .await
                 .expect("Failed to write incomplete data");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1449,10 +1448,9 @@ mod tests {
             UInt(item_size).write(&mut buf); // Varint encoding
             let data = [2u8; 5];
             BufMut::put_slice(&mut buf, &data);
-            blob.write_at(0, buf)
+            blob.write_at_sync(0, buf)
                 .await
                 .expect("Failed to write incomplete item");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1508,11 +1506,9 @@ mod tests {
             let mut buf = Vec::new();
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
-            blob.write_at(0, buf)
+            blob.write_at_sync(0, buf)
                 .await
                 .expect("Failed to write item without checksum");
-
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1572,11 +1568,9 @@ mod tests {
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
             buf.put_u32(incorrect_checksum);
-            blob.write_at(0, buf)
+            blob.write_at_sync(0, buf)
                 .await
                 .expect("Failed to write item with bad checksum");
-
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context.child("storage"), cfg.clone())
@@ -1802,10 +1796,9 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(blob_size, vec![0u8; 16])
+            blob.write_at_sync(blob_size, vec![0u8; 16])
                 .await
                 .expect("Failed to add extra data");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.child("second"), cfg)
@@ -2296,10 +2289,9 @@ mod tests {
 
             // Write incomplete varint: 0xFF has continuation bit set, needs more bytes
             // This creates 2 trailing bytes that cannot form a valid item
-            blob.write_at(physical_size_before, vec![0xFF, 0xFF])
+            blob.write_at_sync(physical_size_before, vec![0xFF, 0xFF])
                 .await
                 .unwrap();
-            blob.sync().await.unwrap();
 
             // Reopen journal and replay starting PAST all valid items
             // (start_offset = valid_logical_size means we skip all valid data)

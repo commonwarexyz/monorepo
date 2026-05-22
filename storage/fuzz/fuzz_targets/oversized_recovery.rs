@@ -256,8 +256,7 @@ fn fuzz(input: FuzzInput) {
                             if overlaps_existing_blob(offset, data.len(), size) {
                                 index_page_integrity_may_be_invalidated = true;
                             }
-                            let _ = blob.write_at(offset, data.to_vec()).await;
-                            let _ = blob.sync().await;
+                            let _ = blob.write_at_sync(offset, data.to_vec()).await;
                         }
                     }
                 }
@@ -271,8 +270,7 @@ fn fuzz(input: FuzzInput) {
                     {
                         if size > 0 {
                             let offset = (size * (*offset_factor as u64)) / 256;
-                            let _ = blob.write_at(offset, data.to_vec()).await;
-                            let _ = blob.sync().await;
+                            let _ = blob.write_at_sync(offset, data.to_vec()).await;
                         }
                     }
                 }
@@ -290,16 +288,14 @@ fn fuzz(input: FuzzInput) {
                     if let Ok((blob, size)) =
                         context.open(INDEX_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at(size, garbage.to_vec()).await;
-                        let _ = blob.sync().await;
+                        let _ = blob.write_at_sync(size, garbage.to_vec()).await;
                     }
                 }
                 CorruptionType::ExtendGlob { section, garbage } => {
                     if let Ok((blob, size)) =
                         context.open(VALUE_PARTITION, &section.to_be_bytes()).await
                     {
-                        let _ = blob.write_at(size, garbage.to_vec()).await;
-                        let _ = blob.sync().await;
+                        let _ = blob.write_at_sync(size, garbage.to_vec()).await;
                     }
                 }
             }
