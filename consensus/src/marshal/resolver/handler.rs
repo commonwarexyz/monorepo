@@ -3,8 +3,8 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_runtime::Metrics;
 use commonware_resolver::{p2p::Producer, Consumer, Delivery, Fetch as ResolverFetch};
+use commonware_runtime::Metrics;
 use commonware_utils::{channel::oneshot, Span};
 use std::{
     collections::VecDeque,
@@ -109,10 +109,7 @@ impl<D: Digest> Handler<D> {
 }
 
 /// Creates a resolver receiver and handler pair.
-pub fn init<D: Digest>(
-    metrics: impl Metrics,
-    capacity: NonZeroUsize,
-) -> (Receiver<D>, Handler<D>) {
+pub fn init<D: Digest>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Receiver<D>, Handler<D>) {
     let (sender, receiver) = mailbox::new(metrics, capacity);
     (Receiver::new(receiver), Handler::new(sender))
 }
