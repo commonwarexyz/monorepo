@@ -3489,6 +3489,43 @@ mod tests {
         });
     }
 
+    #[test_traced("DEBUG")]
+    fn test_resize_page_boundary_shrink_uses_full_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Start with two durable full pages. The initial sync can persist them with one
+            // range-sync write.
+            let page_size = PAGE_SIZE.get() as usize;
+            let data = vec![11u8; page_size * 2];
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Shrinking to a page boundary resizes the blob but does not rewrite CRC metadata.
+            append.resize(PAGE_SIZE.get() as u64).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Only the resize needs a full sync, no additional writes are emitted by the shrink.
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let reopened = Append::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size().await, PAGE_SIZE.get() as u64);
+            let read = reopened.read_at(0, page_size).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..page_size]);
+        });
+    }
+
     #[test]
     fn test_reopen_partial_tail_append_and_resize() {
         let executor = deterministic::Runner::default();
