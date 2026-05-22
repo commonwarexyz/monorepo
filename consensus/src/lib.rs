@@ -92,9 +92,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Payload used to initialize the consensus engine.
-        fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Digest> + Send;
-
         /// Generate a new payload for the given context.
         ///
         /// If it is possible to generate a payload, the Digest should be returned over the provided
@@ -237,7 +234,7 @@ stability_scope!(ALPHA {
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use commonware_cryptography::certificate::Scheme;
-    use futures::Stream;
+    use crate::marshal::ancestry::Ancestry;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand::Rng;
 
@@ -258,12 +255,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// The block type produced by the application's builder.
         type Block: Block;
 
-        /// Payload used to initialize the consensus engine in the first epoch.
-        ///
-        /// This future may be cancelled before it completes. Implementations must be
-        /// cancellation-safe.
-        fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
-
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
@@ -272,7 +263,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
@@ -287,7 +278,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Stream<Item = Self::Block> + Send,
+            ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

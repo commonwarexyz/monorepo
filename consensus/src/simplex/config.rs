@@ -1,15 +1,16 @@
 use super::{
     elector::Config as Elector,
-    types::{Activity, Context},
+    types::{Activity, Context, Finalization},
 };
 use crate::{
     types::{Epoch, ViewDelta},
-    CertifiableAutomaton, Relay, Reporter,
+    CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
+use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Controls whether and how the engine proactively forwards certified blocks
@@ -37,6 +38,39 @@ impl ForwardingPolicy {
     /// Returns true if the policy is enabled.
     pub const fn is_enabled(&self) -> bool {
         !matches!(self, Self::Disabled)
+    }
+}
+
+/// The certified root from which a Simplex instance starts.
+#[derive(Clone, Debug)]
+pub enum Floor<S: Scheme, D: Digest> {
+    /// Start from the epoch genesis payload at view 0.
+    Genesis(D),
+    /// Start from an already-finalized proposal.
+    Finalized(Finalization<S, D>),
+}
+
+impl<S: Scheme, D: Digest> Floor<S, D> {
+    fn assert<Rng>(&self, epoch: Epoch, rng: &mut Rng, scheme: &S, strategy: &impl Strategy)
+    where
+        Rng: CryptoRngCore,
+        S: super::scheme::Scheme<D>,
+    {
+        if let Self::Finalized(finalization) = self {
+            assert_eq!(
+                finalization.epoch(),
+                epoch,
+                "floor finalization must be in the configured epoch"
+            );
+            assert!(
+                !finalization.view().is_zero(),
+                "use Floor::Genesis for the genesis view"
+            );
+            assert!(
+                finalization.verify(rng, scheme, strategy),
+                "floor finalization must verify"
+            );
+        }
     }
 }
 
@@ -102,6 +136,9 @@ where
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.
     pub epoch: Epoch,
 
+    /// Certified root for the consensus engine.
+    pub floor: Floor<S, D>,
+
     /// Number of bytes to buffer when replaying during startup.
     pub replay_buffer: NonZeroUsize,
 
@@ -157,7 +194,13 @@ impl<
     > Config<S, L, B, D, A, R, F, T>
 {
     /// Assert enforces that all configuration values are valid.
-    pub fn assert(&self) {
+    ///
+    /// The RNG is used to verify finalized floor certificates.
+    pub fn assert<Rng>(&self, rng: &mut Rng)
+    where
+        Rng: CryptoRngCore,
+        S: super::scheme::Scheme<D>,
+    {
         assert!(
             !self.scheme.participants().is_empty(),
             "there must be at least one participant"
@@ -194,5 +237,7 @@ impl<
             self.fetch_timeout > Duration::default(),
             "fetch timeout must be greater than zero"
         );
+        self.floor
+            .assert(self.epoch, rng, &self.scheme, &self.strategy);
     }
 }

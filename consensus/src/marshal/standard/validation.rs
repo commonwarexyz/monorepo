@@ -3,7 +3,7 @@ use crate::{
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::{CommitmentFallback, Mailbox, Variant},
+        core::{CommitmentFallback, Mailbox},
         standard::Standard,
     },
     simplex::types::Context,
@@ -13,8 +13,7 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics, Spawner};
-use commonware_utils::channel::oneshot::{self, error::RecvError};
-use futures::future::{ready, Either, Ready};
+use commonware_utils::channel::oneshot;
 use rand::Rng;
 use std::sync::Arc;
 use tracing::debug;
@@ -136,15 +135,12 @@ where
     B: Block + Clone,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let parent_request = fetch_parent(
+    let parent_request = marshal.subscribe_by_commitment(
         parent_commitment,
         CommitmentFallback::FetchByRound {
             round: Round::new(context.epoch(), parent_view),
         },
-        application,
-        marshal,
-    )
-    .await;
+    );
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
@@ -207,43 +203,6 @@ where
         return None;
     }
     Some(application_valid)
-}
-
-/// Fetches the parent block given its commitment and missing-block behavior.
-///
-/// If the commitment matches genesis, returns genesis directly. Otherwise, subscribes
-/// to marshal for parent availability according to `fallback`.
-///
-/// Use `FetchByRound` for certified parent lookups when the caller knows the
-/// certified parent round and commitment, such as proposal construction or
-/// verification of a known child. Do not derive the parent height from the
-/// finalized tip or the child block: proposals may build on a certified parent
-/// that is not finalized locally yet, and an unverified child may lie about its
-/// height. Once a round-bound response arrives it is heightable, and normal
-/// ancestry validation decides whether it matches the child.
-///
-/// The returned subscription receiver may resolve with `RecvError` if marshal
-/// cancels the request.
-#[inline]
-pub(super) async fn fetch_parent<E, S, A, B>(
-    parent_commitment: B::Digest,
-    fallback: CommitmentFallback,
-    application: &mut A,
-    marshal: &mut Mailbox<S, Standard<B>>,
-) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block + Clone,
-{
-    let genesis = application.genesis().await;
-    if parent_commitment == <Standard<B> as Variant>::commitment(&genesis) {
-        Either::Left(ready(Ok(genesis)))
-    } else {
-        let receiver = marshal.subscribe_by_commitment(parent_commitment, fallback);
-        Either::Right(receiver)
-    }
 }
 
 #[cfg(test)]

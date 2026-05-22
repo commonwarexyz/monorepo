@@ -402,7 +402,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                                     new_size = state.valid_offset,
                                                     "trailing bytes detected: truncating"
                                                 );
-                                                state.blob.resize(state.valid_offset).await.ok()?;
+                                                if let Err(err) =
+                                                    state.blob.resize(state.valid_offset).await
+                                                {
+                                                    batch.push(Err(err.into()));
+                                                    state.done = true;
+                                                    return Some((batch, state));
+                                                }
                                             }
                                             state.done = true;
                                             return if batch.is_empty() {
@@ -428,7 +434,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         new_size = state.valid_offset,
                                         "incomplete item at end: truncating"
                                     );
-                                    state.blob.resize(state.valid_offset).await.ok()?;
+                                    if let Err(err) = state.blob.resize(state.valid_offset).await {
+                                        batch.push(Err(err.into()));
+                                        state.done = true;
+                                        return Some((batch, state));
+                                    }
                                     state.done = true;
                                     return if batch.is_empty() {
                                         None
@@ -1316,10 +1326,9 @@ mod tests {
             let mut incomplete_data = Vec::new();
             UInt(u32::MAX).write(&mut incomplete_data);
             incomplete_data.truncate(1);
-            blob.write_at(0, incomplete_data)
+            blob.write_at_sync(0, incomplete_data)
                 .await
                 .expect("Failed to write incomplete data");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1340,6 +1349,72 @@ mod tests {
                 }
             }
             assert!(items.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_replay_reports_resize_error_on_trailing_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Leave one byte in the first page so the trailing bytes below cross the page
+            // boundary and repair must issue a physical resize.
+            let section = 1u64;
+            let item = [10u8; 1021];
+            let item_record_size =
+                UInt(item.encode_size() as u32).encode_size() + item.encode_size();
+            assert_eq!(item_record_size, PAGE_SIZE.get() as usize - 1);
+
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+            journal
+                .append(section, &item)
+                .await
+                .expect("Failed to append item");
+            journal
+                .append_raw(section, &[0xFF, 0xFF])
+                .await
+                .expect("Failed to append trailing bytes");
+            journal.sync(section).await.expect("Failed to sync journal");
+            drop(journal);
+
+            let journal = Journal::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to re-initialize journal");
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                resize_rate: Some(1.0),
+                ..Default::default()
+            };
+
+            let stream = journal
+                .replay(0, 0, NZUsize!(1024))
+                .await
+                .expect("unable to setup replay");
+            pin_mut!(stream);
+
+            let first = stream
+                .next()
+                .await
+                .expect("expected item before trailing bytes")
+                .expect("failed to replay valid item");
+            assert_eq!(first, (section, 0, item.encode_size() as u32, item));
+
+            // The trailing bytes cross the page boundary, so repair must issue a physical resize.
+            match stream.next().await {
+                Some(Err(_)) => {}
+                other => {
+                    panic!("expected resize error while repairing trailing bytes, got {other:?}")
+                }
+            }
+            assert!(stream.next().await.is_none());
         });
     }
 
@@ -1373,10 +1448,9 @@ mod tests {
             UInt(item_size).write(&mut buf); // Varint encoding
             let data = [2u8; 5];
             BufMut::put_slice(&mut buf, &data);
-            blob.write_at(0, buf)
+            blob.write_at_sync(0, buf)
                 .await
                 .expect("Failed to write incomplete item");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1432,11 +1506,9 @@ mod tests {
             let mut buf = Vec::new();
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
-            blob.write_at(0, buf)
+            blob.write_at_sync(0, buf)
                 .await
                 .expect("Failed to write item without checksum");
-
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context, cfg)
@@ -1496,11 +1568,9 @@ mod tests {
             UInt(item_size).write(&mut buf);
             BufMut::put_slice(&mut buf, item_data);
             buf.put_u32(incorrect_checksum);
-            blob.write_at(0, buf)
+            blob.write_at_sync(0, buf)
                 .await
                 .expect("Failed to write item with bad checksum");
-
-            blob.sync().await.expect("Failed to sync blob");
 
             // Initialize the journal
             let journal = Journal::init(context.child("storage"), cfg.clone())
@@ -1726,10 +1796,9 @@ mod tests {
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(blob_size, vec![0u8; 16])
+            blob.write_at_sync(blob_size, vec![0u8; 16])
                 .await
                 .expect("Failed to add extra data");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.child("second"), cfg)
@@ -2220,10 +2289,9 @@ mod tests {
 
             // Write incomplete varint: 0xFF has continuation bit set, needs more bytes
             // This creates 2 trailing bytes that cannot form a valid item
-            blob.write_at(physical_size_before, vec![0xFF, 0xFF])
+            blob.write_at_sync(physical_size_before, vec![0xFF, 0xFF])
                 .await
                 .unwrap();
-            blob.sync().await.unwrap();
 
             // Reopen journal and replay starting PAST all valid items
             // (start_offset = valid_logical_size means we skip all valid data)

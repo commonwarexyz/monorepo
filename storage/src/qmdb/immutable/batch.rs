@@ -254,7 +254,7 @@ where
             ops.push(Operation::Set(key.clone(), value.clone()));
             diff.push((key, DiffEntry { value, loc }));
         }
-        debug_assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
+        assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
 
         ops.push(Operation::Commit(metadata, inactivity_floor));
 

@@ -231,7 +231,7 @@ where
             .reads
             .locations_requested
             .inc_by(locs.len() as u64);
-        debug_assert!(
+        assert!(
             locs.windows(2).all(|w| w[0] < w[1]),
             "locations must be strictly increasing"
         );

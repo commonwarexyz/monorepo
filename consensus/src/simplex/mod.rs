@@ -23,8 +23,8 @@
 //! ### Genesis
 //!
 //! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
-//! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
-//! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//! [`Config::floor`](config::Config::floor) supplies the initial finalized state. Voting begins
+//! at view 1, with the first proposal referencing genesis as its parent.
 //!
 //! ### Specification for View `v`
 //!
@@ -347,7 +347,7 @@ cfg_if::cfg_if! {
 
         mod actors;
         pub mod config;
-        pub use config::{Config, ForwardingPolicy};
+        pub use config::{Config, Floor, ForwardingPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
@@ -812,6 +812,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -974,6 +977,232 @@ mod tests {
         all_online::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_non_genesis_floor_joiner_catches_tip() {
+        // First let a quorum finalize beyond genesis so the joiner has a real
+        // floor certificate and existing tip to catch.
+        let n = 5;
+        let active_count = quorum(n) as usize;
+        let initial_tip_target = View::new(15);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let active = &participants[..active_count];
+            let joiner_idx = active_count;
+            let joiner = participants[joiner_idx].clone();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
+
+            let elector = RoundRobin::<Sha256>::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+
+            for (idx, validator) in active.iter().enumerate() {
+                let validator_context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter = mocks::reporter::Reporter::new(
+                    validator_context.child("reporter"),
+                    reporter_config,
+                );
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    validator_context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker: oracle.control(validator.clone()),
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: format!("joiner_catches_tip_{validator}"),
+                    mailbox_size: NZUsize!(1024),
+                    epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: NZUsize!(4),
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(
+                        &validator_context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(validator_context.child("engine"), cfg);
+                let (pending, recovered, resolver) =
+                    register_validator(&mut oracle, validator.clone()).await;
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(
+                    context
+                        .child("initial_finalizer")
+                        .spawn(move |_| async move {
+                            while latest < initial_tip_target {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                            latest
+                        }),
+                );
+            }
+            let tip_at_join = join_all(finalizers)
+                .await
+                .into_iter()
+                .map(|result| result.expect("initial finalizer failed"))
+                .min()
+                .expect("initial validators missing");
+
+            let (floor_view, floor_finalization) = {
+                let finalizations = reporters[0].finalizations.lock();
+                finalizations
+                    .iter()
+                    .filter(|(view, _)| **view > View::zero() && **view < tip_at_join)
+                    .min_by_key(|(view, _)| view.get())
+                    .map(|(view, finalization)| (*view, finalization.clone()))
+                    .expect("non-genesis floor finalization missing")
+            };
+            assert!(floor_view > View::zero());
+            assert!(floor_view < tip_at_join);
+
+            // Start the extra validator from the non-genesis floor and require
+            // it to catch both the existing tip and later cluster progress.
+            for validator in active.iter() {
+                oracle
+                    .add_link(joiner.clone(), validator.clone(), link.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(validator.clone(), joiner.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+
+            let joiner_context = context
+                .child("validator")
+                .with_attribute("public_key", &joiner);
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[joiner_idx].clone(),
+                elector: elector.clone(),
+            };
+            let mut joiner_reporter =
+                mocks::reporter::Reporter::new(joiner_context.child("reporter"), reporter_config);
+            reporters.push(joiner_reporter.clone());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: joiner.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (actor, application) = mocks::application::Application::new(
+                joiner_context.child("application"),
+                application_cfg,
+            );
+            actor.start();
+
+            let cfg = config::Config {
+                scheme: schemes[joiner_idx].clone(),
+                elector,
+                blocker: oracle.control(joiner.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: joiner_reporter.clone(),
+                strategy: Sequential,
+                partition: format!("joiner_catches_tip_{joiner}"),
+                mailbox_size: NZUsize!(1024),
+                epoch: Epoch::new(333),
+                floor: config::Floor::Finalized(floor_finalization),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout,
+                skip_timeout,
+                fetch_concurrent: NZUsize!(4),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forwarding: ForwardingPolicy::Disabled,
+            };
+            let engine = Engine::new(joiner_context.child("engine"), cfg);
+            let (pending, recovered, resolver) = register_validator(&mut oracle, joiner).await;
+            engine_handlers.push(engine.start(pending, recovered, resolver));
+
+            let (mut joiner_latest, mut joiner_monitor) = joiner_reporter.subscribe().await;
+            while joiner_latest < tip_at_join {
+                joiner_latest = joiner_monitor.recv().await.expect("event missing");
+            }
+
+            let post_join_target = tip_at_join.saturating_add(ViewDelta::new(5));
+            while joiner_latest < post_join_target {
+                joiner_latest = joiner_monitor.recv().await.expect("event missing");
+            }
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
     /// A dishonest leader (validator 0) proposes payloads that all honest peers
     /// refuse to certify.
     ///
@@ -1068,6 +1297,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -1227,6 +1459,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -1388,6 +1623,9 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -1572,6 +1810,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -1691,6 +1932,9 @@ mod tests {
                 partition: me.to_string(),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
@@ -1828,6 +2072,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2063,6 +2310,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2231,6 +2481,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2432,6 +2685,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2628,6 +2884,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -2880,6 +3139,9 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -3059,6 +3321,9 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -3233,6 +3498,9 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -3445,6 +3713,7 @@ mod tests {
                 partition: me.to_string(),
                 mailbox_size: NZUsize!(1),
                 epoch,
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
@@ -3562,6 +3831,9 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -3726,6 +3998,9 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -3817,6 +4092,9 @@ mod tests {
                 partition: validator.to_string(),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
@@ -4044,6 +4322,9 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -4200,6 +4481,9 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -4373,6 +4657,9 @@ mod tests {
                         partition: validator.clone().to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
@@ -4512,6 +4799,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -4674,6 +4964,9 @@ mod tests {
                 partition: participants[0].clone().to_string(),
                 mailbox_size: NZUsize!(64),
                 epoch: Epoch::new(333),
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_millis(50),
                 certification_timeout: Duration::from_millis(100),
                 timeout_retry: Duration::from_millis(250),
@@ -4899,6 +5192,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -5253,6 +5549,9 @@ mod tests {
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(10),
                         certification_timeout: Duration::from_secs(10),
                         timeout_retry: Duration::from_secs(10),
@@ -5467,6 +5766,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_millis(100),
                     certification_timeout: Duration::from_millis(200),
                     timeout_retry: Duration::from_millis(500),
@@ -5610,6 +5912,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -5709,6 +6014,9 @@ mod tests {
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
@@ -6207,6 +6515,9 @@ mod tests {
                             partition,
                             mailbox_size: NZUsize!(1024),
                             epoch: Epoch::new(333),
+                            floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                                Epoch::new(333),
+                            )),
                             leader_timeout: Duration::from_secs(1),
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
@@ -6274,6 +6585,9 @@ mod tests {
                         partition,
                         mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),

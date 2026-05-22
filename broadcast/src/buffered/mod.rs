@@ -196,13 +196,13 @@ mod tests {
 
         let (current_responder, current_receiver) = commonware_utils::channel::oneshot::channel();
         drop(current_receiver);
-        assert!(<Message<PublicKey, TestMessage> as Policy>::handle(
+        <Message<PublicKey, TestMessage> as Policy>::handle(
             &mut overflow,
             Message::Get {
                 digest: current_get.digest(),
                 responder: current_responder,
             },
-        ));
+        );
 
         let mut drained = VecDeque::new();
         overflow.drain(|message| {

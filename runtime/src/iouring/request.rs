@@ -522,6 +522,8 @@ pub(super) struct WriteAtRequest {
     pub(super) written: usize,
     /// Write cursor and buffers that still need to be written.
     pub(super) write: WriteBuffers,
+    /// Whether the write should be durably persisted before completion.
+    pub(super) sync: bool,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
     pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
@@ -529,10 +531,20 @@ pub(super) struct WriteAtRequest {
 }
 
 impl WriteAtRequest {
+    /// Return the flags for this write request, setting `RWF_SYNC` when `sync` is set.
+    const fn rw_flags(&self) -> i32 {
+        if self.sync {
+            libc::RWF_SYNC
+        } else {
+            0
+        }
+    }
+
     /// Build the next positioned write SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
         let offset = self.offset + self.written as u64;
+        let rw_flags = self.rw_flags();
         match &mut self.write {
             WriteBuffers::Single { buf } => {
                 let ptr = buf.as_ptr();
@@ -545,6 +557,7 @@ impl WriteAtRequest {
                         .expect("single-buffer SQE length exceeds u32"),
                 )
                 .offset(offset)
+                .rw_flags(rw_flags)
                 .build()
             }
             WriteBuffers::Vectored { bufs, iovecs } => {
@@ -563,6 +576,7 @@ impl WriteAtRequest {
 
                 opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len)
                     .offset(offset)
+                    .rw_flags(rw_flags)
                     .build()
             }
         }
@@ -1170,14 +1184,17 @@ mod tests {
 
         // Retryable CQEs should requeue the positioned write.
         let (tx, _rx) = oneshot::channel();
-        let mut request = Request::WriteAt(WriteAtRequest {
+        let write = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
             result: None,
             sender: tx,
-        });
+        };
+        assert_eq!(write.rw_flags(), 0);
+        let mut request = Request::WriteAt(write);
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Single-buffer writes should track partial progress until complete.
@@ -1187,6 +1204,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
             result: None,
             sender: tx,
         });
@@ -1207,6 +1225,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: vectored.into(),
+            sync: false,
             result: None,
             sender: tx,
         });
@@ -1224,6 +1243,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
             result: None,
             sender: tx,
         });
@@ -1240,6 +1260,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
             result: None,
             sender: tx,
         });
@@ -1250,6 +1271,27 @@ mod tests {
             Err(Error::WriteFailed)
         ));
 
+        // Synchronous writes use the same logical error surface as regular
+        // writes, `sync` only changes the SQE flags.
+        let (tx, rx) = oneshot::channel();
+        let write = WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: true,
+            result: None,
+            sender: tx,
+        };
+        assert_eq!(write.rw_flags(), libc::RWF_SYNC);
+        let mut request = Request::WriteAt(write);
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL));
+        request.complete();
+        assert!(matches!(
+            block_on(rx).expect("missing sync write failure"),
+            Err(Error::WriteFailed)
+        ));
+
         // Timeout cancellation should also surface as a write failure.
         let (tx, rx) = oneshot::channel();
         let mut request = Request::WriteAt(WriteAtRequest {
@@ -1257,6 +1299,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
             result: None,
             sender: tx,
         });
@@ -1408,6 +1451,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
             result: None,
             sender: tx,
         });
@@ -1492,6 +1536,7 @@ mod tests {
             offset: 0,
             written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            sync: false,
             result: None,
             sender: tx,
         });

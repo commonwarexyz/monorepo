@@ -296,12 +296,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         let checkpoint = freezer_result?;
         ordinal_result?;
 
-        // Update checkpoint
+        // Publish the freezer checkpoint with a single metadata sync after the
+        // freezer and ordinal state are durable.
         let freezer_key = U64::new(FREEZER_PREFIX, 0);
-        self.metadata.put(freezer_key, Record::Freezer(checkpoint));
-
-        // Sync metadata once underlying are synced
-        self.metadata.sync().await?;
+        self.metadata
+            .put_sync(freezer_key, Record::Freezer(checkpoint))
+            .await?;
 
         Ok(())
     }

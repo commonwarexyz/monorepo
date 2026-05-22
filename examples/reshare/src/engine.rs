@@ -1,7 +1,7 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{Application, Block, EpochProvider, Provider},
+    application::{genesis, Application, Block, EpochProvider, Provider},
     dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
@@ -20,7 +20,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::Output,
+        dkg::feldman_desmedt::Output,
         primitives::{group, variant::Variant},
     },
     ed25519::Batch,
@@ -260,6 +260,7 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
+        let genesis = genesis::<H, C, V>();
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -267,6 +268,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: marshal::Start::Genesis(genesis),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -402,9 +404,9 @@ where
             callback,
         );
         let buffer_handle = self.buffer.start(broadcast);
-        let marshal_handle = self
-            .marshal
-            .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
+        let marshal_handle =
+            self.marshal
+                .start(self.dkg_mailbox, Some(self.buffered_mailbox), marshal);
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![

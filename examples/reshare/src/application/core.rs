@@ -1,20 +1,12 @@
 //! Core reshare [Application] implementation.
 
-use crate::{
-    application::{genesis_block, Block},
-    dkg,
-};
-use commonware_consensus::{
-    simplex::types::Context,
-    types::{Epoch, Round, View},
-    Heightable,
-};
+use crate::{application::Block, dkg};
+use commonware_consensus::{marshal::ancestry::Ancestry, simplex::types::Context, Heightable};
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Digest, Hasher,
-    Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Hasher, Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rand::Rng;
 use std::marker::PhantomData;
 
@@ -74,24 +66,12 @@ where
     type SigningScheme = S;
     type Block = Block<H, C, V>;
 
-    async fn genesis(&mut self) -> Self::Block {
-        // Create a genesis context with epoch 0, view 0, and empty parent.
-        // Use a deterministic leader from seed 0 so all validators agree on genesis.
-        let genesis_context = Context {
-            round: Round::new(Epoch::zero(), View::zero()),
-            leader: C::from_seed(0).public_key(),
-            parent: (View::zero(), <H::Digest as Digest>::EMPTY),
-        };
-        genesis_block::<H, C, V>(genesis_context)
-    }
-
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
-        ancestry: impl Stream<Item = Self::Block> + Send,
+        mut ancestry: impl Ancestry<Self::Block>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
-        futures::pin_mut!(ancestry);
         let parent_block = ancestry.next().await?;
         let parent_commitment = parent_block.commitment();
 
@@ -111,11 +91,7 @@ where
         ))
     }
 
-    async fn verify(
-        &mut self,
-        _: (E, Self::Context),
-        _: impl Stream<Item = Self::Block> + Send,
-    ) -> bool {
+    async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
         // verification (parent commitment and height contiguity).
         //

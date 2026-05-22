@@ -1,7 +1,7 @@
 //! Rate-limited [`UnlimitedSender`] wrapper.
 
 use crate::{Recipients, UnlimitedSender};
-use commonware_actor::Feedback;
+use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
 use commonware_utils::{channel::ring, sync::Mutex};
@@ -210,7 +210,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
         }
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
         self.sender.send(self.recipients, message, priority)
     }
 }
@@ -260,10 +260,10 @@ mod tests {
             recipients: Recipients<Self::PublicKey>,
             message: impl Into<IoBufs> + Send,
             priority: bool,
-        ) -> Feedback {
+        ) -> Unreliable<Feedback> {
             let message = message.into().coalesce();
             self.sent.lock().push((recipients, message, priority));
-            Feedback::Ok
+            Unreliable::new(Feedback::Ok)
         }
     }
 
@@ -332,7 +332,10 @@ mod tests {
             let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
 
             let checked = limited.check(Recipients::One(key(1))).unwrap();
-            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
+            assert_eq!(
+                checked.send(IoBuf::from(b"hello"), false),
+                Unreliable::new(Feedback::Ok)
+            );
         });
     }
 
@@ -365,7 +368,10 @@ mod tests {
 
             let peers_list = vec![key(1), key(2), key(3)];
             let checked = limited.check(Recipients::Some(peers_list)).unwrap();
-            assert_eq!(checked.send(IoBuf::from(b"hello"), false), Feedback::Ok);
+            assert_eq!(
+                checked.send(IoBuf::from(b"hello"), false),
+                Unreliable::new(Feedback::Ok)
+            );
             assert_sent_to(&sender, 0, &[key(1), key(2), key(3)]);
         });
     }

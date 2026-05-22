@@ -16,6 +16,12 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
+ark-ec.workspace = true
+ark-ed-on-bls12-381-bandersnatch = { workspace = true, features = ["r1cs"] }
+ark-ff.workspace = true
+ark-r1cs-std.workspace = true
+ark-relations.workspace = true
+ark-serialize.workspace = true
 blake3 = { workspace = true, features = ["zeroize"] }
 blst = { workspace = true, features = ["no-threads"] }
 bytes.workspace = true
@@ -38,7 +44,7 @@ rand_chacha.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-x25519-dalek = { workspace = true, features = ["zeroize"] }
+x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
@@ -82,8 +88,15 @@ arbitrary = [
 	"dep:arbitrary",
 	"std",
 ]
+fuzz = [ "arbitrary", "std" ]
 std = [
 	"anyhow?/std",
+	"ark-ec/std",
+	"ark-ed-on-bls12-381-bandersnatch/std",
+	"ark-ff/std",
+	"ark-r1cs-std/std",
+	"ark-relations/std",
+	"ark-serialize/std",
 	"blake3/std",
 	"bytes/std",
 	"chacha20poly1305/getrandom",

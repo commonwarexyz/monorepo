@@ -23,7 +23,8 @@ mod tle_encrypt;
 
 criterion_main!(
     batch_to_affine::benches,
-    dkg::benches,
+    dkg::golden::benches,
+    dkg::feldman_desmedt::benches,
     hash_to_curve::benches,
     threshold_recover::benches,
     combine_public_keys::benches,

@@ -335,8 +335,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     #[cfg(feature = "std")]
     #[allow(dead_code)]
     pub(crate) fn truncate(&mut self, new_size: Position<F>) {
-        debug_assert!(new_size.is_valid_size());
-        debug_assert!(new_size >= self.pruning_boundary);
+        assert!(new_size.is_valid_size());
+        assert!(new_size >= self.pruning_boundary);
         let keep = (*new_size - *self.pruning_boundary) as usize;
         self.nodes.truncate(keep);
     }

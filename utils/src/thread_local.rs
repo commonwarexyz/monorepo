@@ -64,7 +64,7 @@ impl<T: 'static> Drop for TakeCleanup<T> {
         }
         self.cache.with(|cell| {
             let mut slot = cell.borrow_mut();
-            debug_assert!(slot.0, "cache expected to be held");
+            assert!(slot.0, "cache expected to be held");
             slot.0 = false;
             slot.1 = self.cached.take();
         });
@@ -146,7 +146,7 @@ impl<T: 'static> Drop for Cached<T> {
         if let Some(v) = self.value.take() {
             self.cache.with(|cell| {
                 let mut slot = cell.borrow_mut();
-                debug_assert!(slot.0, "cache expected to be held");
+                assert!(slot.0, "cache expected to be held");
                 slot.0 = false;
                 slot.1 = Some(v);
             });
