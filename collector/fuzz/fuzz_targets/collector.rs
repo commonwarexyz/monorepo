@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_actor::Feedback;
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, ReadRangeExt, Write,
 };
@@ -56,7 +56,6 @@ enum ChannelKind {
 enum FeedbackKind {
     Ok,
     Backoff,
-    Rejected,
     Closed,
 }
 
@@ -65,7 +64,6 @@ impl From<FeedbackKind> for Feedback {
         match kind {
             FeedbackKind::Ok => Feedback::Ok,
             FeedbackKind::Backoff => Feedback::Backoff,
-            FeedbackKind::Rejected => Feedback::Rejected,
             FeedbackKind::Closed => Feedback::Closed,
         }
     }
@@ -386,10 +384,10 @@ impl CheckedSender for MockCheckedSender {
         .collect()
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, _priority: bool) -> Feedback {
+    fn send(self, message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
         let feedback = Feedback::from(self.feedback);
         if !feedback.accepted() {
-            return feedback;
+            return Unreliable::new(feedback);
         }
         let message = message.into().coalesce();
         let recipients = self.recipients();
@@ -407,7 +405,7 @@ impl CheckedSender for MockCheckedSender {
                 message.clone(),
             ));
         }
-        feedback
+        Unreliable::new(feedback)
     }
 }
 

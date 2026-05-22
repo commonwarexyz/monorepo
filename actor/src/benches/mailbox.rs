@@ -1,4 +1,4 @@
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::{mailbox, Feedback, Unreliable};
 use commonware_runtime::{
     telemetry::metrics::{Metric, Registered, Registration},
     Metrics, Name, Supervisor,
@@ -51,10 +51,10 @@ impl Metrics for NoopMetrics {
     }
 }
 
-fn new<T: mailbox::Policy>(
+fn new<T: mailbox::UnreliablePolicy>(
     capacity: std::num::NonZeroUsize,
-) -> (mailbox::Sender<T>, mailbox::Receiver<T>) {
-    mailbox::new(NoopMetrics, capacity)
+) -> (mailbox::UnreliableSender<T>, mailbox::UnreliableReceiver<T>) {
+    mailbox::new_unreliable(NoopMetrics, capacity)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +89,7 @@ impl Message {
     }
 }
 
-impl mailbox::Policy for Message {
+impl mailbox::UnreliablePolicy for Message {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -125,7 +125,7 @@ fn bench_enqueue_ready(c: &mut Criterion) {
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop()));
-                    assert_eq!(result, Feedback::Ok);
+                    assert_eq!(result, Unreliable::new(Feedback::Ok));
                     black_box(result);
                 }
             },
@@ -145,7 +145,10 @@ fn bench_try_recv_ready(c: &mut Criterion) {
             || {
                 let (sender, receiver) = new::<Message>(NZUsize!(CAPACITY));
                 for _ in 0..MESSAGES {
-                    assert_eq!(sender.enqueue(Message::drop()), Feedback::Ok);
+                    assert_eq!(
+                        sender.enqueue(Message::drop()),
+                        Unreliable::new(Feedback::Ok)
+                    );
                 }
                 receiver
             },
@@ -170,10 +173,16 @@ fn bench_try_recv_overflow(c: &mut Criterion) {
             || {
                 let (sender, receiver) = new::<Message>(NZUsize!(CAPACITY));
                 for _ in 0..CAPACITY {
-                    assert_eq!(sender.enqueue(Message::drop()), Feedback::Ok);
+                    assert_eq!(
+                        sender.enqueue(Message::drop()),
+                        Unreliable::new(Feedback::Ok)
+                    );
                 }
                 for _ in 0..MESSAGES {
-                    assert_eq!(sender.enqueue(Message::spill()), Feedback::Backoff);
+                    assert_eq!(
+                        sender.enqueue(Message::spill()),
+                        Unreliable::new(Feedback::Backoff)
+                    );
                 }
                 receiver
             },
@@ -199,7 +208,7 @@ fn bench_round_trip_ready(c: &mut Criterion) {
             |(sender, mut receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop()));
-                    assert_eq!(result, Feedback::Ok);
+                    assert_eq!(result, Unreliable::new(Feedback::Ok));
                     black_box(result);
                     black_box(receiver.try_recv().unwrap());
                 }
@@ -231,7 +240,7 @@ fn bench_recv_waiting(c: &mut Criterion) {
                         .await;
 
                         let result = sender.enqueue(Message::drop());
-                        assert_eq!(result, Feedback::Ok);
+                        assert_eq!(result, Unreliable::new(Feedback::Ok));
                         black_box(result);
                         black_box(next.await.unwrap());
                     }
@@ -252,13 +261,16 @@ fn bench_overflow_drop(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = new::<Message>(NZUsize!(1));
-                assert_eq!(sender.enqueue(Message::drop()), Feedback::Ok);
+                assert_eq!(
+                    sender.enqueue(Message::drop()),
+                    Unreliable::new(Feedback::Ok)
+                );
                 (sender, receiver)
             },
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::drop()));
-                    assert_eq!(result, Feedback::Rejected);
+                    assert_eq!(result, Unreliable::Rejected);
                     black_box(result);
                 }
             },
@@ -277,13 +289,16 @@ fn bench_overflow_spill(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (sender, receiver) = new::<Message>(NZUsize!(1));
-                assert_eq!(sender.enqueue(Message::drop()), Feedback::Ok);
+                assert_eq!(
+                    sender.enqueue(Message::drop()),
+                    Unreliable::new(Feedback::Ok)
+                );
                 (sender, receiver)
             },
             |(sender, _receiver)| {
                 for _ in 0..MESSAGES {
                     let result = sender.enqueue(black_box(Message::spill()));
-                    assert_eq!(result, Feedback::Backoff);
+                    assert_eq!(result, Unreliable::new(Feedback::Backoff));
                     black_box(result);
                 }
             },
@@ -294,17 +309,31 @@ fn bench_overflow_spill(c: &mut Criterion) {
     group.finish();
 }
 
-fn replace_queue(newest: bool) -> (mailbox::Sender<Message>, mailbox::Receiver<Message>) {
+fn replace_queue(
+    newest: bool,
+) -> (
+    mailbox::UnreliableSender<Message>,
+    mailbox::UnreliableReceiver<Message>,
+) {
     let (sender, receiver) = new::<Message>(NZUsize!(REPLACE_CAPACITY));
 
     for _ in 0..REPLACE_CAPACITY {
-        assert_eq!(sender.enqueue(Message::drop()), Feedback::Ok);
+        assert_eq!(
+            sender.enqueue(Message::drop()),
+            Unreliable::new(Feedback::Ok)
+        );
     }
-    assert_eq!(sender.enqueue(Message::replace()), Feedback::Backoff);
+    assert_eq!(
+        sender.enqueue(Message::replace()),
+        Unreliable::new(Feedback::Backoff)
+    );
 
     if !newest {
         for _ in 1..REPLACE_CAPACITY {
-            assert_eq!(sender.enqueue(Message::spill()), Feedback::Backoff);
+            assert_eq!(
+                sender.enqueue(Message::spill()),
+                Unreliable::new(Feedback::Backoff)
+            );
         }
     }
 
@@ -324,7 +353,7 @@ fn bench_overflow_replace(c: &mut Criterion) {
                     |(sender, _receiver)| {
                         for _ in 0..MESSAGES {
                             let result = sender.enqueue(black_box(Message::replace()));
-                            assert_eq!(result, Feedback::Backoff);
+                            assert_eq!(result, Unreliable::new(Feedback::Backoff));
                             black_box(result);
                         }
                     },
@@ -352,7 +381,7 @@ fn bench_concurrent_enqueue(c: &mut Criterion) {
                     scope.spawn(move || {
                         for _ in 0..PRODUCER_MESSAGES {
                             let result = sender.enqueue(Message::drop());
-                            assert_eq!(result, Feedback::Ok);
+                            assert_eq!(result, Unreliable::new(Feedback::Ok));
                             black_box(result);
                         }
                     });

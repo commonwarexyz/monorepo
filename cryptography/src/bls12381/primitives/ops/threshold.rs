@@ -347,7 +347,7 @@ where
 mod tests {
     use super::*;
     use crate::bls12381::{
-        dkg,
+        dkg::feldman_desmedt as dkg,
         primitives::{
             group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE},
             ops::{self, hash_with_namespace},

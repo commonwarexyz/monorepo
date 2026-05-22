@@ -219,7 +219,7 @@ mod tests {
         Address, AddressableManager, CheckedSender as _, Ingress, LimitedSender as _, Provider,
         Receiver, Recipients, Sender,
     };
-    use commonware_actor::Feedback;
+    use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
@@ -2145,7 +2145,11 @@ mod tests {
             let message = IoBuf::from(vec![0u8; 100]);
             for i in 0..11 {
                 let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
-                assert_ne!(sent, Feedback::Closed, "Broadcast {i} should be accepted");
+                assert_ne!(
+                    sent,
+                    Unreliable::new(Feedback::Closed),
+                    "Broadcast {i} should be accepted"
+                );
 
                 assert!(fast_receivers.low.recv().await.is_some());
             }

@@ -5,7 +5,8 @@
 //! The mailbox is split into two queues: a bounded `ready` queue
 //! that producers push to and the receiver pops from, and an unbounded
 //! `overflow` queue that holds messages displaced when ready is full. A
-//! [`Policy`] decides how overflow is updated when overflow is contended.
+//! [`Policy`] or [`UnreliablePolicy`] decides how overflow is updated when
+//! overflow is contended.
 //!
 //! ```text
 //!                          senders
@@ -39,7 +40,7 @@
 //! Enqueue calls from the same sender will be delivered in order. Concurrent enqueue calls,
 //! however, are not globally ordered and may be observed in any interleaving.
 
-use crate::Feedback;
+use crate::{Feedback, Unreliable};
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Metrics,
@@ -48,6 +49,7 @@ use std::{
     collections::VecDeque,
     fmt,
     future::poll_fn,
+    marker::PhantomData,
     num::NonZeroUsize,
     sync::mpsc::TryRecvError,
     task::{Context, Poll},
@@ -91,17 +93,39 @@ pub trait Policy: Sized {
     /// Overflow storage used by this policy.
     type Overflow: Overflow<Self>;
 
-    /// Handle `message` when it cannot enter the bounded ready queue immediately.
+    /// Reliably handle `message` when it cannot enter the bounded ready queue immediately.
     ///
-    /// Returns `true` when the policy considered the message's effects. This includes
-    /// retaining the message, coalescing it with retained work, replacing older retained work,
-    /// or deliberately doing no work because the message is already satisfied, superseded, or no
-    /// longer needed (for example, a request whose response channel is already closed). These
-    /// no-op cases are still handled: there is no remaining work, so there is no loss to report.
+    /// This may retain the message, coalesce it with retained work, replace older retained work,
+    /// or deliberately do no work because the message is already satisfied, superseded, or no
+    /// longer needed (for example, a request whose response channel is already closed).
     ///
-    /// Returns `false` only when the policy rejects the message under backpressure. This is the
-    /// lossy case: the submitted work was not semantically handled, and callers that care should
-    /// retry or treat the submission as failed.
+    /// # Warning
+    ///
+    /// Do not enqueue into the same mailbox from this method or from destructors triggered by
+    /// editing `overflow`. This method runs while the mailbox holds its overflow lock, so same
+    /// mailbox re-entry can deadlock.
+    ///
+    /// This method should not unwind after mutating `overflow`. A panic, including one from a
+    /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
+    /// the mailbox.
+    fn handle(overflow: &mut Self::Overflow, message: Self);
+}
+
+/// Overflow behavior for actor messages that can be rejected when an inbox is full.
+pub trait UnreliablePolicy: Sized {
+    /// Overflow storage used by this policy.
+    type Overflow: Overflow<Self>;
+
+    /// Unreliably handle `message` when it cannot enter the bounded ready queue immediately.
+    ///
+    /// Returns `true` when the policy considered the message's effects. This includes retaining
+    /// the message, coalescing it with retained work, replacing older retained work, or deliberately
+    /// doing no work because the message is already satisfied, superseded, or no longer needed.
+    ///
+    /// Returns `false` only when the policy rejects the message under backpressure without
+    /// retaining, coalescing, replacing, or otherwise handling it. This is the unreliable case: the
+    /// submitted work was not semantically handled, and callers that care should retry or treat the
+    /// submission as failed.
     ///
     /// # Warning
     ///
@@ -113,6 +137,247 @@ pub trait Policy: Sized {
     /// destructor triggered while editing `overflow`, can leave retained overflow data stranded in
     /// the mailbox.
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool;
+}
+
+// Marker types that select the mailbox overflow policy.
+mod mode {
+    /// Uses a policy that always handles overflow messages.
+    pub(super) struct Reliable;
+
+    /// Uses a policy that may reject overflow messages.
+    pub(super) struct Unreliable;
+}
+
+trait Mode<T>: Sized {
+    /// Overflow storage used by this mode.
+    type Overflow: Overflow<T>;
+    /// Feedback returned from enqueue attempts.
+    type Feedback;
+
+    /// Updates overflow for a full inbox and reports whether the message was handled.
+    fn handle(overflow: &mut Self::Overflow, message: T) -> bool;
+    /// Maps ready-path feedback into this mode's feedback type.
+    fn ready_feedback(feedback: Feedback) -> Self::Feedback;
+    /// Maps overflow handling into this mode's feedback type.
+    fn overflow_feedback(handled: bool) -> Self::Feedback;
+    /// Returns `true` when this feedback should count as backoff.
+    fn is_backoff(feedback: &Self::Feedback) -> bool;
+    /// Returns `true` when this feedback means the receiver is closed.
+    fn is_closed(feedback: &Self::Feedback) -> bool;
+}
+
+impl<T: Policy> Mode<T> for mode::Reliable {
+    type Overflow = T::Overflow;
+    type Feedback = Feedback;
+
+    fn handle(overflow: &mut Self::Overflow, message: T) -> bool {
+        T::handle(overflow, message);
+        true
+    }
+
+    fn ready_feedback(feedback: Feedback) -> Self::Feedback {
+        feedback
+    }
+
+    fn overflow_feedback(_handled: bool) -> Self::Feedback {
+        Feedback::Backoff
+    }
+
+    fn is_backoff(feedback: &Self::Feedback) -> bool {
+        *feedback == Feedback::Backoff
+    }
+
+    fn is_closed(feedback: &Self::Feedback) -> bool {
+        *feedback == Feedback::Closed
+    }
+}
+
+impl<T: UnreliablePolicy> Mode<T> for mode::Unreliable {
+    type Overflow = T::Overflow;
+    type Feedback = Unreliable<Feedback>;
+
+    fn handle(overflow: &mut Self::Overflow, message: T) -> bool {
+        T::handle(overflow, message)
+    }
+
+    fn ready_feedback(feedback: Feedback) -> Self::Feedback {
+        Unreliable::new(feedback)
+    }
+
+    fn overflow_feedback(handled: bool) -> Self::Feedback {
+        if handled {
+            Unreliable::new(Feedback::Backoff)
+        } else {
+            Unreliable::Rejected
+        }
+    }
+
+    fn is_backoff(feedback: &Self::Feedback) -> bool {
+        *feedback == Unreliable::new(Feedback::Backoff)
+    }
+
+    fn is_closed(feedback: &Self::Feedback) -> bool {
+        *feedback == Unreliable::new(Feedback::Closed)
+    }
+}
+
+/// Sender half of a mailbox.
+pub struct Sender<T: Policy> {
+    state: Arc<State<T, mode::Reliable>>,
+}
+
+/// Sender half of an unreliable mailbox.
+pub struct UnreliableSender<T: UnreliablePolicy> {
+    state: Arc<State<T, mode::Unreliable>>,
+}
+
+impl<T: Policy> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: clone_sender_state(&self.state),
+        }
+    }
+}
+
+impl<T: UnreliablePolicy> Clone for UnreliableSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: clone_sender_state(&self.state),
+        }
+    }
+}
+
+impl<T: Policy> Drop for Sender<T> {
+    fn drop(&mut self) {
+        drop_sender_state(&self.state);
+    }
+}
+
+impl<T: UnreliablePolicy> Drop for UnreliableSender<T> {
+    fn drop(&mut self) {
+        drop_sender_state(&self.state);
+    }
+}
+
+impl<T: Policy> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_sender_state("Sender", &self.state, f)
+    }
+}
+
+impl<T: UnreliablePolicy> fmt::Debug for UnreliableSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_sender_state("UnreliableSender", &self.state, f)
+    }
+}
+
+impl<T: Policy> Sender<T> {
+    /// Submit a message without waiting for inbox capacity.
+    #[must_use = "caller must handle enqueue feedback"]
+    pub fn enqueue(&self, message: T) -> Feedback {
+        self.state.enqueue(message)
+    }
+}
+
+impl<T: UnreliablePolicy> UnreliableSender<T> {
+    /// Submit a message without waiting for inbox capacity, allowing policy rejection.
+    #[must_use = "caller must handle enqueue feedback"]
+    pub fn enqueue(&self, message: T) -> Unreliable<Feedback> {
+        self.state.enqueue(message)
+    }
+}
+
+/// Receiver half of a mailbox.
+///
+/// Dropping the receiver closes the mailbox and drains buffered messages.
+///
+/// Dropping the last sender disconnects the mailbox, but the receiver continues
+/// returning buffered messages until ready and overflow are empty.
+pub struct Receiver<T: Policy> {
+    state: Arc<State<T, mode::Reliable>>,
+}
+
+/// Receiver half of an unreliable mailbox.
+///
+/// Dropping the receiver closes the mailbox and drains buffered messages.
+///
+/// Dropping the last sender disconnects the mailbox, but the receiver continues
+/// returning buffered messages until ready and overflow are empty.
+pub struct UnreliableReceiver<T: UnreliablePolicy> {
+    state: Arc<State<T, mode::Unreliable>>,
+}
+
+impl<T: Policy> Receiver<T> {
+    /// Receive the next message.
+    ///
+    /// Returns `None` after all senders are dropped and all buffered messages
+    /// have been drained.
+    pub async fn recv(&mut self) -> Option<T> {
+        recv_from(&self.state).await
+    }
+
+    /// Try to receive the next message without waiting.
+    ///
+    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
+    /// all buffered messages have been drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        try_recv_from(&self.state)
+    }
+}
+
+impl<T: UnreliablePolicy> UnreliableReceiver<T> {
+    /// Receive the next message.
+    ///
+    /// Returns `None` after all senders are dropped and all buffered messages
+    /// have been drained.
+    pub async fn recv(&mut self) -> Option<T> {
+        recv_from(&self.state).await
+    }
+
+    /// Try to receive the next message without waiting.
+    ///
+    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
+    /// all buffered messages have been drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        try_recv_from(&self.state)
+    }
+}
+
+impl<T: Policy> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        self.state.close();
+    }
+}
+
+impl<T: UnreliablePolicy> Drop for UnreliableReceiver<T> {
+    fn drop(&mut self) {
+        self.state.close();
+    }
+}
+
+/// Create a new bounded mailbox.
+pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+    let state = new_state(metrics, capacity);
+    (
+        Sender {
+            state: state.clone(),
+        },
+        Receiver { state },
+    )
+}
+
+/// Create a new bounded unreliable mailbox.
+pub fn new_unreliable<T: UnreliablePolicy>(
+    metrics: impl Metrics,
+    capacity: NonZeroUsize,
+) -> (UnreliableSender<T>, UnreliableReceiver<T>) {
+    let state = new_state(metrics, capacity);
+    (
+        UnreliableSender {
+            state: state.clone(),
+        },
+        UnreliableReceiver { state },
+    )
 }
 
 // `activity` packs the published overflow state and in-flight overflow
@@ -260,17 +525,19 @@ cfg_if::cfg_if! {
     }
 }
 
-struct OverflowState<T: Policy> {
-    queue: Mutex<T::Overflow>,
+struct OverflowState<T, M: Mode<T>> {
+    queue: Mutex<M::Overflow>,
     activity: AtomicUsize,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<T: Policy> OverflowState<T> {
+impl<T, M: Mode<T>> OverflowState<T, M> {
     #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
-            queue: Mutex::new(T::Overflow::default()),
+            queue: Mutex::new(M::Overflow::default()),
             activity: AtomicUsize::new(0),
+            _phantom: PhantomData,
         }
     }
 
@@ -282,13 +549,18 @@ impl<T: Policy> OverflowState<T> {
         ready.push(message)
     }
 
-    fn enqueue(&self, ready: &Ready<T>, message: T, is_closed: impl Fn() -> bool) -> Feedback {
+    fn enqueue_overflow(
+        &self,
+        ready: &Ready<T>,
+        message: T,
+        is_closed: impl Fn() -> bool,
+    ) -> M::Feedback {
         // Mark overflow active so racing senders stay off the ready fast path.
         let mutation = Mutation::begin(&self.activity);
         let mut queue = lock(&self.queue);
         if is_closed() {
             mutation.publish(queue.is_empty());
-            return Feedback::Closed;
+            return M::ready_feedback(Feedback::Closed);
         }
 
         // The fast-path push may have observed stale ready fullness. Retry
@@ -298,7 +570,7 @@ impl<T: Policy> OverflowState<T> {
             match ready.push(message) {
                 Ok(()) => {
                     mutation.publish(queue.is_empty());
-                    return Feedback::Ok;
+                    return M::ready_feedback(Feedback::Ok);
                 }
                 Err(message) => message,
             }
@@ -307,13 +579,9 @@ impl<T: Policy> OverflowState<T> {
         };
 
         // Preserve overflow order, or handle a still-full ready queue.
-        let handled = T::handle(&mut queue, message);
+        let handled = M::handle(&mut queue, message);
         mutation.publish(queue.is_empty());
-        if handled {
-            Feedback::Backoff
-        } else {
-            Feedback::Rejected
-        }
+        M::overflow_feedback(handled)
     }
 
     fn refill(&self, ready: &Ready<T>) {
@@ -381,105 +649,56 @@ impl Drop for Mutation<'_> {
     }
 }
 
-struct State<T: Policy> {
+struct State<T, M: Mode<T>> {
     ready: Ready<T>,
-    overflow: OverflowState<T>,
+    overflow: OverflowState<T, M>,
     backoff: Counter,
     closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
 }
 
-/// Sender half of a mailbox.
-pub struct Sender<T: Policy> {
-    state: Arc<State<T>>,
-}
-
-impl<T: Policy> Clone for Sender<T> {
-    fn clone(&self) -> Self {
-        // Live sender count drives receiver disconnect detection.
-        self.state.senders.fetch_add(1, Ordering::Relaxed);
-        Self {
-            state: self.state.clone(),
-        }
-    }
-}
-
-impl<T: Policy> Drop for Sender<T> {
-    fn drop(&mut self) {
-        let previous = self.state.senders.fetch_sub(1, Ordering::AcqRel);
-        assert!(previous > 0);
-        // Wake a receiver that is parked waiting for data or disconnect.
-        if previous == 1 {
-            self.state.waker.wake();
-        }
-    }
-}
-
-impl<T: Policy> fmt::Debug for Sender<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sender")
-            .field("capacity", &self.state.ready.capacity())
-            .field("closed", &self.state.closed.load(Ordering::Acquire))
-            .finish()
-    }
-}
-
-impl<T: Policy> Sender<T> {
-    /// Submit a message without waiting for inbox capacity.
-    #[must_use = "caller must handle enqueue feedback"]
-    pub fn enqueue(&self, message: T) -> Feedback {
+impl<T, M: Mode<T>> State<T, M> {
+    fn enqueue(&self, message: T) -> M::Feedback {
         // Receiver closure makes new sends fail immediately.
-        if self.state.closed.load(Ordering::Acquire) {
-            return Feedback::Closed;
+        if self.closed.load(Ordering::Acquire) {
+            return M::ready_feedback(Feedback::Closed);
         }
 
         // Common case: publish directly to ready without taking overflow lock.
-        let message = match self.state.overflow.try_ready(&self.state.ready, message) {
+        let message = match self.overflow.try_ready(&self.ready, message) {
             Ok(()) => {
-                if self.state.closed.load(Ordering::Acquire) {
-                    self.state.overflow.drain(&self.state.ready);
-                    return Feedback::Closed;
+                if self.closed.load(Ordering::Acquire) {
+                    self.overflow.drain(&self.ready);
+                    return M::ready_feedback(Feedback::Closed);
                 }
-                self.state.waker.wake();
-                return Feedback::Ok;
+                self.waker.wake();
+                return M::ready_feedback(Feedback::Ok);
             }
             Err(message) => message,
         };
 
         // Slow path: serialize through overflow and apply the policy.
-        let feedback = self.state.overflow.enqueue(&self.state.ready, message, || {
-            self.state.closed.load(Ordering::Acquire)
-        });
+        let feedback = self
+            .overflow
+            .enqueue_overflow(&self.ready, message, || self.closed.load(Ordering::Acquire));
 
         // Record any backoff.
-        if feedback == Feedback::Backoff {
-            self.state.backoff.inc();
+        if M::is_backoff(&feedback) {
+            self.backoff.inc();
         }
 
         // Wake after any non-closed slow-path enqueue because a receiver may
         // have skipped refill while this overflow mutation was active. By the
         // time we wake, the mutation has published its overflow state. Spurious
         // wakes are acceptable.
-        if feedback != Feedback::Closed {
-            self.state.waker.wake();
+        if !M::is_closed(&feedback) {
+            self.waker.wake();
         }
         feedback
     }
-}
 
-/// Receiver half of a mailbox.
-///
-/// Dropping the receiver closes the mailbox and drains buffered messages.
-///
-/// Dropping the last sender disconnects the mailbox, but the receiver continues
-/// returning buffered messages until ready and overflow are empty.
-pub struct Receiver<T: Policy> {
-    state: Arc<State<T>>,
-}
-
-impl<T: Policy> Receiver<T> {
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+    fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         // Fast path avoids waker churn when a message is already ready.
         if let Some(message) = self.pop() {
             return Poll::Ready(Some(message));
@@ -489,7 +708,7 @@ impl<T: Policy> Receiver<T> {
             return Poll::Ready(self.pop());
         }
 
-        register_waker(&self.state.waker, cx.waker());
+        register_waker(&self.waker, cx.waker());
 
         // A sender can enqueue and wake after the first pop but before this
         // waker is installed. Re-check before sleeping so the wake is not lost.
@@ -504,69 +723,78 @@ impl<T: Policy> Receiver<T> {
         }
     }
 
-    fn pop(&mut self) -> Option<T> {
-        if let Some(message) = self.state.ready.pop() {
+    fn pop(&self) -> Option<T> {
+        if let Some(message) = self.ready.pop() {
             // A freed ready slot may let the oldest overflow message advance.
-            self.state.overflow.refill(&self.state.ready);
+            self.overflow.refill(&self.ready);
             return Some(message);
         }
 
         // Empty ready may race with stale activity, so let `refill`
         // decide whether overflow is worth locking.
-        self.state.overflow.refill(&self.state.ready);
-        self.state.ready.pop()
+        self.overflow.refill(&self.ready);
+        self.ready.pop()
     }
 
     fn is_disconnected(&self) -> bool {
-        self.state.closed.load(Ordering::Acquire) || self.state.senders.load(Ordering::Acquire) == 0
+        self.closed.load(Ordering::Acquire) || self.senders.load(Ordering::Acquire) == 0
     }
 
-    /// Receive the next message.
-    ///
-    /// Returns `None` after all senders are dropped and all buffered messages
-    /// have been drained.
-    pub async fn recv(&mut self) -> Option<T> {
-        poll_fn(|cx| self.poll_recv(cx)).await
-    }
-
-    /// Try to receive the next message without waiting.
-    ///
-    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
-    /// all buffered messages have been drained.
-    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        if let Some(message) = self.pop() {
-            return Ok(message);
-        }
-        if self.is_disconnected() {
-            return self.pop().ok_or(TryRecvError::Disconnected);
-        }
-        Err(TryRecvError::Empty)
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.overflow.drain(&self.ready);
     }
 }
 
-impl<T: Policy> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        self.state.closed.store(true, Ordering::Release);
-        self.state.overflow.drain(&self.state.ready);
-    }
-}
-
-/// Create a new bounded mailbox.
-pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-    let state = Arc::new(State {
+fn new_state<T, M: Mode<T>>(metrics: impl Metrics, capacity: NonZeroUsize) -> Arc<State<T, M>> {
+    Arc::new(State {
         ready: Ready::new(capacity.get()),
         overflow: OverflowState::new(),
         backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
         closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),
-    });
-    (
-        Sender {
-            state: state.clone(),
-        },
-        Receiver { state },
-    )
+    })
+}
+
+fn clone_sender_state<T, M: Mode<T>>(state: &Arc<State<T, M>>) -> Arc<State<T, M>> {
+    // Live sender count drives receiver disconnect detection.
+    state.senders.fetch_add(1, Ordering::Relaxed);
+    state.clone()
+}
+
+fn drop_sender_state<T, M: Mode<T>>(state: &State<T, M>) {
+    let previous = state.senders.fetch_sub(1, Ordering::AcqRel);
+    assert!(previous > 0);
+    // Wake a receiver that is parked waiting for data or disconnect.
+    if previous == 1 {
+        state.waker.wake();
+    }
+}
+
+fn fmt_sender_state<T, M: Mode<T>>(
+    name: &str,
+    state: &State<T, M>,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    f.debug_struct(name)
+        .field("capacity", &state.ready.capacity())
+        .field("closed", &state.closed.load(Ordering::Acquire))
+        .finish()
+}
+
+async fn recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Option<T> {
+    poll_fn(|cx| state.poll_recv(cx)).await
+}
+
+fn try_recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Result<T, TryRecvError> {
+    if let Some(message) = state.pop() {
+        return Ok(message);
+    }
+    if state.is_disconnected() {
+        return state.pop().ok_or(TryRecvError::Disconnected);
+    }
+    Err(TryRecvError::Empty)
 }
 
 #[cfg(test)]
@@ -631,6 +859,12 @@ mod tests {
         super::new(mocks::Metrics, capacity)
     }
 
+    fn new_unreliable<T: UnreliablePolicy>(
+        capacity: NonZeroUsize,
+    ) -> (UnreliableSender<T>, UnreliableReceiver<T>) {
+        super::new_unreliable(mocks::Metrics, capacity)
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Message {
         Update(u64),
@@ -640,7 +874,7 @@ mod tests {
         Hint(u64),
     }
 
-    impl Policy for Message {
+    impl UnreliablePolicy for Message {
         type Overflow = VecDeque<Self>;
 
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -682,9 +916,8 @@ mod tests {
     impl Policy for Ack {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
@@ -728,10 +961,19 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_replaces_stale_overflow_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Update(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Update(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(3)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Update(1)));
         assert_eq!(receiver.recv().await, Some(Message::Update(3)));
@@ -739,11 +981,23 @@ mod tests {
 
     #[test_async]
     async fn policy_can_replace_stale_overflow_at_back() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Update(4)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Required(3)),
+            Unreliable::new(Feedback::Backoff)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(4)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(3)));
@@ -752,18 +1006,27 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_rejects_non_replaceable_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Rejected);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(sender.enqueue(Message::Vote(2)), Unreliable::Rejected);
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
 
     #[test_async]
     async fn full_inbox_retains_required_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Buffered(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Buffered(2)));
@@ -771,9 +1034,15 @@ mod tests {
 
     #[test]
     fn try_recv_refills_from_overflow() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Buffered(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Buffered(2)));
@@ -783,10 +1052,19 @@ mod tests {
     fn backoff_metric_counts_backoff_feedback() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
-            assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-            assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
-            assert_eq!(sender.enqueue(Message::Buffered(3)), Feedback::Backoff);
+            let (sender, _receiver) = super::new_unreliable(context.child("mailbox"), NZUsize!(1));
+            assert_eq!(
+                sender.enqueue(Message::Vote(1)),
+                Unreliable::new(Feedback::Ok)
+            );
+            assert_eq!(
+                sender.enqueue(Message::Buffered(2)),
+                Unreliable::new(Feedback::Backoff)
+            );
+            assert_eq!(
+                sender.enqueue(Message::Buffered(3)),
+                Unreliable::new(Feedback::Backoff)
+            );
 
             let buffer = context.encode();
             assert!(
@@ -797,14 +1075,17 @@ mod tests {
     }
 
     #[test]
-    fn rejected_feedback_is_not_accepted_or_counted_as_backoff() {
+    fn unreliable_rejected_feedback_is_not_accepted_or_counted_as_backoff() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (sender, _receiver) = super::new(context.child("mailbox"), NZUsize!(1));
-            assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+            let (sender, _receiver) = super::new_unreliable(context.child("mailbox"), NZUsize!(1));
+            assert_eq!(
+                sender.enqueue(Message::Vote(1)),
+                Unreliable::new(Feedback::Ok)
+            );
             let feedback = sender.enqueue(Message::Vote(2));
 
-            assert_eq!(feedback, Feedback::Rejected);
+            assert_eq!(feedback, Unreliable::Rejected);
             assert!(!feedback.accepted());
 
             let buffer = context.encode();
@@ -817,9 +1098,15 @@ mod tests {
 
     #[test]
     fn try_recv_drains_buffered_messages_after_senders_drop() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Buffered(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
         drop(sender);
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
@@ -829,53 +1116,86 @@ mod tests {
 
     #[test]
     fn poll_recv_drains_buffered_messages_after_senders_drop() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, receiver) = new_unreliable(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Buffered(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
         drop(sender);
 
         assert_eq!(
-            receiver.poll_recv(&mut cx),
+            receiver.state.poll_recv(&mut cx),
             Poll::Ready(Some(Message::Vote(1)))
         );
         assert_eq!(
-            receiver.poll_recv(&mut cx),
+            receiver.state.poll_recv(&mut cx),
             Poll::Ready(Some(Message::Buffered(2)))
         );
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
     }
 
     #[test]
     fn enqueue_uses_ready_capacity_after_partial_drain() {
-        let (sender, mut receiver) = new(NZUsize!(2));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(2));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Vote(2)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Required(3)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(2)));
 
-        assert_eq!(sender.enqueue(Message::Vote(4)), Feedback::Ok);
+        assert_eq!(
+            sender.enqueue(Message::Vote(4)),
+            Unreliable::new(Feedback::Ok)
+        );
         assert_eq!(receiver.try_recv(), Ok(Message::Required(3)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(4)));
     }
 
     #[test]
     fn receiver_refills_overflow_after_partial_drain() {
-        let (sender, mut receiver) = new(NZUsize!(3));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(2)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Vote(3)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(4)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(3));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Vote(2)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Vote(3)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Required(4)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(2)));
 
-        assert_eq!(sender.enqueue(Message::Vote(5)), Feedback::Ok);
+        assert_eq!(
+            sender.enqueue(Message::Vote(5)),
+            Unreliable::new(Feedback::Ok)
+        );
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(3)));
         assert_eq!(receiver.try_recv(), Ok(Message::Required(4)));
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(5)));
@@ -883,9 +1203,15 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_retains_unmatched_replaceable_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Required(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(2)));
@@ -893,11 +1219,23 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_replaces_stale_overflow_after_ready_fills() {
-        let (sender, mut receiver) = new(NZUsize!(2));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(3)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Update(4)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(2));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(2)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(3)),
+            Unreliable::new(Feedback::Backoff)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(4)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Update(2)));
@@ -906,10 +1244,19 @@ mod tests {
 
     #[test_async]
     async fn mailbox_capacity_is_soft_limit_for_required_messages() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Required(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Required(3)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Required(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Required(3)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Required(2)));
@@ -918,19 +1265,34 @@ mod tests {
 
     #[test_async]
     async fn full_inbox_rejects_hint() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Hint(2)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Hint(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
     }
 
     #[test_async]
     async fn full_inbox_can_replace_or_drop_by_message() {
-        let (sender, mut receiver) = new(NZUsize!(1));
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
-        assert_eq!(sender.enqueue(Message::Update(2)), Feedback::Backoff);
-        assert_eq!(sender.enqueue(Message::Hint(3)), Feedback::Backoff);
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Update(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
+        assert_eq!(
+            sender.enqueue(Message::Hint(3)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(receiver.recv().await, Some(Message::Vote(1)));
         assert_eq!(receiver.recv().await, Some(Message::Hint(3)));
@@ -938,45 +1300,51 @@ mod tests {
 
     #[test_async]
     async fn empty_inbox_wakes_on_enqueue() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
 
         let next = receiver.recv();
         pin_mut!(next);
         assert!(next.as_mut().now_or_never().is_none());
 
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Ok);
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
         assert_eq!(next.await, Some(Message::Vote(1)));
     }
 
     #[test]
     fn pending_recv_wakes_when_senders_drop() {
-        let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+        let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
         drop(sender);
 
         assert_eq!(wakes.count(), 1);
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
     }
 
     #[test]
     fn pending_recv_wakes_on_handled_overflow_enqueue() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
         // Prime ready directly to isolate the overflow wake after registration.
         assert_eq!(sender.state.ready.push(Message::Vote(1)), Ok(()));
-        assert_eq!(sender.enqueue(Message::Buffered(2)), Feedback::Backoff);
+        assert_eq!(
+            sender.enqueue(Message::Buffered(2)),
+            Unreliable::new(Feedback::Backoff)
+        );
 
         assert_eq!(wakes.count(), 1);
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
@@ -985,21 +1353,24 @@ mod tests {
 
     #[test]
     fn receiver_drop_blocks_ready_fast_path_feedback() {
-        let (sender, mut receiver) = new(NZUsize!(1));
+        let (sender, receiver) = new_unreliable(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         drop(receiver);
 
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Closed);
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Closed)
+        );
         assert_eq!(wakes.count(), 0);
     }
 
     #[test_async]
     async fn empty_inbox_closes_when_senders_drop() {
-        let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+        let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
         drop(sender);
 
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
@@ -1008,10 +1379,13 @@ mod tests {
 
     #[test]
     fn enqueue_after_receiver_drop_returns_closed() {
-        let (sender, receiver) = new(NZUsize!(1));
+        let (sender, receiver) = new_unreliable(NZUsize!(1));
         drop(receiver);
 
-        assert_eq!(sender.enqueue(Message::Vote(1)), Feedback::Closed);
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Closed)
+        );
     }
 
     #[test_async]
@@ -1042,10 +1416,9 @@ mod tests {
     impl Policy for ClearingMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
             overflow.clear();
-            true
         }
     }
 
@@ -1074,9 +1447,8 @@ mod tests {
     impl Policy for SpillMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
@@ -1087,7 +1459,7 @@ mod tests {
         let waker = waker_ref(&wakes);
         let mut cx = Context::from_waker(&waker);
 
-        assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+        assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
         assert_eq!(wakes.count(), 0);
 
         assert_eq!(sender.state.ready.push(SpillMessage::FillReady), Ok(()));
@@ -1118,6 +1490,12 @@ mod loom_tests {
 
     fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
         super::new(mocks::Metrics, capacity)
+    }
+
+    fn new_unreliable<T: UnreliablePolicy>(
+        capacity: NonZeroUsize,
+    ) -> (UnreliableSender<T>, UnreliableReceiver<T>) {
+        super::new_unreliable(mocks::Metrics, capacity)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1165,7 +1543,7 @@ mod loom_tests {
         }
     }
 
-    impl Policy for Message {
+    impl UnreliablePolicy for Message {
         type Overflow = VecDeque<Self>;
 
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -1182,7 +1560,7 @@ mod loom_tests {
     impl Policy for OrderedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             let gate = match &message {
                 Self::Item(_) => None,
                 Self::Coordinated(_, gate) => Some(gate.clone()),
@@ -1194,11 +1572,10 @@ mod loom_tests {
                     thread::yield_now();
                 }
             }
-            true
         }
     }
 
-    impl Policy for ReplacingMessage {
+    impl UnreliablePolicy for ReplacingMessage {
         type Overflow = VecDeque<Self>;
 
         fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -1223,18 +1600,16 @@ mod loom_tests {
     impl Policy for TrackedMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
     impl Policy for CyclicMessage {
         type Overflow = VecDeque<Self>;
 
-        fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+        fn handle(overflow: &mut VecDeque<Self>, message: Self) {
             overflow.push_back(message);
-            true
         }
     }
 
@@ -1307,7 +1682,7 @@ mod loom_tests {
     #[test]
     fn sender_drop_racing_waker_registration_wakes_or_disconnects() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1316,14 +1691,14 @@ mod loom_tests {
                 drop(sender);
             });
 
-            let poll = receiver.poll_recv(&mut cx);
+            let poll = receiver.state.poll_recv(&mut cx);
             close.join().unwrap();
 
             match poll {
                 Poll::Ready(None) => {}
                 Poll::Pending => {
                     assert!(wakes.load(Ordering::Acquire) > 0);
-                    assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+                    assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
                 }
                 Poll::Ready(Some(_)) => panic!("unexpected message"),
             }
@@ -1333,16 +1708,19 @@ mod loom_tests {
     #[test]
     fn sender_enqueue_then_drop_racing_poll_recv_drains_message() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
 
             let enqueue = thread::spawn(move || {
-                assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+                assert_eq!(
+                    sender.enqueue(Message::Spill(0)),
+                    Unreliable::new(Feedback::Ok)
+                );
             });
 
-            let poll = receiver.poll_recv(&mut cx);
+            let poll = receiver.state.poll_recv(&mut cx);
             enqueue.join().unwrap();
 
             match poll {
@@ -1350,7 +1728,7 @@ mod loom_tests {
                 Poll::Pending => {
                     assert!(wakes.load(Ordering::Acquire) > 0);
                     assert_eq!(
-                        receiver.poll_recv(&mut cx),
+                        receiver.state.poll_recv(&mut cx),
                         Poll::Ready(Some(Message::Spill(0)))
                     );
                 }
@@ -1358,17 +1736,20 @@ mod loom_tests {
                 Poll::Ready(Some(message)) => panic!("unexpected message: {message:?}"),
             }
 
-            assert_eq!(receiver.poll_recv(&mut cx), Poll::Ready(None));
+            assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Ready(None));
         });
     }
 
     #[test]
     fn sender_enqueue_then_drop_racing_try_recv_drains_message() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
 
             let enqueue = thread::spawn(move || {
-                assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+                assert_eq!(
+                    sender.enqueue(Message::Spill(0)),
+                    Unreliable::new(Feedback::Ok)
+                );
             });
 
             let result = receiver.try_recv();
@@ -1392,7 +1773,7 @@ mod loom_tests {
     #[test]
     fn handled_enqueue_wakes_registered_receiver() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
@@ -1400,7 +1781,10 @@ mod loom_tests {
             let next = receiver.recv();
             pin_mut!(next);
             assert!(matches!(next.as_mut().poll(&mut cx), Poll::Pending));
-            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            assert_eq!(
+                sender.enqueue(Message::Spill(0)),
+                Unreliable::new(Feedback::Ok)
+            );
 
             assert_eq!(wakes.load(Ordering::Acquire), 1);
             assert_eq!(
@@ -1413,12 +1797,12 @@ mod loom_tests {
     #[test]
     fn receiver_drop_racing_ready_fast_path_feedback_wakes_if_ready() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
             let wakes = Arc::new(AtomicUsize::new(0));
             let waker = counting_waker(wakes.clone());
             let mut cx = Context::from_waker(&waker);
 
-            assert_eq!(receiver.poll_recv(&mut cx), Poll::Pending);
+            assert_eq!(receiver.state.poll_recv(&mut cx), Poll::Pending);
 
             let close = thread::spawn(move || {
                 drop(receiver);
@@ -1429,9 +1813,12 @@ mod loom_tests {
             if feedback.accepted() {
                 assert!(wakes.load(Ordering::Acquire) > 0);
             } else {
-                assert_eq!(feedback, Feedback::Closed);
+                assert_eq!(feedback, Unreliable::new(Feedback::Closed));
             }
-            assert_eq!(sender.enqueue(Message::Spill(1)), Feedback::Closed);
+            assert_eq!(
+                sender.enqueue(Message::Spill(1)),
+                Unreliable::new(Feedback::Closed)
+            );
         });
     }
 
@@ -1565,7 +1952,7 @@ mod loom_tests {
     #[test]
     fn concurrent_close_and_ready_enqueue_remains_closed() {
         loom::model(|| {
-            let (sender, receiver) = new::<Message>(NZUsize!(1));
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
 
             let enqueue_sender = sender.clone();
             let enqueue = thread::spawn(move || {
@@ -1578,15 +1965,21 @@ mod loom_tests {
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
+            assert_eq!(
+                sender.enqueue(Message::Spill(2)),
+                Unreliable::new(Feedback::Closed)
+            );
         });
     }
 
     #[test]
     fn concurrent_close_and_overflow_enqueue_remains_closed() {
         loom::model(|| {
-            let (sender, receiver) = new::<Message>(NZUsize!(1));
-            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
+            let (sender, receiver) = new_unreliable::<Message>(NZUsize!(1));
+            assert_eq!(
+                sender.enqueue(Message::Drop(0)),
+                Unreliable::new(Feedback::Ok)
+            );
 
             let enqueue_sender = sender.clone();
             let enqueue = thread::spawn(move || {
@@ -1599,16 +1992,22 @@ mod loom_tests {
 
             enqueue.join().unwrap();
             close.join().unwrap();
-            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Closed);
+            assert_eq!(
+                sender.enqueue(Message::Spill(2)),
+                Unreliable::new(Feedback::Closed)
+            );
         });
     }
 
     #[test]
     fn concurrent_spill_and_refill_preserves_messages() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
             let idle_sender = sender.clone();
-            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            assert_eq!(
+                sender.enqueue(Message::Spill(0)),
+                Unreliable::new(Feedback::Ok)
+            );
 
             let seen = Arc::new(AtomicUsize::new(0));
             let enqueue = thread::spawn(move || {
@@ -1639,9 +2038,12 @@ mod loom_tests {
     #[test]
     fn concurrent_spill_senders_preserve_messages() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(1));
+            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(1));
             let idle_sender = sender.clone();
-            assert_eq!(sender.enqueue(Message::Spill(0)), Feedback::Ok);
+            assert_eq!(
+                sender.enqueue(Message::Spill(0)),
+                Unreliable::new(Feedback::Ok)
+            );
 
             let sender_1 = sender.clone();
             let enqueue_1 = thread::spawn(move || sender_1.enqueue(Message::Spill(1)));
@@ -1664,20 +2066,29 @@ mod loom_tests {
     #[test]
     fn concurrent_replace_keeps_one_overflow_message() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<ReplacingMessage>(NZUsize!(1));
+            let (sender, mut receiver) = new_unreliable::<ReplacingMessage>(NZUsize!(1));
             let idle_sender = sender.clone();
-            assert_eq!(sender.enqueue(ReplacingMessage::FillReady), Feedback::Ok);
+            assert_eq!(
+                sender.enqueue(ReplacingMessage::FillReady),
+                Unreliable::new(Feedback::Ok)
+            );
             assert_eq!(
                 sender.enqueue(ReplacingMessage::Replace(1)),
-                Feedback::Backoff
+                Unreliable::new(Feedback::Backoff)
             );
 
             let sender_1 = sender.clone();
             let replace_1 = thread::spawn(move || sender_1.enqueue(ReplacingMessage::Replace(2)));
             let replace_2 = thread::spawn(move || sender.enqueue(ReplacingMessage::Replace(3)));
 
-            assert_eq!(replace_1.join().unwrap(), Feedback::Backoff);
-            assert_eq!(replace_2.join().unwrap(), Feedback::Backoff);
+            assert_eq!(
+                replace_1.join().unwrap(),
+                Unreliable::new(Feedback::Backoff)
+            );
+            assert_eq!(
+                replace_2.join().unwrap(),
+                Unreliable::new(Feedback::Backoff)
+            );
             assert_eq!(receiver.try_recv(), Ok(ReplacingMessage::FillReady));
 
             let retained = replacement_value(receiver.try_recv().unwrap()).unwrap();
@@ -1690,15 +2101,27 @@ mod loom_tests {
     #[test]
     fn stale_overflow_hint_retries_ready_before_policy() {
         loom::model(|| {
-            let (sender, mut receiver) = new::<Message>(NZUsize!(2));
-            assert_eq!(sender.enqueue(Message::Drop(0)), Feedback::Ok);
-            assert_eq!(sender.enqueue(Message::Drop(1)), Feedback::Ok);
-            assert_eq!(sender.enqueue(Message::Spill(2)), Feedback::Backoff);
+            let (sender, mut receiver) = new_unreliable::<Message>(NZUsize!(2));
+            assert_eq!(
+                sender.enqueue(Message::Drop(0)),
+                Unreliable::new(Feedback::Ok)
+            );
+            assert_eq!(
+                sender.enqueue(Message::Drop(1)),
+                Unreliable::new(Feedback::Ok)
+            );
+            assert_eq!(
+                sender.enqueue(Message::Spill(2)),
+                Unreliable::new(Feedback::Backoff)
+            );
 
             assert_eq!(receiver.try_recv(), Ok(Message::Drop(0)));
             assert_eq!(receiver.try_recv(), Ok(Message::Drop(1)));
 
-            assert_eq!(sender.enqueue(Message::Drop(3)), Feedback::Ok);
+            assert_eq!(
+                sender.enqueue(Message::Drop(3)),
+                Unreliable::new(Feedback::Ok)
+            );
             assert_eq!(receiver.try_recv(), Ok(Message::Spill(2)));
             assert_eq!(receiver.try_recv(), Ok(Message::Drop(3)));
         });

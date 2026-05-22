@@ -2,7 +2,7 @@
 
 use crate::{
     bls12381::{
-        dkg::deal,
+        dkg::feldman_desmedt::deal,
         primitives::{group::Share, sharing::Sharing, variant::Variant},
     },
     certificate::{mocks::Fixture, Scheme},

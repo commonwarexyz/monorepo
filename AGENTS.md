@@ -124,6 +124,7 @@ Extensive technical writing in `docs/blogs/` provides deep insights into design 
 - **buffered-signatures.html**: Efficient signature aggregation
 - **threshold-simplex.html**: Threshold consensus mechanism
 - **batch-pari.html** / **bte.html**: Batch and threshold encryption constructions
+- **golden.html**: One-round DKG protocol
 
 ## CI/CD Pipeline
 
