@@ -3,8 +3,8 @@
 use super::mocks::{
     application::Application,
     harness::{
-        self, CodingHarness, StandardHarness, TestHarness, V, ValidatorHandle, ValidatorSetup,
-        BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, QUORUM,
+        self, CodingHarness, StandardHarness, TestHarness, ValidatorHandle, ValidatorSetup,
+        BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, QUORUM, V,
     },
 };
 use crate::{
@@ -25,17 +25,17 @@ struct CodingStorageConformance;
 
 impl Conformance for StandardStorageConformance {
     async fn commit(seed: u64) -> Vec<u8> {
-        marshal_commit::<StandardHarness>(seed).await
+        marshal_commit::<StandardHarness>(seed)
     }
 }
 
 impl Conformance for CodingStorageConformance {
     async fn commit(seed: u64) -> Vec<u8> {
-        marshal_commit::<CodingHarness>(seed).await
+        marshal_commit::<CodingHarness>(seed)
     }
 }
 
-async fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
+fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
     let runner = deterministic::Runner::new(
         deterministic::Config::default()
             .with_seed(seed)
@@ -80,7 +80,9 @@ async fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
         for height in 1..=count {
             let height = Height::new(height);
             let round = Round::new(Epoch::zero(), View::new(height.get()));
-            let parent_view = height.previous().map_or(View::zero(), |h| View::new(h.get()));
+            let parent_view = height
+                .previous()
+                .map_or(View::zero(), |h| View::new(h.get()));
             let block = H::make_test_block(
                 H::digest(&parent),
                 H::commitment(&parent),
