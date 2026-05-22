@@ -77,13 +77,12 @@ impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
 impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
     type Overflow = Pending<P, M>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
-            return true;
+            return;
         }
 
         overflow.0.push_back(message);
-        true
     }
 }
 
