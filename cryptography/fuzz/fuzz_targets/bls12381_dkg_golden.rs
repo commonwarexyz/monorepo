@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::bls12381::golden_dkg::{FuzzPlan, Setup};
+use commonware_cryptography::bls12381::dkg::golden::{FuzzPlan, Setup};
 use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
 use std::{num::NonZeroU32, sync::LazyLock};

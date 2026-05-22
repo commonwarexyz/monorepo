@@ -83,6 +83,16 @@ impl<B: Blob> State<B> {
 /// - Flush paths ([Self::sync], [Self::resize], overlap flushes in [Self::write_at]) hand drained
 ///   bytes to the blob and leave the tip detached until the next buffered write.
 ///
+/// # Concurrent Access
+///
+/// [Write] owns mutation ordering and durability bookkeeping for the wrapped [Blob]. Cloned
+/// [Write] handles are safe to use concurrently because they share the same state. Raw [Blob]
+/// handles cloned before wrapping observe only flushed data and may not see the latest buffered
+/// writes until [Self::sync], [Self::resize], or an overlapping [Self::write_at] flushes them.
+/// Those raw handles must not be used to write, resize, or otherwise mutate the blob while a
+/// [Write] exists. External mutations bypass the buffer state and [Self::sync] may use
+/// [Blob::write_at_sync], which is not a durability barrier for those external mutations.
+///
 /// # Example
 ///
 /// ```
@@ -126,7 +136,8 @@ impl<B: Blob> Write<B> {
             state: Arc::new(AsyncRwLock::new(State {
                 blob,
                 buffer: Buffer::new(size, capacity.get(), pool),
-                needs_sync: false,
+                // Preserve one full sync barrier for mutations that predate wrapping.
+                needs_sync: true,
             })),
         }
     }
@@ -275,7 +286,7 @@ impl<B: Blob> Write<B> {
         Ok(())
     }
 
-    /// Flush buffered bytes and durably sync the underlying blob.
+    /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&self) -> Result<(), Error> {
         let mut state = self.state.write().await;
         if let Some((buf, offset)) = state.buffer.take() {

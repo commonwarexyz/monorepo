@@ -1,7 +1,7 @@
 use clap::{value_parser, Arg, Command};
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::{dkg::deal_anonymous, primitives::variant::MinSig},
+    bls12381::{dkg::feldman_desmedt::deal_anonymous, primitives::variant::MinSig},
     ed25519, Signer as _,
 };
 use commonware_formatting::hex;

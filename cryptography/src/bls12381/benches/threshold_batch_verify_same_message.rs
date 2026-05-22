@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::deal,
+        dkg::feldman_desmedt::deal,
         primitives::{self, sharing::Mode, variant::MinSig},
     },
     ed25519::PrivateKey,

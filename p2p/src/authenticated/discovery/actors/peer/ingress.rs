@@ -1,5 +1,5 @@
 use crate::authenticated::discovery::types;
-use commonware_actor::mailbox::{self, Policy};
+use commonware_actor::mailbox::{self, UnreliablePolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Metrics;
 use std::{collections::VecDeque, fmt, num::NonZeroUsize};
@@ -17,7 +17,7 @@ pub enum Message<C: PublicKey> {
     Kill,
 }
 
-impl<C: PublicKey> Policy for Message<C> {
+impl<C: PublicKey> UnreliablePolicy for Message<C> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
@@ -31,11 +31,14 @@ impl<C: PublicKey> Policy for Message<C> {
     }
 }
 
-pub struct Mailbox<C: PublicKey>(mailbox::Sender<Message<C>>);
+pub struct Mailbox<C: PublicKey>(mailbox::UnreliableSender<Message<C>>);
 
 impl<C: PublicKey> Mailbox<C> {
-    pub fn new(metrics: impl Metrics, size: NonZeroUsize) -> (Self, mailbox::Receiver<Message<C>>) {
-        let (sender, receiver) = mailbox::new(metrics, size);
+    pub fn new(
+        metrics: impl Metrics,
+        size: NonZeroUsize,
+    ) -> (Self, mailbox::UnreliableReceiver<Message<C>>) {
+        let (sender, receiver) = mailbox::new_unreliable(metrics, size);
         (Self(sender), receiver)
     }
 

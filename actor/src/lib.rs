@@ -17,8 +17,6 @@ commonware_macros::stability_scope!(BETA {
         Ok,
         /// The submission exceeded configured capacity but was handled by the overflow policy.
         Backoff,
-        /// The submission exceeded configured capacity and was rejected by the overflow policy.
-        Rejected,
         /// The endpoint is closed.
         Closed,
     }
@@ -27,6 +25,50 @@ commonware_macros::stability_scope!(BETA {
         /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             matches!(self, Self::Ok | Self::Backoff)
+        }
+    }
+
+    /// Feedback from endpoints that may reject work under backpressure.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Unreliable<T> {
+        /// Endpoint outcome from the submission attempt.
+        Outcome(T),
+        /// The work was rejected by the endpoint.
+        Rejected,
+    }
+
+    impl<T> Unreliable<T> {
+        /// Wrap an outcome for an operation that may reject work.
+        pub const fn new(outcome: T) -> Self {
+            Self::Outcome(outcome)
+        }
+
+        /// Create a rejected result.
+        pub const fn rejected() -> Self {
+            Self::Rejected
+        }
+
+        /// Returns `true` when the operation was rejected before producing an outcome.
+        pub const fn is_rejected(&self) -> bool {
+            matches!(self, Self::Rejected)
+        }
+
+        /// Returns the outcome when the operation was not rejected.
+        pub fn outcome(self) -> Option<T> {
+            match self {
+                Self::Outcome(outcome) => Some(outcome),
+                Self::Rejected => None,
+            }
+        }
+    }
+
+    impl Unreliable<Feedback> {
+        /// Returns `true` when the endpoint handled the submission.
+        pub const fn accepted(self) -> bool {
+            match self {
+                Self::Outcome(feedback) => feedback.accepted(),
+                Self::Rejected => false,
+            }
         }
     }
 

@@ -135,7 +135,7 @@ where
 {
     type Overflow = Pending<K, P, S>;
 
-    fn handle(overflow: &mut Pending<K, P, S>, message: Self) -> bool {
+    fn handle(overflow: &mut Pending<K, P, S>, message: Self) {
         match message {
             Self::Fetch(keys) => {
                 for key in keys {
@@ -171,7 +171,6 @@ where
                 overflow.modifications.push_back(predicate);
             }
         }
-        true
     }
 }
 

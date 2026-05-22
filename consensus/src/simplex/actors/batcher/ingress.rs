@@ -90,7 +90,7 @@ impl<S: Scheme, D: Digest> Overflow<Message<S, D>> for Pending<S, D> {
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     type Overflow = Pending<S, D>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         match message {
             update @ Self::Update {
                 current: new_current,
@@ -107,7 +107,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     let old = (*old_current, *old_finalized);
                     let new = (new_current, new_finalized);
                     if new <= old {
-                        return true;
+                        return;
                     }
                 }
                 overflow.update = Some(update);
@@ -124,7 +124,7 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     Some(Self::Update { current: old_current, finalized: old_finalized, .. })
                         if Self::prunes(*old_current, *old_finalized, &new_vote)
                 ) {
-                    return true;
+                    return;
                 }
 
                 // Ignore the constructed vote if it is a duplicate
@@ -133,12 +133,11 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                     .iter()
                     .any(|old_vote| Self::similar(old_vote, &new_vote))
                 {
-                    return true;
+                    return;
                 }
                 overflow.constructed.push_back(new_vote);
             }
         }
-        true
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
-use commonware_actor::{mailbox::Policy, Feedback};
+use commonware_actor::{mailbox::UnreliablePolicy, Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
@@ -18,7 +18,7 @@ pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
     },
 }
 
-impl<Si: Sink, St: Stream, P: PublicKey> Policy for Message<Si, St, P> {
+impl<Si: Sink, St: Stream, P: PublicKey> UnreliablePolicy for Message<Si, St, P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -32,13 +32,13 @@ impl<Si: Sink, St: Stream, P: PublicKey> Policy for Message<Si, St, P> {
 impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
-    /// This may fail during shutdown if the spawner has already exited,
-    /// which is harmless since no new connections need to be spawned.
+    /// This may be rejected when the spawner is backlogged, or return closed after shutdown, which
+    /// is harmless since stale connections do not need to be spawned.
     pub fn spawn(
         &mut self,
         connection: (Sender<Si>, Receiver<St>),
         reservation: Reservation<P>,
-    ) -> Feedback {
+    ) -> Unreliable<Feedback> {
         self.0.enqueue(Message::Spawn {
             peer: reservation.metadata().public_key().clone(),
             connection,
@@ -154,10 +154,13 @@ mod tests {
                 Reservation::new(Metadata::Listener(peer_1.clone()), releaser.clone());
             let reservation_2 = Reservation::new(Metadata::Listener(peer_2.clone()), releaser);
 
-            assert_eq!(spawner.spawn(connection_1, reservation_1), Feedback::Ok);
+            assert_eq!(
+                spawner.spawn(connection_1, reservation_1),
+                Unreliable::new(Feedback::Ok)
+            );
             assert_eq!(
                 spawner.spawn(connection_2, reservation_2),
-                Feedback::Rejected
+                Unreliable::Rejected
             );
 
             let release = tracker_receiver

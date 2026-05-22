@@ -9,7 +9,7 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
-use commonware_actor::Feedback;
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufs, Spawner};
@@ -301,9 +301,9 @@ impl<S: Sender> GlobalSender<S> {
         recipients: Recipients<S::PublicKey>,
         payload: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Feedback {
+    ) -> Unreliable<Feedback> {
         self.check(recipients).map_or_else(
-            |_| Feedback::Rejected,
+            |_| Unreliable::Rejected,
             |checked| checked.with_subchannel(subchannel).send(payload, priority),
         )
     }
@@ -347,7 +347,7 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         self.inner.recipients()
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Feedback {
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
@@ -674,7 +674,7 @@ mod tests {
             unreachable!("rate-limited sender should not produce a checked sender");
         }
 
-        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Feedback {
+        fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
             unreachable!("rate-limited sender should not send");
         }
     }
@@ -695,7 +695,7 @@ mod tests {
     fn test_global_sender_rate_limited_send_rejected() {
         let mut sender = GlobalSender::new(RateLimitedSender);
         let feedback = sender.send(0, Recipients::One(pk(0)), b"rate-limited", false);
-        assert_eq!(feedback, Feedback::Rejected);
+        assert_eq!(feedback, Unreliable::Rejected);
         assert!(!feedback.accepted());
     }
 

@@ -42,11 +42,16 @@ made real progress in scaling these systems with many chains supporting
 10K–100K TPS. But what happens when we introduce privacy?" />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/batch-pari.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
-        <meta property="twitter:creator" content="https://x.com/gvamsip" />
+        <meta property="twitter:creator" content="https://x.com/guruvamsip" />
     
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"
+        onload="document.querySelectorAll('.math').forEach(function (el) {
+            katex.render(el.textContent, el, {
+                displayMode: el.classList.contains('display'),
+                throwOnError: false
+            });
+        });"></script>
     
     <link rel="stylesheet" type="text/css" href="/style.css">
 </head>
@@ -95,7 +100,7 @@ made real progress in scaling these systems with many chains supporting
         <h1>The Proof is in the Pairing</h1>
         <div class="meta">
 
-                        <div class="author">By <a href="https://x.com/gvamsip">Guru
+                        <div class="author">By <a href="https://x.com/guruvamsip">Guru
 Vamsi Policharla</a></div>
                         <div class="date">March 24th, 2026</div>
         </div>
@@ -117,8 +122,8 @@ Vamsi Policharla</a></div>
         (exponentiations/pairings) per transaction when using
         pairing-based techniques. Note that this is (asymptotically)
         optimal, so doing much better is difficult. So if we budget
-        <span class="math inline">\(\approx 1\)</span> ms privacy
-        overhead per transaction (about the time taken for a pairing on
+        <span class="math inline">\approx 1</span> ms privacy overhead
+        per transaction (about the time taken for a pairing on
         BLS12-381), processing 100K transactions requires 100s in
         single-core CPU time. Assuming perfect parallelization, we can
         of course reach 100K TPS with 100 cores—or a GPU—but this is
@@ -137,9 +142,9 @@ Vamsi Policharla</a></div>
         <p>But this strategy comes with two limitations:</p>
         <ol type="1">
         <li>introduces an extra “hop” in each slot from proposer <span
-        class="math inline">\(\rightarrow\)</span> aggregator <span
-        class="math inline">\(\rightarrow\)</span> validator, which in
-        turn increases latency</li>
+        class="math inline">\rightarrow</span> aggregator <span
+        class="math inline">\rightarrow</span> validator, which in turn
+        increases latency</li>
         <li>relies on availability of the aggregator to maintain the
         system’s throughput</li>
         </ol>
@@ -178,51 +183,50 @@ Vamsi Policharla</a></div>
         the verification algorithm:</p>
         <ol type="1">
         <li><p>Parse the verification key <span
-        class="math inline">\(\textsf{ivk} = ((A,B), [\alpha]_1,
+        class="math inline">\textsf{ivk} = ((A,B), [\alpha]_1,
         [\beta]_1, [\delta_1]_2, [\delta_2]_2, [\tau]_2, [\delta_1
-        \tau]_2)\)</span>, where <span class="math inline">\(A\)</span>
-        and <span class="math inline">\(B\)</span> form the square R1CS
+        \tau]_2)</span>, where <span class="math inline">A</span> and
+        <span class="math inline">B</span> form the square R1CS
         relation.</p></li>
-        <li><p>Parse the proof <span class="math inline">\(\pi = (T, U,
+        <li><p>Parse the proof <span class="math inline">\pi = (T, U,
         v_a, v_b) \in \mathbb{G}_1^2 \times
-        \mathbb{F}^2\)</span>.</p></li>
-        <li><p>Compute the challenge <span class="math inline">\(r :=
-        H(\textsf{transcript})\)</span>.</p></li>
-        <li><p>Compute <span class="math inline">\(x_A := A \cdot (x \|
-        0)\)</span> and <span class="math inline">\(x_B := B \cdot (x \|
-        0)\)</span>, and interpolate over domain <span
-        class="math inline">\(K\)</span> to obtain polynomials <span
-        class="math inline">\(\hat{x}_A\)</span> and <span
-        class="math inline">\(\hat{x}_B\)</span>.</p></li>
+        \mathbb{F}^2</span>.</p></li>
+        <li><p>Compute the challenge <span class="math inline">r :=
+        H(\textsf{transcript})</span>.</p></li>
+        <li><p>Compute <span class="math inline">x_A := A \cdot (x \|
+        0)</span> and <span class="math inline">x_B := B \cdot (x \|
+        0)</span>, and interpolate over domain <span
+        class="math inline">K</span> to obtain polynomials <span
+        class="math inline">\hat{x}_A</span> and <span
+        class="math inline">\hat{x}_B</span>.</p></li>
         <li><p>Compute the quotient evaluation, where <span
-        class="math inline">\(z_K\)</span> is the vanishing polynomial
-        on the domain <span class="math inline">\(K\)</span>:</p>
-        <p><span class="math display">\[v_q := \frac{(v_a +
-        \hat{x}_A(r))^2 - (v_b +
-        \hat{x}_B(r))}{z_K(r)}\]</span></p></li>
+        class="math inline">z_K</span> is the vanishing polynomial on
+        the domain <span class="math inline">K</span>:</p>
+        <p><span class="math display">v_q := \frac{(v_a +
+        \hat{x}_A(r))^2 - (v_b + \hat{x}_B(r))}{z_K(r)}</span></p></li>
         <li><p>Check the pairing equation:</p>
-        <p><span class="math display">\[e(T,\; [\delta_2]_2)
+        <p><span class="math display">e(T,\; [\delta_2]_2)
         \stackrel{?}{=} e(U,\; [\delta_1 \tau]_2 - r \cdot [\delta_1]_2)
         \cdot e(v_a \cdot [\alpha]_1 + v_b \cdot [\beta]_1 + v_q \cdot
-        [1]_1,\; [1]_2)\]</span></p></li>
+        [1]_1,\; [1]_2)</span></p></li>
         </ol>
         <p>Rearranging the last equation, we have:</p>
-        <p><span class="math display">\[e(\colorbox{lightgrey}{$T$},\;
+        <p><span class="math display">e(\colorbox{lightgrey}{$T$},\;
         [\delta_2]_2) \stackrel{?}{=} e(\colorbox{lightgrey}{$U$},\;
         [\delta_1 \tau]_2) \cdot e(\colorbox{lightgrey}{$-r \cdot U$},\;
         [\delta_1]_2) \cdot e(\colorbox{lightgrey}{$v_a$} \cdot
         [\alpha]_1 + \colorbox{lightgrey}{$v_b$} \cdot [\beta]_1 +
-        \colorbox{lightgrey}{$v_q$} \cdot [1]_1,\; [1]_2)\]</span></p>
+        \colorbox{lightgrey}{$v_q$} \cdot [1]_1,\; [1]_2)</span></p>
         <p>where only the <span
-        class="math inline">\(\colorbox{lightgrey}{\text{highlighted}}\)</span>
+        class="math inline">\colorbox{lightgrey}{\text{highlighted}}</span>
         terms change across different proofs (under the same
         verification key). Thus, we can batch verify multiple proofs
         (see <a href="https://eprint.iacr.org/2008/015.pdf">FGHP09</a>)
         by taking a random linear combination using three <span
-        class="math inline">\(\mathbb{G}_1\)</span> MSMs for the <span
-        class="math inline">\(T, U, r\cdot U\)</span> terms, field
-        multiplications for the <span class="math inline">\(v_a, v_b,
-        v_q\)</span> terms, and finally checking a single multi-pairing.
+        class="math inline">\mathbb{G}_1</span> MSMs for the <span
+        class="math inline">T, U, r\cdot U</span> terms, field
+        multiplications for the <span class="math inline">v_a, v_b,
+        v_q</span> terms, and finally checking a single multi-pairing.
         Of course, we still need to carry out steps 1-5 for each proof,
         but these are very fast hashing and field operations. This
         strategy applies more broadly to KZG opening proofs and
@@ -232,14 +236,13 @@ Vamsi Policharla</a></div>
         <p>A quick implementation (with room for further optimization)
         of this idea can be found <a
         href="https://github.com/guruvamsi-policharla/garuda-pari/pull/1">here</a>,
-        and it shows a <span class="math inline">\(60\times\)</span>
-        speedup when verifying <span
-        class="math inline">\(2^{16}\)</span> proofs relative to naive
-        individual verification. Both experiments were run in
-        single-threaded mode. Concretely, this amounts to <span
-        class="math inline">\(\approx 10\mu\text{s}\)</span> per proof
-        on an M5 MacBook Pro, down from 0.6 ms per proof. And the more
-        proofs you verify, the faster it gets!</p>
+        and it shows a <span class="math inline">60\times</span> speedup
+        when verifying <span class="math inline">2^{16}</span> proofs
+        relative to naive individual verification. Both experiments were
+        run in single-threaded mode. Concretely, this amounts to <span
+        class="math inline">\approx 10\mu\text{s}</span> per proof on an
+        M5 MacBook Pro, down from 0.6 ms per proof. And the more proofs
+        you verify, the faster it gets!</p>
         <div data-align="center">
         <table>
         <thead>
@@ -289,7 +292,7 @@ Vamsi Policharla</a></div>
         proportionally, verifying a SNARK can be cheaper than an ERC-20
         transfer. A parallel implementation using 8 threads is able to
         verify over 500K proofs in <span
-        class="math inline">\(&lt;750\)</span> ms.</p>
+        class="math inline">&lt;750</span> ms.</p>
         <div data-align="center">
         <table>
         <thead>
@@ -340,8 +343,8 @@ Vamsi Policharla</a></div>
         extended to support standard R1CS circuits (see Remark 2.3 in <a
         href="https://eprint.iacr.org/2024/1245">DMS24</a>) by
         increasing the proof size to 2 <span
-        class="math inline">\(\mathbb{G}_1\)</span> elements and 3 <span
-        class="math inline">\(\mathbb{F}\)</span> elements.</p>
+        class="math inline">\mathbb{G}_1</span> elements and 3 <span
+        class="math inline">\mathbb{F}</span> elements.</p>
         <p>Stay tuned for our upcoming posts on scaling timelock
         encryption and batched threshold encryption for encrypted
         mempools!</p>
