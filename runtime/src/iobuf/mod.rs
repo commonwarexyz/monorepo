@@ -30,21 +30,23 @@ use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, 
 ///
 /// On Unix systems, queries the actual page size via `sysconf`.
 /// On other systems (Windows), defaults to 4KB.
-#[cfg(unix)]
-pub fn page_size() -> usize {
-    // SAFETY: sysconf is safe to call.
-    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if size <= 0 {
-        4096 // Safe fallback if sysconf fails
-    } else {
-        size as usize
-    }
-}
-
-#[cfg(not(unix))]
 #[allow(clippy::missing_const_for_fn)]
 pub fn page_size() -> usize {
-    4096
+    #[cfg(unix)]
+    {
+        // SAFETY: sysconf is safe to call.
+        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if size <= 0 {
+            4096 // Safe fallback if sysconf fails
+        } else {
+            size as usize
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        4096
+    }
 }
 
 /// Returns the cache line size for the current architecture.
