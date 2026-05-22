@@ -7,6 +7,8 @@ pub mod byzzfuzz;
 pub mod disrupter;
 pub mod id_mock;
 pub mod invariants;
+#[cfg(feature = "mocks")]
+pub mod marshal;
 pub mod network;
 #[cfg(feature = "mocks")]
 pub mod ordered_broadcast;
