@@ -830,7 +830,11 @@ impl BufMut<PooledBacking> {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCacheConfig},
+        iobuf::{
+            cache_line_size,
+            pool::BufferPoolThreadCacheConfig,
+            BufferPool, BufferPoolConfig,
+        },
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -868,7 +872,7 @@ mod tests {
         assert!((buf.as_ptr() as usize).is_multiple_of(page));
 
         // Cache-line-aligned allocation should also satisfy its alignment.
-        let cache_line = BufferPoolConfig::for_network().alignment.get();
+        let cache_line = cache_line_size();
         let buf2 = AlignedBuffer::new(4096, cache_line);
         assert_eq!(buf2.capacity(), 4096);
         assert!((buf2.as_ptr() as usize).is_multiple_of(cache_line));

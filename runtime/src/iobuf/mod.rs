@@ -22,7 +22,7 @@ pub(crate) use buffer::AlignedBuffer;
 use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
-pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
+pub use pool::{cache_line_size, BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
 
 #[cfg(feature = "bench")]
