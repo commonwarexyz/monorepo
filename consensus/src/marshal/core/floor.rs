@@ -66,7 +66,7 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
         }
     }
 
-    pub(super) const fn processed_height_floor(&self) -> Height {
+    pub(super) const fn processed_height(&self) -> Height {
         match self.processed.height {
             Some(height) => height,
             None => Height::zero(),

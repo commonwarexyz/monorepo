@@ -741,8 +741,8 @@ where
             }
             Message::Prune { height } => {
                 // Only allow pruning at or below the current floor.
-                if height > self.floor.processed_height_floor() {
-                    warn!(%height, floor = %self.floor.processed_height_floor(), "prune height above floor, ignoring");
+                if height > self.floor.processed_height() {
+                    warn!(%height, floor = %self.floor.processed_height(), "prune height above floor, ignoring");
                     return;
                 }
 
@@ -1080,10 +1080,10 @@ where
         // This anchor cannot move the application sync point, but its
         // finalization round can still prune round-bound resolver work.
         // Keep pending acks intact because processed_height is unchanged.
-        if height <= self.floor.processed_height_floor() {
+        if height <= self.floor.processed_height() {
             warn!(
                 %height,
-                existing = %self.floor.processed_height_floor(),
+                existing = %self.floor.processed_height(),
                 "floor not updated, at or below existing"
             );
             let finalization = self
@@ -1239,7 +1239,7 @@ where
                     if annotations
                         .iter()
                         .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
-                        && height > self.floor.processed_height_floor()
+                        && height > self.floor.processed_height()
                     {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
@@ -1257,7 +1257,7 @@ where
                 let Some(bounds) = self.epocher.containing(height) else {
                     debug!(
                         %height,
-                        floor = %self.floor.processed_height_floor(),
+                        floor = %self.floor.processed_height(),
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -1266,7 +1266,7 @@ where
                 let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
                     debug!(
                         %height,
-                        floor = %self.floor.processed_height_floor(),
+                        floor = %self.floor.processed_height(),
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -1306,7 +1306,7 @@ where
                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
                     debug!(
                         ?round,
-                        floor = %self.floor.processed_height_floor(),
+                        floor = %self.floor.processed_height(),
                         "ignoring stale delivery"
                     );
                     response.send_lossy(true);
@@ -1725,10 +1725,10 @@ where
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
         // pruning boundary)
-        if height <= self.floor.processed_height_floor() {
+        if height <= self.floor.processed_height() {
             debug!(
                 %height,
-                floor = %self.floor.processed_height_floor(),
+                floor = %self.floor.processed_height(),
                 ?digest,
                 "dropping finalization at or below processed height floor"
             );
@@ -1903,7 +1903,7 @@ where
         }
 
         let mut wrote = false;
-        let start = self.floor.processed_height_floor().next();
+        let start = self.floor.processed_height().next();
 
         // If finalizations extend beyond the last stored block, anchor the
         // trailing block so the gap repair loop below can walk backward from it.
@@ -1912,7 +1912,7 @@ where
                 .finalized_blocks
                 .last_index()
                 .is_some_and(|last| last >= last_finalized);
-            if last_finalized > self.floor.processed_height_floor() && !have_block {
+            if last_finalized > self.floor.processed_height() && !have_block {
                 // Get the finalization for the last finalized block.
                 let finalization = self
                     .get_finalization_by_height(last_finalized)
@@ -2034,7 +2034,7 @@ where
         self.floor.set_processed_height(height);
         let _ = self
             .processed_height
-            .try_set(self.floor.processed_height_floor().get());
+            .try_set(self.floor.processed_height().get());
 
         // Prune any existing requests below the new floor.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
@@ -2091,7 +2091,7 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
-        if height > self.floor.processed_height_floor() || round <= self.floor.processed_round() {
+        if height > self.floor.processed_height() || round <= self.floor.processed_round() {
             return;
         }
 
