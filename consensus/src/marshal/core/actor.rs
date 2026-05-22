@@ -90,6 +90,13 @@ impl ApplicationFloor {
         }
     }
 
+    fn round_restore_height(self) -> Height {
+        match self {
+            Self::BeforeGenesis => Height::zero(),
+            Self::Acknowledged(height) => height.next(),
+        }
+    }
+
     fn next_dispatch_height(self) -> Height {
         match self {
             Self::BeforeGenesis => Height::zero(),
@@ -249,11 +256,13 @@ where
             Start::Floor(finalization) => Some(finalization),
         };
         // A floor transition to height H is persisted as H - 1 until the
-        // application acknowledges H. Looking one height ahead restores the
-        // anchor's round across that crash window.
-        let last_processed_round =
-            Self::latest_processed_round(&finalizations_by_height, last_processed_height.next())
-                .await;
+        // application acknowledges H. If that persisted cursor exists, looking
+        // one height ahead restores the anchor's round across the crash window.
+        let last_processed_round = Self::latest_processed_round(
+            &finalizations_by_height,
+            application_floor.round_restore_height(),
+        )
+        .await;
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");

@@ -3188,6 +3188,65 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_start_floor_height_one_without_metadata_delivers_anchor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "start-floor-height-one-without-metadata";
+
+            let floor_round = Round::new(Epoch::zero(), View::new(1));
+            let floor_block = make_raw_block(Sha256::hash(b"genesis-parent"), Height::new(1), 100);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::zero(),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let blocks = [floor_block.clone()];
+            let finalizations = [(Height::new(1), floor_finalization.clone())];
+            seed_inconsistent_restart_state(
+                context.child("seed_restart_state"),
+                partition_prefix,
+                &blocks,
+                &finalizations,
+            )
+            .await;
+
+            let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+
+            select! {
+                height = started_rx => {
+                    assert_eq!(
+                        height.expect("floor anchor delivery signal missing"),
+                        Height::new(1),
+                        "height-one startup floor must be delivered without prior metadata"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("height-one startup floor was not delivered");
+                },
+            }
+            assert!(
+                resolver.fetches().is_empty(),
+                "stored startup floor anchor must not be fetched"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_set_floor_holds_dispatch_until_anchor_arrives() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
