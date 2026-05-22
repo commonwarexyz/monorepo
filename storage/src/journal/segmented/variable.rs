@@ -1364,12 +1364,13 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
+
+            // Leave one byte in the first page so the trailing bytes below cross the page
+            // boundary and repair must issue a physical resize.
             let section = 1u64;
             let item = [10u8; 1021];
             let item_record_size =
                 UInt(item.encode_size() as u32).encode_size() + item.encode_size();
-            // Leave one byte in the first page so the trailing bytes below cross the page
-            // boundary and repair must issue a physical resize.
             assert_eq!(item_record_size, PAGE_SIZE.get() as usize - 1);
 
             let mut journal = Journal::init(context.child("first"), cfg.clone())
