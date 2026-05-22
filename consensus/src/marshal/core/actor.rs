@@ -2039,10 +2039,7 @@ where
     }
 
     /// Returns the latest known finalization round at or below the processed height.
-    async fn latest_processed_round(
-        finalizations_by_height: &FC,
-        height: Option<Height>,
-    ) -> Round {
+    async fn latest_processed_round(finalizations_by_height: &FC, height: Option<Height>) -> Round {
         let Some(height) = height else {
             return Round::zero();
         };
