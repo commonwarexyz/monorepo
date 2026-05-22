@@ -20,7 +20,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::Output,
+        dkg::feldman_desmedt::Output,
         primitives::{group, variant::Variant},
     },
     ed25519::Batch,

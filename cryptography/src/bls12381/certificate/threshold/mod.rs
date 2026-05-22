@@ -713,7 +713,7 @@ mod tests {
     use super::*;
     use crate::{
         bls12381::{
-            dkg,
+            dkg::feldman_desmedt as dkg,
             primitives::{
                 ops::threshold::sign_message,
                 variant::{MinPk, MinSig, Variant},

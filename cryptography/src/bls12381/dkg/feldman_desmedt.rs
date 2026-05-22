@@ -1,10 +1,10 @@
-//! Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
+//! Feldman/Desmedt Distributed Key Generation (DKG) and Resharing for BLS12-381.
 //!
-//! This module implements an interactive Distributed Key Generation (DKG) and Resharing protocol
-//! for the BLS12-381 curve. Unlike other constructions, this construction does not require encrypted
-//! shares to be publicly broadcast to complete a DKG/Reshare. Shares, instead, are sent directly
-//! between dealers and players over an encrypted channel (which can be instantiated
-//! with [commonware-p2p](https://docs.rs/commonware-p2p)).
+//! This module implements a Feldman/Desmedt-style DKG and Resharing protocol. Unlike other
+//! constructions, this construction does not require encrypted shares to be publicly broadcast to
+//! complete a DKG/Reshare. Shares, instead, are sent directly between dealers and players over an
+//! encrypted channel (which can be instantiated with
+//! [commonware-p2p](https://docs.rs/commonware-p2p)).
 //!
 //! The DKG is based on the "Joint-Feldman" construction from "Secure Distributed Key
 //! Generation for Discrete-Log Based Cryptosystems" (GJKR99) and Resharing is based
@@ -157,11 +157,12 @@
 //! honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1` (for `B_2`),
 //! however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
 //!
-//! #### DKG without a synchrony assumption
+//! #### Dropping the Synchrony Assumption for `f` Bounded Reveals?
 //!
-//! Some protocols achieve one round without synchrony assumptions, by combining
-//! encryption and ZK Proofs. We have an implementation of one such protocol,
-//! [Golden](https://eprint.iacr.org/2025/1924), in [`crate::bls12381::golden_dkg`].
+//! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
+//! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
+//! where at most `f` players are Byzantine) by combining encryption and ZK Proofs. We have an implementation of one
+//! such protocol, [Golden](https://eprint.iacr.org/2025/1924), in [`crate::bls12381::dkg::golden`].
 //!
 //! ## Handling Complaints
 //!
@@ -194,7 +195,7 @@
 //!
 //! ```
 //! use commonware_cryptography::bls12381::{
-//!     dkg::{Dealer, Info, Logs, Player, SignedDealerLog, observe},
+//!     dkg::feldman_desmedt::{Dealer, Info, Logs, Player, SignedDealerLog, observe},
 //!     primitives::{variant::MinSig, sharing::Mode},
 //! };
 //! use commonware_cryptography::{ed25519, Signer};
@@ -296,10 +297,9 @@
 //!
 //! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 
-use super::primitives::group::{Private, Share};
 use crate::{
     bls12381::primitives::{
-        group::Scalar,
+        group::{Private, Scalar, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },

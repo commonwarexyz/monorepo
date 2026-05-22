@@ -415,7 +415,7 @@ of a single dealer, which is quite nice.
 # Performance
 
 Here are the current performance numbers we have from our initial implementation.
-Measured values are taken from `bls12381::golden_dkg::{deal, verify, dealing_size}`
+Measured values are taken from `bls12381::dkg::golden::{deal, verify, dealing_size}`
 for $n \in \{2, 4, 8\}$; values for $n \in \{16, 32, 64\}$ are projected linearly
 (shown in gray) since the underlying cost is dominated by $O(n)$ work.
 

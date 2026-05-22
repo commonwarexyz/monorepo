@@ -1,7 +1,7 @@
 //! Non-interactive Distributed Key Generation (DKG) and Resharing for BLS12-381.
 //!
 //! This module implements a non-interactive DKG and Resharing protocol for the BLS12-381
-//! curve. Unlike the interactive [`super::dkg`] protocol, this construction requires no
+//! curve. Unlike the interactive [`super::feldman_desmedt`] protocol, this construction requires no
 //! back-and-forth between dealers and players. Each dealer publishes a single message,
 //! and any observer can verify correctness and compute the public output without private
 //! key material.
@@ -94,7 +94,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use commonware_cryptography::bls12381::golden_dkg::*;
+//! use commonware_cryptography::bls12381::dkg::golden::*;
 //! use std::num::NonZeroU32;
 //!
 //! // Build the eVRF [`Setup`] once. This is expensive but only needs to be done
@@ -127,13 +127,10 @@
 mod evrf;
 
 use crate::{
-    bls12381::{
-        golden_dkg::evrf::{Signature, VrfCommitments},
-        primitives::{
-            group::{Private, Scalar, Share, SmallScalar, G1},
-            sharing::{Mode, ModeVersion, Sharing},
-            variant::MinPk,
-        },
+    bls12381::primitives::{
+        group::{Private, Scalar, Share, SmallScalar, G1},
+        sharing::{Mode, ModeVersion, Sharing},
+        variant::MinPk,
     },
     transcript::{Summary, Transcript},
     Signer as _, Verifier as _,
@@ -150,6 +147,7 @@ use commonware_utils::{
     Faults, Participant, TryCollect as _, NZU32,
 };
 pub use evrf::{PrivateKey, PublicKey, Setup};
+use evrf::{Signature, VrfCommitments};
 use rand_core::CryptoRngCore;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
@@ -1317,7 +1315,7 @@ mod test_plan {
                 //
                 // Manually construct a dealing with a wrong-degree poly
                 // evaluated at the correct player scalars. Because
-                // golden_dkg has no explicit degree check, this dealing
+                // Golden has no explicit degree check, this dealing
                 // passes Dealing::check() and gets selected -- the test
                 // verifies this by NOT considering shift_degree dealers
                 // as "bad".

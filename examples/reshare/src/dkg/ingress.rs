@@ -9,7 +9,7 @@ use commonware_actor::{
 };
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{
-    bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
+    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
     Hasher, Signer,
 };
 use commonware_utils::{acknowledgement::Exact, channel::oneshot, Acknowledgement};
