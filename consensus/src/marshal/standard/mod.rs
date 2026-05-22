@@ -597,8 +597,8 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-
             assert_eq!(recovering.application.acknowledged().await, Height::zero());
+
             // Walk through all blocks sequentially. Block 2 must be
             // repaired from the peer before it can be dispatched.
             for expected_height in 1..=2 {
@@ -707,8 +707,8 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-
             assert_eq!(recovering.application.acknowledged().await, Height::zero());
+
             // Walk through all three blocks sequentially. Block 2 must be
             // repaired from the peer before it can be dispatched.
             for expected_height in 1..=3 {
@@ -910,8 +910,8 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-
             assert_eq!(recovering.application.acknowledged().await, Height::zero());
+
             // Walk through all five blocks sequentially. Blocks 2-5 must be
             // repaired from the peer before they can be dispatched.
             for expected_height in 1..=5 {
@@ -1103,8 +1103,8 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-
             assert_eq!(recovering.application.acknowledged().await, Height::zero());
+
             // Walk through sequential acks to confirm no repair was needed.
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
@@ -1183,8 +1183,8 @@ mod tests {
                 crate::marshal::mocks::application::Application::manual_ack(),
             )
             .await;
-
             assert_eq!(recovering.application.acknowledged().await, Height::zero());
+
             // Walk through both blocks to confirm repair recovered them.
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
