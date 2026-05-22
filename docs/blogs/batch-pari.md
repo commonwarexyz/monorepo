@@ -5,7 +5,7 @@ date: "March 24th, 2026"
 published-time: "2026-03-24T00:00:00Z"
 modified-time: "2026-03-24T00:00:00Z"
 author: "Guru Vamsi Policharla"
-author_twitter: "https://x.com/gvamsip"
+author_twitter: "https://x.com/guruvamsip"
 url: "https://commonware.xyz/blogs/batch-pari"
 image: "https://commonware.xyz/imgs/batch-pari.png"
 katex: true
