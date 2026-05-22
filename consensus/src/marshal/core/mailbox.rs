@@ -51,7 +51,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// A request to retrieve the latest processed height.
     GetProcessedHeight {
         /// A channel to send the latest processed height.
-        response: oneshot::Sender<Height>,
+        response: oneshot::Sender<Option<Height>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -590,7 +590,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let _ = self
             .sender
             .enqueue(Message::GetProcessedHeight { response });
-        receiver.await.ok()
+        receiver.await.ok().flatten()
     }
 
     /// Hints that a finalized block may be available at the given height.

@@ -168,7 +168,7 @@ pub struct ValidatorSetup<H: TestHarness> {
     pub application: Application<H::ApplicationBlock>,
     pub mailbox: Mailbox<S, H::Variant>,
     pub extra: H::ValidatorExtra,
-    pub height: Height,
+    pub height: Option<Height>,
     pub actor_handle: commonware_runtime::Handle<()>,
 }
 
@@ -839,7 +839,7 @@ pub fn hailstorm<H: TestHarness>(
                 .await;
                 assert_eq!(
                     restarted.height,
-                    Height::new(persisted_height),
+                    Some(Height::new(persisted_height)),
                     "validator {idx} should recover its persisted finalized height before replay"
                 );
 
@@ -3170,7 +3170,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             Application::manual_ack(),
         )
         .await;
-        assert_eq!(restart.height, Height::new(3));
+        assert_eq!(restart.height, Some(Height::new(3)));
     });
 }
 
@@ -3200,8 +3200,14 @@ pub fn genesis_emitted_once<H: TestHarness>() {
             Application::<H::ApplicationBlock>::manual_ack(),
         )
         .await;
-        assert_eq!(setup.height, Height::zero());
+        assert_eq!(setup.height, None);
+        assert_eq!(setup.mailbox.get_processed_height().await, None);
         assert_eq!(setup.application.acknowledged().await, Height::zero());
+        context.sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            setup.mailbox.get_processed_height().await,
+            Some(Height::zero())
+        );
         assert!(setup.application.blocks().contains_key(&Height::zero()));
 
         // Let marshal persist the height-zero acknowledgement before restart.
@@ -3222,7 +3228,7 @@ pub fn genesis_emitted_once<H: TestHarness>() {
             Application::<H::ApplicationBlock>::manual_ack(),
         )
         .await;
-        assert_eq!(restart.height, Height::zero());
+        assert_eq!(restart.height, Some(Height::zero()));
         context.sleep(Duration::from_millis(100)).await;
         assert!(
             restart.application.blocks().is_empty(),
@@ -5083,8 +5089,8 @@ pub fn init_processed_height<H: TestHarness>() {
         };
         let initial_height = setup.height;
 
-        // Initially should be zero (no blocks processed)
-        assert_eq!(initial_height, Height::zero());
+        // Initially no block has been durably acknowledged.
+        assert_eq!(initial_height, None);
 
         // Finalize blocks 1-5
         let mut parent = Sha256::hash(b"");
@@ -5137,7 +5143,7 @@ pub fn init_processed_height<H: TestHarness>() {
         let recovered_height = setup2.height;
 
         // Should have recovered to height 5
-        assert_eq!(recovered_height, Height::new(5));
+        assert_eq!(recovered_height, Some(Height::new(5)));
     })
 }
 

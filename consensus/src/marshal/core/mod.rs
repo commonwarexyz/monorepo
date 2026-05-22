@@ -28,6 +28,7 @@
 //!     blocks_archive,
 //!     config,
 //! ).await;
+//! // `last_height` is `None` until the application acknowledges a block.
 //!
 //! // Start with application and buffer
 //! actor.start(application, Some(buffer), resolver);

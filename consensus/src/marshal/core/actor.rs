@@ -160,7 +160,7 @@ where
         finalizations_by_height: FC,
         mut finalized_blocks: FB,
         config: Config<P, ES, T, V::ApplicationBlock, V::Block, V::Commitment>,
-    ) -> (Self, Mailbox<P::Scheme, V>, Height) {
+    ) -> (Self, Mailbox<P::Scheme, V>, Option<Height>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix),
@@ -178,7 +178,8 @@ where
         .await;
 
         let stream = Stream::new(context.child("stream"), &config.partition_prefix).await;
-        let last_processed_height = stream.processed_height().unwrap_or_else(Height::zero);
+        let last_processed_height = stream.processed_height();
+        let processed_height_floor = last_processed_height.unwrap_or_else(Height::zero);
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
@@ -201,11 +202,13 @@ where
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
         let processed_height = context.gauge("processed_height", "Processed height of application");
-        let _ = processed_height.try_set(last_processed_height.get());
+        if let Some(last_processed_height) = last_processed_height {
+            let _ = processed_height.try_set(last_processed_height.get());
+        }
         let floor = pending_floor_anchor.map_or_else(
-            || Floor::resolved(last_processed_height, last_processed_round),
+            || Floor::resolved(processed_height_floor, last_processed_round),
             |finalization| {
-                Floor::awaiting_anchor(last_processed_height, last_processed_round, finalization)
+                Floor::awaiting_anchor(processed_height_floor, last_processed_round, finalization)
             },
         );
 
@@ -241,7 +244,7 @@ where
     async fn ensure_genesis_anchor(
         finalized_blocks: &mut FB,
         anchor: V::Block,
-        last_processed_height: Height,
+        last_processed_height: Option<Height>,
     ) {
         let anchor_height = anchor.height();
         let anchor_commitment = V::commitment(&anchor);
@@ -262,10 +265,12 @@ where
                 );
             }
             Ok(None) => {
-                if anchor_height < last_processed_height {
+                if let Some(existing) =
+                    last_processed_height.filter(|height| anchor_height < *height)
+                {
                     warn!(
                         height = %anchor_height,
-                        existing = %last_processed_height,
+                        %existing,
                         "ignoring stale anchor"
                     );
                     return;
@@ -675,7 +680,7 @@ where
                 response.send_lossy(finalization);
             }
             Message::GetProcessedHeight { response } => {
-                response.send_lossy(self.floor.processed_height());
+                response.send_lossy(self.stream.processed_height());
             }
             Message::HintFinalized { height, targets } => {
                 // Skip if finalization is already available locally.
@@ -2034,7 +2039,13 @@ where
     }
 
     /// Returns the latest known finalization round at or below the processed height.
-    async fn latest_processed_round(finalizations_by_height: &FC, height: Height) -> Round {
+    async fn latest_processed_round(
+        finalizations_by_height: &FC,
+        height: Option<Height>,
+    ) -> Round {
+        let Some(height) = height else {
+            return Round::zero();
+        };
         let Some(finalization_height) = finalizations_by_height
             .ranges_from(Height::zero())
             .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
