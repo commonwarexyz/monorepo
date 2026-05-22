@@ -115,6 +115,12 @@ impl<M: BlockProvider> AncestorStream<M> {
             pending: None.into(),
         }
     }
+
+    /// Peeks at the latest block in the stream without consuming it. Returns [None]
+    /// if the stream does not yet have a block available or has been exhausted.
+    pub fn peek(&self) -> Option<&M::Block> {
+        self.buffered.last()
+    }
 }
 
 impl<M> Stream for AncestorStream<M>
