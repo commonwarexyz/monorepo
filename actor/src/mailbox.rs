@@ -221,6 +221,165 @@ impl<T: UnreliablePolicy> Mode<T> for mode::Unreliable {
     }
 }
 
+/// Sender half of a mailbox.
+pub struct Sender<T: Policy> {
+    state: Arc<State<T, mode::Reliable>>,
+}
+
+/// Sender half of an unreliable mailbox.
+pub struct UnreliableSender<T: UnreliablePolicy> {
+    state: Arc<State<T, mode::Unreliable>>,
+}
+
+impl<T: Policy> Clone for Sender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: clone_sender_state(&self.state),
+        }
+    }
+}
+
+impl<T: UnreliablePolicy> Clone for UnreliableSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: clone_sender_state(&self.state),
+        }
+    }
+}
+
+impl<T: Policy> Drop for Sender<T> {
+    fn drop(&mut self) {
+        drop_sender_state(&self.state);
+    }
+}
+
+impl<T: UnreliablePolicy> Drop for UnreliableSender<T> {
+    fn drop(&mut self) {
+        drop_sender_state(&self.state);
+    }
+}
+
+impl<T: Policy> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_sender_state("Sender", &self.state, f)
+    }
+}
+
+impl<T: UnreliablePolicy> fmt::Debug for UnreliableSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_sender_state("UnreliableSender", &self.state, f)
+    }
+}
+
+impl<T: Policy> Sender<T> {
+    /// Submit a message without waiting for inbox capacity.
+    #[must_use = "caller must handle enqueue feedback"]
+    pub fn enqueue(&self, message: T) -> Feedback {
+        self.state.enqueue(message)
+    }
+}
+
+impl<T: UnreliablePolicy> UnreliableSender<T> {
+    /// Submit a message without waiting for inbox capacity, allowing policy rejection.
+    #[must_use = "caller must handle enqueue feedback"]
+    pub fn enqueue(&self, message: T) -> Unreliable<Feedback> {
+        self.state.enqueue(message)
+    }
+}
+
+/// Receiver half of a mailbox.
+///
+/// Dropping the receiver closes the mailbox and drains buffered messages.
+///
+/// Dropping the last sender disconnects the mailbox, but the receiver continues
+/// returning buffered messages until ready and overflow are empty.
+pub struct Receiver<T: Policy> {
+    state: Arc<State<T, mode::Reliable>>,
+}
+
+/// Receiver half of an unreliable mailbox.
+///
+/// Dropping the receiver closes the mailbox and drains buffered messages.
+///
+/// Dropping the last sender disconnects the mailbox, but the receiver continues
+/// returning buffered messages until ready and overflow are empty.
+pub struct UnreliableReceiver<T: UnreliablePolicy> {
+    state: Arc<State<T, mode::Unreliable>>,
+}
+
+impl<T: Policy> Receiver<T> {
+    /// Receive the next message.
+    ///
+    /// Returns `None` after all senders are dropped and all buffered messages
+    /// have been drained.
+    pub async fn recv(&mut self) -> Option<T> {
+        recv_from(&self.state).await
+    }
+
+    /// Try to receive the next message without waiting.
+    ///
+    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
+    /// all buffered messages have been drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        try_recv_from(&self.state)
+    }
+}
+
+impl<T: UnreliablePolicy> UnreliableReceiver<T> {
+    /// Receive the next message.
+    ///
+    /// Returns `None` after all senders are dropped and all buffered messages
+    /// have been drained.
+    pub async fn recv(&mut self) -> Option<T> {
+        recv_from(&self.state).await
+    }
+
+    /// Try to receive the next message without waiting.
+    ///
+    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
+    /// all buffered messages have been drained.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        try_recv_from(&self.state)
+    }
+}
+
+impl<T: Policy> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        self.state.close();
+    }
+}
+
+impl<T: UnreliablePolicy> Drop for UnreliableReceiver<T> {
+    fn drop(&mut self) {
+        self.state.close();
+    }
+}
+
+/// Create a new bounded mailbox.
+pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+    let state = new_state(metrics, capacity);
+    (
+        Sender {
+            state: state.clone(),
+        },
+        Receiver { state },
+    )
+}
+
+/// Create a new bounded unreliable mailbox.
+pub fn new_unreliable<T: UnreliablePolicy>(
+    metrics: impl Metrics,
+    capacity: NonZeroUsize,
+) -> (UnreliableSender<T>, UnreliableReceiver<T>) {
+    let state = new_state(metrics, capacity);
+    (
+        UnreliableSender {
+            state: state.clone(),
+        },
+        UnreliableReceiver { state },
+    )
+}
+
 // `activity` packs the published overflow state and in-flight overflow
 // mutations into one atomic word. The overflow lock serializes actual
 // overflow changes (this word lets the ready fast path avoid that lock when
@@ -636,165 +795,6 @@ fn try_recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Result<T, TryRecvError> 
         return state.pop().ok_or(TryRecvError::Disconnected);
     }
     Err(TryRecvError::Empty)
-}
-
-/// Sender half of a mailbox.
-pub struct Sender<T: Policy> {
-    state: Arc<State<T, mode::Reliable>>,
-}
-
-/// Sender half of an unreliable mailbox.
-pub struct UnreliableSender<T: UnreliablePolicy> {
-    state: Arc<State<T, mode::Unreliable>>,
-}
-
-impl<T: Policy> Clone for Sender<T> {
-    fn clone(&self) -> Self {
-        Self {
-            state: clone_sender_state(&self.state),
-        }
-    }
-}
-
-impl<T: UnreliablePolicy> Clone for UnreliableSender<T> {
-    fn clone(&self) -> Self {
-        Self {
-            state: clone_sender_state(&self.state),
-        }
-    }
-}
-
-impl<T: Policy> Drop for Sender<T> {
-    fn drop(&mut self) {
-        drop_sender_state(&self.state);
-    }
-}
-
-impl<T: UnreliablePolicy> Drop for UnreliableSender<T> {
-    fn drop(&mut self) {
-        drop_sender_state(&self.state);
-    }
-}
-
-impl<T: Policy> fmt::Debug for Sender<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_sender_state("Sender", &self.state, f)
-    }
-}
-
-impl<T: UnreliablePolicy> fmt::Debug for UnreliableSender<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_sender_state("UnreliableSender", &self.state, f)
-    }
-}
-
-impl<T: Policy> Sender<T> {
-    /// Submit a message without waiting for inbox capacity.
-    #[must_use = "caller must handle enqueue feedback"]
-    pub fn enqueue(&self, message: T) -> Feedback {
-        self.state.enqueue(message)
-    }
-}
-
-impl<T: UnreliablePolicy> UnreliableSender<T> {
-    /// Submit a message without waiting for inbox capacity, allowing policy rejection.
-    #[must_use = "caller must handle enqueue feedback"]
-    pub fn enqueue(&self, message: T) -> Unreliable<Feedback> {
-        self.state.enqueue(message)
-    }
-}
-
-/// Receiver half of a mailbox.
-///
-/// Dropping the receiver closes the mailbox and drains buffered messages.
-///
-/// Dropping the last sender disconnects the mailbox, but the receiver continues
-/// returning buffered messages until ready and overflow are empty.
-pub struct Receiver<T: Policy> {
-    state: Arc<State<T, mode::Reliable>>,
-}
-
-/// Receiver half of an unreliable mailbox.
-///
-/// Dropping the receiver closes the mailbox and drains buffered messages.
-///
-/// Dropping the last sender disconnects the mailbox, but the receiver continues
-/// returning buffered messages until ready and overflow are empty.
-pub struct UnreliableReceiver<T: UnreliablePolicy> {
-    state: Arc<State<T, mode::Unreliable>>,
-}
-
-impl<T: Policy> Receiver<T> {
-    /// Receive the next message.
-    ///
-    /// Returns `None` after all senders are dropped and all buffered messages
-    /// have been drained.
-    pub async fn recv(&mut self) -> Option<T> {
-        recv_from(&self.state).await
-    }
-
-    /// Try to receive the next message without waiting.
-    ///
-    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
-    /// all buffered messages have been drained.
-    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        try_recv_from(&self.state)
-    }
-}
-
-impl<T: UnreliablePolicy> UnreliableReceiver<T> {
-    /// Receive the next message.
-    ///
-    /// Returns `None` after all senders are dropped and all buffered messages
-    /// have been drained.
-    pub async fn recv(&mut self) -> Option<T> {
-        recv_from(&self.state).await
-    }
-
-    /// Try to receive the next message without waiting.
-    ///
-    /// Returns [`TryRecvError::Disconnected`] after all senders are dropped and
-    /// all buffered messages have been drained.
-    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        try_recv_from(&self.state)
-    }
-}
-
-impl<T: Policy> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        self.state.close();
-    }
-}
-
-impl<T: UnreliablePolicy> Drop for UnreliableReceiver<T> {
-    fn drop(&mut self) {
-        self.state.close();
-    }
-}
-
-/// Create a new bounded mailbox.
-pub fn new<T: Policy>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
-    let state = new_state(metrics, capacity);
-    (
-        Sender {
-            state: state.clone(),
-        },
-        Receiver { state },
-    )
-}
-
-/// Create a new bounded unreliable mailbox.
-pub fn new_unreliable<T: UnreliablePolicy>(
-    metrics: impl Metrics,
-    capacity: NonZeroUsize,
-) -> (UnreliableSender<T>, UnreliableReceiver<T>) {
-    let state = new_state(metrics, capacity);
-    (
-        UnreliableSender {
-            state: state.clone(),
-        },
-        UnreliableReceiver { state },
-    )
 }
 
 #[cfg(test)]
