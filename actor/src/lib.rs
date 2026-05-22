@@ -37,17 +37,32 @@ commonware_macros::stability_scope!(BETA {
         Rejected,
     }
 
-    impl Unreliable<Feedback> {
-        /// Wrap endpoint feedback for an endpoint that may reject work.
-        pub const fn new(feedback: Feedback) -> Self {
-            Self::Outcome(feedback)
+    impl<T> Unreliable<T> {
+        /// Wrap an outcome for an operation that may reject work.
+        pub const fn new(outcome: T) -> Self {
+            Self::Outcome(outcome)
         }
 
-        /// Create rejected feedback.
+        /// Create a rejected result.
         pub const fn rejected() -> Self {
             Self::Rejected
         }
 
+        /// Returns `true` when the operation was rejected before producing an outcome.
+        pub const fn is_rejected(&self) -> bool {
+            matches!(self, Self::Rejected)
+        }
+
+        /// Returns the outcome when the operation was not rejected.
+        pub fn outcome(self) -> Option<T> {
+            match self {
+                Self::Outcome(outcome) => Some(outcome),
+                Self::Rejected => None,
+            }
+        }
+    }
+
+    impl Unreliable<Feedback> {
         /// Returns `true` when the endpoint handled the submission.
         pub const fn accepted(self) -> bool {
             match self {
