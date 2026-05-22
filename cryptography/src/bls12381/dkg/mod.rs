@@ -2,8 +2,8 @@
 //!
 //! This module provides two constructions:
 //!
-//! - [`feldman_desmedt`]: a two-round protocol with direct dealer-player messages,
-//! - [`golden`]: a one-round protocol using encryption and zero-knowledge proofs.
+//! - [`feldman_desmedt`]: a synchronous, two-round protocol with direct dealer-player messages,
+//! - [`golden`]: an asynchronous, one-round protocol using encryption and zero-knowledge proofs.
 //!
 //! [`feldman_desmedt`] is simpler and cheaper, but relies on synchrony to bound
 //! revealed shares. [`golden`] removes that assumption at higher computational cost.
