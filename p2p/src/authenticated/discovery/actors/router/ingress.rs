@@ -8,8 +8,8 @@ use crate::{
     Channel, Recipients,
 };
 use commonware_actor::{
-    mailbox::{self, Policy},
-    Feedback,
+    mailbox::{self, UnreliablePolicy},
+    Feedback, Unreliable,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufferPool, IoBufs};
@@ -39,7 +39,7 @@ pub enum Message<P: PublicKey> {
     SubscribePeers { sender: ring::Sender<Vec<P>> },
 }
 
-impl<P: PublicKey> Policy for Message<P> {
+impl<P: PublicKey> UnreliablePolicy for Message<P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
@@ -54,7 +54,7 @@ impl<P: PublicKey> Policy for Message<P> {
 }
 
 /// Mailbox for the router actor.
-pub struct Mailbox<P: PublicKey>(mailbox::Sender<Message<P>>);
+pub struct Mailbox<P: PublicKey>(mailbox::UnreliableSender<Message<P>>);
 
 impl<P: PublicKey> Clone for Mailbox<P> {
     fn clone(&self) -> Self {
@@ -70,7 +70,7 @@ impl<P: PublicKey> fmt::Debug for Mailbox<P> {
 
 impl<P: PublicKey> Mailbox<P> {
     /// Returns a router mailbox around the provided sender.
-    pub const fn new(sender: mailbox::Sender<Message<P>>) -> Self {
+    pub const fn new(sender: mailbox::UnreliableSender<Message<P>>) -> Self {
         Self(sender)
     }
 
@@ -92,7 +92,10 @@ impl<P: PublicKey> Mailbox<P> {
     /// This may fail during shutdown if the router has already exited,
     /// which is harmless since the router no longer tracks any peers.
     pub fn release(&self, peer: P) -> Feedback {
-        self.0.enqueue(Message::Release { peer })
+        match self.0.enqueue(Message::Release { peer }) {
+            Unreliable::Outcome(feedback) => feedback,
+            Unreliable::Rejected => unreachable!("router release cannot be rejected"),
+        }
     }
 }
 
@@ -120,7 +123,7 @@ impl<P: PublicKey> Messenger<P> {
         channel: Channel,
         message: IoBufs,
         priority: bool,
-    ) -> Feedback {
+    ) -> Unreliable<Feedback> {
         // Build Data and encode Payload::Data once for all recipients
         let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
 
@@ -157,8 +160,10 @@ mod tests {
     fn test_overflow_rejects_content_but_retains_control() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (control_sender, mut receiver) =
-                mailbox::new::<Message<PublicKey>>(context.child("control_mailbox"), NZUsize!(1));
+            let (control_sender, mut receiver) = mailbox::new_unreliable::<Message<PublicKey>>(
+                context.child("control_mailbox"),
+                NZUsize!(1),
+            );
             let mailbox = Mailbox::new(control_sender.clone());
             let messenger = Messenger::new(
                 context.network_buffer_pool().clone(),
@@ -173,11 +178,11 @@ mod tests {
                     IoBuf::from(b"one").into(),
                     false
                 ),
-                Feedback::Ok
+                Unreliable::new(Feedback::Ok)
             );
             assert_eq!(
                 messenger.content(Recipients::One(peer), 7, IoBuf::from(b"two").into(), false),
-                Feedback::Rejected
+                Unreliable::Rejected
             );
             assert_eq!(
                 mailbox.release(PrivateKey::from_seed(2).public_key()),

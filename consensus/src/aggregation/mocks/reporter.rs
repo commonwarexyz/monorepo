@@ -30,9 +30,8 @@ enum Message<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Policy for Message<S, D> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
         overflow.push_back(message);
-        true
     }
 }
 

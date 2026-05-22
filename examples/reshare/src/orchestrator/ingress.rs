@@ -19,7 +19,7 @@ pub enum Message<V: Variant, P: PublicKey> {
 impl<V: Variant, P: PublicKey> Policy for Message<V, P> {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
         match message {
             Self::Enter(transition) => {
                 let epoch = transition.epoch;
@@ -42,7 +42,6 @@ impl<V: Variant, P: PublicKey> Policy for Message<V, P> {
                 }
             }
         }
-        true
     }
 }
 

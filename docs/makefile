@@ -5,7 +5,7 @@ HTML_DEPS := $(shell find . -name "*.html" -type f ! -name "template.html")
 
 # Re-runs when the template file changes, or any markdown file changes
 %.html: %.md template.html
-	pandoc $< -o $@ --template=template.html --mathjax --standalone
+	pandoc $< -o $@ --template=template.html --katex --standalone
 markdown: $(MD_TARGETS)
 
 # Mirror source code to versioned paths under /code/

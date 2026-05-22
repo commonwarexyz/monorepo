@@ -67,7 +67,7 @@ impl<S: Scheme, D: Digest> Overflow<MailboxMessage<S, D>> for Pending<S, D> {
 impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
     type Overflow = Pending<S, D>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
@@ -76,7 +76,7 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             Some(Self::Certificate(Certificate::Finalization(old_finalized)))
                 if old_finalized.view() >= new_view
         ) {
-            return true;
+            return;
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
@@ -85,7 +85,7 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                 .messages
                 .retain(|old_message| old_message.view() > new_view);
             overflow.finalization = Some(message);
-            return true;
+            return;
         }
 
         // Ignore the message if it is a duplicate
@@ -109,10 +109,9 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                 _ => false,
             })
         {
-            return true;
+            return;
         }
         overflow.messages.push_back(message);
-        true
     }
 }
 
@@ -194,12 +193,11 @@ impl Overflow<HandlerMessage> for HandlerPending {
 impl Policy for HandlerMessage {
     type Overflow = HandlerPending;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
-            return true;
+            return;
         }
         overflow.0.push_back(message);
-        true
     }
 }
 

@@ -126,7 +126,7 @@
         </p>
         <p>
             Our new <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/reshare"><code>commonware-reshare</code></a> example
-            marries the DKG implementation from <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html"><code>commonware-cryptography::bls12381::dkg</code></a> with
+            marries the DKG implementation from <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/feldman_desmedt/index.html"><code>commonware-cryptography::bls12381::dkg::feldman_desmedt</code></a> with
             threshold <code>commonware-consensus::simplex</code>'s (implicit) replicated log.
             Validators proactively refresh their key material every epoch, a configurable interval of blocks, and derive new shares for incoming participants.
         </p>
@@ -158,7 +158,7 @@
         <p>
             The trusted path is great for local testing and CI: the setup tool deterministically samples the group key, splits it into shares, and writes configs for each validator.
             The DKG ceremony is more complex but should be used for any production deployment (recall whoever has the shared secret can trivially undermine threshold <code>commonware-consensus::simplex</code>).
-            A bootstrap committee uses the non-threshold dialect of <code>commonware-consensus::simplex</code> (powered by <code>commonware-cryptography::ed25519</code>) to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg</code>, and the generated shares
+            A bootstrap committee uses the non-threshold dialect of <code>commonware-consensus::simplex</code> (powered by <code>commonware-cryptography::ed25519</code>) to agree on the transcript produced by <code>commonware-cryptography::bls12381::dkg::feldman_desmedt</code>, and the generated shares
             are used by the initial participants in the first epoch. From there, the built-in resharing mechanism handles all future key material updates.
         </p>
         <p>

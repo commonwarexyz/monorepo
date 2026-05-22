@@ -1,7 +1,7 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
 use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::{mailbox, Feedback, Unreliable};
 use commonware_codec::{Codec, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -86,7 +86,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         self.sender.recipients()
     }
 
-    pub fn send(self, message: V, priority: bool) -> Feedback {
+    pub fn send(self, message: V, priority: bool) -> Unreliable<Feedback> {
         let encoded = message.encode_with_pool(self.pool);
         self.sender.send(encoded, priority)
     }
@@ -134,7 +134,7 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// messages are dropped (they would likely no longer be useful by the time we get back to them).
 struct Decoded<P: PublicKey, V>(P, V);
 
-impl<P: PublicKey, V> mailbox::Policy for Decoded<P, V> {
+impl<P: PublicKey, V> mailbox::UnreliablePolicy for Decoded<P, V> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -144,7 +144,7 @@ impl<P: PublicKey, V> mailbox::Policy for Decoded<P, V> {
 
 /// Receiver half for successfully decoded messages from a [`WrappedBackgroundReceiver`].
 pub struct BackgroundReceiver<P: PublicKey, V> {
-    receiver: mailbox::Receiver<Decoded<P, V>>,
+    receiver: mailbox::UnreliableReceiver<Decoded<P, V>>,
 }
 
 impl<P: PublicKey, V> BackgroundReceiver<P, V> {
@@ -169,7 +169,7 @@ where
     receiver: R,
     codec_config: V::Cfg,
     blocker: B,
-    sender: mailbox::Sender<Decoded<P, V>>,
+    sender: mailbox::UnreliableSender<Decoded<P, V>>,
     max_concurrency: usize,
 }
 
@@ -194,7 +194,7 @@ where
         channel_capacity: NonZeroUsize,
         strategy: &impl Strategy,
     ) -> (Self, BackgroundReceiver<P, V>) {
-        let (tx, rx) = mailbox::new(context.child("mailbox"), channel_capacity);
+        let (tx, rx) = mailbox::new_unreliable(context.child("mailbox"), channel_capacity);
         (
             Self {
                 context: ContextCell::new(context),
@@ -272,7 +272,7 @@ where
 
     fn handle_decode_result(
         blocker: &mut B,
-        sender: &mut mailbox::Sender<Decoded<P, V>>,
+        sender: &mut mailbox::UnreliableSender<Decoded<P, V>>,
         result: (P, Result<V, commonware_codec::Error>),
     ) {
         let (peer, decode_result) = result;

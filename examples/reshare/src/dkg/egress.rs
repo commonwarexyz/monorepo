@@ -1,6 +1,6 @@
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
-    dkg::Output,
+    dkg::feldman_desmedt::Output,
     primitives::{group::Share, variant::Variant},
 };
 use std::{future::Future, pin::Pin};

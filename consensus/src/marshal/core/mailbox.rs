@@ -1,7 +1,7 @@
 use super::Variant;
 use crate::{
     marshal::{
-        ancestry::{AncestorStream, BlockProvider},
+        ancestry::{AncestorStream, Ancestry, BlockProvider},
         Identifier,
     },
     simplex::types::{Activity, Finalization, Notarization},
@@ -15,7 +15,6 @@ use commonware_actor::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use futures::Stream;
 use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 
 /// Messages sent to the marshal [Actor](super::Actor).
@@ -48,6 +47,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         height: Height,
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
+    },
+    /// A request to retrieve the latest processed height.
+    GetProcessedHeight {
+        /// A channel to send the latest processed height.
+        response: oneshot::Sender<Height>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -253,7 +257,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetInfo {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
-            } => false,
+            }
+            | Self::GetProcessedHeight { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -273,6 +278,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 response.is_closed()
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
+            Self::GetProcessedHeight { response } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -477,10 +483,10 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         // A closed responder cannot be served
         if message.response_closed() {
-            return true;
+            return;
         }
         match message {
             // Coalesce hints: a single entry per height with a unioned target set
@@ -498,14 +504,13 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             // Queue if the new message is still useful
             message => {
                 if message.stale(overflow.height()) {
-                    return true;
+                    return;
                 }
                 overflow
                     .messages
                     .push_back(PendingMessage::Message(message));
             }
         }
-        true
     }
 }
 
@@ -533,7 +538,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub(crate) fn ancestor_stream<I>(
         &self,
         initial: I,
-    ) -> impl Stream<Item = V::ApplicationBlock> + Send + use<S, V, I>
+    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
         I: IntoIterator<Item = V::Block>,
@@ -578,6 +583,15 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .sender
             .enqueue(Message::GetFinalization { height, response });
         receiver.await.ok().flatten()
+    }
+
+    /// Retrieve the latest processed height.
+    pub async fn get_processed_height(&self) -> Option<Height> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .enqueue(Message::GetProcessedHeight { response });
+        receiver.await.ok()
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -680,7 +694,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn ancestry(
         &self,
         (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
-    ) -> Option<impl Stream<Item = V::ApplicationBlock> + Send + use<S, V>>
+    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V>>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
     {
@@ -1087,12 +1101,9 @@ mod tests {
             },
         );
 
-        assert!(<TestMessage as Policy>::handle(&mut overflow, wait));
-        assert!(<TestMessage as Policy>::handle(&mut overflow, by_round));
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            by_commitment
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, wait);
+        <TestMessage as Policy>::handle(&mut overflow, by_round);
+        <TestMessage as Policy>::handle(&mut overflow, by_commitment);
 
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);
@@ -1139,10 +1150,7 @@ mod tests {
 
         let (current_closed, current_closed_rx) = subscribe_by_digest(3);
         drop(current_closed_rx);
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            current_closed
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, current_closed);
 
         assert!(!has_subscription(&overflow, 1));
         assert!(has_subscription(&overflow, 2));
@@ -1170,10 +1178,7 @@ mod tests {
 
         let (current_closed, current_closed_rx) = get_finalization(3);
         drop(current_closed_rx);
-        assert!(<TestMessage as Policy>::handle(
-            &mut overflow,
-            current_closed
-        ));
+        <TestMessage as Policy>::handle(&mut overflow, current_closed);
 
         assert!(!has_get_block(&overflow, 1));
         assert!(has_get_info(&overflow, 2));
