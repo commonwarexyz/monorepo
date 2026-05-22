@@ -46,7 +46,7 @@
 //!
 //! ## Generate Shared Secrets
 //!
-//! _A production-grade implementation should use a DKG (and Resharing during reconfiguration). For example, you could use [commonware_cryptography::bls12381::dkg::feldman_desmedt]_
+//! _A production-grade implementation should use a DKG (and Resharing during reconfiguration). For example, you could use [commonware_cryptography::bls12381::dkg]_
 //!
 //! We assign shares to validators based on their order in the sorted list of participants (by public key).
 //! The assignments seen below are just the indices used to derive the shares and as such do not necessarily
