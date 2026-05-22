@@ -332,9 +332,9 @@ where
             }
 
             let ancestor_stream = marshal.ancestor_stream(
+                Arc::new(runtime_context.child("ancestor_stream")),
                 [parent],
                 ancestor_fetch_duration,
-                Arc::new(runtime_context.child("ancestor_stream")),
             );
             let build_request = application.propose(
                 (

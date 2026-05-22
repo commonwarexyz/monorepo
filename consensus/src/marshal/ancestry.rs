@@ -74,15 +74,15 @@ impl<D: Digest> ExpectedParent<D> {
     }
 }
 
-fn timed_parent_fetch<M, C>(
+fn timed_parent_fetch<C, M>(
+    clock: &Arc<C>,
     marshal: &M,
     child: &M::Block,
     fetch_duration: &Timed,
-    clock: &Arc<C>,
 ) -> PendingFetch<M::Block>
 where
-    M: BlockProvider,
     C: Clock,
+    M: BlockProvider,
 {
     let expected = ExpectedParent::from_child(child);
     let timer = fetch_duration.timer(clock.as_ref());
@@ -118,10 +118,10 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     ///
     /// Panics if the initial blocks are not contiguous.
     pub(crate) fn new(
+        clock: Arc<C>,
         marshal: M,
         initial: impl IntoIterator<Item = M::Block>,
         fetch_duration: Timed,
-        clock: Arc<C>,
     ) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<M::Block>>();
         buffered.sort_by_key(Heightable::height);
@@ -185,7 +185,7 @@ where
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
                 let future =
-                    timed_parent_fetch(this.marshal, &block, this.fetch_duration, this.clock);
+                    timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
                 *this.pending.as_mut() = Some(future).into();
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -220,7 +220,7 @@ where
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
                     let future =
-                        timed_parent_fetch(this.marshal, &block, this.fetch_duration, this.clock);
+                        timed_parent_fetch(this.clock, this.marshal, &block, this.fetch_duration);
                     *this.pending.as_mut() = Some(future).into();
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
@@ -305,12 +305,8 @@ mod test {
         M: BlockProvider,
     {
         let stream_context = context.child("ancestor_stream");
-        AncestorStream::new(
-            marshal,
-            initial,
-            timed(&stream_context),
-            Arc::new(stream_context),
-        )
+        let fetch_duration = timed(&stream_context);
+        AncestorStream::new(Arc::new(stream_context), marshal, initial, fetch_duration)
     }
 
     #[test]

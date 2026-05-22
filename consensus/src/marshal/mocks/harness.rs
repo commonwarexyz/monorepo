@@ -4827,9 +4827,9 @@ where
         let ancestry = handle
             .mailbox
             .ancestry(
+                Arc::new(context.child("ancestor_stream")),
                 (DigestFallback::Wait, commitment),
                 fetch_duration,
-                Arc::new(context.child("ancestor_stream")),
             )
             .await
             .unwrap();

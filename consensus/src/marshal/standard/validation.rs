@@ -178,9 +178,9 @@ where
 
     // Request verification from the application over the two-block ancestry prefix.
     let ancestry_stream = marshal.ancestor_stream(
+        Arc::new(runtime_context.child("ancestor_stream")),
         [block.clone(), parent],
         ancestor_fetch_duration,
-        Arc::new(runtime_context.child("ancestor_stream")),
     );
     let validity_request = application.verify(
         (runtime_context.child("app_verify"), context.clone()),
