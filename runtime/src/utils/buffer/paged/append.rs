@@ -186,6 +186,7 @@ impl<B: Blob> Append<B> {
         }
 
         let capacity = capacity_with_floor(capacity, cache_ref.page_size());
+        let needs_sync = !invalid_data_found;
 
         let (blob_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (
@@ -193,7 +194,7 @@ impl<B: Blob> Append<B> {
                     blob,
                     current_page: pages - 1,
                     partial_page_state: Some(crc_record),
-                    needs_sync: false,
+                    needs_sync,
                 },
                 Some(partial_page),
             ),
@@ -202,7 +203,7 @@ impl<B: Blob> Append<B> {
                     blob,
                     current_page: pages,
                     partial_page_state: None,
-                    needs_sync: false,
+                    needs_sync,
                 },
                 None,
             ),
@@ -1740,21 +1741,28 @@ mod tests {
                 .await
                 .unwrap();
 
-            // A single buffered write with no prior dirty state can be made durable directly.
+            // A newly wrapped blob preserves one full barrier before range sync is used.
+            append.sync().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // A single buffered write with no remaining dirty state can be made durable directly.
             let data = b"hello world";
             append.append(data).await.unwrap();
             append.sync().await.unwrap();
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 0);
+            assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
 
             // With no new writes and no pending full-sync barrier, sync has no work left.
             append.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 0);
+            assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -1877,6 +1885,81 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_recreated_sync_preserves_replay_plain_flush_barrier() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(b"replayed").await.unwrap();
+            let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
+            assert!(replay.ensure(b"replayed".len()).await.unwrap());
+            assert_eq!(replay.remaining(), b"replayed".len());
+            assert_eq!(replay.chunk(), b"replayed");
+            drop(replay);
+            drop(append);
+
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let reopened = Append::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size().await, b"replayed".len() as u64);
+            reopened.sync().await.unwrap();
+
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.len(), blob.size() as usize);
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_recreated_sync_skips_barrier_after_invalid_truncation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            append.sync().await.unwrap();
+            append.append(b"valid").await.unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            blob.write_at(blob.size(), b"junk").await.unwrap();
+
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let reopened = Append::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size().await, b"valid".len() as u64);
+
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 1);
+
+            reopened.sync().await.unwrap();
+
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_sync_batches_split_protected_writes_with_full_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -1885,6 +1968,7 @@ mod tests {
             let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
+            append.sync().await.unwrap();
 
             // Establish a persisted partial page with one authoritative CRC slot.
             append.append(b"abc").await.unwrap();
@@ -1897,7 +1981,7 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 3);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 1);
 
             // On the next extension, the protected slot is the second CRC, so only the prefix
@@ -1907,7 +1991,7 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 4);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 2);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -3473,6 +3557,7 @@ mod tests {
             let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
+            append.sync().await.unwrap();
 
             let data = vec![5u8; PAGE_SIZE.get() as usize];
             append.append(&data).await.unwrap();
@@ -3484,7 +3569,7 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 4);
-            assert_eq!(full_syncs, 0);
+            assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 4);
         });
     }
@@ -3498,6 +3583,7 @@ mod tests {
             let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
+            append.sync().await.unwrap();
 
             let data = vec![9u8; PAGE_SIZE.get() as usize * 2];
             append.append(&data).await.unwrap();
@@ -3510,7 +3596,7 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 4);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 3);
 
             // Once the resize barrier is cleared, the next single flush can use range sync again.
@@ -3519,7 +3605,7 @@ mod tests {
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 5);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 4);
 
             let mut expected = data[..50].to_vec();
@@ -3538,9 +3624,10 @@ mod tests {
             let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
+            append.sync().await.unwrap();
 
-            // Start with two durable full pages. The initial sync can persist them with one
-            // range-sync write.
+            // Start with two durable full pages. After clearing the wrapper barrier, the data sync
+            // can persist them with one range-sync write.
             let page_size = PAGE_SIZE.get() as usize;
             let data = vec![11u8; page_size * 2];
             append.append(&data).await.unwrap();
@@ -3553,7 +3640,7 @@ mod tests {
             // Only the resize needs a full sync, no additional writes are emitted by the shrink.
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
-            assert_eq!(full_syncs, 1);
+            assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 1);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
