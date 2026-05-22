@@ -13,6 +13,17 @@
 //!
 //! During initialization, the wrapper will back up over any page that is not accompanied by a
 //! valid CRC, treating it as the result of an incomplete write that may be invalid.
+//!
+//! # Blob Semantics
+//!
+//! [Append] owns the physical page layout, read cache, and durability bookkeeping for the wrapped
+//! [Blob]. Cloned [Append] handles share that state and are safe to use concurrently. Raw [Blob]
+//! handles cloned before wrapping operate on physical bytes, including checksum records, rather
+//! than [Append]'s logical view, and they do not observe buffered data until it is flushed.
+//!
+//! Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while an
+//! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
+//! recovery, and are not covered by [Append]'s [`Blob::write_at_sync`] fast paths.
 
 use super::read::{PageReader, Replay};
 use crate::{
@@ -983,7 +994,7 @@ impl<B: Blob> Append<B> {
     /// The returned replay can be used to sequentially read all pages from the blob while ensuring
     /// all data passes integrity verification. CRCs are validated but not included in the output.
     ///
-    /// This is not a durability operation. Buffered data may be plainly written so the replay can
+    /// This is not a durable operation. Buffered data may be plainly written so the replay can
     /// read it, but callers must still use [`sync`](Self::sync) if that data must survive a crash.
     pub async fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
         let logical_page_size = self.cache_ref.page_size();
