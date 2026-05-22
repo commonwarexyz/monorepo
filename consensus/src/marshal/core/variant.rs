@@ -17,7 +17,7 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, marker::PhantomData};
+use std::future::Future;
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
@@ -118,23 +118,28 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     ///
     /// Returns a receiver that will resolve when the block becomes available.
     /// If the block is already cached, the receiver may resolve immediately.
+    /// Returns `None` when the buffer cannot provide availability notifications.
     ///
     /// The returned receiver can be dropped to cancel the subscription.
     fn subscribe_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> oneshot::Receiver<V::Block>;
+    ) -> Option<oneshot::Receiver<V::Block>>;
 
     /// Subscribe to a block's availability by its commitment.
     ///
     /// Returns a receiver that will resolve when the block becomes available.
     /// If the block is already cached, the receiver may resolve immediately.
+    /// Returns `None` when the buffer cannot provide availability notifications.
     ///
     /// Having the full commitment may enable additional retrieval mechanisms
     /// depending on the variant implementation.
     ///
     /// The returned receiver can be dropped to cancel the subscription.
-    fn subscribe_by_commitment(&self, commitment: V::Commitment) -> oneshot::Receiver<V::Block>;
+    fn subscribe_by_commitment(
+        &self,
+        commitment: V::Commitment,
+    ) -> Option<oneshot::Receiver<V::Block>>;
 
     /// Notify the buffer that a block has been finalized.
     ///
@@ -145,75 +150,43 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
 }
 
-/// A broadcast buffer that may be absent.
-pub(super) struct OptionalBuffer<V: Variant, Buf> {
-    inner: Option<Buf>,
-    _variant: PhantomData<fn() -> V>,
-}
-
-impl<V: Variant, Buf> OptionalBuffer<V, Buf> {
-    /// Create an optional buffer.
-    pub(super) const fn new(inner: Option<Buf>) -> Self {
-        Self {
-            inner,
-            _variant: PhantomData,
-        }
-    }
-}
-
-impl<V, Buf> OptionalBuffer<V, Buf>
+impl<V, Buf> Buffer<V> for Option<Buf>
 where
     V: Variant,
     Buf: Buffer<V>,
 {
-    /// Attempt to find a block by its digest.
-    pub(super) async fn find_by_digest(
-        &self,
-        digest: <V::Block as Digestible>::Digest,
-    ) -> Option<V::Block> {
-        self.inner.as_ref()?.find_by_digest(digest).await
+    type PublicKey = Buf::PublicKey;
+
+    async fn find_by_digest(&self, digest: <V::Block as Digestible>::Digest) -> Option<V::Block> {
+        self.as_ref()?.find_by_digest(digest).await
     }
 
-    /// Attempt to find a block by its commitment.
-    pub(super) async fn find_by_commitment(&self, commitment: V::Commitment) -> Option<V::Block> {
-        self.inner.as_ref()?.find_by_commitment(commitment).await
+    async fn find_by_commitment(&self, commitment: V::Commitment) -> Option<V::Block> {
+        self.as_ref()?.find_by_commitment(commitment).await
     }
 
-    /// Subscribe to a block's availability by its digest, if a buffer exists.
-    pub(super) fn subscribe_by_digest(
+    fn subscribe_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<oneshot::Receiver<V::Block>> {
-        self.inner
-            .as_ref()
-            .map(|buffer| buffer.subscribe_by_digest(digest))
+        self.as_ref()?.subscribe_by_digest(digest)
     }
 
-    /// Subscribe to a block's availability by its commitment, if a buffer exists.
-    pub(super) fn subscribe_by_commitment(
+    fn subscribe_by_commitment(
         &self,
         commitment: V::Commitment,
     ) -> Option<oneshot::Receiver<V::Block>> {
-        self.inner
-            .as_ref()
-            .map(|buffer| buffer.subscribe_by_commitment(commitment))
+        self.as_ref()?.subscribe_by_commitment(commitment)
     }
 
-    /// Notify the buffer that a block has been finalized, if a buffer exists.
-    pub(super) fn finalized(&self, commitment: V::Commitment) {
-        if let Some(buffer) = &self.inner {
+    fn finalized(&self, commitment: V::Commitment) {
+        if let Some(buffer) = self {
             buffer.finalized(commitment);
         }
     }
 
-    /// Send a block to peers, if a buffer exists.
-    pub(super) fn send(
-        &self,
-        round: Round,
-        block: V::Block,
-        recipients: Recipients<Buf::PublicKey>,
-    ) {
-        if let Some(buffer) = &self.inner {
+    fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>) {
+        if let Some(buffer) = self {
             buffer.send(round, block, recipients);
         }
     }

@@ -2559,16 +2559,16 @@ mod tests {
                 .cloned()
         }
 
-        fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<B>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscriptions.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
-        fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_commitment(&self, _commitment: D) -> Option<oneshot::Receiver<B>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
         fn finalized(&self, _commitment: D) {}
