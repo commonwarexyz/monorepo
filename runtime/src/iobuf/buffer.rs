@@ -830,11 +830,7 @@ impl BufMut<PooledBacking> {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{
-            cache_line_size,
-            pool::BufferPoolThreadCacheConfig,
-            BufferPool, BufferPoolConfig,
-        },
+        iobuf::{cache_line_size, pool::BufferPoolThreadCacheConfig, BufferPool, BufferPoolConfig},
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
