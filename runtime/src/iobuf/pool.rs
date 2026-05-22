@@ -192,14 +192,13 @@ impl BufferPoolConfig {
     /// Cache-line alignment is used because network buffers don't require page
     /// alignment for DMA, and smaller alignment reduces internal fragmentation.
     pub const fn for_network() -> Self {
-        let cache_line = NZUsize!(cache_line_size());
         Self {
-            pool_min_size: 1024,
+            pool_min_size: 0,
             min_size: NZUsize!(1024),
-            max_size: NZUsize!(64 * 1024),
+            max_size: NZUsize!(128 * 1024),
             max_per_class: NZU32!(4096),
             prefill: false,
-            alignment: cache_line,
+            alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
@@ -212,12 +211,12 @@ impl BufferPoolConfig {
     pub fn for_storage() -> Self {
         let page = NZUsize!(page_size());
         Self {
-            pool_min_size: 1024,
+            pool_min_size: 0,
             min_size: page,
             max_size: NZUsize!(8 * 1024 * 1024),
             max_per_class: NZU32!(64),
             prefill: false,
-            alignment: page,
+            alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
