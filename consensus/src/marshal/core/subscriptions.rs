@@ -153,7 +153,10 @@ mod tests {
             Some(receiver)
         }
 
-        fn subscribe_by_commitment(&self, _commitment: Digest) -> Option<oneshot::Receiver<TestBlock>> {
+        fn subscribe_by_commitment(
+            &self,
+            _commitment: Digest,
+        ) -> Option<oneshot::Receiver<TestBlock>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscribers.lock().push(sender);
             Some(receiver)

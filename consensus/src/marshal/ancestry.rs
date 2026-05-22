@@ -26,7 +26,7 @@ pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
 /// Creates an ancestry stream from a fixed sequence of blocks.
 ///
 /// Blocks are yielded in iterator order and no parent fetching is performed. This is useful when
-/// the caller already has the complete ancestry needed by an application.
+/// the caller wants to bound the ancestry available to the application.
 pub fn from_iter<B>(blocks: impl IntoIterator<Item = B>) -> impl Ancestry<B>
 where
     B: Block,
