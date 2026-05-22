@@ -2039,9 +2039,9 @@ mod tests {
     fn test_config_for_network() {
         let config = BufferPoolConfig::for_network();
         config.validate();
-        assert_eq!(config.pool_min_size, 1024);
+        assert_eq!(config.pool_min_size, 0);
         assert_eq!(config.min_size.get(), 1024);
-        assert_eq!(config.max_size.get(), 64 * 1024);
+        assert_eq!(config.max_size.get(), 128 * 1024);
         assert_eq!(config.max_per_class.get(), 4096);
         assert_eq!(config.parallelism, NZUsize!(1));
         assert_eq!(
@@ -2049,14 +2049,14 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(None)
         );
         assert!(!config.prefill);
-        assert_eq!(config.alignment.get(), cache_line_size());
+        assert_eq!(config.alignment.get(), 1);
     }
 
     #[test]
     fn test_config_for_storage() {
         let config = BufferPoolConfig::for_storage();
         config.validate();
-        assert_eq!(config.pool_min_size, 1024);
+        assert_eq!(config.pool_min_size, 0);
         assert_eq!(config.min_size.get(), page_size());
         assert_eq!(config.max_size.get(), 8 * 1024 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
@@ -2066,7 +2066,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(None)
         );
         assert!(!config.prefill);
-        assert_eq!(config.alignment.get(), page_size());
+        assert_eq!(config.alignment.get(), 1);
     }
 
     #[test]
@@ -2101,8 +2101,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(Some(NZUsize!(8)))
         );
         assert!(config.prefill);
-        // Storage profile alignment stays page-sized unless explicitly changed.
-        assert_eq!(config.alignment.get(), page_size());
+        assert_eq!(config.alignment.get(), 1);
 
         // Alignment can be tuned explicitly as long as min_size is also adjusted.
         let aligned = BufferPoolConfig::for_network()
@@ -3127,21 +3126,24 @@ mod tests {
     #[test]
     fn test_buffer_alignment() {
         let page = page_size();
-        let cache_line = cache_line_size();
+        let cache_line = 128;
+
         // Reduce max_per_class under miri (atomics are slow)
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
                 let storage_config = BufferPoolConfig {
                     max_per_class: NZU32!(32),
-                    ..BufferPoolConfig::for_storage()
+                    ..BufferPoolConfig::for_storage().with_alignment(NZUsize!(page))
                 };
                 let network_config = BufferPoolConfig {
                     max_per_class: NZU32!(32),
-                    ..BufferPoolConfig::for_network()
+                    ..BufferPoolConfig::for_network().with_alignment(NZUsize!(cache_line))
                 };
             } else {
-                let storage_config = BufferPoolConfig::for_storage();
-                let network_config = BufferPoolConfig::for_network();
+                let storage_config =
+                    BufferPoolConfig::for_storage().with_alignment(NZUsize!(page));
+                let network_config =
+                    BufferPoolConfig::for_network().with_alignment(NZUsize!(cache_line));
             }
         }
 
