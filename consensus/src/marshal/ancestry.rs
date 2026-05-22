@@ -9,6 +9,7 @@ use futures::{
 };
 use pin_project::pin_project;
 use std::{
+    collections::VecDeque,
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -20,6 +21,39 @@ pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
     /// Peeks at the latest block in the stream without consuming it. Returns [None]
     /// if the stream does not yet have a block available or has been exhausted.
     fn peek(&self) -> Option<&B>;
+}
+
+/// Creates an ancestry stream from a fixed sequence of blocks.
+///
+/// Blocks are yielded in iterator order and no parent fetching is performed. This is useful when
+/// the caller already has the complete ancestry needed by an application.
+pub fn from_iter<B>(blocks: impl IntoIterator<Item = B>) -> impl Ancestry<B>
+where
+    B: Block,
+{
+    BoundedAncestry {
+        blocks: blocks.into_iter().collect(),
+    }
+}
+
+struct BoundedAncestry<B: Block> {
+    blocks: VecDeque<B>,
+}
+
+impl<B: Block> Unpin for BoundedAncestry<B> {}
+
+impl<B: Block> Ancestry<B> for BoundedAncestry<B> {
+    fn peek(&self) -> Option<&B> {
+        self.blocks.front()
+    }
+}
+
+impl<B: Block> Stream for BoundedAncestry<B> {
+    type Item = B;
+
+    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.blocks.pop_front())
+    }
 }
 
 /// An interface for providing parent blocks.
@@ -381,6 +415,34 @@ mod test {
             let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
             let stream = stream(&context, MockProvider::default(), [block.clone()]);
             assert_eq!(peek_height(stream), Some(block.height()));
+        });
+    }
+
+    #[test]
+    fn test_from_iter_available_through_ancestry_trait() {
+        fn peek_height(ancestry: impl Ancestry<Block<Sha256Digest, ()>>) -> Option<Height> {
+            ancestry.peek().map(Heightable::height)
+        }
+
+        let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let ancestry = from_iter([block.clone()]);
+
+        assert_eq!(peek_height(ancestry), Some(block.height()));
+    }
+
+    #[test]
+    fn test_from_iter_yields_blocks_in_order_and_peeks_next() {
+        deterministic::Runner::default().start(|_| async move {
+            let parent = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+            let child = Block::new::<Sha256>((), parent.digest(), Height::new(2), 2);
+            let mut ancestry = from_iter([child.clone(), parent.clone()]);
+
+            assert_eq!(ancestry.peek(), Some(&child));
+            assert_eq!(ancestry.next().await, Some(child));
+            assert_eq!(ancestry.peek(), Some(&parent));
+            assert_eq!(ancestry.next().await, Some(parent));
+            assert_eq!(ancestry.peek(), None);
+            assert_eq!(ancestry.next().await, None);
         });
     }
 
