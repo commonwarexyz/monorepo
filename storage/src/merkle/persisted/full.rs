@@ -637,15 +637,16 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         }
 
         let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        self.metadata.put(
-            key,
-            Location::try_from(prune_to_pos)?
-                .as_u64()
-                .to_be_bytes()
-                .into(),
-        );
-
-        self.metadata.sync().await.map_err(Error::Metadata)?;
+        self.metadata
+            .put_sync(
+                key,
+                Location::try_from(prune_to_pos)?
+                    .as_u64()
+                    .to_be_bytes()
+                    .into(),
+            )
+            .await
+            .map_err(Error::Metadata)?;
 
         Ok(pinned_nodes)
     }
@@ -2336,8 +2337,10 @@ mod tests {
                 .unwrap();
         metadata.clear();
         let key = U64::new(PRUNED_TO_PREFIX, 0);
-        metadata.put(key, 0u64.to_be_bytes().to_vec());
-        metadata.sync().await.unwrap();
+        metadata
+            .put_sync(key, 0u64.to_be_bytes().to_vec())
+            .await
+            .unwrap();
         drop(metadata);
 
         // Reopen the structure - before the fix, this would panic with assertion failure
