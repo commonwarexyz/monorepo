@@ -4852,6 +4852,101 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_floor_round_restored_before_anchor_ack() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "floor-round-before-anchor-ack";
+
+            let floor_round = Round::new(Epoch::zero(), View::new(5));
+            let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    floor_round,
+                    View::new(4),
+                    StandardHarness::commitment(&floor_block),
+                ),
+                &schemes,
+                QUORUM,
+            );
+
+            let (application, started) = HoldingBlockReporter::new_after(Height::zero());
+            let (mailbox, buffer, resolver, actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
+            mailbox.set_floor(floor_finalization);
+            select! {
+                height = started => {
+                    assert_eq!(
+                        height.expect("floor anchor delivery signal missing"),
+                        Height::new(5),
+                        "floor anchor should be delivered before the simulated crash"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("floor anchor was not delivered before restart");
+                },
+            }
+
+            actor_handle.abort();
+            drop(mailbox);
+            drop(buffer);
+            drop(resolver);
+            context.sleep(Duration::from_millis(1)).await;
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context
+                    .child("validator_restart")
+                    .with_attribute("index", 0),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let fetches_before = resolver.fetches().len();
+            let subscription = mailbox.subscribe_by_commitment(
+                Sha256::hash(b"missing-at-restored-floor-round"),
+                CommitmentFallback::FetchByRound { round: floor_round },
+            );
+            let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
+            assert!(
+                mailbox
+                    .verified(Round::new(Epoch::zero(), View::new(6)), barrier)
+                    .await,
+                "barrier verification should be processed"
+            );
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "restart must restore the floor round before the anchor is acknowledged"
+            );
+            select! {
+                result = subscription => {
+                    assert!(
+                        result.is_err(),
+                        "floor-round subscription should be canceled after restart"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("floor-round subscription remained open after restart");
+                },
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_set_floor_prunes_round_bound_fetches() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

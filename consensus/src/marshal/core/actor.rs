@@ -18,7 +18,7 @@ use crate::{
         scheme::Scheme,
         types::{verify_certificates, Finalization, Notarization, Subject},
     },
-    types::{Epoch, Epocher, Height, Round, ViewDelta},
+    types::{Epoch, Epocher, Height, Round, View, ViewDelta},
     Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
@@ -54,7 +54,11 @@ use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
 use tracing::{debug, warn};
 
 /// The key used to store the last application-acknowledged height.
-const LATEST_KEY: U64 = U64::new(0xFF);
+const LATEST_HEIGHT_KEY: U64 = U64::new(0xFF);
+/// The key used to store the epoch component of the processed round floor.
+const LATEST_ROUND_EPOCH_KEY: U64 = U64::new(0xFE);
+/// The key used to store the view component of the processed round floor.
+const LATEST_ROUND_VIEW_KEY: U64 = U64::new(0xFD);
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
@@ -195,7 +199,7 @@ where
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_applied_height = application_metadata.get(&LATEST_KEY).copied();
+        let last_applied_height = application_metadata.get(&LATEST_HEIGHT_KEY).copied();
         let processed_floor_height = last_applied_height.unwrap_or(Height::zero());
 
         // Genesis is seeded as a local anchor. If the application has not
@@ -215,8 +219,11 @@ where
             }
             Start::Floor(finalization) => Some(finalization),
         };
-        let last_processed_round =
+        let height_derived_processed_round =
             Self::latest_processed_round(&finalizations_by_height, processed_floor_height).await;
+        let last_processed_round = Self::metadata_round_floor(&application_metadata)
+            .unwrap_or(Round::zero())
+            .max(height_derived_processed_round);
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
@@ -485,7 +492,7 @@ where
             }
         };
 
-        // Persist buffered processed-height updates once after draining all ready acks.
+        // Persist buffered progress updates once after draining all ready acks.
         self.application_metadata
             .sync()
             .await
@@ -2042,7 +2049,7 @@ where
         >,
     ) {
         self.last_applied_height = Some(height);
-        self.application_metadata.put(LATEST_KEY, height);
+        self.application_metadata.put(LATEST_HEIGHT_KEY, height);
         self.floor.set_processed_height(height);
         let _ = self
             .processed_height
@@ -2050,6 +2057,13 @@ where
 
         // Prune any existing requests below the new floor.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+    }
+
+    /// Returns the durably stored processed round floor, if present.
+    fn metadata_round_floor(metadata: &Metadata<E, U64, Height>) -> Option<Round> {
+        let epoch = metadata.get(&LATEST_ROUND_EPOCH_KEY)?;
+        let view = metadata.get(&LATEST_ROUND_VIEW_KEY)?;
+        Some(Round::new(Epoch::new(epoch.get()), View::new(view.get())))
     }
 
     /// Returns the latest known finalization round at or below the processed height.
@@ -2106,6 +2120,10 @@ where
 
         let previous = self.floor.processed_round();
         self.floor.set_processed_round(round);
+        self.application_metadata
+            .put(LATEST_ROUND_EPOCH_KEY, Height::new(round.epoch().get()));
+        self.application_metadata
+            .put(LATEST_ROUND_VIEW_KEY, Height::new(round.view().get()));
 
         // Retain view-indexed cache data for a window behind the previously
         // processed finalized block.
