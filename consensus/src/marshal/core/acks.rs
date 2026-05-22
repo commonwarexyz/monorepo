@@ -62,12 +62,12 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
     }
 
     /// Returns the next height to dispatch while preserving sequential order.
-    pub(super) fn next_dispatch_height(&self, last_applied_height: Option<Height>) -> Height {
+    pub(super) fn next_dispatch_height(&self, last_processed_height: Height) -> Height {
         self.queue
             .back()
             .map(|ack| ack.height.next())
             .or_else(|| self.current.as_ref().map(|ack| ack.height.next()))
-            .unwrap_or_else(|| last_applied_height.map_or(Height::zero(), Height::next))
+            .unwrap_or_else(|| last_processed_height.next())
     }
 
     /// Enqueues a newly dispatched ack, arming it immediately when idle.
@@ -136,25 +136,18 @@ mod tests {
     fn enqueue_tracks_capacity_and_fifo_ready_order() {
         let mut pending = PendingAcks::<TestVariant, Exact>::new(2);
         assert!(pending.has_capacity());
-        assert_eq!(pending.next_dispatch_height(None), Height::zero());
-        assert_eq!(
-            pending.next_dispatch_height(Some(Height::new(7))),
-            Height::new(8)
-        );
+        assert_eq!(pending.next_dispatch_height(Height::new(7)), Height::new(8));
 
         let (first, first_ack) = pending_ack(8, 1);
         pending.enqueue(first);
         assert!(pending.has_capacity());
-        assert_eq!(
-            pending.next_dispatch_height(Some(Height::new(7))),
-            Height::new(9)
-        );
+        assert_eq!(pending.next_dispatch_height(Height::new(7)), Height::new(9));
 
         let (second, second_ack) = pending_ack(9, 2);
         pending.enqueue(second);
         assert!(!pending.has_capacity());
         assert_eq!(
-            pending.next_dispatch_height(Some(Height::new(7))),
+            pending.next_dispatch_height(Height::new(7)),
             Height::new(10)
         );
 
@@ -192,7 +185,7 @@ mod tests {
         assert!(pending.pop_ready().is_none());
         assert!(pending.has_capacity());
         assert_eq!(
-            pending.next_dispatch_height(Some(Height::new(9))),
+            pending.next_dispatch_height(Height::new(9)),
             Height::new(10)
         );
     }

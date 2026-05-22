@@ -780,11 +780,6 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_genesis_emitted_once() {
-        harness::genesis_emitted_once::<CodingHarness>();
-    }
-
-    #[test_traced("WARN")]
     fn test_coding_proposed_success_implies_recoverable_after_restart() {
         harness::proposed_success_implies_recoverable_after_restart::<CodingHarness>(0..16);
     }

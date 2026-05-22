@@ -98,7 +98,7 @@ mod tests {
         ordered::Set,
         sync::Mutex,
         vec::NonEmptyVec,
-        Acknowledgement as _, NZUsize, NZU16, NZU64,
+        NZUsize, NZU16, NZU64,
     };
     use std::{
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -230,12 +230,6 @@ mod tests {
     fn test_standard_ack_pipeline_backlog_persists_on_restart() {
         harness::ack_pipeline_backlog_persists_on_restart::<InlineHarness>();
         harness::ack_pipeline_backlog_persists_on_restart::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_genesis_emitted_once() {
-        harness::genesis_emitted_once::<InlineHarness>();
-        harness::genesis_emitted_once::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -576,7 +570,6 @@ mod tests {
             )
             .await;
 
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
             // Walk through all blocks sequentially. Block 2 must be
             // repaired from the peer before it can be dispatched.
             for expected_height in 1..=2 {
@@ -686,7 +679,6 @@ mod tests {
             )
             .await;
 
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
             // Walk through all three blocks sequentially. Block 2 must be
             // repaired from the peer before it can be dispatched.
             for expected_height in 1..=3 {
@@ -776,7 +768,6 @@ mod tests {
             // Walk the application through sequential acks. Even though
             // block_two has no finalization, it is still dispatched because
             // its block data exists in the archive.
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
                 assert_eq!(h, Height::new(expected_height));
@@ -889,7 +880,6 @@ mod tests {
             )
             .await;
 
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
             // Walk through all five blocks sequentially. Blocks 2-5 must be
             // repaired from the peer before they can be dispatched.
             for expected_height in 1..=5 {
@@ -998,7 +988,6 @@ mod tests {
                 "restart should surface the pending finalized tip before all blocks are repaired"
             );
 
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
             for expected_height in 1..=pending_tip {
                 let h = recovering.application.acknowledged().await;
                 assert_eq!(h, Height::new(expected_height));
@@ -1082,7 +1071,6 @@ mod tests {
             )
             .await;
 
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
             // Walk through sequential acks to confirm no repair was needed.
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
@@ -1162,7 +1150,6 @@ mod tests {
             )
             .await;
 
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
             // Walk through both blocks to confirm repair recovered them.
             for expected_height in 1..=2 {
                 let h = recovering.application.acknowledged().await;
@@ -2783,25 +2770,15 @@ mod tests {
     struct HoldingBlockReporter {
         started: Arc<Mutex<Option<oneshot::Sender<Height>>>>,
         pending: Arc<Mutex<Vec<Exact>>>,
-        min_signal_height: Height,
     }
 
     impl HoldingBlockReporter {
         fn new() -> (Self, oneshot::Receiver<Height>) {
-            Self::new_from(Height::zero())
-        }
-
-        fn new_after(height: Height) -> (Self, oneshot::Receiver<Height>) {
-            Self::new_from(height.next())
-        }
-
-        fn new_from(min_signal_height: Height) -> (Self, oneshot::Receiver<Height>) {
             let (started_tx, started_rx) = oneshot::channel();
             (
                 Self {
                     started: Arc::new(Mutex::new(Some(started_tx))),
                     pending: Arc::new(Mutex::new(Vec::new())),
-                    min_signal_height,
                 },
                 started_rx,
             )
@@ -2814,10 +2791,6 @@ mod tests {
         fn report(&mut self, activity: Self::Activity) -> Feedback {
             match activity {
                 Update::Block(block, ack) => {
-                    if block.height() < self.min_signal_height {
-                        ack.acknowledge();
-                        return Feedback::Ok;
-                    }
                     if let Some(started) = self.started.lock().take() {
                         started.send_lossy(block.height());
                     }
@@ -3069,7 +3042,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (application, mut started_rx) = HoldingBlockReporter::new();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "start-floor-async",
@@ -3205,7 +3178,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (application, mut started_rx) = HoldingBlockReporter::new();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "set-floor-holds-dispatch",
@@ -3295,7 +3268,6 @@ mod tests {
             )
             .await;
             let mut mailbox = mailbox;
-            assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
@@ -3399,7 +3371,6 @@ mod tests {
             )
             .await;
             let mut mailbox = mailbox;
-            assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
@@ -3664,7 +3635,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (application, mut started_rx) = HoldingBlockReporter::new();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "set-floor-supersedes-pending",
@@ -3843,7 +3814,7 @@ mod tests {
             );
             let floor_finalization =
                 StandardHarness::make_finalization(floor_proposal.clone(), &schemes, QUORUM);
-            let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let (application, mut started_rx) = HoldingBlockReporter::new();
             let buffer = RecordingBuffer::default();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -3911,7 +3882,6 @@ mod tests {
             )
             .await;
             let mut mailbox = mailbox;
-            assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
@@ -4027,7 +3997,6 @@ mod tests {
             )
             .await;
             let mut mailbox = mailbox;
-            assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(genesis.digest(), Height::new(1), 100);
@@ -4104,7 +4073,6 @@ mod tests {
             )
             .await;
             let mut mailbox = mailbox;
-            assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(genesis.digest(), Height::new(1), 100);
@@ -4238,7 +4206,6 @@ mod tests {
             )
             .await;
             let mut mailbox = mailbox;
-            assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
             let block1 = make_raw_block(Sha256::hash(b"block1-parent"), Height::new(1), 100);
@@ -4345,7 +4312,6 @@ mod tests {
             );
             assert!(mailbox.verified(block_round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
-            assert_eq!(application.acknowledged().await, Height::zero());
             assert_eq!(application.acknowledged().await, Height::new(1));
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
@@ -4594,7 +4560,6 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
-            assert_eq!(application.acknowledged().await, Height::zero());
             assert_eq!(
                 application.acknowledged().await,
                 Height::new(1),
@@ -4671,7 +4636,6 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
-            assert_eq!(application.acknowledged().await, Height::zero());
             assert_eq!(application.acknowledged().await, Height::new(1));
             wait_until(
                 &context,
@@ -4789,7 +4753,6 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
-            assert_eq!(application.acknowledged().await, Height::zero());
             assert_eq!(application.acknowledged().await, Height::new(1));
             wait_until(
                 &context,
@@ -4871,7 +4834,7 @@ mod tests {
                 QUORUM,
             );
 
-            let (application, started) = HoldingBlockReporter::new_after(Height::zero());
+            let (application, started) = HoldingBlockReporter::new();
             let (mailbox, buffer, resolver, actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
                 partition_prefix,
@@ -5194,7 +5157,7 @@ mod tests {
                 QUORUM,
             );
 
-            let (application, started) = HoldingBlockReporter::new_after(Height::zero());
+            let (application, started) = HoldingBlockReporter::new();
             let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
