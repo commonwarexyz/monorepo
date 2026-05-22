@@ -28,12 +28,13 @@
 //!   advanced on non-stale `AckNext`, and reset to
 //!   `setup.height.get()` after `Restart`.
 //!
-//!   On each repair wake — every above-floor `ReportFinalization`
+//!   On each repair wake (every above-floor `ReportFinalization`
 //!   that found its block, and every `Restart` after the variant
-//!   cache is cleared (marshal's startup path runs `try_repair_gaps`
-//!   unconditionally) — the driver finds the largest anchor `a` for
+//!   cache is cleared, since marshal's startup path runs
+//!   `try_repair_gaps` unconditionally) the driver finds the largest
+//!   anchor `a` for
 //!   which every height `1..=a` is currently available in
-//!   (`durable_available ∪ variant_available`). If `a >
+//!   (`durable_available` union `variant_available`). If `a >
 //!   ready_prefix`, the gap is repairable: marshal can walk the
 //!   chain from `a` back to 1 and deliver. The driver bumps
 //!   `ready_prefix = a` and promotes heights `prev_ready+1..=a` into
