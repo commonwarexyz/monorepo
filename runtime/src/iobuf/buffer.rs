@@ -830,16 +830,15 @@ impl BufMut<PooledBacking> {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{cache_line_size, pool::BufferPoolThreadCacheConfig, BufferPool, BufferPoolConfig},
+        iobuf::{
+            cache_line_size, page_size, pool::BufferPoolThreadCacheConfig, BufferPool,
+            BufferPoolConfig,
+        },
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use commonware_utils::{NZUsize, NZU32};
     use std::ops::Bound;
-
-    fn page_size() -> usize {
-        BufferPoolConfig::for_storage().min_size.get()
-    }
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {
         let mut registry = Registry::default();

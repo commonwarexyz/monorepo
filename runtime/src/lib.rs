@@ -64,7 +64,7 @@ stability_scope!(BETA {
 
     pub mod iobuf;
     pub use iobuf::{
-        cache_line_size, BufferPool, BufferPoolConfig, BufferPoolThreadCache,
+        cache_line_size, page_size, BufferPool, BufferPoolConfig, BufferPoolThreadCache,
         Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut,
     };
 

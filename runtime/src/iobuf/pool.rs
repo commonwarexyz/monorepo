@@ -49,17 +49,16 @@
 //! first try to re-enter the dropping thread's local cache, spilling a bounded
 //! batch back to the global freelist if needed.
 
-use super::{freelist::Freelist, IoBufMut};
+use super::{freelist::Freelist, page_size, IoBufMut};
 use crate::{
     iobuf::buffer::{PooledBufMut, PooledBuffer},
     telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::{NZUsize, NZU32};
-use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
-    mem::{align_of, MaybeUninit},
+    mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     ptr,
     sync::{
@@ -94,32 +93,6 @@ impl std::fmt::Display for PoolError {
 }
 
 impl std::error::Error for PoolError {}
-
-/// Returns the system page size.
-///
-/// On Unix systems, queries the actual page size via `sysconf`.
-/// On other systems (Windows), defaults to 4KB.
-#[cfg(unix)]
-fn page_size() -> usize {
-    // SAFETY: sysconf is safe to call.
-    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if size <= 0 {
-        4096 // Safe fallback if sysconf fails
-    } else {
-        size as usize
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::missing_const_for_fn)]
-fn page_size() -> usize {
-    4096
-}
-
-/// Returns the cache line size for the current architecture.
-pub const fn cache_line_size() -> usize {
-    align_of::<CachePadded<u8>>()
-}
 
 /// Policy for sizing each thread's cache within a buffer pool size class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1738,7 +1711,7 @@ impl BufferPool {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{freelist, IoBuf},
+        iobuf::{cache_line_size, freelist, IoBuf},
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut};
