@@ -14,13 +14,10 @@ use std::{
 };
 
 /// A stream of blocks used by application propose and verify calls.
-pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {}
-
-impl<T, B> Ancestry<B> for T
-where
-    T: Stream<Item = B> + Send + Unpin + 'static,
-    B: Block,
-{
+pub trait Ancestry<B: Block>: Stream<Item = B> + Send + Unpin + 'static {
+    /// Peeks at the latest block in the stream without consuming it. Returns [None]
+    /// if the stream does not yet have a block available or has been exhausted.
+    fn peek(&self) -> Option<&B>;
 }
 
 /// An interface for providing parent blocks.
@@ -120,6 +117,15 @@ impl<M: BlockProvider> AncestorStream<M> {
     /// if the stream does not yet have a block available or has been exhausted.
     pub fn peek(&self) -> Option<&M::Block> {
         self.buffered.last()
+    }
+}
+
+impl<M> Ancestry<M::Block> for AncestorStream<M>
+where
+    M: BlockProvider,
+{
+    fn peek(&self) -> Option<&M::Block> {
+        AncestorStream::peek(self)
     }
 }
 
@@ -294,6 +300,17 @@ mod test {
         let waker = futures::task::noop_waker_ref();
         let mut cx = std::task::Context::from_waker(waker);
         let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+    }
+
+    #[test]
+    fn test_peek_available_through_ancestry_trait() {
+        fn peek_height(ancestry: impl Ancestry<Block<Sha256Digest, ()>>) -> Option<Height> {
+            ancestry.peek().map(Heightable::height)
+        }
+
+        let block = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let stream = AncestorStream::new(MockProvider::default(), [block.clone()]);
+        assert_eq!(peek_height(stream), Some(block.height()));
     }
 
     #[test_async]
