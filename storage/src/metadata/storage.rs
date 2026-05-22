@@ -270,6 +270,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     }
 
     /// Perform a [Self::put] and [Self::sync] in a single operation.
+    ///
+    /// Like calling [Self::sync] directly, this commits all pending metadata
+    /// changes, not just the provided key.
     pub async fn put_sync(&mut self, key: K, value: V) -> Result<(), Error> {
         self.put(key, value);
         self.sync().await
