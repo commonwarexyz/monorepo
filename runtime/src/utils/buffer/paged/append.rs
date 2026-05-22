@@ -76,7 +76,12 @@ impl<B: Blob> BlobState<B> {
             self.write_at(offset, bufs).await?;
             self.sync().await
         } else {
-            self.blob.write_at_sync(offset, bufs).await
+            // If `write_at_sync` fails, a later sync must not treat the drained
+            // buffer as durable.
+            self.needs_sync = true;
+            self.blob.write_at_sync(offset, bufs).await?;
+            self.needs_sync = false;
+            Ok(())
         }
     }
 
@@ -1747,6 +1752,30 @@ mod tests {
                 .unwrap();
             let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_failed_range_sync_does_not_mark_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let name = b"failed_range_sync";
+            let (blob, size) = context.open("test_partition", name).await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Keep the write buffered so sync attempts the clean `write_at_sync` path.
+            append.append(b"abc").await.unwrap();
+
+            // Removing the blob makes the range-sync flush fail.
+            context.remove("test_partition", Some(name)).await.unwrap();
+            assert!(append.sync().await.is_err());
+
+            // The failed `write_at_sync` must leave a pending full-sync barrier, so a
+            // later sync cannot report success.
+            assert!(append.sync().await.is_err());
         });
     }
 
