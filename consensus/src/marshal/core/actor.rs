@@ -90,14 +90,14 @@ impl ApplicationFloor {
         }
     }
 
-    fn round_restore_height(self) -> Height {
+    const fn round_restore_height(self) -> Height {
         match self {
             Self::BeforeGenesis => Height::zero(),
             Self::Acknowledged(height) => height.next(),
         }
     }
 
-    fn next_dispatch_height(self) -> Height {
+    const fn next_dispatch_height(self) -> Height {
         match self {
             Self::BeforeGenesis => Height::zero(),
             Self::Acknowledged(height) => height.next(),
