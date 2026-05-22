@@ -5,7 +5,7 @@ date: "April 17th, 2026"
 published-time: "2026-04-17T00:00:00Z"
 modified-time: "2026-04-17T00:00:00Z"
 author: "Guru Vamsi Policharla"
-author_twitter: "https://x.com/gvamsip"
+author_twitter: "https://x.com/guruvamsip"
 url: "https://commonware.xyz/blogs/bte"
 image: "https://commonware.xyz/imgs/bte.png"
 katex: true
