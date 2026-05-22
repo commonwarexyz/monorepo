@@ -177,7 +177,10 @@ where
         )
         .await;
 
-        let stream = Stream::new(context.child("stream"), &config.partition_prefix).await;
+        // The application metadata name is retained for legacy support.
+        let application_metadata_partition =
+            format!("{}-application-metadata", config.partition_prefix);
+        let stream = Stream::new(context.child("stream"), &application_metadata_partition).await;
         let last_processed_height = stream.processed_height();
         let processed_height_floor = last_processed_height.unwrap_or_else(Height::zero);
 

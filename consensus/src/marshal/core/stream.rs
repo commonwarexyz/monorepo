@@ -49,12 +49,11 @@ pub(super) struct Stream<E: Context> {
 }
 
 impl<E: Context> Stream<E> {
-    pub(super) async fn new(context: E, partition_prefix: &str) -> Self {
+    pub(super) async fn new(context: E, application_metadata_partition: &str) -> Self {
         let metadata = Metadata::init(
             context,
             metadata::Config {
-                // The application metadata name is retained for legacy support.
-                partition: format!("{partition_prefix}-application-metadata"),
+                partition: application_metadata_partition.to_string(),
                 codec_config: (),
             },
         )
