@@ -1,14 +1,11 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{db::Anchor, Application};
+use crate::stateful::Application;
 use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
     Feedback,
 };
-use commonware_consensus::{
-    marshal::Update, types::Height, Application as ConsensusApplication, Reporter,
-};
-use commonware_cryptography::Digestible;
+use commonware_consensus::{marshal::Update, Application as ConsensusApplication, Reporter};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
@@ -24,9 +21,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// A request for the genesis block.
-    Genesis { response: oneshot::Sender<A::Block> },
-
     /// A request to propose a block.
     Propose {
         context: (E, A::Context),
@@ -47,22 +41,6 @@ where
         acknowledgement: Exact,
     },
 
-    /// A new finalized tip observed by marshal.
-    ///
-    /// During state sync, the actor uses this to fetch the block and
-    /// extract updated sync targets. In processing mode, this is a no-op.
-    Tip {
-        height: Height,
-        digest: <A::Block as Digestible>::Digest,
-    },
-
-    /// Signals that state sync is complete and the actor should transition
-    /// to `Mode::Processing`.
-    SyncComplete {
-        databases: A::Databases,
-        last_processed: Anchor<<A::Block as Digestible>::Digest>,
-    },
-
     /// Requests the attached database set.
     ///
     /// The actor replies once the database set is attached, or immediately if
@@ -79,11 +57,10 @@ where
 {
     fn response_closed(&self) -> bool {
         match self {
-            Self::Genesis { response } => response.is_closed(),
             Self::Propose { response, .. } => response.is_closed(),
             Self::Verify { response, .. } => response.is_closed(),
             Self::SubscribeDatabases { response } => response.is_closed(),
-            Self::Finalized { .. } | Self::Tip { .. } | Self::SyncComplete { .. } => false,
+            Self::Finalized { .. } => false,
         }
     }
 }
@@ -185,32 +162,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Fetch the application's genesis block from the actor.
-    pub(crate) async fn genesis(&self) -> A::Block {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Genesis { response });
-        receiver
-            .await
-            .expect("stateful actor dropped during genesis")
-    }
-
-    /// Signal that state sync is complete, providing the constructed databases
-    /// and the finalized digest to transition the actor to processing mode.
-    pub fn sync_complete(
-        &self,
-        databases: A::Databases,
-        last_processed: Anchor<<A::Block as Digestible>::Digest>,
-    ) {
-        let feedback = self.sender.enqueue(Message::SyncComplete {
-            databases,
-            last_processed,
-        });
-        assert!(
-            feedback.accepted(),
-            "stateful actor dropped during sync_complete"
-        );
-    }
-
     /// Wait for the attached database set.
     ///
     /// This resolves when startup bootstrap finishes and the actor has
@@ -278,7 +229,7 @@ where
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
-            Update::Tip(_, height, digest) => Message::Tip { height, digest },
+            Update::Tip(_, _, _) => return Feedback::Ok,
             Update::Block(block, acknowledgement) => Message::Finalized {
                 block,
                 acknowledgement,
