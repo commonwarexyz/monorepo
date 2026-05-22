@@ -8,7 +8,7 @@ use crate::{
         db::{
             p2p as qmdb_resolver, DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
         },
-        Application, Config as StatefulConfig, Proposed, StartupMode, Stateful as StatefulActor,
+        Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
     },
 };
 use commonware_broadcast::buffered;
@@ -496,12 +496,29 @@ impl EngineDefinition for MultiDbEngine {
             )
         };
 
+        let mut plan =
+            SyncPlan::load(context.child("stateful_startup"), partition_prefix.clone()).await;
+        let startup_sync_height = if self.enable_state_sync && plan.needs_state_sync() {
+            match fetch_majority_sync_floor(&self.marshal_mailboxes, &context, public_key).await {
+                Some((finalization, height)) => {
+                    self.sync_heights
+                        .lock()
+                        .insert(public_key.clone(), height.get());
+                    plan = plan.with_floor(finalization);
+                    Some(height.get())
+                }
+                None => None,
+            }
+        } else {
+            self.sync_heights.lock().get(public_key).copied()
+        };
+
         // Marshal actor
         let provider = ConstantProvider::new(scheme.clone());
         let marshal_config = marshal::Config {
             provider,
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: marshal::Start::Genesis(genesis_block.clone()),
+            start: plan.marshal_start(genesis_block.clone()),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
@@ -566,27 +583,6 @@ impl EngineDefinition for MultiDbEngine {
             );
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
-        let (startup, startup_sync_height) = if self.enable_state_sync
-            && !state_sync_done(context.child("state_sync_metadata"), &partition_prefix).await
-        {
-            fetch_majority_sync_target(&self.marshal_mailboxes, &context, public_key)
-                .await
-                .map_or((StartupMode::MarshalSync, None), |(block, finalization)| {
-                    let height = block.height().get();
-                    self.sync_heights.lock().insert(public_key.clone(), height);
-                    (
-                        StartupMode::StateSync {
-                            block,
-                            finalization,
-                        },
-                        Some(height),
-                    )
-                })
-        } else {
-            let prior = self.sync_heights.lock().get(public_key).copied();
-            (StartupMode::MarshalSync, prior)
-        };
-
         // Stateful actor
         let app = App::new(genesis_block.clone());
         let (stateful_actor, stateful_mailbox) = StatefulActor::init(
@@ -597,9 +593,8 @@ impl EngineDefinition for MultiDbEngine {
                 input_provider: (),
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: 100,
-                partition_prefix: partition_prefix.clone(),
-                startup,
-                resolvers: (qmdb_sync_resolver_a.clone(), qmdb_sync_resolver_b.clone()),
+                plan,
+                resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: 64,
