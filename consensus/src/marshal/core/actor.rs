@@ -38,9 +38,7 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::{
-    archive::Identifier as ArchiveID,
-};
+use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
@@ -184,9 +182,7 @@ where
             &config.partition_prefix,
         )
         .await;
-        let last_processed_height = stream
-            .processed_height()
-            .unwrap_or_else(Height::zero);
+        let last_processed_height = stream.processed_height().unwrap_or_else(Height::zero);
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
@@ -203,14 +199,8 @@ where
             }
             Start::Floor(finalization) => Some(finalization),
         };
-        // A floor transition to height H is persisted as H - 1 until the
-        // application acknowledges H. If that persisted cursor exists, looking
-        // one height ahead restores the anchor's round across the crash window.
-        let last_processed_round = Self::latest_processed_round(
-            &finalizations_by_height,
-            stream.next_height(),
-        )
-        .await;
+        let last_processed_round =
+            Self::latest_processed_round(&finalizations_by_height, last_processed_height).await;
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");

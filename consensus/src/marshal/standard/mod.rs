@@ -96,6 +96,7 @@ mod tests {
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, oneshot, oneshot::error::TryRecvError},
         ordered::Set,
+        sequence::U64,
         sync::Mutex,
         vec::NonEmptyVec,
         Acknowledgement as _, NZUsize, NZU16, NZU64,
@@ -440,6 +441,27 @@ mod tests {
             .sync()
             .await
             .expect("failed to sync seeded finalizations");
+    }
+
+    async fn seed_processed_height(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        height: Height,
+    ) {
+        let mut metadata: Metadata<deterministic::Context, U64, Height> = Metadata::init(
+            context.child("seed_application_metadata"),
+            metadata::Config {
+                partition: format!("{partition_prefix}-application-metadata"),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("failed to initialize application metadata for seeded restart state");
+        metadata.put(U64::new(0xFF), height);
+        metadata
+            .sync()
+            .await
+            .expect("failed to sync seeded application metadata");
     }
 
     // Writes a block directly into the cache's per-epoch notarized storage,
@@ -4911,12 +4933,101 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_floor_round_restored_before_anchor_ack() {
+    fn test_standard_round_floor_does_not_restore_missing_next_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let partition_prefix = "floor-round-before-anchor-ack";
+            let partition_prefix = "round-floor-missing-next-block";
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let notarization =
+                StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+
+            seed_processed_height(context.child("metadata"), partition_prefix, Height::zero())
+                .await;
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                partition_prefix,
+                &[],
+                &[(Height::new(1), finalization)],
+            )
+            .await;
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let mut subscription = mailbox.subscribe_by_commitment(
+                StandardHarness::commitment(&block),
+                CommitmentFallback::FetchByRound { round },
+            );
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(subscription.try_recv(), Err(TryRecvError::Empty)),
+                "missing next block must not advance the restored round floor"
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "fetch-by-round after missing-next restart",
+                || {
+                    resolver.fetches().iter().any(|fetch| {
+                        matches!(
+                            (&fetch.key, &fetch.subscriber),
+                            (
+                                handler::Key::Notarized { round: request_round },
+                                handler::Annotation::Notarization { round: subscriber_round },
+                            ) if *request_round == round && *subscriber_round == round
+                        )
+                    })
+                },
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Notarized { round },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
+                    },
+                    value: (notarization, block.clone()).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "notarized delivery should validate"
+            );
+            select! {
+                result = subscription => {
+                    let delivered = result.expect("block subscription should resolve");
+                    assert_eq!(delivered.digest(), block.digest());
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("round-floor subscription did not resolve");
+                },
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_round_floor_does_not_restore_unacknowledged_anchor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "round-floor-before-anchor-ack";
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(b"floor-parent"), Height::new(5), 500);
@@ -4975,8 +5086,8 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            let subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(b"missing-at-restored-floor-round"),
+            let mut subscription = mailbox.subscribe_by_commitment(
+                Sha256::hash(b"missing-before-anchor-ack"),
                 CommitmentFallback::FetchByRound { round: floor_round },
             );
             let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
@@ -4986,22 +5097,25 @@ mod tests {
                     .await,
                 "barrier verification should be processed"
             );
-            assert_eq!(
-                resolver.fetches().len(),
-                fetches_before,
-                "restart must restore the floor round before the anchor is acknowledged"
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "round-bound fetch before anchor ack",
+                || {
+                    resolver.fetches().len() > fetches_before
+                        && resolver.fetches().iter().any(|fetch| {
+                            matches!(
+                                fetch.key,
+                                handler::Key::Notarized { round } if round == floor_round
+                            )
+                        })
+                },
+            )
+            .await;
+            assert!(
+                matches!(subscription.try_recv(), Err(TryRecvError::Empty)),
+                "unacknowledged anchor round must remain subscribable after restart"
             );
-            select! {
-                result = subscription => {
-                    assert!(
-                        result.is_err(),
-                        "floor-round subscription should be canceled after restart"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("floor-round subscription remained open after restart");
-                },
-            }
         });
     }
 
