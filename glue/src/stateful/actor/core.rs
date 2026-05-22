@@ -3,7 +3,7 @@
 
 use crate::stateful::{
     actor::{
-        bootstrap::{bootstrap, BootstrapConfig, Mode as BootstrapMode},
+        bootstrap::{bootstrap, BootstrapConfig, Completion, Mode as BootstrapMode},
         mailbox::{ErasedAncestorStream, Message},
         metrics::Metrics as ProcessorMetrics,
         processor::{FinalizeStatus, Processor},
@@ -16,7 +16,7 @@ use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
-        core::{DigestFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
     simplex::types::Finalization,
     types::{Height, Round},
@@ -30,7 +30,10 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot, ring},
     Acknowledgement,
 };
-use futures::SinkExt;
+use futures::{
+    future::{pending, Either},
+    SinkExt,
+};
 use rand::Rng;
 use std::num::NonZeroUsize;
 use tracing::{debug, info};
@@ -50,12 +53,6 @@ where
     context: (E, A::Context),
     ancestry: ErasedAncestorStream<A::Block>,
     response: oneshot::Sender<bool>,
-}
-
-/// Buffered finalization while startup sync is in progress.
-struct HeldFinalization<B> {
-    block: B,
-    acknowledgement: Exact,
 }
 
 /// Tracks the attached database set and pending subscribers.
@@ -103,7 +100,7 @@ pub enum StartupMode<B, F> {
     ///
     /// It is up to the user to determine whether or not this block is a valid member
     /// of the canonical chain. The finalization is used to advance marshal's
-    /// floor after state sync completes.
+    /// floor before state sync starts.
     StateSync { block: B, finalization: F },
 }
 
@@ -151,7 +148,7 @@ where
     app: A,
 
     /// Anchored target updates forwarded to the bootstrap sync task.
-    tip_sender: ring::Sender<AnchoredUpdate<A, E>>,
+    target_sender: ring::Sender<AnchoredUpdate<A, E>>,
 
     /// Resolver set attached once sync completes.
     sync_resolvers: R,
@@ -162,11 +159,11 @@ where
     /// list is bounded by protocol behavior.
     held_verify_requests: Vec<HeldVerify<E, A>>,
 
-    /// Finalizations held while syncing.
-    ///
-    /// Marshal bounds in-flight application updates by `max_pending_acks`,
-    /// so this list is also bounded by protocol behavior.
-    held_finalizations: Vec<HeldFinalization<A::Block>>,
+    /// Bootstrap completion, once database state sync has converged.
+    completion: Option<Completion<E, A>>,
+
+    /// Last finalized block acknowledged while syncing.
+    last_acknowledged: Height,
 }
 
 impl<E, A, R> SyncingState<E, A, R>
@@ -176,15 +173,17 @@ where
 {
     const fn new(
         app: A,
-        tip_sender: ring::Sender<AnchoredUpdate<A, E>>,
+        target_sender: ring::Sender<AnchoredUpdate<A, E>>,
         sync_resolvers: R,
+        last_acknowledged: Height,
     ) -> Self {
         Self {
             app,
-            tip_sender,
+            target_sender,
             sync_resolvers,
             held_verify_requests: Vec::new(),
-            held_finalizations: Vec::new(),
+            completion: None,
+            last_acknowledged,
         }
     }
 }
@@ -231,9 +230,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Sender half of the actor mailbox channel.
-    sender: actor_mailbox::Sender<Message<E, A>>,
-
     /// Runtime context providing RNG, task spawning, metrics, and clock.
     context: ContextCell<E>,
 
@@ -280,7 +276,6 @@ where
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), mailbox_size);
         (
             Self {
-                sender: sender.clone(),
                 context: ContextCell::new(context),
                 mailbox,
                 inner: config.app,
@@ -313,42 +308,58 @@ where
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
         R: AttachableResolverSet<A::Databases>,
     {
-        let (tip_sender, target_updates) = ring::channel(self.sync_config.update_channel_size);
-        let bootstrap_mode = match self.startup {
-            StartupMode::MarshalSync => BootstrapMode::MarshalSync,
+        let (target_sender, target_updates) = ring::channel(self.sync_config.update_channel_size);
+        let (completion, bootstrap_completion) = oneshot::channel();
+        let (bootstrap_mode, last_acknowledged) = match self.startup {
+            StartupMode::MarshalSync => (BootstrapMode::MarshalSync, Height::zero()),
             StartupMode::StateSync {
                 block,
                 finalization,
-            } => BootstrapMode::StateSync {
-                block,
-                finalization: finalization.into(),
-                target_updates,
-            },
+            } => {
+                let last_acknowledged = block.height();
+                (
+                    BootstrapMode::StateSync {
+                        block,
+                        finalization: finalization.into(),
+                        target_updates,
+                    },
+                    last_acknowledged,
+                )
+            }
         };
+        let bootstrap_app = self.inner.clone();
         let bootstrap_resolvers = self.resolvers.clone();
         let bootstrap_context = self.context.as_present().child("state_sync");
         let bootstrap_task_context = self.context.as_present().child("state_sync_bootstrap");
         let marshal: MarshalMailbox<S, V> = self.marshal.clone().into();
         let mut service = Service {
             mailbox: self.mailbox,
+            marshal_sync_startup: matches!(bootstrap_mode, BootstrapMode::MarshalSync),
             shared: Shared {
                 context: self.context,
                 input_provider: self.input_provider,
                 marshal: marshal.clone(),
                 database_attachment: DatabaseAttachment::new(),
             },
-            mode: Mode::Syncing(SyncingState::new(self.inner, tip_sender, self.resolvers)),
+            bootstrap_completion: Some(bootstrap_completion),
+            mode: Mode::Syncing(SyncingState::new(
+                self.inner,
+                target_sender,
+                self.resolvers,
+                last_acknowledged,
+            )),
         };
         let bootstrap_config = BootstrapConfig {
             context: bootstrap_context,
             db_config: self.db_config,
+            app: bootstrap_app,
             metadata_partition: format!("{}{STATE_SYNC_METADATA_SUFFIX}", self.partition_prefix),
             sync_config: self.sync_config,
             resolvers: bootstrap_resolvers,
             mode: bootstrap_mode,
+            completion,
         };
-        let mailbox = Mailbox::new(self.sender);
-        bootstrap_task_context.spawn(move |_| bootstrap(marshal, mailbox, bootstrap_config));
+        bootstrap_task_context.spawn(move |_| bootstrap(marshal, bootstrap_config));
         spawn_cell!(service.shared.context, service.run())
     }
 }
@@ -363,6 +374,8 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     mailbox: actor_mailbox::Receiver<Message<E, A>>,
+    marshal_sync_startup: bool,
+    bootstrap_completion: Option<oneshot::Receiver<Completion<E, A>>>,
     shared: Shared<E, A, S, V>,
     mode: Mode<E, A, R>,
 }
@@ -383,23 +396,47 @@ where
             self.shared.context,
             on_start => {
                 self.shared.database_attachment.prune_closed_subscribers();
+                let read_mailbox = !self.marshal_sync_startup
+                    || self.bootstrap_completion.is_none();
+                let bootstrap_completion = self.bootstrap_completion.as_mut().map_or_else(
+                    || Either::Right(pending()),
+                    Either::Left,
+                );
+                let mailbox_message = if read_mailbox {
+                    Either::Left(self.mailbox.recv())
+                } else {
+                    Either::Right(pending())
+                };
             },
             on_stopped => {
                 debug!("context shutdown, stopping stateful application");
             },
-            Some(message) = self.mailbox.recv() else {
+            result = bootstrap_completion => {
+                self.bootstrap_completion = None;
+                let completion = result.expect("bootstrap completion channel closed");
+                if let Mode::Syncing(syncing) = &mut self.mode {
+                    if self.marshal_sync_startup {
+                        syncing.last_acknowledged = completion.last_processed.height;
+                    }
+                    syncing.completion = Some(completion);
+                    if let Some((databases, processor)) = try_enter_processing(
+                        self.shared.context.as_present(),
+                        self.shared.marshal.clone(),
+                        syncing,
+                    )
+                    .await
+                    {
+                        self.shared.database_attachment.attach(databases);
+                        self.mode = Mode::Processing(processor);
+                    }
+                }
+            },
+            Some(message) = mailbox_message else {
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
                 match (&mut self.mode, message) {
                     // Shared
-                    (_, Message::Genesis { response }) => {
-                        let genesis = match &mut self.mode {
-                            Mode::Syncing(syncing) => syncing.app.genesis().await,
-                            Mode::Processing(processor) => processor.genesis().await,
-                        };
-                        response.send_lossy(genesis);
-                    }
                     (_, Message::SubscribeDatabases { response }) => {
                         self.shared.database_attachment.subscribe(response);
                     }
@@ -437,36 +474,18 @@ where
                             acknowledgement,
                         },
                     ) => {
-                        debug!(
-                            height = block.height().get(),
-                            "finalization held during sync"
-                        );
-                        syncing.held_finalizations.push(HeldFinalization {
-                            block,
-                            acknowledgement,
-                        });
-                    }
-                    (Mode::Syncing(syncing), Message::Tip { height, digest }) => {
-                        handle_tip(&mut self.shared, syncing, height, digest).await;
-                    }
-                    (
-                        Mode::Syncing(syncing),
-                        Message::SyncComplete {
-                            databases,
-                            last_processed,
-                        },
-                    ) => {
-                        let attached_databases = databases.clone();
-                        let processor = handle_sync_complete(
+                        if let Some((databases, processor)) = handle_syncing_finalized(
                             self.shared.context.as_present(),
                             self.shared.marshal.clone(),
                             syncing,
-                            databases,
-                            last_processed,
+                            block,
+                            acknowledgement,
                         )
-                        .await;
-                        self.shared.database_attachment.attach(attached_databases);
-                        self.mode = Mode::Processing(processor);
+                        .await
+                        {
+                            self.shared.database_attachment.attach(databases);
+                            self.mode = Mode::Processing(processor);
+                        }
                     }
 
                     // Processing mode
@@ -522,62 +541,93 @@ where
                         }
                         acknowledgement.acknowledge();
                     }
-                    (Mode::Processing(_), Message::Tip { .. }) => {}
-                    (Mode::Processing(_), Message::SyncComplete { .. }) => {}
                 }
             },
         }
     }
 }
 
-/// Handles a [`Message::Tip`].
-///
-/// In [`Mode::Syncing`], fetches the block from marshal, extracts
-/// per-database sync targets via [`Application::sync_targets`], and
-/// forwards them to the background sync engines.
-async fn handle_tip<E, A, S, V, R>(
-    shared: &mut Shared<E, A, S, V>,
+async fn handle_syncing_finalized<E, A, S, V, R>(
+    context: &E,
+    marshal: MarshalMailbox<S, V>,
     syncing: &mut SyncingState<E, A, R>,
-    height: Height,
-    digest: <A::Block as Digestible>::Digest,
-) where
+    block: A::Block,
+    acknowledgement: Exact,
+) -> Option<(A::Databases, Processor<E, A>)>
+where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     S: Scheme,
     V: MarshalVariant<ApplicationBlock = A::Block>,
+    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    R: AttachableResolverSet<A::Databases>,
 {
-    let Some(block) = shared
-        .marshal
-        .subscribe_by_digest(digest, DigestFallback::Wait)
-        .await
-        .ok()
-        .map(V::into_inner)
-    else {
-        debug!(
-            height = height.get(),
-            "tip block not available from provider, skipping target update"
-        );
-        return;
-    };
+    let height = block.height();
+    if height <= syncing.last_acknowledged {
+        acknowledgement.acknowledge();
+        return try_enter_processing(context, marshal, syncing).await;
+    }
+
+    assert_eq!(
+        height,
+        syncing.last_acknowledged.next(),
+        "marshal must deliver contiguous finalized blocks while syncing",
+    );
 
     let block_context = block.context();
-    let anchored_update = (
+    let update = (
         Anchor {
             height,
             round: Round::new(block_context.epoch(), block_context.view()),
-            digest,
+            digest: block.digest(),
         },
         A::sync_targets(&block),
     );
-    if syncing.tip_sender.send(anchored_update).await.is_err() {
+
+    if syncing.target_sender.send(update).await.is_err() {
         debug!(
             height = height.get(),
-            "tip update channel unavailable, skipping target update"
+            "sync target update ignored: bootstrap receiver closed"
         );
     }
+
+    syncing.last_acknowledged = height;
+    acknowledgement.acknowledge();
+    try_enter_processing(context, marshal, syncing).await
 }
 
-/// Handles a [`Message::SyncComplete`].
+async fn try_enter_processing<E, A, S, V, R>(
+    context: &E,
+    marshal: MarshalMailbox<S, V>,
+    syncing: &mut SyncingState<E, A, R>,
+) -> Option<(A::Databases, Processor<E, A>)>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    S: Scheme,
+    V: MarshalVariant<ApplicationBlock = A::Block>,
+    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    R: AttachableResolverSet<A::Databases>,
+{
+    let completion = syncing.completion.as_ref()?;
+    if syncing.last_acknowledged < completion.last_processed.height {
+        return None;
+    }
+
+    let Completion {
+        databases,
+        last_processed,
+    } = syncing
+        .completion
+        .take()
+        .expect("completion must be present");
+    let attached_databases = databases.clone();
+    let processor =
+        handle_sync_complete(context, marshal, syncing, databases, last_processed).await;
+    Some((attached_databases, processor))
+}
+
+/// Handles bootstrap completion.
 ///
 /// Attaches resolvers to the databases and returns a [`Processor`] ready for
 /// consensus execution.
@@ -621,23 +671,6 @@ where
                 response,
             )
             .await;
-    }
-
-    // In case any finalizations were delivered after the floor was updated,
-    // process them now to ensure we progress marshal.
-    for HeldFinalization {
-        block,
-        acknowledgement,
-    } in syncing.held_finalizations.drain(..)
-    {
-        if block.height() <= last_processed.height {
-            // Block is already persisted at or below the reconciled floor.
-            // The acknowledgement can be dropped, since marshal cancels
-            // pending acks when the floor is updated.
-            continue;
-        }
-        processor.finalize(context, block).await;
-        acknowledgement.acknowledge();
     }
 
     info!("sync complete, database attached to processor");

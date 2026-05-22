@@ -117,11 +117,6 @@ where
         }
     }
 
-    /// Delegate to the application to produce the genesis block.
-    pub(super) async fn genesis(&mut self) -> A::Block {
-        self.app.genesis().await
-    }
-
     /// Prepare parent-relative batches and delegate to the application to
     /// build a new block proposal. The resulting block and its merkleized
     /// state are cached in `pending`. Sends `None` on `response` if the

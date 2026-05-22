@@ -35,11 +35,12 @@
 //!
 //! - [`StateSync`](StartupMode::StateSync): Run a one-time QMDB state sync
 //!   from a seed block, populating each database via
-//!   [`db::StateSyncSet::sync`]. Tip updates stream in as new blocks finalize
-//!   during the sync, so the final synced height is not predetermined. Once all
-//!   databases converge on the same anchor block, the actor transitions to
-//!   normal processing. A durable metadata flag ensures state sync runs at most
-//!   once; subsequent restarts must take the marshal sync path.
+//!   [`db::StateSyncSet::sync`]. Finalized blocks acknowledged by the actor
+//!   stream target updates into the sync task, so the final synced height is
+//!   not predetermined. Once all databases converge on the same anchor block,
+//!   the actor acknowledges through that height and then transitions to normal
+//!   processing. A durable metadata flag ensures state sync runs at most once;
+//!   subsequent restarts must take the marshal sync path.
 //!
 //! # Lazy Recovery
 //!
@@ -129,10 +130,11 @@ where
 
     /// Extract per-database sync targets from a finalized block.
     ///
-    /// Called by the wrapper when a [`Update::Tip`](commonware_consensus::marshal::Update::Tip)
-    /// is received during state sync. The returned targets are forwarded to
-    /// the background sync orchestrator so the sync engines can track the
-    /// latest finalized state root and range.
+    /// Called by the wrapper for finalized blocks received during state sync.
+    ///
+    /// The returned targets are forwarded to the background sync orchestrator
+    /// so the sync engines can track the latest finalized state root and
+    /// range.
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
 
     /// Block used to initialize the consensus engine in the first epoch.

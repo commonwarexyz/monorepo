@@ -21,8 +21,7 @@
 //! - This reconciliation assumes databases were not manually rolled back or
 //!   replaced out-of-band.
 //! - Any rewind failure is fatal and causes a panic.
-//! - Bootstrap then transitions to processing mode via
-//!   [`ApplicationMailbox::sync_complete`] at marshal's processed anchor.
+//! - Bootstrap then hands the processed anchor and databases to the actor.
 //!
 //! The marshal only advances its processed height after it has durably stored
 //! the floor block, so reconciliation can read the processed block directly.
@@ -41,18 +40,16 @@
 //!
 //! 1. Extract the initial anchor and sync targets from the
 //!    seed block.
-//! 2. Run [`StateSyncSet::sync`],
-//!    which initializes and populates all databases via the provided
-//!    resolvers. Tip updates stream in via the `target_updates` channel as
-//!    new blocks finalize during the sync, so the final synced height is
-//!    determined by the sync routine itself, not pre-determined.
-//! 3. Persist `sync_done = true` so subsequent boots skip state sync.
-//! 4. Raise the marshal floor to the synced height via
-//!    [`MarshalMailbox::set_floor`], then assert that the marshal's processed
-//!    height is at that floor.
-//! 5. Call [`ApplicationMailbox::sync_complete`] with the constructed databases
-//!    and the synced digest, transitioning the actor into block-processing
-//!    mode.
+//! 2. Raise marshal's floor to the initial target so finalized blocks stream
+//!    contiguously while state sync runs.
+//! 3. Run [`StateSyncSet::sync`], which initializes and populates all databases
+//!    via the provided resolvers. Finalized blocks acknowledged by the actor
+//!    stream in via the `target_updates` channel during the sync, so the final
+//!    synced height is determined by the sync routine itself, not pre-determined.
+//! 4. Persist `sync_done = true` so subsequent boots skip state sync.
+//! 5. Send the constructed databases and synced digest to the actor. The actor
+//!    keeps acknowledging finalized blocks until marshal has delivered through
+//!    the synced height, then transitions into block-processing mode.
 //!
 //! ## Crash during state sync
 //!
@@ -64,24 +61,27 @@
 
 use crate::stateful::{
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
-    Application, Mailbox as ApplicationMailbox,
+    Application,
 };
 use commonware_consensus::{
     marshal::{
-        core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
         Identifier,
     },
     simplex::types::Finalization,
     types::{Height, Round},
     CertifiableBlock, Epochable, Heightable, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{
     telemetry::metrics::{MetricsExt, Registered},
     Clock, Metrics, Spawner, Storage,
 };
 use commonware_storage::metadata::{Config as MetadataConfig, Metadata};
-use commonware_utils::{channel::ring, sequence::U64};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot, ring},
+    sequence::U64,
+};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 
@@ -92,22 +92,17 @@ type SyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::S
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type AnchoredUpdate<A, E> = (Anchor<BlockDigest<A, E>>, SyncTargets<A, E>);
 
-/// Bootstrap outcome before durable metadata is finalized.
-enum BootstrapState<D, G, F>
+/// Startup bootstrap completion delivered directly to the actor.
+pub(super) struct Completion<E, A>
 where
-    G: Digest,
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
 {
-    /// Databases are ready with no marshal floor update.
-    Ready {
-        databases: D,
-        last_processed: Anchor<G>,
-    },
-    /// Databases were state-synced and require marshal floor update.
-    Synced {
-        databases: D,
-        last_processed: Anchor<G>,
-        floor: F,
-    },
+    /// Databases initialized by bootstrap.
+    pub(super) databases: A::Databases,
+
+    /// Last block whose state is already represented by the databases.
+    pub(super) last_processed: Anchor<BlockDigest<A, E>>,
 }
 
 /// Startup inputs for bootstrap.
@@ -144,6 +139,9 @@ where
     /// Database configuration for the managed set.
     pub(super) db_config: <A::Databases as DatabaseSet<E>>::Config,
 
+    /// Application used to load genesis during bootstrap.
+    pub(super) app: A,
+
     /// Metadata partition that stores the durable "state sync done" bit.
     pub(super) metadata_partition: String,
 
@@ -155,6 +153,9 @@ where
 
     /// Startup mode and required inputs for that mode.
     pub(super) mode: Mode<E, A, F>,
+
+    /// Actor handoff for initialized databases.
+    pub(super) completion: oneshot::Sender<Completion<E, A>>,
 }
 
 /// Initialize databases and transition the actor into processing mode.
@@ -187,14 +188,13 @@ where
 ///   databases to marshal's processed block targets. Rewind errors indicate
 ///   unrecoverable local history loss/corruption (for example pruned rewind
 ///   boundaries or invalid commit targets), so startup must stop.
-/// - Marshal unreachable after `set_floor`. After state sync the marshal
-///   floor must be raised so that the node does not attempt to re-process
-///   blocks below the synced height. If the marshal does not respond, or
-///   reports a processed height that does not equal the floor, the node
-///   cannot safely determine where to resume.
+/// - Marshal unreachable after `set_floor`. Before state sync the marshal
+///   floor must be raised to the initial target so the finalized block stream
+///   starts at the first block that may advance synced state. If the marshal
+///   does not respond, or reports a processed height below the initial floor,
+///   the node cannot safely determine where to resume.
 pub(super) async fn bootstrap<E, A, S, V, R>(
     marshal: MarshalMailbox<S, V>,
-    application: ApplicationMailbox<E, A>,
     config: BootstrapConfig<E, A, R, Finalization<S, V::Commitment>>,
 ) where
     E: Rng + Spawner + Metrics + Clock + Storage,
@@ -206,10 +206,12 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
     let BootstrapConfig {
         context,
         db_config,
+        mut app,
         metadata_partition,
         sync_config,
         resolvers,
         mode,
+        completion,
     } = config;
 
     let state_sync_done: Registered<Gauge> =
@@ -233,15 +235,9 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
             "state sync bootstrap received a sync startup target after state sync was already marked complete",
         );
 
-        let genesis = application.genesis().await;
+        let genesis = app.genesis().await;
         let databases = A::Databases::init(context.child("db_set"), db_config).await;
 
-        // After a crash following state sync, the block at the floor height
-        // may not yet be in the marshal's archive: `set_floor` advanced
-        // `processed_height`, but the local marshal had not finalized that
-        // block through its own consensus flow before the crash. If the
-        // block is missing, hint the marshal to fetch it from the network,
-        // then poll until it arrives.
         let (processed_anchor, processed_targets) =
             processed_anchor_targets::<E, A, S, V>(&marshal, &genesis)
                 .await
@@ -257,21 +253,27 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
             );
         }
 
-        application.sync_complete(databases, processed_anchor);
+        assert!(
+            completion.send_lossy(Completion {
+                databases,
+                last_processed: processed_anchor,
+            }),
+            "stateful actor dropped during bootstrap completion",
+        );
         return;
     }
 
-    let state = match mode {
+    let completion_message = match mode {
         Mode::MarshalSync => {
             let databases = A::Databases::init(context.child("db_set"), db_config).await;
-            let genesis = application.genesis().await;
+            let genesis = app.genesis().await;
             let genesis_context = genesis.context();
             let last_processed = Anchor {
                 height: Height::zero(),
                 round: Round::new(genesis_context.epoch(), genesis_context.view()),
                 digest: genesis.digest(),
             };
-            BootstrapState::Ready {
+            Completion {
                 databases,
                 last_processed,
             }
@@ -288,6 +290,11 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
                 digest: block.digest(),
             };
             let initial_targets = A::sync_targets(&block);
+            // Move marshal to the initial target before state sync starts so
+            // the actor sees a contiguous finalized stream after target
+            // selection. Every later finalized block can then become both a
+            // sync target update and an acknowledgement toward handoff.
+            marshal.set_floor(finalization.clone());
             let (databases, last_processed) = A::Databases::sync(
                 context.child("state_sync"),
                 db_config,
@@ -299,56 +306,23 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
             )
             .await
             .unwrap_or_else(|err| panic!("state sync failed: {err:?}"));
-            let floor = if last_processed.height == initial_anchor.height {
-                finalization
-            } else {
-                marshal
-                    .get_finalization(last_processed.height)
-                    .await
-                    .expect("marshal must respond with finalization after state sync")
-            };
-            BootstrapState::Synced {
+            Completion {
                 databases,
                 last_processed,
-                floor,
             }
         }
     };
 
-    let (databases, last_processed) = match state {
-        BootstrapState::Ready {
-            databases,
-            last_processed,
-        } => {
-            metadata
-                .put_sync(SYNC_DONE_KEY, true)
-                .await
-                .expect("must persist state sync completion metadata");
-            state_sync_done.set(1);
-            (databases, last_processed)
-        }
-        BootstrapState::Synced {
-            databases,
-            last_processed,
-            floor: finalization,
-        } => {
-            let floor = last_processed.height;
-            metadata
-                .put_sync(SYNC_DONE_KEY, true)
-                .await
-                .expect("must persist state sync completion metadata");
-            state_sync_done.set(1);
-            // Marshal fetches and stores the floor block before advancing its
-            // processed height, which also clears pending acknowledgements
-            // below that floor.
-            let floor_commitment = finalization.proposal.payload;
-            marshal.set_floor(finalization);
-            wait_for_floor(&marshal, floor, floor_commitment).await;
-            (databases, last_processed)
-        }
-    };
+    metadata
+        .put_sync(SYNC_DONE_KEY, true)
+        .await
+        .expect("must persist state sync completion metadata");
+    state_sync_done.set(1);
 
-    application.sync_complete(databases, last_processed);
+    assert!(
+        completion.send_lossy(completion_message),
+        "stateful actor dropped during bootstrap completion",
+    );
 }
 
 /// Load marshal's current processed anchor and derived sync targets.
@@ -400,55 +374,4 @@ where
         },
         A::sync_targets(&block),
     ))
-}
-
-async fn wait_for_floor<S, V>(
-    marshal: &MarshalMailbox<S, V>,
-    floor: Height,
-    commitment: V::Commitment,
-) where
-    S: Scheme,
-    V: MarshalVariant,
-{
-    let block = marshal
-        .subscribe_by_commitment(commitment, CommitmentFallback::Wait)
-        .await
-        .expect("marshal floor block subscription cancelled");
-    assert_eq!(
-        block.height(),
-        floor,
-        "marshal returned unexpected state sync floor block height",
-    );
-
-    let processed_height = marshal
-        .get_processed_height()
-        .await
-        .expect("marshal must respond with processed height after set_floor");
-    assert_eq!(
-        processed_height, floor,
-        "marshal processed height must match updated floor after state sync",
-    );
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn synced_bootstrap_persists_sync_done_before_advancing_floor() {
-        let source = include_str!("bootstrap.rs");
-        let synced_arm = source
-            .split("BootstrapState::Synced")
-            .nth(2)
-            .expect("synced arm should exist");
-        let set_floor = synced_arm
-            .find("marshal.set_floor")
-            .expect("synced bootstrap should advance marshal floor");
-        let put_sync = synced_arm
-            .find("put_sync(SYNC_DONE_KEY, true)")
-            .expect("synced bootstrap should persist sync_done");
-
-        assert!(
-            put_sync < set_floor,
-            "sync_done must be durable before the marshal floor advances",
-        );
-    }
 }
