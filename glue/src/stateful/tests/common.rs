@@ -6,12 +6,9 @@ use commonware_consensus::{
     Heightable,
 };
 use commonware_cryptography::{ed25519, sha256, Digestible};
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Quota, Storage};
-use commonware_storage::{
-    archive::immutable,
-    metadata::{Config as MetadataConfig, Metadata},
-};
-use commonware_utils::{sequence::U64, sync::Mutex, NZUsize, NZU16, NZU64};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Quota};
+use commonware_storage::archive::immutable;
+use commonware_utils::{sync::Mutex, NZUsize, NZU16, NZU64};
 use std::{
     collections::{BTreeMap, HashMap},
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -99,14 +96,14 @@ where
 
 pub(super) type MarshalMailboxOf<V> = marshal::core::Mailbox<MockScheme<ed25519::PublicKey>, V>;
 
-/// Poll peers for a majority-agreed sync target block.
-pub(super) async fn fetch_majority_sync_target<V>(
+/// Poll peers for a majority-agreed sync floor.
+pub(super) async fn fetch_majority_sync_floor<V>(
     mailboxes: &Arc<Mutex<BTreeMap<ed25519::PublicKey, MarshalMailboxOf<V>>>>,
     context: &impl Clock,
     me: &ed25519::PublicKey,
 ) -> Option<(
-    V::Block,
     Finalization<MockScheme<ed25519::PublicKey>, V::Commitment>,
+    Height,
 )>
 where
     V: Variant,
@@ -144,7 +141,7 @@ where
         heights.sort();
         let quorum_height = heights[heights.len() - required];
 
-        // Count digests at quorum height and return the first block with majority agreement.
+        // Count digests at quorum height and return the first finalization with majority agreement.
         let mut counts: HashMap<sha256::Digest, (usize, MarshalMailboxOf<V>)> = HashMap::new();
         for (mailbox, h) in &peers {
             if *h < quorum_height {
@@ -163,39 +160,21 @@ where
         }
         for (digest, (count, mailbox)) in counts {
             if count >= required {
-                if let Some(block) = mailbox.get_block(MarshalIdentifier::Digest(digest)).await {
-                    let finalization = mailbox
-                        .get_finalization(quorum_height)
-                        .await
-                        .expect("sync target finalization must be available");
-                    return Some((block, finalization));
-                }
+                let finalization = mailbox
+                    .get_finalization(quorum_height)
+                    .await
+                    .expect("sync floor finalization must be available");
+                assert_eq!(
+                    V::commitment_to_inner(finalization.proposal.payload),
+                    digest
+                );
+                return Some((finalization, quorum_height));
             }
         }
 
         context.sleep(Duration::from_millis(100)).await;
     }
     None
-}
-
-const STATE_SYNC_METADATA_SUFFIX: &str = "_state_sync_metadata";
-const SYNC_DONE_KEY: U64 = U64::new(0);
-
-/// Check whether state sync has already completed for this validator.
-pub(super) async fn state_sync_done(
-    context: impl Storage + Clock + Metrics,
-    partition_prefix: &str,
-) -> bool {
-    let metadata = Metadata::<_, U64, bool>::init(
-        context,
-        MetadataConfig {
-            partition: format!("{partition_prefix}{STATE_SYNC_METADATA_SUFFIX}"),
-            codec_config: (),
-        },
-    )
-    .await
-    .expect("failed to read state sync metadata");
-    metadata.get(&SYNC_DONE_KEY).copied().unwrap_or(false)
 }
 
 impl<V> ProcessedHeight for MockValidatorState<V>

@@ -3,7 +3,10 @@
 
 use crate::stateful::{
     actor::{
-        bootstrap::{bootstrap, BootstrapConfig, Completion, Mode as BootstrapMode},
+        bootstrap::{
+            bootstrap, metadata_partition, state_sync_done, BootstrapConfig, Completion,
+            Mode as BootstrapMode,
+        },
         mailbox::{ErasedAncestorStream, Message},
         metrics::Metrics as ProcessorMetrics,
         processor::{FinalizeStatus, Processor},
@@ -17,17 +20,19 @@ use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        Start as MarshalStart,
     },
     simplex::types::Finalization,
     types::{Height, Round},
     CertifiableBlock, Epochable, Heightable, Viewable,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot, ring},
+    futures::OptionFuture,
     Acknowledgement,
 };
 use futures::{
@@ -90,18 +95,83 @@ impl<D: Clone> DatabaseAttachment<D> {
     }
 }
 
-const STATE_SYNC_METADATA_SUFFIX: &str = "_state_sync_metadata";
+/// Startup plan that determines whether state sync is required and, when so,
+/// which finalized floor to sync from.
+///
+/// Construction is two-phase so the caller can avoid fetching a finalized
+/// floor from peers when state sync has already completed:
+///
+/// 1. [`SyncPlan::load`] reads the durable state-sync flag.
+/// 2. If [`SyncPlan::needs_state_sync`] returns `true`, the caller fetches a
+///    finalized floor and attaches it via [`SyncPlan::with_floor`]. Otherwise
+///    the caller skips floor selection entirely.
+///
+/// The same plan is then passed to marshal (via [`SyncPlan::marshal_start`])
+/// and to stateful (via [`Config::plan`]), guaranteeing both actors agree on
+/// the startup decision.
+pub struct SyncPlan<F> {
+    partition_prefix: String,
+    state_sync_complete: bool,
+    floor: Option<F>,
+}
 
-/// Startup mode for the [`Stateful`] application.
-pub enum StartupMode<B, F> {
-    /// Initialize databases and let marshal backfill.
-    MarshalSync,
-    /// State sync the databases, starting at the given block's embedded targets.
+impl<F> SyncPlan<F> {
+    /// Load the durable state-sync completion flag for this partition prefix.
     ///
-    /// It is up to the user to determine whether or not this block is a valid member
-    /// of the canonical chain. The finalization is used to advance marshal's
-    /// floor before state sync starts.
-    StateSync { block: B, finalization: F },
+    /// # Panics
+    ///
+    /// Panics if the metadata store cannot be opened. A node that cannot
+    /// determine whether state sync already completed cannot safely choose a
+    /// startup path.
+    pub async fn load<E>(context: E, partition_prefix: impl Into<String>) -> Self
+    where
+        E: Clock + Metrics + Storage,
+    {
+        let partition_prefix = partition_prefix.into();
+        let state_sync_complete = state_sync_done(context, &partition_prefix).await;
+        Self {
+            partition_prefix,
+            state_sync_complete,
+            floor: None,
+        }
+    }
+
+    /// Returns whether state sync should still run on this node.
+    ///
+    /// When `false`, the caller should skip floor selection: any floor passed
+    /// to [`SyncPlan::with_floor`] would be ignored.
+    pub const fn needs_state_sync(&self) -> bool {
+        !self.state_sync_complete
+    }
+
+    /// Attach a finalized floor to state sync from.
+    ///
+    /// Has no effect if state sync has already completed.
+    #[must_use]
+    pub fn with_floor(mut self, floor: F) -> Self {
+        if self.needs_state_sync() {
+            self.floor = Some(floor);
+        }
+        self
+    }
+}
+
+impl<S, C> SyncPlan<Finalization<S, C>>
+where
+    S: Scheme,
+    C: Digest,
+{
+    /// Marshal startup anchor matching this plan.
+    ///
+    /// Callers should pass this into marshal's configuration before
+    /// constructing stateful, so both actors are initialized from the same
+    /// startup decision.
+    pub fn marshal_start<B>(&self, genesis: B) -> MarshalStart<S, C, B> {
+        self.floor.as_ref().map_or_else(
+            || MarshalStart::Genesis(genesis),
+            |finalization| MarshalStart::Floor(finalization.clone()),
+        )
+    }
 }
 
 /// Configuration for constructing a [`Stateful`] application.
@@ -125,11 +195,10 @@ where
     /// Capacity of the stateful actor mailbox channel.
     pub mailbox_size: usize,
 
-    /// Partition prefix used to derive the durable state-sync metadata partition.
-    pub partition_prefix: String,
-
-    /// Explicit startup mode.
-    pub startup: StartupMode<A::Block, F>,
+    /// Startup plan loaded via [`SyncPlan::load`], optionally augmented with
+    /// a finalized floor via [`SyncPlan::with_floor`]. Carries the durable
+    /// metadata partition prefix and the startup decision shared with marshal.
+    pub plan: SyncPlan<F>,
 
     /// Resolver(s) for startup sync fetches and post-bootstrap serving.
     pub resolvers: R,
@@ -175,7 +244,6 @@ where
         app: A,
         target_sender: ring::Sender<AnchoredUpdate<A, E>>,
         sync_resolvers: R,
-        last_acknowledged: Height,
     ) -> Self {
         Self {
             app,
@@ -183,7 +251,7 @@ where
             sync_resolvers,
             held_verify_requests: Vec::new(),
             completion: None,
-            last_acknowledged,
+            last_acknowledged: Height::zero(),
         }
     }
 }
@@ -248,11 +316,8 @@ where
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// Partition prefix used to derive the durable state-sync metadata partition.
-    partition_prefix: String,
-
-    /// Explicit startup mode.
-    startup: StartupMode<A::Block, F>,
+    /// Startup plan carrying the metadata partition prefix and floor decision.
+    plan: SyncPlan<F>,
 
     /// Resolver(s) for startup sync fetches and post-bootstrap serving.
     resolvers: R,
@@ -282,8 +347,7 @@ where
                 input_provider: config.input_provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
-                partition_prefix: config.partition_prefix,
-                startup: config.startup,
+                plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
             },
@@ -294,8 +358,8 @@ where
     /// Start the actor and run startup bootstrap in the background.
     ///
     /// This is the single startup entrypoint for both modes:
-    /// - [`StartupMode::MarshalSync`]: initialize databases and backfill from marshal.
-    /// - [`StartupMode::StateSync`]: run one-time startup state sync.
+    /// - No floor attached to the plan: initialize databases and backfill from marshal.
+    /// - Floor attached to the plan: run one-time startup state sync.
     pub fn start<S, V>(self) -> Handle<()>
     where
         E: Rng + Spawner + Metrics + Clock + Storage,
@@ -310,23 +374,23 @@ where
     {
         let (target_sender, target_updates) = ring::channel(self.sync_config.update_channel_size);
         let (completion, bootstrap_completion) = oneshot::channel();
-        let (bootstrap_mode, last_acknowledged) = match self.startup {
-            StartupMode::MarshalSync => (BootstrapMode::MarshalSync, Height::zero()),
-            StartupMode::StateSync {
-                block,
-                finalization,
-            } => {
-                let last_acknowledged = block.height();
-                (
-                    BootstrapMode::StateSync {
-                        block,
-                        finalization: finalization.into(),
-                        target_updates,
-                    },
-                    last_acknowledged,
-                )
-            }
-        };
+        let SyncPlan {
+            partition_prefix,
+            floor,
+            state_sync_complete: _,
+        } = self.plan;
+        let (bootstrap_mode, pending_state_sync_floor_height) = floor.map_or_else(
+            || (BootstrapMode::MarshalSync, None),
+            |finalization| {
+                let (floor_height_sender, floor_height_receiver) = oneshot::channel();
+                let mode = BootstrapMode::StateSync {
+                    finalization: finalization.into(),
+                    target_updates,
+                    state_sync_floor_height: floor_height_sender,
+                };
+                (mode, Some(floor_height_receiver))
+            },
+        );
         let bootstrap_app = self.inner.clone();
         let bootstrap_resolvers = self.resolvers.clone();
         let bootstrap_context = self.context.as_present().child("state_sync");
@@ -334,7 +398,8 @@ where
         let marshal: MarshalMailbox<S, V> = self.marshal.clone().into();
         let mut service = Service {
             mailbox: self.mailbox,
-            marshal_sync_startup: matches!(bootstrap_mode, BootstrapMode::MarshalSync),
+            marshal_sync: matches!(bootstrap_mode, BootstrapMode::MarshalSync),
+            pending_state_sync_floor_height,
             shared: Shared {
                 context: self.context,
                 input_provider: self.input_provider,
@@ -342,18 +407,13 @@ where
                 database_attachment: DatabaseAttachment::new(),
             },
             bootstrap_completion: Some(bootstrap_completion),
-            mode: Mode::Syncing(SyncingState::new(
-                self.inner,
-                target_sender,
-                self.resolvers,
-                last_acknowledged,
-            )),
+            mode: Mode::Syncing(SyncingState::new(self.inner, target_sender, self.resolvers)),
         };
         let bootstrap_config = BootstrapConfig {
             context: bootstrap_context,
             db_config: self.db_config,
             app: bootstrap_app,
-            metadata_partition: format!("{}{STATE_SYNC_METADATA_SUFFIX}", self.partition_prefix),
+            metadata_partition: metadata_partition(&partition_prefix),
             sync_config: self.sync_config,
             resolvers: bootstrap_resolvers,
             mode: bootstrap_mode,
@@ -374,7 +434,8 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     mailbox: actor_mailbox::Receiver<Message<E, A>>,
-    marshal_sync_startup: bool,
+    marshal_sync: bool,
+    pending_state_sync_floor_height: Option<oneshot::Receiver<Height>>,
     bootstrap_completion: Option<oneshot::Receiver<Completion<E, A>>>,
     shared: Shared<E, A, S, V>,
     mode: Mode<E, A, R>,
@@ -388,6 +449,66 @@ where
     V: MarshalVariant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
+    const fn should_read_mailbox(&self) -> bool {
+        // State sync starts from marshal's configured floor. Wait until
+        // bootstrap tells us that floor height so finalized blocks are
+        // interpreted relative to the state-sync floor, not Height::zero.
+        if self.pending_state_sync_floor_height.is_some() {
+            return false;
+        }
+
+        // Keep reading finalized blocks while bootstrap syncs databases if
+        // state syncing. Those blocks drive target updates, and proposals/
+        // verifies are still rejected or held by Syncing mode.
+        if !self.marshal_sync {
+            return true;
+        }
+
+        // Marshal sync does not need mailbox traffic to complete bootstrap.
+        // Wait for database initialization/reconciliation before handling
+        // proposals, verifies, or finalized blocks.
+        self.bootstrap_completion.is_none()
+    }
+
+    async fn try_enter_processing(&mut self)
+    where
+        R: AttachableResolverSet<A::Databases>,
+    {
+        let transition = {
+            let Mode::Syncing(syncing) = &mut self.mode else {
+                return;
+            };
+            let Some(completion) = syncing.completion.as_ref() else {
+                return;
+            };
+            if syncing.last_acknowledged < completion.last_processed.height {
+                return;
+            }
+
+            let Completion {
+                databases,
+                last_processed,
+            } = syncing
+                .completion
+                .take()
+                .expect("completion must be present");
+            let attached_databases = databases.clone();
+            let processor = handle_sync_complete(
+                self.shared.context.as_present(),
+                self.shared.marshal.clone(),
+                syncing,
+                databases,
+                last_processed,
+            )
+            .await;
+            (attached_databases, processor)
+        };
+
+        let (databases, processor) = transition;
+        self.shared.database_attachment.attach(databases);
+        self.mode = Mode::Processing(processor);
+    }
+
     async fn run(mut self)
     where
         R: AttachableResolverSet<A::Databases>,
@@ -396,12 +517,10 @@ where
             self.shared.context,
             on_start => {
                 self.shared.database_attachment.prune_closed_subscribers();
-                let read_mailbox = !self.marshal_sync_startup
-                    || self.bootstrap_completion.is_none();
-                let bootstrap_completion = self.bootstrap_completion.as_mut().map_or_else(
-                    || Either::Right(pending()),
-                    Either::Left,
-                );
+                let read_mailbox = self.should_read_mailbox();
+                let state_sync_floor_height =
+                    OptionFuture::from(self.pending_state_sync_floor_height.as_mut());
+                let bootstrap_completion = OptionFuture::from(self.bootstrap_completion.as_mut());
                 let mailbox_message = if read_mailbox {
                     Either::Left(self.mailbox.recv())
                 } else {
@@ -411,25 +530,26 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping stateful application");
             },
+            height = state_sync_floor_height => {
+                self.pending_state_sync_floor_height = None;
+                let height = height.expect("state-sync floor height channel closed");
+                let Mode::Syncing(syncing) = &mut self.mode else {
+                    panic!("received state-sync floor height while not syncing");
+                };
+                syncing.last_acknowledged = height;
+                self.try_enter_processing().await;
+            },
             result = bootstrap_completion => {
                 self.bootstrap_completion = None;
                 let completion = result.expect("bootstrap completion channel closed");
-                if let Mode::Syncing(syncing) = &mut self.mode {
-                    if self.marshal_sync_startup {
-                        syncing.last_acknowledged = completion.last_processed.height;
-                    }
-                    syncing.completion = Some(completion);
-                    if let Some((databases, processor)) = try_enter_processing(
-                        self.shared.context.as_present(),
-                        self.shared.marshal.clone(),
-                        syncing,
-                    )
-                    .await
-                    {
-                        self.shared.database_attachment.attach(databases);
-                        self.mode = Mode::Processing(processor);
-                    }
+                let Mode::Syncing(syncing) = &mut self.mode else {
+                    panic!("received bootstrap completion while not syncing");
+                };
+                if self.marshal_sync {
+                    syncing.last_acknowledged = completion.last_processed.height;
                 }
+                syncing.completion = Some(completion);
+                self.try_enter_processing().await;
             },
             Some(message) = mailbox_message else {
                 debug!("mailbox closed, shutting down");
@@ -474,18 +594,8 @@ where
                             acknowledgement,
                         },
                     ) => {
-                        if let Some((databases, processor)) = handle_syncing_finalized(
-                            self.shared.context.as_present(),
-                            self.shared.marshal.clone(),
-                            syncing,
-                            block,
-                            acknowledgement,
-                        )
-                        .await
-                        {
-                            self.shared.database_attachment.attach(databases);
-                            self.mode = Mode::Processing(processor);
-                        }
+                        handle_syncing_finalized(syncing, block, acknowledgement).await;
+                        self.try_enter_processing().await;
                     }
 
                     // Processing mode
@@ -547,25 +657,18 @@ where
     }
 }
 
-async fn handle_syncing_finalized<E, A, S, V, R>(
-    context: &E,
-    marshal: MarshalMailbox<S, V>,
+async fn handle_syncing_finalized<E, A, R>(
     syncing: &mut SyncingState<E, A, R>,
     block: A::Block,
     acknowledgement: Exact,
-) -> Option<(A::Databases, Processor<E, A>)>
-where
+) where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    S: Scheme,
-    V: MarshalVariant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
 {
     let height = block.height();
     if height <= syncing.last_acknowledged {
         acknowledgement.acknowledge();
-        return try_enter_processing(context, marshal, syncing).await;
+        return;
     }
 
     assert_eq!(
@@ -593,38 +696,6 @@ where
 
     syncing.last_acknowledged = height;
     acknowledgement.acknowledge();
-    try_enter_processing(context, marshal, syncing).await
-}
-
-async fn try_enter_processing<E, A, S, V, R>(
-    context: &E,
-    marshal: MarshalMailbox<S, V>,
-    syncing: &mut SyncingState<E, A, R>,
-) -> Option<(A::Databases, Processor<E, A>)>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-    S: Scheme,
-    V: MarshalVariant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
-{
-    let completion = syncing.completion.as_ref()?;
-    if syncing.last_acknowledged < completion.last_processed.height {
-        return None;
-    }
-
-    let Completion {
-        databases,
-        last_processed,
-    } = syncing
-        .completion
-        .take()
-        .expect("completion must be present");
-    let attached_databases = databases.clone();
-    let processor =
-        handle_sync_complete(context, marshal, syncing, databases, last_processed).await;
-    Some((attached_databases, processor))
 }
 
 /// Handles bootstrap completion.

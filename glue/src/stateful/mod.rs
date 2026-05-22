@@ -27,14 +27,21 @@
 //!
 //! # Syncing
 //!
-//! The actor supports two startup modes via [`StartupMode`]:
+//! Applications load a [`SyncPlan`] before constructing marshal and stateful.
+//! The plan reads the durable state-sync flag; callers gate floor selection
+//! on [`SyncPlan::needs_state_sync`] and, if still required, attach a finalized
+//! floor via [`SyncPlan::with_floor`]. The same plan then drives marshal (via
+//! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
+//! actors are guaranteed to agree on the startup decision.
 //!
-//! - [`MarshalSync`](StartupMode::MarshalSync): Initialize fresh databases
-//!   and let the marshal backfill blocks from the network. Appropriate for
-//!   validators joining from genesis or after a clean state wipe.
+//! The actor supports two sync paths:
 //!
-//! - [`StateSync`](StartupMode::StateSync): Run a one-time QMDB state sync
-//!   from a seed block, populating each database via
+//! - **Marshal sync** (no floor attached): Initialize fresh databases and let
+//!   the marshal backfill blocks from the network. Appropriate for validators
+//!   joining from genesis or after a clean state wipe.
+//!
+//! - **State sync** (floor attached): Run a one-time QMDB state sync from
+//!   marshal's configured floor block, populating each database via
 //!   [`db::StateSyncSet::sync`]. Finalized blocks acknowledged by the actor
 //!   stream target updates into the sync task, so the final synced height is
 //!   not predetermined. Once all databases converge on the same anchor block,
@@ -73,7 +80,7 @@ use rand::Rng;
 use std::future::Future;
 
 mod actor;
-pub use actor::{Config, Mailbox, StartupMode, Stateful};
+pub use actor::{Config, Mailbox, Stateful, SyncPlan};
 
 pub mod db;
 

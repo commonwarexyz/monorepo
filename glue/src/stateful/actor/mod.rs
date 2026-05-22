@@ -1,5 +1,5 @@
 mod core;
-pub use core::{Config, StartupMode, Stateful};
+pub use core::{Config, Stateful, SyncPlan};
 
 mod mailbox;
 pub use mailbox::Mailbox;
