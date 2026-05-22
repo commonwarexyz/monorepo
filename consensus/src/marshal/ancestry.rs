@@ -74,6 +74,8 @@ impl<D: Digest> ExpectedParent<D> {
     }
 }
 
+// Builds a pending parent fetch that records successful fetch latency and carries the
+// expected relationship for validation when the parent is delivered.
 fn timed_parent_fetch<C, M>(
     clock: &Arc<C>,
     marshal: &M,
