@@ -54,7 +54,7 @@ impl Bench {
 }
 
 /// Time for a dealer to produce a [`SignedDealerLog`] addressed to `n` receivers.
-fn bench_golden_deal(c: &mut Criterion) {
+fn bench_deal(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
@@ -83,7 +83,7 @@ fn bench_golden_deal(c: &mut Criterion) {
 /// Performs the full verification a real receiver does: the signature check
 /// via `SignedDealerLog::identify`, plus the eVRF batch check and per-dealing
 /// linear check via `golden::observe`.
-fn bench_golden_verify(c: &mut Criterion) {
+fn bench_verify(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
@@ -107,7 +107,7 @@ fn bench_golden_verify(c: &mut Criterion) {
 ///
 /// Reported via stdout (no measured timing) in the same style as
 /// `coding/src/benches/bench_size.rs`.
-fn bench_golden_dealing_size(_c: &mut Criterion) {
+fn bench_dealing_size(_c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in RECEIVERS {
         let bench = Bench::new(&mut rng, n);
@@ -125,7 +125,7 @@ criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
     targets =
-        bench_golden_deal,
-        bench_golden_verify,
-        bench_golden_dealing_size,
+        bench_deal,
+        bench_verify,
+        bench_dealing_size,
 }
