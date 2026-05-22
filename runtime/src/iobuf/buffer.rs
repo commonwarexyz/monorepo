@@ -1319,7 +1319,7 @@ mod tests {
     fn test_alignment_after_advance() {
         // Advancing breaks base-pointer alignment, which is expected.
         let page = page_size();
-        let pool = test_pool(BufferPoolConfig::for_storage());
+        let pool = test_pool(BufferPoolConfig::for_storage().with_alignment(NZUsize!(page)));
 
         let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0; 100]);
