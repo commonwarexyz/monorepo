@@ -14,8 +14,12 @@ use commonware_actor::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
+use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
+use std::{
+    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    sync::Arc,
+};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -535,15 +539,23 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// parent's height from its child before issuing a height-bound request.
     ///
     /// Do not use this to wait for pending candidate proposal data.
-    pub(crate) fn ancestor_stream<I>(
+    pub(crate) fn ancestor_stream<I, C>(
         &self,
+        clock: Arc<C>,
         initial: I,
-    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I>
+        fetch_duration: Timed,
+    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
         I: IntoIterator<Item = V::Block>,
+        C: Clock,
     {
-        AncestorStream::new(self.clone(), initial.into_iter().map(V::into_inner))
+        AncestorStream::new(
+            clock,
+            self.clone(),
+            initial.into_iter().map(V::into_inner),
+            fetch_duration,
+        )
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
@@ -691,18 +703,21 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// verify, certify, or repair from. It is not a candidate fetch path.
     ///
     /// If the starting block is not found, `None` is returned.
-    pub async fn ancestry(
+    pub async fn ancestry<C>(
         &self,
+        clock: Arc<C>,
         (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
-    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V>>
+        fetch_duration: Timed,
+    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C>>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
+        C: Clock,
     {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver
             .await
             .ok()
-            .map(|block| self.ancestor_stream([block]))
+            .map(|block| self.ancestor_stream(clock, [block], fetch_duration))
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
