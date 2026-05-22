@@ -1,5 +1,5 @@
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_actor::{mailbox, Feedback};
+use commonware_actor::{mailbox, Feedback, Unreliable};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner, Supervisor};
 use commonware_utils::{
     sync::{Mutex, Once},
@@ -213,7 +213,7 @@ struct Message {
     kind: Kind,
 }
 
-impl mailbox::Policy for Message {
+impl mailbox::UnreliablePolicy for Message {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
@@ -260,21 +260,23 @@ impl FifoState {
         }
     }
 
-    fn sent(&mut self, message: Message, feedback: Feedback) {
+    fn sent(&mut self, message: Message, feedback: Unreliable<Feedback>) {
         match feedback {
-            Feedback::Ok | Feedback::Backoff => {
+            Unreliable::Outcome(Feedback::Ok) | Unreliable::Outcome(Feedback::Backoff) => {
                 assert!(feedback.accepted());
                 self.expected[message.sender as usize].push_back(message.sequence);
                 self.next_sequence[message.sender as usize] += 1;
-                if feedback == Feedback::Backoff {
+                if feedback == Unreliable::new(Feedback::Backoff) {
                     self.backoffs += 1;
                 }
             }
-            Feedback::Rejected => {
+            Unreliable::Outcome(Feedback::Closed) => {
+                assert!(!self.receiver_alive);
                 assert!(!feedback.accepted());
             }
-            Feedback::Closed => {
-                assert!(!self.receiver_alive);
+            Unreliable::Rejected => {
+                // Policy rejected the message under overflow; the receiver never sees it,
+                // so we do not consume a sequence number or add to expected.
                 assert!(!feedback.accepted());
             }
         }
@@ -298,7 +300,7 @@ impl FifoState {
 }
 
 fn send_fifo(
-    senders: &[mailbox::Sender<Message>],
+    senders: &[mailbox::UnreliableSender<Message>],
     state: &mut FifoState,
     sender_index: usize,
     input: EnqueueInput,
@@ -311,7 +313,11 @@ fn send_fifo(
     state.sent(message, feedback);
 }
 
-fn drain_try_fifo(receiver: &mut mailbox::Receiver<Message>, state: &mut FifoState, limit: usize) {
+fn drain_try_fifo(
+    receiver: &mut mailbox::UnreliableReceiver<Message>,
+    state: &mut FifoState,
+    limit: usize,
+) {
     for _ in 0..limit {
         match receiver.try_recv() {
             Ok(message) => state.observe(message),
@@ -356,7 +362,7 @@ fn assert_only_mailbox_counter(metrics: &str, prefix: &str, expected: &str) {
 }
 
 async fn drain_recv_fifo(
-    receiver: &mut mailbox::Receiver<Message>,
+    receiver: &mut mailbox::UnreliableReceiver<Message>,
     state: &mut FifoState,
     limit: usize,
 ) {
@@ -375,7 +381,7 @@ async fn run_fifo<C>(context: C, capacity: usize, operations: Vec<Operation>, me
 where
     C: Clock + Metrics + Spawner,
 {
-    let (sender, receiver) = mailbox::new(
+    let (sender, receiver) = mailbox::new_unreliable(
         context.child("mailbox"),
         NonZeroUsize::new(capacity).unwrap(),
     );
@@ -453,7 +459,7 @@ where
                         });
                         assert_eq!(
                             senders[index as usize % senders.len()].enqueue(message),
-                            Feedback::Closed
+                            Unreliable::new(Feedback::Closed)
                         );
                     }
                 }
@@ -483,7 +489,7 @@ where
                             sender: 0,
                             kind: Kind::Retain,
                         });
-                        assert_eq!(sender.enqueue(message), Feedback::Closed);
+                        assert_eq!(sender.enqueue(message), Unreliable::new(Feedback::Closed));
                     }
                 }
             }
@@ -533,7 +539,7 @@ struct CoalesceMessage {
 impl mailbox::Policy for CoalesceMessage {
     type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut VecDeque<Self>, message: Self) -> bool {
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
         if message.kind == CoalesceKind::Coalesce {
             if let Some(index) = overflow.iter().rposition(|pending| {
                 pending.sender == message.sender && pending.kind == CoalesceKind::Coalesce
@@ -543,7 +549,6 @@ impl mailbox::Policy for CoalesceMessage {
             }
         }
         overflow.push_back(message);
-        true
     }
 }
 
