@@ -1,7 +1,7 @@
 //! Non-interactive Distributed Key Generation (DKG) and Resharing for BLS12-381.
 //!
 //! This module implements a non-interactive DKG and Resharing protocol for the BLS12-381
-//! curve. Unlike the [`super::feldman_desmedt`] protocol, this construction requires no
+//! curve. Unlike the interactive [`super::feldman_desmedt`] protocol, this construction requires no
 //! back-and-forth between dealers and players. Each dealer publishes a single message,
 //! and any observer can verify correctness and compute the public output without private
 //! key material.
