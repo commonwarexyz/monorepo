@@ -5,7 +5,7 @@
 //! - [`standard`]: Certificates contain only a vote signature (requires half the computation to verify
 //!   partial signatures and recover threshold signatures as [`vrf`]).
 //!
-//! - [`vrf`]: Certificates contain a vote signature and a view signature (a seed that can be used
+//! - [`vrf`]: Certificates contain a vote signature and a round signature (a seed that can be used
 //!   as a VRF).
 //!
 //! # Non-Attributable Signatures

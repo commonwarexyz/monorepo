@@ -93,7 +93,7 @@ pub trait Policy: Sized {
     /// Overflow storage used by this policy.
     type Overflow: Overflow<Self>;
 
-    /// Handle `message` when it cannot enter the bounded ready queue immediately.
+    /// Reliably handle `message` when it cannot enter the bounded ready queue immediately.
     ///
     /// This may retain the message, coalesce it with retained work, replace older retained work,
     /// or deliberately do no work because the message is already satisfied, superseded, or no
@@ -116,7 +116,7 @@ pub trait UnreliablePolicy: Sized {
     /// Overflow storage used by this policy.
     type Overflow: Overflow<Self>;
 
-    /// Handle `message` when it cannot enter the bounded ready queue immediately.
+    /// Unreliably handle `message` when it cannot enter the bounded ready queue immediately.
     ///
     /// Returns `true` when the policy considered the message's effects. This includes retaining
     /// the message, coalescing it with retained work, replacing older retained work, or deliberately

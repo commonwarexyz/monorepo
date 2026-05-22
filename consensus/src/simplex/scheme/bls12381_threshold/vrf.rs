@@ -1,6 +1,6 @@
 //! BLS12-381 threshold VRF implementation of the [`Scheme`] trait for `simplex`.
 //!
-//! Certificates contain a vote signature and a view signature (a seed that can be used
+//! Certificates contain a vote signature and a round signature (a seed that can be used
 //! as a VRF).
 //!
 //! # Using the VRF
@@ -314,7 +314,7 @@ where
 pub struct Signature<V: Variant> {
     /// Signature over the consensus vote message (partial or recovered aggregate).
     pub vote_signature: V::Signature,
-    /// Signature over the per-view seed (partial or recovered aggregate).
+    /// Signature over the per-round seed (partial or recovered aggregate).
     pub seed_signature: V::Signature,
 }
 
@@ -833,18 +833,18 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
             let vote_message = context.message();
             entries.push((vote_namespace, vote_message, cert.vote_signature));
 
-            // Seed signatures are per-view, so multiple certificates for the same view
+            // Seed signatures are per-round, so multiple certificates for the same round
             // (e.g., notarization and finalization) share the same seed. We only include
             // each unique seed once in the aggregate, but verify all certificates for a
-            // view have matching seeds.
-            if let Some(previous) = seeds.get(&context.view()) {
+            // round have matching seeds.
+            let seed_message = seed_message_from_subject(&context);
+            if let Some(previous) = seeds.get(&seed_message) {
                 if *previous != cert.seed_signature {
                     return false;
                 }
             } else {
-                let seed_message = seed_message_from_subject(&context);
-                entries.push((&namespace.seed, seed_message, cert.seed_signature));
-                seeds.insert(context.view(), cert.seed_signature);
+                entries.push((&namespace.seed, seed_message.clone(), cert.seed_signature));
+                seeds.insert(seed_message, cert.seed_signature);
             }
         }
 
@@ -2025,6 +2025,154 @@ mod tests {
     fn test_verify_certificates_rejects_malleability() {
         verify_certificates_rejects_malleability::<MinPk>();
         verify_certificates_rejects_malleability::<MinSig>();
+    }
+
+    fn assemble_notarization_certificate<V: Variant>(
+        schemes: &[Scheme<V>],
+        proposal: &Proposal<Sha256Digest>,
+    ) -> Certificate<V> {
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| scheme.sign(Subject::Notarize { proposal }).unwrap())
+            .collect();
+
+        schemes[0]
+            .assemble::<_, N3f1>(votes, &Sequential)
+            .expect("assemble notarization certificate")
+    }
+
+    fn assemble_finalization_certificate<V: Variant>(
+        schemes: &[Scheme<V>],
+        proposal: &Proposal<Sha256Digest>,
+    ) -> Certificate<V> {
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let votes: Vec<_> = schemes
+            .iter()
+            .skip(schemes.len() - quorum)
+            .map(|scheme| scheme.sign(Subject::Finalize { proposal }).unwrap())
+            .collect();
+
+        schemes[0]
+            .assemble::<_, N3f1>(votes, &Sequential)
+            .expect("assemble finalization certificate")
+    }
+
+    fn verify_certificates_accepts_shared_round_seed<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers::<V>(4, 81);
+        let proposal = sample_proposal(Epoch::new(1), View::new(35), 19);
+        let notarization_certificate = assemble_notarization_certificate(&schemes, &proposal);
+        let finalization_certificate = assemble_finalization_certificate(&schemes, &proposal);
+
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            &mut rng,
+            [
+                (
+                    Subject::Notarize {
+                        proposal: &proposal,
+                    },
+                    &notarization_certificate,
+                ),
+                (
+                    Subject::Finalize {
+                        proposal: &proposal,
+                    },
+                    &finalization_certificate,
+                ),
+            ]
+            .into_iter(),
+            &Sequential,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificates_accepts_shared_round_seed() {
+        verify_certificates_accepts_shared_round_seed::<MinPk>();
+        verify_certificates_accepts_shared_round_seed::<MinSig>();
+    }
+
+    fn verify_certificates_rejects_cross_epoch_seed_replay<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers::<V>(4, 83);
+        let view = View::new(35);
+        let proposal1 = sample_proposal(Epoch::new(1), view, 19);
+        let proposal2 = sample_proposal(Epoch::new(2), view, 20);
+        let certificate1 = assemble_notarization_certificate(&schemes, &proposal1);
+        let certificate2 = assemble_notarization_certificate(&schemes, &proposal2);
+
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            &mut rng,
+            [
+                (
+                    Subject::Notarize {
+                        proposal: &proposal1,
+                    },
+                    &certificate1,
+                ),
+                (
+                    Subject::Notarize {
+                        proposal: &proposal2,
+                    },
+                    &certificate2,
+                ),
+            ]
+            .into_iter(),
+            &Sequential,
+        ));
+
+        let cert1 = certificate1.get().unwrap();
+        let cert2 = certificate2.get().unwrap();
+        let forged_certificate2: Certificate<V> = Signature {
+            vote_signature: cert2.vote_signature,
+            seed_signature: cert1.seed_signature,
+        }
+        .into();
+
+        assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            Subject::Notarize {
+                proposal: &proposal2,
+            },
+            &forged_certificate2,
+            &Sequential,
+        ));
+
+        let batch = [
+            (
+                Subject::Notarize {
+                    proposal: &proposal1,
+                },
+                &certificate1,
+            ),
+            (
+                Subject::Notarize {
+                    proposal: &proposal2,
+                },
+                &forged_certificate2,
+            ),
+        ];
+
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            &mut rng,
+            batch.iter().copied(),
+            &Sequential,
+        ));
+        assert_eq!(
+            verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+                &mut rng,
+                &batch,
+                &Sequential,
+            ),
+            vec![true, false],
+        );
+    }
+
+    #[test]
+    fn test_verify_certificates_rejects_cross_epoch_seed_replay() {
+        verify_certificates_rejects_cross_epoch_seed_replay::<MinPk>();
+        verify_certificates_rejects_cross_epoch_seed_replay::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]
