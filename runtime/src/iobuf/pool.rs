@@ -55,11 +55,10 @@ use crate::{
     telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::{NZUsize, NZU32};
-use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
-    mem::{align_of, MaybeUninit},
+    mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     ptr,
     sync::{
@@ -114,14 +113,6 @@ fn page_size() -> usize {
 #[allow(clippy::missing_const_for_fn)]
 fn page_size() -> usize {
     4096
-}
-
-/// Returns the cache line size for the current architecture.
-///
-/// Matches the architecture-specific alignment used by
-/// [`crossbeam_utils::CachePadded`].
-const fn cache_line_size() -> usize {
-    align_of::<CachePadded<u8>>()
 }
 
 /// Policy for sizing each thread's cache within a buffer pool size class.
