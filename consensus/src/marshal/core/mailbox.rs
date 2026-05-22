@@ -140,12 +140,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: Option<oneshot::Sender<()>>,
     },
-    /// Attempts to set the sync starting point from an already-processed finalization.
+    /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the verified finalization advances marshal's current floor, marshal
     /// anchors on its block, prunes below it, then syncs and delivers blocks
-    /// starting at the floor height + 1. Stale or superseded floors may be
-    /// ignored.
+    /// starting at the floor height. Stale or superseded floors may be ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -741,12 +740,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.is_ok()
     }
 
-    /// Attempts to set the sync starting point from an already-processed finalization.
+    /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the verified finalization advances marshal's current floor, marshal
     /// anchors on its block, prunes below it, then syncs and delivers blocks
-    /// starting at the floor height + 1. Stale or superseded floors may be
-    /// ignored.
+    /// starting at the floor height. Stale or superseded floors may be ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Self::prune] instead.

@@ -17,8 +17,13 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// supersedes the configured anchor.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
+    ///
+    /// Genesis is stored as marshal's local anchor and emitted to the
+    /// application as an [`Update::Block`](crate::marshal::Update::Block)
+    /// unless durable metadata shows it was already acknowledged.
     Genesis(B),
-    /// Start from an already-processed finalized commitment.
+    /// Start from a finalized commitment, delivering the floor block to the
+    /// application if it has not already been acknowledged.
     Floor(Finalization<S, C>),
 }
 

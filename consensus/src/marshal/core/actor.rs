@@ -53,7 +53,7 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
 use tracing::{debug, warn};
 
-/// The key used to store the last processed height in the metadata store.
+/// The key used to store the last application-acknowledged height.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -121,6 +121,8 @@ where
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
+    // Last height acknowledged by the application, or None before genesis is acknowledged
+    last_applied_height: Option<Height>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
     // Highest known finalized height
@@ -193,13 +195,13 @@ where
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_processed_height = application_metadata
-            .get(&LATEST_KEY)
-            .copied()
-            .unwrap_or(Height::zero());
+        let last_applied_height = application_metadata.get(&LATEST_KEY).copied();
+        let processed_floor_height = last_applied_height.unwrap_or(Height::zero());
 
-        // Genesis is a local anchor. A floor finalization is verified and
-        // resolved after `run` receives the resolver and buffer.
+        // Genesis is seeded as a local anchor. If the application has not
+        // acknowledged height zero yet, normal dispatch will emit it.
+        // A floor finalization is verified and resolved after `run` receives
+        // the resolver and buffer.
         let pending_floor_anchor = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
@@ -207,23 +209,23 @@ where
                     Height::zero(),
                     "genesis anchor must be at height zero"
                 );
-                Self::ensure_genesis_anchor(&mut finalized_blocks, anchor, last_processed_height)
+                Self::ensure_genesis_anchor(&mut finalized_blocks, anchor, processed_floor_height)
                     .await;
                 None
             }
             Start::Floor(finalization) => Some(finalization),
         };
         let last_processed_round =
-            Self::latest_processed_round(&finalizations_by_height, last_processed_height).await;
+            Self::latest_processed_round(&finalizations_by_height, processed_floor_height).await;
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
         let processed_height = context.gauge("processed_height", "Processed height of application");
-        let _ = processed_height.try_set(last_processed_height.get());
+        let _ = processed_height.try_set(processed_floor_height.get());
         let floor = pending_floor_anchor.map_or_else(
-            || Floor::resolved(last_processed_height, last_processed_round),
+            || Floor::resolved(processed_floor_height, last_processed_round),
             |finalization| {
-                Floor::awaiting_anchor(last_processed_height, last_processed_round, finalization)
+                Floor::awaiting_anchor(processed_floor_height, last_processed_round, finalization)
             },
         );
 
@@ -241,6 +243,7 @@ where
                 strategy: config.strategy,
                 last_proposed_block: None,
                 floor,
+                last_applied_height,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
@@ -252,7 +255,7 @@ where
                 processed_height,
             },
             Mailbox::new(sender),
-            last_processed_height,
+            processed_floor_height,
         )
     }
 
@@ -1139,9 +1142,13 @@ where
             let _ = self.finalized_height.try_set(height.get());
         }
 
-        // Update the processed floor after the anchor and certificate are durable.
-        self.update_processed_height(height, resolver);
-        self.update_processed_round_floor(height, round, resolver)
+        // The anchor is durable, but the application still needs to process it.
+        // Record the previous height so dispatch resumes at the anchor itself.
+        let last_applied_height = height
+            .previous()
+            .expect("floor anchor above processed height must have predecessor");
+        self.update_processed_height(last_applied_height, resolver);
+        self.update_processed_round_floor(last_applied_height, round, resolver)
             .await;
         self.application_metadata
             .sync()
@@ -1578,7 +1585,7 @@ where
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
-                .next_dispatch_height(self.floor.processed_height());
+                .next_dispatch_height(self.last_applied_height);
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
@@ -2034,6 +2041,7 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
+        self.last_applied_height = Some(height);
         self.application_metadata.put(LATEST_KEY, height);
         self.floor.set_processed_height(height);
         let _ = self
