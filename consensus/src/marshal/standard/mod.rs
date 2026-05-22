@@ -2951,8 +2951,11 @@ mod tests {
         )
         .await;
         let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
-        let actor_handle =
-            actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
+        let actor_handle = if let Some(buffer) = buffer.clone() {
+            actor.start(application, buffer, (resolver_rx, resolver.clone()))
+        } else {
+            actor.start_unbuffered(application, (resolver_rx, resolver.clone()))
+        };
         (mailbox, buffer, resolver, actor_handle)
     }
 
@@ -5295,7 +5298,7 @@ mod tests {
             .await;
             actor.start(
                 Application::<B>::default(),
-                Some(buffer),
+                buffer,
                 (
                     handler::Receiver::new(resolver_rx),
                     RecordingResolver::default(),

@@ -31,10 +31,10 @@
 //! // `last_height` is `None` until the application acknowledges a block.
 //!
 //! // Start with application and buffer
-//! actor.start(application, Some(buffer), resolver);
+//! actor.start(application, buffer, resolver);
 //!
 //! // Or omit broadcast buffering for follower-only chain tracking
-//! actor.start(application, None::<MyBuffer>, resolver);
+//! actor.start_unbuffered(application, resolver);
 //! ```
 //!
 //! For standard mode, use [`crate::marshal::standard::Standard`] as the variant and

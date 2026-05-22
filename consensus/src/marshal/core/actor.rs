@@ -6,6 +6,7 @@ use super::{
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
+    variant::NoBuffer,
     Buffer, Variant,
 };
 use crate::{
@@ -307,6 +308,26 @@ where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver))
+    }
+
+    /// Start the actor without a broadcast buffer.
+    pub fn start_unbuffered<R>(
+        self,
+        application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: (handler::Receiver<V::Commitment>, R),
+    ) -> Handle<()>
+    where
+        R: Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
+    {
+        self.start(
+            application,
+            NoBuffer::<<P::Scheme as CertificateScheme>::PublicKey>::new(),
+            resolver,
+        )
     }
 
     /// Run the application actor.

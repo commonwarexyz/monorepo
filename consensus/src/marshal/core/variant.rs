@@ -17,7 +17,7 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::future::Future;
+use std::{future::Future, marker::PhantomData};
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
@@ -150,44 +150,54 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
 }
 
-impl<V, Buf> Buffer<V> for Option<Buf>
+/// A buffer implementation that never stores, subscribes, finalizes, or sends blocks.
+pub(super) struct NoBuffer<P> {
+    _public_key: PhantomData<fn() -> P>,
+}
+
+impl<P> NoBuffer<P> {
+    pub(super) const fn new() -> Self {
+        Self {
+            _public_key: PhantomData,
+        }
+    }
+}
+
+impl<P> Clone for NoBuffer<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for NoBuffer<P> {}
+
+impl<V, P> Buffer<V> for NoBuffer<P>
 where
     V: Variant,
-    Buf: Buffer<V>,
+    P: PublicKey,
 {
-    type PublicKey = Buf::PublicKey;
+    type PublicKey = P;
 
-    async fn find_by_digest(&self, digest: <V::Block as Digestible>::Digest) -> Option<V::Block> {
-        self.as_ref()?.find_by_digest(digest).await
+    async fn find_by_digest(&self, _: <V::Block as Digestible>::Digest) -> Option<V::Block> {
+        None
     }
 
-    async fn find_by_commitment(&self, commitment: V::Commitment) -> Option<V::Block> {
-        self.as_ref()?.find_by_commitment(commitment).await
+    async fn find_by_commitment(&self, _: V::Commitment) -> Option<V::Block> {
+        None
     }
 
     fn subscribe_by_digest(
         &self,
-        digest: <V::Block as Digestible>::Digest,
+        _: <V::Block as Digestible>::Digest,
     ) -> Option<oneshot::Receiver<V::Block>> {
-        self.as_ref()?.subscribe_by_digest(digest)
+        None
     }
 
-    fn subscribe_by_commitment(
-        &self,
-        commitment: V::Commitment,
-    ) -> Option<oneshot::Receiver<V::Block>> {
-        self.as_ref()?.subscribe_by_commitment(commitment)
+    fn subscribe_by_commitment(&self, _: V::Commitment) -> Option<oneshot::Receiver<V::Block>> {
+        None
     }
 
-    fn finalized(&self, commitment: V::Commitment) {
-        if let Some(buffer) = self {
-            buffer.finalized(commitment);
-        }
-    }
+    fn finalized(&self, _: V::Commitment) {}
 
-    fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>) {
-        if let Some(buffer) = self {
-            buffer.send(round, block, recipients);
-        }
-    }
+    fn send(&self, _: Round, _: V::Block, _: Recipients<Self::PublicKey>) {}
 }
