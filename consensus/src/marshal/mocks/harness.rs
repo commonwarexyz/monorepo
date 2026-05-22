@@ -451,8 +451,7 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
                 (Height::zero(), genesis_digest)
             };
         assert_eq!(
-            height,
-            expected_height,
+            height, expected_height,
             "{label}: application reported wrong tip height",
         );
         assert_eq!(
