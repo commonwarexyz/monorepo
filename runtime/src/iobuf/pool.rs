@@ -175,13 +175,11 @@ pub struct BufferPoolConfig {
 }
 
 impl BufferPoolConfig {
-    /// Network I/O preset: cache-line aligned, 1KB to 64KB buffers,
-    /// 4096 per class, not prefilled.
+    /// Network I/O preset: 1KB to 128KB buffers, 4096 per class, not prefilled.
     ///
-    /// Network operations typically need multiple concurrent buffers per connection
-    /// (message, encoding, encryption) so we allow 4096 buffers per size class.
-    /// Cache-line alignment is used because network buffers don't require page
-    /// alignment for DMA, and smaller alignment reduces internal fragmentation.
+    /// Network operations typically need multiple concurrent buffers per
+    /// connection (message, encoding, encryption) so we allow 4096 buffers per
+    /// size class.
     pub const fn for_network() -> Self {
         Self {
             pool_min_size: 0,
@@ -195,10 +193,8 @@ impl BufferPoolConfig {
         }
     }
 
-    /// Storage I/O preset: page-aligned, page_size to 8MB buffers, 64 per class,
+    /// Storage I/O preset: `page_size` (usually 4KB) to 8MB buffers, 64 per class,
     /// not prefilled.
-    ///
-    /// Page alignment is required for direct I/O and efficient DMA transfers.
     pub fn for_storage() -> Self {
         let page = NZUsize!(page_size());
         Self {
