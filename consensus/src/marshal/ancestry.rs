@@ -125,7 +125,7 @@ where
     M: BlockProvider,
 {
     fn peek(&self) -> Option<&M::Block> {
-        AncestorStream::peek(self)
+        Self::peek(self)
     }
 }
 
