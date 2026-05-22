@@ -203,6 +203,7 @@ impl BufferPoolConfig {
             max_size: NZUsize!(8 * 1024 * 1024),
             max_per_class: NZU32!(64),
             prefill: false,
+            // TODO (#2960): this needs to be page/block aligned for O_DIRECT
             alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
