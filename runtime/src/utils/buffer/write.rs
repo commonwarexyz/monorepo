@@ -136,8 +136,7 @@ impl<B: Blob> Write<B> {
             state: Arc::new(AsyncRwLock::new(State {
                 blob,
                 buffer: Buffer::new(size, capacity.get(), pool),
-                // Preserve one full sync barrier for mutations that predate wrapping.
-                needs_sync: true,
+                needs_sync: true, // ensure pending writes on the wrapped blob are synced
             })),
         }
     }
