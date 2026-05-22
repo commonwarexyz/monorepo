@@ -3,12 +3,14 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
+use commonware_runtime::Metrics;
 use commonware_resolver::{p2p::Producer, Consumer, Delivery, Fetch as ResolverFetch};
 use commonware_utils::{channel::oneshot, Span};
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
+    num::NonZeroUsize,
     sync::mpsc::TryRecvError,
 };
 
@@ -95,7 +97,7 @@ impl<D: Digest> Policy for Message<D> {
 /// This struct implements the [Consumer] and [Producer] traits from the
 /// resolver, and acts as a bridge to the main actor loop.
 #[derive(Clone)]
-pub(crate) struct Handler<D: Digest> {
+pub struct Handler<D: Digest> {
     sender: Sender<Message<D>>,
 }
 
@@ -104,6 +106,15 @@ impl<D: Digest> Handler<D> {
     pub(crate) const fn new(sender: Sender<Message<D>>) -> Self {
         Self { sender }
     }
+}
+
+/// Creates a resolver receiver and handler pair.
+pub fn init<D: Digest>(
+    metrics: impl Metrics,
+    capacity: NonZeroUsize,
+) -> (Receiver<D>, Handler<D>) {
+    let (sender, receiver) = mailbox::new(metrics, capacity);
+    (Receiver::new(receiver), Handler::new(sender))
 }
 
 /// Receiver for resolver handler messages.
