@@ -13,7 +13,9 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, W
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck},
+        dkg::feldman_desmedt::{
+            observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck,
+        },
         primitives::{
             group::Share,
             sharing::{Mode, ModeVersion},
@@ -643,7 +645,7 @@ mod tests {
     use crate::{dkg::ContinueOnUpdate, orchestrator::Message, setup::PeerConfig};
     use commonware_actor::Feedback;
     use commonware_cryptography::{
-        bls12381::{dkg::deal, primitives::variant::MinSig},
+        bls12381::{dkg::feldman_desmedt::deal, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
         transcript::Summary,
         Sha256, Signer,

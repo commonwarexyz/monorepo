@@ -271,7 +271,7 @@
 //!
 //! [scheme::bls12381_threshold] employs threshold cryptography (BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum)
 //! to generate succinct consensus certificates (verifiable with just the static public key). This scheme requires instantiating
-//! the shared secret via [commonware_cryptography::bls12381::dkg] and resharing whenever participants change.
+//! the shared secret via [commonware_cryptography::bls12381::dkg::feldman_desmedt] and resharing whenever participants change.
 //!
 //! Two (non-attributable) variants are provided:
 //!
@@ -296,7 +296,7 @@
 //! #### Succinct Certificates
 //!
 //! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain attestations (partial signatures) for a static
-//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)).
+//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg::feldman_desmedt)).
 //! As soon as `2f+1` messages are collected, a threshold signature over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)`
 //! can be recovered, respectively. Because the public key is static, any of these certificates can be verified by an external
 //! process without following the consensus instance and/or tracking the current set of participants (as is typically required

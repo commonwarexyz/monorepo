@@ -140,8 +140,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "bls12381_golden_dkg"
-path = "fuzz_targets/bls12381_golden_dkg.rs"
+name = "bls12381_dkg_golden"
+path = "fuzz_targets/bls12381_dkg_golden.rs"
 test = false
 doc = false
 bench = false
