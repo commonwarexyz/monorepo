@@ -248,12 +248,11 @@ impl<F: Family> Overflow<EngineMessage<F>> for EnginePending<F> {
 impl<F: Family> Policy for EngineMessage<F> {
     type Overflow = EnginePending<F>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
-            return true;
+            return;
         }
         overflow.0.push_back(message);
-        true
     }
 }
 

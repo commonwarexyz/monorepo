@@ -77,9 +77,9 @@ impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<D
 impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
     type Overflow = Pending<DB, F, Op, D>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) -> bool {
+    fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
-            return true;
+            return;
         }
 
         match message {
@@ -88,7 +88,6 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
             }
             message => overflow.messages.push_back(message),
         }
-        true
     }
 }
 
