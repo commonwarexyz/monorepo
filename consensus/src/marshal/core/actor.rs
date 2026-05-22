@@ -4,6 +4,7 @@ use super::{
     delivery::PendingVerification,
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
+    stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
     variant::OptionalBuffer,
     Buffer, Variant,
@@ -39,22 +40,17 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
-    metadata::{self, Metadata},
 };
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     futures::AbortablePool,
-    sequence::U64,
     Acknowledgement, BoxedError,
 };
 use futures::{future::join_all, try_join};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
 use tracing::{debug, warn};
-
-/// The key used to store the last processed height in the metadata store.
-const LATEST_KEY: U64 = U64::new(0xFF);
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
@@ -66,47 +62,6 @@ struct ResolverDelivery<V: Variant> {
     delivery: Delivery<ResolverRequestFor<V>, Annotation>,
     value: Bytes,
     response: oneshot::Sender<bool>,
-}
-
-/// Last block acknowledged by the application.
-#[derive(Clone, Copy)]
-enum ApplicationFloor {
-    BeforeGenesis,
-    Acknowledged(Height),
-}
-
-impl ApplicationFloor {
-    const fn from_metadata(height: Option<Height>) -> Self {
-        match height {
-            Some(height) => Self::Acknowledged(height),
-            None => Self::BeforeGenesis,
-        }
-    }
-
-    const fn processed_height(self) -> Height {
-        match self {
-            Self::BeforeGenesis => Height::zero(),
-            Self::Acknowledged(height) => height,
-        }
-    }
-
-    const fn round_restore_height(self) -> Height {
-        match self {
-            Self::BeforeGenesis => Height::zero(),
-            Self::Acknowledged(height) => height.next(),
-        }
-    }
-
-    const fn next_dispatch_height(self) -> Height {
-        match self {
-            Self::BeforeGenesis => Height::zero(),
-            Self::Acknowledged(height) => height.next(),
-        }
-    }
-
-    const fn acknowledge(&mut self, height: Height) {
-        *self = Self::Acknowledged(height);
-    }
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -163,7 +118,7 @@ where
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
     // Application delivery cursor
-    application_floor: ApplicationFloor,
+    stream: Stream<E>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
     // Highest known finalized height
@@ -174,8 +129,6 @@ where
     // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
-    // Metadata tracking application progress
-    application_metadata: Metadata<E, U64, Height>,
     // Finalizations stored by height
     finalizations_by_height: FC,
     // Finalized blocks stored by height
@@ -226,19 +179,14 @@ where
         )
         .await;
 
-        // Initialize metadata tracking application progress
-        let application_metadata = Metadata::init(
+        let stream = Stream::new(
             context.child("application_metadata"),
-            metadata::Config {
-                partition: format!("{}-application-metadata", config.partition_prefix),
-                codec_config: (),
-            },
+            &config.partition_prefix,
         )
-        .await
-        .expect("failed to initialize application metadata");
-        let application_floor =
-            ApplicationFloor::from_metadata(application_metadata.get(&LATEST_KEY).copied());
-        let last_processed_height = application_floor.processed_height();
+        .await;
+        let last_processed_height = stream
+            .processed_height()
+            .unwrap_or_else(Height::zero);
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
@@ -260,7 +208,7 @@ where
         // one height ahead restores the anchor's round across the crash window.
         let last_processed_round = Self::latest_processed_round(
             &finalizations_by_height,
-            application_floor.round_restore_height(),
+            stream.next_height(),
         )
         .await;
 
@@ -289,12 +237,11 @@ where
                 strategy: config.strategy,
                 last_proposed_block: None,
                 floor,
-                application_floor,
+                stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 cache,
-                application_metadata,
                 finalizations_by_height,
                 finalized_blocks,
                 finalized_height,
@@ -532,7 +479,7 @@ where
         };
 
         // Persist buffered progress updates once after draining all ready acks.
-        self.application_metadata
+        self.stream
             .sync()
             .await
             .expect("failed to sync application progress");
@@ -1196,7 +1143,7 @@ where
         self.update_processed_height(dispatch_floor, resolver);
         self.update_processed_round_floor(dispatch_floor, round, resolver)
             .await;
-        self.application_metadata
+        self.stream
             .sync()
             .await
             .expect("failed to sync floor metadata");
@@ -1617,7 +1564,7 @@ where
     ///
     /// Iteration M (ack handler, M > N):
     ///   ack handler       ->  update_processed_height  ->  metadata buffered
-    ///   application_metadata.sync ->  metadata durable
+    ///   stream.sync       ->  metadata durable
     /// ```
     async fn try_dispatch_blocks(
         &mut self,
@@ -1631,7 +1578,7 @@ where
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
-                .next_dispatch_height(self.application_floor.next_dispatch_height());
+                .next_dispatch_height(self.stream.next_height());
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
@@ -2087,8 +2034,7 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
-        self.application_floor.acknowledge(height);
-        self.application_metadata.put(LATEST_KEY, height);
+        self.stream.acknowledge(height);
         self.floor.set_processed_height(height);
         let _ = self
             .processed_height

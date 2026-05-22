@@ -48,6 +48,7 @@ mod acks;
 pub(crate) mod cache;
 mod delivery;
 mod floor;
+mod stream;
 
 mod mailbox;
 pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
