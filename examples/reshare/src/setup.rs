@@ -3,7 +3,7 @@ use crate::dkg::MAX_SUPPORTED_MODE;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{deal, Output},
+        dkg::feldman_desmedt::{deal, Output},
         primitives::{group::Share, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},

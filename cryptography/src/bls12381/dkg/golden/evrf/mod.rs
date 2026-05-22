@@ -1,10 +1,7 @@
 mod bandersnatch;
 
 use crate::{
-    bls12381::{
-        golden_dkg::evrf::bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv},
-        primitives::group::{Scalar, G1},
-    },
+    bls12381::primitives::group::{Scalar, G1},
     transcript::{Summary, Transcript},
     zk::{
         bulletproofs::circuit::{self, prove, verify},
@@ -12,7 +9,7 @@ use crate::{
     },
     Secret,
 };
-use bandersnatch::{F, G};
+use bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
@@ -786,7 +783,7 @@ mod tests {
         let msg = Bytes::copy_from_slice(nonce.as_ref());
 
         // The outer transcript both sides agree on. The prover forks it the
-        // same way `golden_dkg::deal` does, and `check_batch` re-forks it
+        // same way `golden::deal` does, and `check_batch` re-forks it
         // internally per sender.
         let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
 

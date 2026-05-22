@@ -6,7 +6,7 @@ use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
-    bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
+    bls12381::{dkg::feldman_desmedt::SignedDealerLog, primitives::variant::Variant},
     Committable, Digest, Digestible, Hasher, Signer,
 };
 use commonware_runtime::{Buf, BufMut};

@@ -14,8 +14,8 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
+//!     dkg::feldman_desmedt as dkg,
 //!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
-//!     dkg,
 //! };
 //! use commonware_utils::{NZU32, N3f1};
 //! use rand::rngs::OsRng;

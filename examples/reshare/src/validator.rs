@@ -164,7 +164,7 @@ mod test {
     };
     use commonware_cryptography::{
         bls12381::{
-            dkg::{deal, Output},
+            dkg::feldman_desmedt::{deal, Output},
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},

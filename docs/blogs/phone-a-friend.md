@@ -5,7 +5,7 @@ date: "May 19th, 2026"
 published-time: "2026-05-19T00:00:00Z"
 modified-time: "2026-05-19T00:00:00Z"
 author: "Guru Vamsi Policharla"
-author_twitter: "https://x.com/gvamsip"
+author_twitter: "https://x.com/guruvamsip"
 url: "https://commonware.xyz/blogs/phone-a-friend"
 image: "https://commonware.xyz/imgs/batch-mempool-decryption.png"
 katex: true

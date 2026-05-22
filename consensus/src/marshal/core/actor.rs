@@ -678,6 +678,9 @@ where
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
+            Message::GetProcessedHeight { response } => {
+                response.send_lossy(self.floor.processed_height());
+            }
             Message::HintFinalized { height, targets } => {
                 // Skip if finalization is already available locally.
                 if self.get_finalization_by_height(height).await.is_some() {
