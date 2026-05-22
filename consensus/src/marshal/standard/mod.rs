@@ -2559,16 +2559,16 @@ mod tests {
                 .cloned()
         }
 
-        fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<B>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscriptions.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
-        fn subscribe_by_commitment(&self, _commitment: D) -> oneshot::Receiver<B> {
+        fn subscribe_by_commitment(&self, _commitment: D) -> Option<oneshot::Receiver<B>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
         fn finalized(&self, _commitment: D) {}
@@ -2951,8 +2951,11 @@ mod tests {
         )
         .await;
         let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
-        let actor_handle =
-            actor.start(application, buffer.clone(), (resolver_rx, resolver.clone()));
+        let actor_handle = if let Some(buffer) = buffer.clone() {
+            actor.start(application, buffer, (resolver_rx, resolver.clone()))
+        } else {
+            actor.start_unbuffered(application, (resolver_rx, resolver.clone()))
+        };
         (mailbox, buffer, resolver, actor_handle)
     }
 
@@ -5295,7 +5298,7 @@ mod tests {
             .await;
             actor.start(
                 Application::<B>::default(),
-                Some(buffer),
+                buffer,
                 (
                     handler::Receiver::new(resolver_rx),
                     RecordingResolver::default(),

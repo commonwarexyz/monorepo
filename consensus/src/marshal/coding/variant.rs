@@ -95,15 +95,15 @@ where
     fn subscribe_by_digest(
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
-        self.subscribe_by_digest(digest)
+    ) -> Option<oneshot::Receiver<CodedBlock<B, C, H>>> {
+        Some(self.subscribe_by_digest(digest))
     }
 
     fn subscribe_by_commitment(
         &self,
         commitment: Commitment,
-    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
-        self.subscribe(commitment)
+    ) -> Option<oneshot::Receiver<CodedBlock<B, C, H>>> {
+        Some(self.subscribe(commitment))
     }
 
     fn finalized(&self, commitment: Commitment) {

@@ -6,7 +6,7 @@ use super::{
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
-    variant::OptionalBuffer,
+    variant::NoBuffer,
     Buffer, Variant,
 };
 use crate::{
@@ -296,7 +296,7 @@ where
     pub fn start<R, Buf>(
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: Option<Buf>,
+        buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
@@ -307,15 +307,34 @@ where
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
-        let buffer = OptionalBuffer::new(buffer);
         spawn_cell!(self.context, self.run(application, buffer, resolver))
+    }
+
+    /// Start the actor without a broadcast buffer.
+    pub fn start_unbuffered<R>(
+        self,
+        application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: (handler::Receiver<V::Commitment>, R),
+    ) -> Handle<()>
+    where
+        R: Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
+    {
+        self.start(
+            application,
+            NoBuffer::<<P::Scheme as CertificateScheme>::PublicKey>::new(),
+            resolver,
+        )
     }
 
     /// Run the application actor.
     async fn run<R, Buf>(
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        mut buffer: OptionalBuffer<V, Buf>,
+        mut buffer: Buf,
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
         R: Resolver<
@@ -436,7 +455,7 @@ where
         &mut self,
         result: <A::Waiter as Future>::Output,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         resolver: &mut R,
     ) where
         Buf: Buffer<V>,
@@ -491,7 +510,7 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -764,7 +783,7 @@ where
         message: handler::Message<V::Commitment>,
         resolver_rx: &mut handler::Receiver<V::Commitment>,
         resolver: &mut R,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -850,7 +869,7 @@ where
         &self,
         key: ResolverRequestFor<V>,
         response: oneshot::Sender<Bytes>,
-        buffer: &OptionalBuffer<V, Buf>,
+        buffer: &Buf,
     ) {
         match key {
             Key::Block(commitment) => {
@@ -898,7 +917,7 @@ where
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
     ) {
         let digest = match key {
             SubscriptionKey::Digest(digest) => digest,
@@ -985,7 +1004,7 @@ where
         finalization: Finalization<P::Scheme, V::Commitment>,
         skip_if_superseded: bool,
         resolver: &mut R,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
@@ -1052,7 +1071,7 @@ where
     async fn apply_floor_anchor<Buf: Buffer<V>>(
         &mut self,
         block: &V::Block,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
@@ -1171,7 +1190,7 @@ where
         &mut self,
         message: ResolverDelivery<V>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
@@ -1349,7 +1368,7 @@ where
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
@@ -1848,7 +1867,7 @@ where
     /// parent links).
     async fn find_block_by_digest<Buf: Buffer<V>>(
         &self,
-        buffer: &OptionalBuffer<V, Buf>,
+        buffer: &Buf,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_digest(digest).await {
@@ -1863,7 +1882,7 @@ where
     /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: Buffer<V>>(
         &self,
-        buffer: &OptionalBuffer<V, Buf>,
+        buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_commitment(commitment).await {
@@ -1888,7 +1907,7 @@ where
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
