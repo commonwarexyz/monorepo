@@ -186,7 +186,7 @@ impl<B: Blob> Append<B> {
         }
 
         let capacity = capacity_with_floor(capacity, cache_ref.page_size());
-        let needs_sync = !invalid_data_found;
+        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
         let (blob_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (
