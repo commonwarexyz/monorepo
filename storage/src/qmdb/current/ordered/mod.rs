@@ -9,10 +9,10 @@
 //! - [variable]: Variant for values of variable size.
 
 use crate::{
-    merkle::{hasher::Standard as StandardHasher, Graftable},
+    merkle::Graftable,
     qmdb::{
         any::{
-            ordered::{self, Operation, Update},
+            ordered::Update,
             ValueEncoding,
         },
         current::proof::OperationProof,
@@ -20,8 +20,8 @@ use crate::{
     },
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_codec::{EncodeSize, Read, ReadExt as _, Write};
+use commonware_cryptography::Digest;
 
 pub mod db;
 pub mod fixed;
@@ -47,43 +47,6 @@ pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const
     /// equal to its own location, which is a necessary and sufficient condition for an empty
     /// database.
     Commit(OperationProof<F, D, N>, Option<V::Value>),
-}
-
-impl<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const N: usize>
-    ExclusionProof<F, K, V, D, N>
-where
-    Operation<F, K, V>: Codec,
-{
-    /// Return true if this proof authenticates that `key` is not active at `root`.
-    pub fn verify_key<H>(&self, hasher: &StandardHasher<H>, key: &K, root: &D) -> bool
-    where
-        H: Hasher<Digest = D>,
-    {
-        let (op_proof, operation) = match self {
-            Self::KeyValue(op_proof, update) => {
-                if update.key == *key {
-                    // The provided `key` is in the DB if it matches the start of the span.
-                    return false;
-                }
-                if !ordered::span_contains(&update.key, &update.next_key, key) {
-                    // If the key is not within the span, then this proof cannot prove its
-                    // exclusion.
-                    return false;
-                }
-
-                (op_proof, Operation::Update(update.clone()))
-            }
-            Self::Commit(op_proof, metadata) => {
-                // Handle the case where the proof shows the db is empty, hence any key is proven
-                // excluded. For the db to be empty, the floor must equal the commit operation's
-                // location.
-                let floor = op_proof.loc;
-                (op_proof, Operation::CommitFloor(metadata.clone(), floor))
-            }
-        };
-
-        op_proof.verify(hasher, operation, root)
-    }
 }
 
 const KEY_VALUE_CONTEXT: u8 = 0;
@@ -627,16 +590,6 @@ pub mod tests {
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, key, value, &proof, &root
                 ));
-                assert!(proof.verify_operation(
-                    &hasher,
-                    Operation::Update(Update {
-                        key,
-                        value,
-                        next_key: proof.next_key,
-                    }),
-                    &root
-                ));
-                assert!(!proof.verify_operation(&hasher, Operation::Delete(key), &root));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
@@ -663,15 +616,6 @@ pub mod tests {
                 bad_proof.next_key = wrong_key;
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, key, value, &bad_proof, &root,
-                ));
-                assert!(!proof.verify_operation(
-                    &hasher,
-                    Operation::Update(Update {
-                        key,
-                        value,
-                        next_key: wrong_key,
-                    }),
-                    &root
                 ));
             }
 
@@ -764,7 +708,6 @@ pub mod tests {
                 &empty_proof,
                 &empty_root,
             ));
-            assert!(empty_proof.verify_key(&hasher, &key_exists_1, &empty_root));
 
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
@@ -797,7 +740,6 @@ pub mod tests {
                 &proof,
                 &root,
             ));
-            assert!(proof.verify_key(&hasher, &greater_key, &root));
             assert!(TestDb::<F, C, V>::verify_exclusion_proof(
                 &hasher,
                 &lesser_key,
@@ -811,7 +753,6 @@ pub mod tests {
                 &proof,
                 &root,
             ));
-            assert!(!proof.verify_key(&hasher, &key_exists_1, &root));
 
             // Add a second key and test exclusion proving over the two-key database case.
             let key_exists_2 = Sha256::fill(0x30);
@@ -873,7 +814,6 @@ pub mod tests {
                 &proof,
                 &root,
             ));
-            assert!(proof.verify_key(&hasher, &middle_key, &root));
             assert!(!TestDb::<F, C, V>::verify_exclusion_proof(
                 &hasher,
                 &key_exists_2,

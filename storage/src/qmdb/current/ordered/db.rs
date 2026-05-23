@@ -9,7 +9,7 @@ use crate::{
     merkle::{self, hasher::Standard as StandardHasher, Location},
     qmdb::{
         any::{
-            ordered::{Operation, Update},
+            ordered::{self, Operation, Update},
             ValueEncoding,
         },
         current::proof::OperationProof,
@@ -58,32 +58,6 @@ impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueP
         let proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
         let next_key = K::read_cfg(buf, key_cfg)?;
         Ok(Self { proof, next_key })
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K, D, N> {
-    /// Return true if this proof authenticates `operation` as the active key-value update.
-    ///
-    /// This also checks that the proof's embedded `next_key` matches the provided operation, which
-    /// is required when the operation is decoded separately from the proof.
-    pub fn verify_operation<H, V>(
-        &self,
-        hasher: &StandardHasher<H>,
-        operation: Operation<F, K, V>,
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<Digest = D>,
-        V: ValueEncoding,
-        Operation<F, K, V>: Codec,
-    {
-        match &operation {
-            Operation::Update(update) if self.next_key == update.next_key => {}
-            Operation::Update(_) => return false,
-            _ => return false,
-        }
-
-        self.proof.verify(hasher, operation, root)
     }
 }
 
@@ -139,7 +113,7 @@ where
         proof: &KeyValueProof<F, K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        proof.verify_operation(
+        proof.proof.verify(
             hasher,
             Operation::Update(Update {
                 key,
@@ -176,7 +150,30 @@ where
         proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        proof.verify_key(hasher, key, root)
+        let (op_proof, operation) = match proof {
+            super::ExclusionProof::KeyValue(op_proof, update) => {
+                if update.key == *key {
+                    // The provided `key` is in the DB if it matches the start of the span.
+                    return false;
+                }
+                if !ordered::span_contains(&update.key, &update.next_key, key) {
+                    // If the key is not within the span, then this proof cannot prove its
+                    // exclusion.
+                    return false;
+                }
+
+                (op_proof, Operation::Update(update.clone()))
+            }
+            super::ExclusionProof::Commit(op_proof, metadata) => {
+                // Handle the case where the proof shows the db is empty, hence any key is proven
+                // excluded. For the db to be empty, the floor must equal the commit operation's
+                // location.
+                let floor = op_proof.loc;
+                (op_proof, Operation::CommitFloor(metadata.clone(), floor))
+            }
+        };
+
+        op_proof.verify(hasher, operation, root)
     }
 }
 
