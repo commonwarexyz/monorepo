@@ -1,0 +1,67 @@
+warning: blocking await in actor loop
+  --> $DIR/main.rs:56:9
+   |
+LL |         handler.process().await;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: queue this work and select on its completion instead of awaiting it in the actor loop
+  --> $DIR/main.rs:56:9
+   |
+LL |         handler.process().await;
+   |         ^^^^^^^^^^^^^^^^^
+note: the lint level is defined here
+  --> $DIR/main.rs:3:9
+   |
+LL | #![warn(blocking_in_actor_loop)]
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: blocking await in actor loop
+  --> $DIR/main.rs:63:9
+   |
+LL |         monitor.collected().await;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: queue this work and select on its completion instead of awaiting it in the actor loop
+  --> $DIR/main.rs:63:9
+   |
+LL |         monitor.collected().await;
+   |         ^^^^^^^^^^^^^^^^^^^
+
+warning: blocking await in actor loop
+  --> $DIR/main.rs:70:9
+   |
+LL |         mailbox.dial().await;
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+help: queue this work and select on its completion instead of awaiting it in the actor loop
+  --> $DIR/main.rs:70:9
+   |
+LL |         mailbox.dial().await;
+   |         ^^^^^^^^^^^^^^
+
+warning: blocking await in actor loop
+  --> $DIR/main.rs:83:9
+   |
+LL |         stream.send().await;
+   |         ^^^^^^^^^^^^^^^^^^^
+   |
+help: queue this work and select on its completion instead of awaiting it in the actor loop
+  --> $DIR/main.rs:83:9
+   |
+LL |         stream.send().await;
+   |         ^^^^^^^^^^^^^
+
+warning: blocking await in actor loop
+  --> $DIR/main.rs:84:9
+   |
+LL |         stream.recv().await;
+   |         ^^^^^^^^^^^^^^^^^^^
+   |
+help: queue this work and select on its completion instead of awaiting it in the actor loop
+  --> $DIR/main.rs:84:9
+   |
+LL |         stream.recv().await;
+   |         ^^^^^^^^^^^^^
+
+warning: 5 warnings emitted
+

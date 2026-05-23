@@ -2,6 +2,7 @@
 
 use crate::{
     authenticated::{
+        dialing::Dialable,
         lookup::{
             actors::{
                 spawner,
@@ -13,7 +14,7 @@ use crate::{
     },
     Ingress,
 };
-use commonware_cryptography::Signer;
+use commonware_cryptography::{PublicKey, Signer};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
@@ -21,15 +22,22 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
     StreamOf,
 };
+use commonware_utils::futures::Pool;
+use futures::future::{self, Either};
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tracing::debug;
 
 // Mailbox for the spawner actor.
 type SupervisorMailbox<E, C> =
     Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey>>;
+
+enum TrackerQuery<C: PublicKey> {
+    Dialable(Dialable<C>),
+    Dial(Option<(Reservation<C>, Ingress)>),
+}
 
 /// Configuration for the dialer actor.
 pub struct Config<C: Signer> {
@@ -144,6 +152,16 @@ impl<
         });
     }
 
+    fn empty_queue_deadline(
+        &self,
+        now: SystemTime,
+        next_query_at: Option<SystemTime>,
+    ) -> SystemTime {
+        let min = now + self.dial_frequency;
+        let max = (now + self.peer_connection_cooldown).max(min);
+        next_query_at.unwrap_or(max).clamp(min, max)
+    }
+
     /// Start the dialer actor.
     pub fn start(
         mut self,
@@ -159,36 +177,59 @@ impl<
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
+        let mut queries = Pool::default();
+        let mut query_pending = false;
         select_loop! {
             self.context,
+            on_start => {
+                let wait_for_deadline = if query_pending {
+                    Either::Left(future::pending())
+                } else {
+                    Either::Right(self.context.sleep_until(dial_deadline))
+                };
+            },
             on_stopped => {
                 debug!("context shutdown, stopping dialer");
             },
-            _ = self.context.sleep_until(dial_deadline) => {
-                // Refill the queue if empty.
+            _ = wait_for_deadline => {
                 let now = self.context.current();
-                let mut next_query_at = None;
                 if self.queue.is_empty() {
-                    let dialable = tracker.dialable().await;
-                    self.queue = dialable.peers;
-                    self.queue.shuffle(self.context.as_mut());
-                    next_query_at = dialable.next_query_at;
+                    let tracker = tracker.clone();
+                    queries.push(async move { TrackerQuery::Dialable(tracker.dialable().await) });
+                    query_pending = true;
+                    continue;
                 }
 
-                // Set next deadline.
-                dial_deadline = if self.queue.is_empty() {
-                    let min = now + self.dial_frequency;
-                    let max = (now + self.peer_connection_cooldown).max(min);
-                    next_query_at.unwrap_or(max).clamp(min, max)
+                if let Some(peer) = self.queue.pop() {
+                    let tracker = tracker.clone();
+                    queries.push(async move { TrackerQuery::Dial(tracker.dial(peer).await) });
+                    query_pending = true;
                 } else {
-                    now + self.dial_frequency
-                };
-
-                // Pop through peers until we can reserve and dial one.
-                while let Some(peer) = self.queue.pop() {
-                    if let Some((reservation, ingress)) = tracker.dial(peer).await {
-                        self.dial_peer(reservation, ingress, &mut supervisor);
-                        break;
+                    dial_deadline = self.empty_queue_deadline(now, None);
+                }
+            },
+            query = queries.next_completed() => {
+                query_pending = false;
+                let now = self.context.current();
+                match query {
+                    TrackerQuery::Dialable(dialable) => {
+                        self.queue = dialable.peers;
+                        self.queue.shuffle(self.context.as_mut());
+                        dial_deadline = if self.queue.is_empty() {
+                            self.empty_queue_deadline(now, dialable.next_query_at)
+                        } else {
+                            now
+                        };
+                    }
+                    TrackerQuery::Dial(result) => {
+                        if let Some((reservation, ingress)) = result {
+                            self.dial_peer(reservation, ingress, &mut supervisor);
+                            dial_deadline = now + self.dial_frequency;
+                        } else if self.queue.is_empty() {
+                            dial_deadline = now + self.dial_frequency;
+                        } else {
+                            dial_deadline = now;
+                        }
                     }
                 }
             },
