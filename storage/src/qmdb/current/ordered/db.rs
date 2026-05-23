@@ -61,6 +61,53 @@ impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueP
     }
 }
 
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K, D, N> {
+    /// Return true if this proof authenticates `update` against `root`.
+    ///
+    /// This also checks that the proof's embedded `next_key` matches the provided update, which is
+    /// required when the operation is decoded separately from the proof.
+    pub fn verify_update<H, V>(
+        &self,
+        hasher: &StandardHasher<H>,
+        update: &Update<K, V>,
+        root: &D,
+    ) -> bool
+    where
+        H: Hasher<Digest = D>,
+        V: ValueEncoding,
+        Operation<F, K, V>: Codec,
+    {
+        if self.next_key != update.next_key {
+            return false;
+        }
+
+        self.proof
+            .verify(hasher, Operation::Update(update.clone()), root)
+    }
+
+    /// Return true if this proof authenticates `operation` as the active key-value update.
+    pub fn verify_operation<H, V>(
+        &self,
+        hasher: &StandardHasher<H>,
+        operation: &Operation<F, K, V>,
+        root: &D,
+    ) -> bool
+    where
+        H: Hasher<Digest = D>,
+        V: ValueEncoding,
+        Operation<F, K, V>: Codec + Clone,
+    {
+        let Operation::Update(update) = operation else {
+            return false;
+        };
+        if self.next_key != update.next_key {
+            return false;
+        }
+
+        self.proof.verify(hasher, operation.clone(), root)
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
     for KeyValueProof<F, K, D, N>
@@ -113,13 +160,13 @@ where
         proof: &KeyValueProof<F, K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let op = Operation::Update(Update {
+        let update = Update {
             key,
             value,
             next_key: proof.next_key.clone(),
-        });
+        };
 
-        proof.proof.verify(hasher, op, root)
+        proof.verify_update(hasher, &update, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -148,37 +195,7 @@ where
         proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let (op_proof, op) = match proof {
-            super::ExclusionProof::KeyValue(op_proof, data) => {
-                if data.key == *key {
-                    // The provided `key` is in the DB if it matches the start of the span.
-                    return false;
-                }
-                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>, N, S>::span_contains(
-                    &data.key,
-                    &data.next_key,
-                    key,
-                ) {
-                    // If the key is not within the span, then this proof cannot prove its
-                    // exclusion.
-                    return false;
-                }
-
-                (op_proof, Operation::Update(data.clone()))
-            }
-            super::ExclusionProof::Commit(op_proof, metadata) => {
-                // Handle the case where the proof shows the db is empty, hence any key is proven
-                // excluded. For the db to be empty, the floor must equal the commit operation's
-                // location.
-                let floor_loc = op_proof.loc;
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), floor_loc),
-                )
-            }
-        };
-
-        op_proof.verify(hasher, op, root)
+        proof.verify_key(hasher, key, root)
     }
 }
 

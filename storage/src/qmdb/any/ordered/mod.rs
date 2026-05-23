@@ -26,6 +26,15 @@ pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Oper
 /// Type alias for a location and its associated key data.
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
+/// Whether the ordered-key span defined by `span_start` and `span_end` contains `key`.
+pub fn span_contains<K: Key>(span_start: &K, span_end: &K, key: &K) -> bool {
+    if span_start >= span_end {
+        key >= span_start || key < span_end
+    } else {
+        key >= span_start && key < span_end
+    }
+}
+
 impl<
         F: Family,
         E: Context,
@@ -50,23 +59,6 @@ where
         }
     }
 
-    /// Whether the span defined by `span_start` and `span_end` contains `key`.
-    pub fn span_contains(span_start: &K, span_end: &K, key: &K) -> bool {
-        if span_start >= span_end {
-            // cyclic span case
-            if key >= span_start || key < span_end {
-                return true;
-            }
-        } else {
-            // normal span case
-            if key >= span_start && key < span_end {
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
@@ -77,7 +69,7 @@ where
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&reader, loc).await?;
-            if Self::span_contains(&data.key, &data.next_key, key) {
+            if span_contains(&data.key, &data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
         }
