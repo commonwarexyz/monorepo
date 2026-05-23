@@ -627,12 +627,15 @@ pub mod tests {
                 assert!(TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, key, value, &proof, &root
                 ));
-                let update = Update {
-                    key,
-                    value,
-                    next_key: proof.next_key,
-                };
-                assert!(proof.verify_operation(&hasher, Operation::Update(update.clone()), &root));
+                assert!(proof.verify_operation(
+                    &hasher,
+                    Operation::Update(Update {
+                        key,
+                        value,
+                        next_key: proof.next_key,
+                    }),
+                    &root
+                ));
                 assert!(!proof.verify_operation(&hasher, Operation::Delete(key), &root));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses

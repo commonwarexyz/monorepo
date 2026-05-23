@@ -139,13 +139,15 @@ where
         proof: &KeyValueProof<F, K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let update = Update {
-            key,
-            value,
-            next_key: proof.next_key.clone(),
-        };
-
-        proof.verify_operation(hasher, Operation::Update(update), root)
+        proof.verify_operation(
+            hasher,
+            Operation::Update(Update {
+                key,
+                value,
+                next_key: proof.next_key.clone(),
+            }),
+            root,
+        )
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
