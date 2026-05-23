@@ -11,10 +11,7 @@
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{
-            ordered::Update,
-            ValueEncoding,
-        },
+        any::{ordered::Update, ValueEncoding},
         current::proof::OperationProof,
         operation::Key,
     },
