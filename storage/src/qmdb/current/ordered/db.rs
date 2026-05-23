@@ -95,16 +95,13 @@ impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K
     where
         H: Hasher<Digest = D>,
         V: ValueEncoding,
-        Operation<F, K, V>: Codec + Clone,
+        Operation<F, K, V>: Codec,
     {
         let Operation::Update(update) = operation else {
             return false;
         };
-        if self.next_key != update.next_key {
-            return false;
-        }
 
-        self.proof.verify(hasher, operation.clone(), root)
+        self.verify_update(hasher, update, root)
     }
 }
 
