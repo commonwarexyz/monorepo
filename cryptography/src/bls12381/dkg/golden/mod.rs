@@ -1567,6 +1567,7 @@ mod tests {
             .expect("plan should succeed");
     }
 
+    #[test_group("slow")]
     #[test]
     fn multiple_dealers_multiple_players() {
         Plan::new(4, 7, 3)
@@ -1574,6 +1575,7 @@ mod tests {
             .expect("plan should succeed");
     }
 
+    #[test_group("slow")]
     #[test]
     fn many_dealers() {
         Plan::new(10, 5, 0)
@@ -1583,6 +1585,7 @@ mod tests {
 
     // Perturbation tests
 
+    #[test_group("slow")]
     #[test]
     fn bad_signature_filtered() {
         // 1 bad sig out of 4 dealers, DKG succeeds
@@ -1592,6 +1595,7 @@ mod tests {
             .expect("plan should succeed with 1 bad sig");
     }
 
+    #[test_group("slow")]
     #[test]
     fn output_dealers_excludes_filtered_dealers() {
         let mut rng = commonware_utils::test_rng();
@@ -1643,6 +1647,7 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
     #[test]
     fn bad_signature_too_many() {
         // 3 bad sigs out of 4 dealers. quorum(4) = 3, so only 1 honest < 3.
@@ -1654,6 +1659,7 @@ mod tests {
             .expect("plan should handle expected failure");
     }
 
+    #[test_group("slow")]
     #[test]
     fn bad_share_filtered() {
         // 1 dealer sends bad share, DKG succeeds
@@ -1663,6 +1669,7 @@ mod tests {
             .expect("plan should succeed with 1 bad share");
     }
 
+    #[test_group("slow")]
     #[test]
     fn bad_share_too_many() {
         // 3 out of 4 dealers send bad shares. quorum(4) = 3, so only 1 honest < 3.
@@ -1674,6 +1681,7 @@ mod tests {
             .expect("plan should handle expected failure");
     }
 
+    #[test_group("slow")]
     #[test]
     fn bad_commitment_filtered() {
         Plan::new(4, 7, 3)
@@ -1682,6 +1690,7 @@ mod tests {
             .expect("plan should succeed with 1 bad commitment");
     }
 
+    #[test_group("slow")]
     #[test]
     fn missing_share_filtered() {
         Plan::new(4, 7, 3)
@@ -1690,6 +1699,7 @@ mod tests {
             .expect("plan should succeed with 1 missing share");
     }
 
+    #[test_group("slow")]
     #[test]
     fn shift_degree_filtered() {
         Plan::new(4, 7, 3)
@@ -1698,6 +1708,7 @@ mod tests {
             .expect("plan should succeed with 1 wrong degree dealer filtered");
     }
 
+    #[test_group("slow")]
     #[test]
     fn insufficient_dealers() {
         // Drop 3 out of 4 dealers. quorum(4) = 3, so only 1 < 3.
@@ -1711,6 +1722,7 @@ mod tests {
 
     // Reshare tests
 
+    #[test_group("slow")]
     #[test]
     fn reshare_happy_path() {
         Plan::new(4, 7, 3)
@@ -1719,6 +1731,7 @@ mod tests {
             .expect("reshare should succeed");
     }
 
+    #[test_group("slow")]
     #[test]
     fn reshare_replace_share_filtered() {
         Plan::new(4, 7, 3)
@@ -1728,6 +1741,7 @@ mod tests {
             .expect("reshare should succeed with 1 replaced share");
     }
 
+    #[test_group("slow")]
     #[test]
     fn reshare_replace_share_fails() {
         // 3 out of 4 dealers use wrong previous share. quorum(4) = 3, only 1 honest.
@@ -1780,6 +1794,7 @@ mod tests {
         assert!(matches!(result, Err(Error::UnknownDealer(_))));
     }
 
+    #[test_group("slow")]
     #[test]
     fn unknown_player() {
         let mut rng = commonware_utils::test_rng();
@@ -1818,6 +1833,7 @@ mod tests {
         assert!(matches!(result, Err(Error::UnknownPlayer)));
     }
 
+    #[test_group("slow")]
     #[test]
     fn missing_dealer_share_in_reshare() {
         let mut rng = commonware_utils::test_rng();
@@ -1860,6 +1876,7 @@ mod tests {
         assert!(matches!(result, Err(Error::MissingDealerShare)));
     }
 
+    #[test_group("slow")]
     #[test]
     fn signed_dealer_log_roundtrip() {
         use commonware_parallel::Sequential;
@@ -1909,6 +1926,7 @@ mod tests {
         observe(&mut rng, &TEST_SETUP, &info, logs, &Sequential).expect("observe should succeed");
     }
 
+    #[test_group("slow")]
     #[test]
     fn output_roundtrip() {
         let mut rng = commonware_utils::test_rng();
@@ -2056,6 +2074,7 @@ mod tests {
         assert!(matches!(result, Err(Error::NumDealers(0))));
     }
 
+    #[test_group("slow")]
     #[test]
     fn info_rejects_reshare_dealer_outside_previous_players() {
         let mut rng = commonware_utils::test_rng();
@@ -2093,6 +2112,7 @@ mod tests {
         assert!(matches!(result, Err(Error::UnknownDealer(_))));
     }
 
+    #[test_group("slow")]
     #[test]
     fn info_rejects_reshare_with_too_few_dealers() {
         let mut rng = commonware_utils::test_rng();

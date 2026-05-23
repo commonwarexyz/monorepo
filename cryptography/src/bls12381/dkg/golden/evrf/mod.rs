@@ -761,6 +761,7 @@ impl VrfCommitments {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_macros::test_group;
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use std::sync::LazyLock;
@@ -769,6 +770,7 @@ mod tests {
     /// every test in this module uses 3.
     static TEST_SETUP: LazyLock<Setup> = LazyLock::new(|| Setup::new(NonZeroU32::new(3).unwrap()));
 
+    #[test_group("slow")]
     #[test]
     fn vrf_batch_checked_roundtrips_through_check_batch() {
         let mut rng = test_rng();
@@ -815,6 +817,7 @@ mod tests {
         assert_eq!(checked, &commitments.commitments);
     }
 
+    #[test_group("slow")]
     #[test]
     fn check_batch_rejects_perturbed_commitments() {
         let mut rng = test_rng();
@@ -903,6 +906,7 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    #[test_group("slow")]
     #[test]
     fn check_batch_falls_back_to_per_sender_on_failure() {
         let mut rng = test_rng();
