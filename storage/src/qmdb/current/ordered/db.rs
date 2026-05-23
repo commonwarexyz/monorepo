@@ -169,7 +169,10 @@ where
                 // excluded. For the db to be empty, the floor must equal the commit operation's
                 // location.
                 let floor_loc = op_proof.loc;
-                (op_proof, Operation::CommitFloor(metadata.clone(), floor_loc))
+                (
+                    op_proof,
+                    Operation::CommitFloor(metadata.clone(), floor_loc),
+                )
             }
         };
 
