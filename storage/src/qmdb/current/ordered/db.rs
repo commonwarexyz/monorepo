@@ -168,8 +168,8 @@ where
                 // Handle the case where the proof shows the db is empty, hence any key is proven
                 // excluded. For the db to be empty, the floor must equal the commit operation's
                 // location.
-                let floor = op_proof.loc;
-                (op_proof, Operation::CommitFloor(metadata.clone(), floor))
+                let floor_loc = op_proof.loc;
+                (op_proof, Operation::CommitFloor(metadata.clone(), floor_loc))
             }
         };
 
