@@ -27,27 +27,35 @@
 //!
 //! # Syncing
 //!
-//! Applications load a [`SyncPlan`] before constructing marshal and stateful.
+//! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
 //! The plan reads the durable state-sync flag; callers gate floor selection
-//! on [`SyncPlan::needs_state_sync`] and, if still required, attach a finalized
+//! on [`SyncPlan::may_state_sync`] and, if state sync is desired, attach a finalized
 //! floor via [`SyncPlan::with_floor`]. The same plan then drives marshal (via
 //! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
-//! actors are guaranteed to agree on the startup decision.
+//! actors are guaranteed to agree on the startup decision. Once the durable flag
+//! is set, the node never performs peer state sync again and must recover from
+//! marshal's processed height on future startups.
 //!
 //! The actor supports two sync paths:
 //!
-//! - **Marshal sync** (no floor attached): Initialize fresh databases and let
-//!   the marshal backfill blocks from the network. Appropriate for validators
-//!   joining from genesis or after a clean state wipe.
+//! - **Marshal sync** (no floor attached): [`Stateful::start`] prepares the
+//!   databases before the actor is spawned. Fresh nodes initialize from
+//!   genesis; restarted nodes reconcile the database set against marshal's
+//!   processed anchor, rewinding if needed. The actor then starts directly in
+//!   normal processing mode while marshal continues backfilling blocks from the
+//!   network.
 //!
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
-//!   [`db::StateSyncSet::sync`]. Finalized blocks acknowledged by the actor
-//!   stream target updates into the sync task, so the final synced height is
-//!   not predetermined. Once all databases converge on the same anchor block,
-//!   the actor acknowledges through that height and then transitions to normal
-//!   processing. A durable metadata flag ensures state sync runs at most once;
-//!   subsequent restarts must take the marshal sync path.
+//!   [`db::StateSyncSet::sync`]. For each finalized block while startup sync
+//!   is live, the actor synchronously asks bootstrap to observe that block's
+//!   sync targets. If the live session accepts the block, the actor
+//!   acknowledges it immediately. Once bootstrap freezes databases at
+//!   `database_anchor`, the actor keeps acknowledging finalized delivery
+//!   through that anchor. The first finalized block above `database_anchor`
+//!   then transitions directly into normal processing. A durable metadata flag
+//!   records that this one-time peer sync/bootstrap has completed; subsequent
+//!   restarts must take the marshal sync path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!
@@ -139,9 +147,8 @@ where
     ///
     /// Called by the wrapper for finalized blocks received during state sync.
     ///
-    /// The returned targets are forwarded to the background sync orchestrator
-    /// so the sync engines can track the latest finalized state root and
-    /// range.
+    /// The returned targets are handed to the startup sync coordinator so the
+    /// sync engines can track the latest finalized state root and range.
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
 
     /// Block used to initialize the consensus engine in the first epoch.

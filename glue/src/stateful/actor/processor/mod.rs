@@ -22,7 +22,6 @@
 //! response channel, in-progress work stops at the next await point via
 //! [`await_or_cancel`].
 
-use super::metrics::Metrics as ProcessorMetrics;
 use crate::stateful::{
     db::{Anchor, DatabaseSet},
     Application, Proposed,
@@ -47,8 +46,12 @@ use std::{
 };
 use tracing::{debug, warn};
 
+mod metrics;
+pub(crate) use metrics::Metrics as ProcessorMetrics;
+
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
+type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -60,8 +63,6 @@ where
     parent: PendingDigest<A, E>,
     merkleized: PendingBatches<A, E>,
 }
-
-type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 
 /// Errors while preparing parent-relative batches for propose/verify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +116,11 @@ where
             last_processed,
             metrics,
         }
+    }
+
+    /// Returns a reference to the database set.
+    pub(super) fn databases(&self) -> &A::Databases {
+        &self.databases
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -698,7 +704,7 @@ where
 mod tests {
     use super::{await_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
     use crate::stateful::{
-        actor::metrics::Metrics as ProcessorMetrics,
+        actor::processor::ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
         Application, Proposed,
     };
