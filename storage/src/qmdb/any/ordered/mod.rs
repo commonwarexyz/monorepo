@@ -27,7 +27,7 @@ pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Oper
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
 /// Whether the ordered-key span defined by `span_start` and `span_end` contains `key`.
-pub fn span_contains<K: Key>(span_start: &K, span_end: &K, key: &K) -> bool {
+pub(crate) fn span_contains<K: Key>(span_start: &K, span_end: &K, key: &K) -> bool {
     if span_start >= span_end {
         key >= span_start || key < span_end
     } else {
