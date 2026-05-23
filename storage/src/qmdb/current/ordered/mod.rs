@@ -632,9 +632,8 @@ pub mod tests {
                     value,
                     next_key: proof.next_key,
                 };
-                assert!(proof.verify_update(&hasher, &update, &root));
-                assert!(proof.verify_operation(&hasher, &Operation::Update(update.clone()), &root));
-                assert!(!proof.verify_operation(&hasher, &Operation::Delete(key), &root));
+                assert!(proof.verify_operation(&hasher, Operation::Update(update.clone()), &root));
+                assert!(!proof.verify_operation(&hasher, Operation::Delete(key), &root));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
@@ -664,7 +663,7 @@ pub mod tests {
                 ));
                 let mut bad_update = update;
                 bad_update.next_key = wrong_key;
-                assert!(!proof.verify_update(&hasher, &bad_update, &root));
+                assert!(!proof.verify_operation(&hasher, Operation::Update(bad_update), &root));
             }
 
             db.destroy().await.unwrap();

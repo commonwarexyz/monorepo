@@ -62,34 +62,14 @@ impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueP
 }
 
 impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K, D, N> {
-    /// Return true if this proof authenticates `update` against `root`.
-    ///
-    /// This also checks that the proof's embedded `next_key` matches the provided update, which is
-    /// required when the operation is decoded separately from the proof.
-    pub fn verify_update<H, V>(
-        &self,
-        hasher: &StandardHasher<H>,
-        update: &Update<K, V>,
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<Digest = D>,
-        V: ValueEncoding,
-        Operation<F, K, V>: Codec,
-    {
-        if self.next_key != update.next_key {
-            return false;
-        }
-
-        self.proof
-            .verify(hasher, Operation::Update(update.clone()), root)
-    }
-
     /// Return true if this proof authenticates `operation` as the active key-value update.
+    ///
+    /// This also checks that the proof's embedded `next_key` matches the provided operation, which
+    /// is required when the operation is decoded separately from the proof.
     pub fn verify_operation<H, V>(
         &self,
         hasher: &StandardHasher<H>,
-        operation: &Operation<F, K, V>,
+        operation: Operation<F, K, V>,
         root: &D,
     ) -> bool
     where
@@ -97,11 +77,13 @@ impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K
         V: ValueEncoding,
         Operation<F, K, V>: Codec,
     {
-        let Operation::Update(update) = operation else {
-            return false;
-        };
+        match &operation {
+            Operation::Update(update) if self.next_key == update.next_key => {}
+            Operation::Update(_) => return false,
+            _ => return false,
+        }
 
-        self.verify_update(hasher, update, root)
+        self.proof.verify(hasher, operation, root)
     }
 }
 
@@ -163,7 +145,7 @@ where
             next_key: proof.next_key.clone(),
         };
 
-        proof.verify_update(hasher, &update, root)
+        proof.verify_operation(hasher, Operation::Update(update), root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
