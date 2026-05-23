@@ -84,11 +84,11 @@
 //!
 //! # Layout
 //!
-//! - [`input`] defines the libFuzzer-facing scenario type.
-//! - [`variant`] adapts the standard / coding variant mailboxes to a
+//! - `input` defines the libFuzzer-facing scenario type.
+//! - `variant` adapts the standard / coding variant mailboxes to a
 //!   single publish trait the driver can call generically.
 //! - [`invariant`] holds the end-of-run assertions, one per property.
-//! - [`runner`] holds the deterministic-runtime driver and delegates
+//! - `runner` holds the deterministic-runtime driver and delegates
 //!   to [`invariant::check_all`] at the end.
 
 mod input;
