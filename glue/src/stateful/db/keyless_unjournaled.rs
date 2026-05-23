@@ -6,13 +6,13 @@
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait,
+    Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_macros::select;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{reschedule, Clock, Metrics, Storage};
 use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
@@ -30,11 +30,18 @@ use std::{ops::Deref, sync::Arc};
 
 type KeylessUnjournaledDbHandle<F, E, V, H, C, S> = Arc<AsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
 
-fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
+async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
     let mut latest = None;
+    let mut drained = 0usize;
     loop {
         match tip_updates.try_recv() {
-            Ok(update) => latest = Some(update),
+            Ok(update) => {
+                latest = Some(update);
+                drained += 1;
+                if drained % MAX_CHANNEL_DRAIN_PER_TICK == 0 {
+                    reschedule().await;
+                }
+            }
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
                 return latest;
             }
@@ -337,7 +344,7 @@ where
         let mut tip_updates = Some(tip_updates);
         loop {
             if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates) {
+                if let Some(update) = drain_latest_target(tip_updates).await {
                     target = update;
                 }
             }
@@ -366,7 +373,7 @@ where
             };
 
             if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates) {
+                if let Some(update) = drain_latest_target(tip_updates).await {
                     target = update;
                     continue;
                 }
@@ -428,7 +435,7 @@ where
         let mut tip_updates = Some(tip_updates);
         loop {
             if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates) {
+                if let Some(update) = drain_latest_target(tip_updates).await {
                     target = update;
                 }
             }
@@ -457,7 +464,7 @@ where
             };
 
             if let Some(tip_updates) = tip_updates.as_mut() {
-                if let Some(update) = drain_latest_target(tip_updates) {
+                if let Some(update) = drain_latest_target(tip_updates).await {
                     target = update;
                     continue;
                 }

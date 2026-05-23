@@ -497,8 +497,8 @@ impl EngineDefinition for MultiDbEngine {
         };
 
         let mut plan =
-            SyncPlan::load(context.child("stateful_startup"), partition_prefix.clone()).await;
-        let startup_sync_height = if self.enable_state_sync && plan.needs_state_sync() {
+            SyncPlan::init(&context.child("stateful_startup"), partition_prefix.clone()).await;
+        let startup_sync_height = if self.enable_state_sync && plan.may_state_sync() {
             match fetch_majority_sync_floor(&self.marshal_mailboxes, &context, public_key).await {
                 Some((finalization, height)) => {
                     self.sync_heights
@@ -584,15 +584,15 @@ impl EngineDefinition for MultiDbEngine {
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
-        let app = App::new(genesis_block.clone());
+        let application = App::new(genesis_block.clone());
         let (stateful_actor, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
-                app,
+                application,
                 db_config,
                 input_provider: (),
                 marshal: marshal_mailbox.clone(),
-                mailbox_size: 100,
+                mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: SyncEngineConfig {

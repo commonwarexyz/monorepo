@@ -47,18 +47,41 @@
 //!    generation's targets to the behind databases, clear their reached
 //!    state, and repeat from step 1.
 //!
+//! ### Chasing a moving tip
+//!
+//! ```text
+//! time -------------------------------------------------------------->
+//!
+//! marshal finalized tip:   A0 ------ A1 ------ A2 ------ A3
+//! generation:              g0        g1        g2        g3
+//!
+//! db0 (slow):              g0 ------------------> g1 -----------------> g3 reached
+//! db1 (fast):              g0 ----> g1 reached -- frozen -- regroup --> g3 reached
+//! db2 (fast):              g0 ----> g1 reached -- frozen -- regroup --> g3 reached
+//!
+//! coordinator queue while db0 is still catching up:
+//!                          [A2] [A3] -- drain --> keep only A3
+//!
+//! finish only when:
+//! - every database has reported the same generation
+//! - no newer tip update is still queued behind it
+//! ```
+//!
 //! The coordinator continuously drains tip updates and keeps only the latest
 //! value before forwarding, which avoids target-channel backpressure buildup.
 //! The `generation_state` map is pruned after every dispatch to only retain
 //! generations currently assigned to at least one database, so memory usage
 //! is bounded by the number of databases regardless of how long sync runs.
 
-use commonware_consensus::types::{Height, Round};
+use commonware_consensus::{
+    types::{Height, Round},
+    CertifiableBlock, Epochable, Viewable,
+};
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_runtime::{Metrics, Spawner};
+use commonware_runtime::{reschedule, Metrics, Spawner};
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, ring},
+    channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::AsyncRwLock,
 };
 use futures::{
@@ -72,6 +95,8 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
+
+const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
 pub mod compact_p2p;
@@ -299,6 +324,61 @@ pub struct Anchor<D: Digest> {
     pub digest: D,
 }
 
+impl<B, D> From<&B> for Anchor<D>
+where
+    B: CertifiableBlock<Digest = D>,
+    B::Context: Epochable + Viewable,
+    D: Digest,
+{
+    fn from(block: &B) -> Self {
+        Self {
+            height: block.height(),
+            round: Round::new(block.context().epoch(), block.context().view()),
+            digest: block.digest(),
+        }
+    }
+}
+
+/// Tip update delivered to a live state-sync session.
+///
+/// The optional observation barrier is used by the stateful actor to delay
+/// marshal acknowledgement until the sync coordinator has recorded the new
+/// anchor and targets.
+pub struct TipUpdate<D: Digest, T> {
+    anchor: Anchor<D>,
+    targets: T,
+    observed: Option<oneshot::Sender<()>>,
+}
+
+impl<D: Digest, T> TipUpdate<D, T> {
+    pub fn new(anchor: Anchor<D>, targets: T) -> Self {
+        Self {
+            anchor,
+            targets,
+            observed: None,
+        }
+    }
+
+    pub(crate) fn with_observation(anchor: Anchor<D>, targets: T) -> (Self, oneshot::Receiver<()>) {
+        let (observed, receiver) = oneshot::channel();
+        (
+            Self {
+                anchor,
+                targets,
+                observed: Some(observed),
+            },
+            receiver,
+        )
+    }
+
+    fn record(mut self) -> (Anchor<D>, T) {
+        if let Some(observed) = self.observed.take() {
+            let _ = observed.send(());
+        }
+        (self.anchor, self.targets)
+    }
+}
+
 /// A [`DatabaseSet`] that can run one-time startup state sync.
 ///
 /// `D` is the block digest type. Each set of sync targets is paired
@@ -319,7 +399,7 @@ where
         resolvers: R,
         anchor: Anchor<D>,
         targets: Self::SyncTargets,
-        tip_updates: ring::Receiver<(Anchor<D>, Self::SyncTargets)>,
+        tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
     ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
 }
@@ -381,13 +461,12 @@ where
         resolver: R,
         anchor: Anchor<D>,
         target: Self::SyncTargets,
-        tip_updates: ring::Receiver<(Anchor<D>, Self::SyncTargets)>,
+        tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
     ) -> Result<(Self, Anchor<D>), Self::Error> {
         let (target_tx, target_rx) = mpsc::channel(sync_config.update_channel_size.get());
         let (finish_tx, finish_rx) = mpsc::channel(1);
         let (reached_tx, mut reached_rx) = mpsc::channel(1);
-
         let mut current_target = target.clone();
         let sync = T::sync_db(
             context,
@@ -420,11 +499,11 @@ where
                         return current_anchor;
                     },
                     update = update_future => {
-                        let Some((new_anchor, new_target)) = update else {
+                        let Some(update) = update else {
                             tip_updates = None;
                             continue;
                         };
-                        // Sync targets must only move forward.
+                        let (new_anchor, new_target) = update.record();
                         if new_anchor.height <= current_anchor.height {
                             continue;
                         }
@@ -568,8 +647,8 @@ macro_rules! impl_state_sync_set {
     ($($T:ident : $R:ident : $idx:tt),+) => {
         impl<E, D, $($T, $R),+> StateSyncSet<E, ($($R,)+), D> for ($(Arc<AsyncRwLock<$T>>,)+)
         where
-            E: Send + Sync + Spawner + Metrics,
-            D: Digest,
+            E: Send + Sync + Spawner + Metrics + 'static,
+            D: Digest + 'static,
             $(
                 $T: StateSyncDb<E, $R> + 'static,
                 $R: Send + 'static,
@@ -583,7 +662,7 @@ macro_rules! impl_state_sync_set {
                 resolvers: ($($R,)+),
                 anchor: Anchor<D>,
                 targets: Self::SyncTargets,
-                tip_updates: ring::Receiver<(Anchor<D>, Self::SyncTargets)>,
+                tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
                 sync_config: SyncEngineConfig,
             ) -> Result<(Self, Anchor<D>), Self::Error> {
                 let db_channels = ($(
@@ -611,32 +690,28 @@ macro_rules! impl_state_sync_set {
                 let coordinator_targets = targets.clone();
                 let first_db_error: Arc<commonware_utils::sync::Mutex<Option<String>>> =
                     Arc::new(commonware_utils::sync::Mutex::new(None));
-                let coordinator_result: Arc<commonware_utils::sync::Mutex<Option<Anchor<D>>>> =
-                    Arc::new(commonware_utils::sync::Mutex::new(None));
-                let finish_coordinator = {
-                    let coordinator_result = coordinator_result.clone();
-                    async move {
-                        // Keep ownership of the original per-database senders inside this task so
-                        // they are dropped as soon as the coordinator exits.
+                let coordinator_handle = context.child("coordinator").spawn({
+                    move |_context| async move {
                         let coordinator_owned_senders = coordinator_owned_senders;
                         let mut tip_updates = Some(tip_updates);
                         let mut state = CoordinatorState::new(db_count, anchor, coordinator_targets);
 
                         loop {
-                            // Phase 1: Drain reached events.
                             loop {
                                 match reached_event_rx.try_recv() {
                                     Ok((idx, generation)) => state.record_reached(idx, generation),
                                     Err(mpsc::error::TryRecvError::Empty) => break,
-                                    Err(mpsc::error::TryRecvError::Disconnected) => return,
+                                    Err(mpsc::error::TryRecvError::Disconnected) => return None,
                                 }
                             }
 
-                            // Phase 2: Drain tip updates; keep only the latest.
                             if let Some(updates) = tip_updates.as_mut() {
                                 loop {
                                     match updates.try_recv() {
-                                        Ok((a, t)) => state.record_tip_update(a, t),
+                                        Ok(update) => {
+                                            let (anchor, targets) = update.record();
+                                            state.record_tip_update(anchor, targets);
+                                        }
                                         Err(ring::TryRecvError::Empty) => break,
                                         Err(ring::TryRecvError::Disconnected) => {
                                             tip_updates = None;
@@ -646,14 +721,12 @@ macro_rules! impl_state_sync_set {
                                 }
                             }
 
-                            // Phase 3: Decide what to do.
                             match state.next_action() {
                                 CoordinatorAction::Converged(anchor) => {
                                     $(
                                         let _ = coordinator_senders.$idx.finish_tx.send_lossy(()).await;
                                     )+
-                                    *coordinator_result.lock() = Some(anchor);
-                                    return;
+                                    return Some(anchor);
                                 }
                                 CoordinatorAction::Dispatch {
                                     generation,
@@ -667,14 +740,14 @@ macro_rules! impl_state_sync_set {
                                                 .send_lossy((generation, dispatch_target.clone()))
                                                 .await
                                             {
-                                                return;
+                                                return None;
                                             }
                                             if !coordinator_senders.$idx
                                                 .target_tx
                                                 .send_lossy(dispatch_target)
                                                 .await
                                             {
-                                                return;
+                                                return None;
                                             }
                                         }
                                     )+
@@ -683,7 +756,6 @@ macro_rules! impl_state_sync_set {
                                 CoordinatorAction::Wait => {}
                             }
 
-                            // Phase 4: Block until the next event.
                             let update_future = tip_updates.as_mut().map_or_else(
                                 || Either::Right(pending()),
                                 |updates| Either::Left(updates.recv()),
@@ -691,31 +763,29 @@ macro_rules! impl_state_sync_set {
                             select! {
                                 reached_event = reached_event_rx.recv() => {
                                     let Some((idx, generation)) = reached_event else {
-                                        return;
+                                        return None;
                                     };
                                     state.record_reached(idx, generation);
                                 },
                                 _ = completion_rx.recv() => {
-                                    // A database task completed (success or failure). Close all
-                                    // outstanding per-database channels immediately so peers
-                                    // waiting on `finish_rx` or `target_rx` can terminate.
                                     drop(coordinator_owned_senders);
-                                    return;
+                                    return None;
                                 },
                                 update = update_future => {
-                                    let Some((a, t)) = update else {
+                                    let Some(update) = update else {
                                         tip_updates = None;
                                         continue;
                                     };
-                                    state.record_tip_update(a, t);
+                                    let (anchor, targets) = update.record();
+                                    state.record_tip_update(anchor, targets);
                                 },
                             };
                         }
                     }
-                };
-                let synced = join!(
+                });
+                let db_handles = (
                     $(
-                        async {
+                        context.child(concat!("db_", stringify!($idx))).spawn({
                             let first_db_error = first_db_error.clone();
                             let mut reached_target_rx = db_channels.$idx.reached_rx;
                             let mut generation_rx = Some(db_channels.$idx.generation_rx);
@@ -725,116 +795,136 @@ macro_rules! impl_state_sync_set {
                             let mut last_reported_generation = None;
                             let reached_event_sender = reached_event_tx.clone();
                             let completion_signal = completion_tx.clone();
-                            let sync = $T::sync_db(
-                                context.child(concat!("db_", stringify!($idx))),
-                                config.$idx,
-                                resolvers.$idx,
-                                targets.$idx,
-                                db_channels.$idx.target_rx,
-                                Some(db_channels.$idx.finish_rx),
-                                Some(db_channels.$idx.reached_tx),
-                                sync_config,
-                            );
-                            let forward_reached = async move {
-                                loop {
-                                    drain_generation_updates(
-                                        &mut generation_rx,
-                                        &mut current_generation,
-                                        &mut current_target,
-                                        &last_reached_target,
-                                        &mut last_reported_generation,
-                                        &reached_event_sender,
-                                        $idx,
-                                    )
-                                    .await;
+                            let config = config.$idx;
+                            let resolver = resolvers.$idx;
+                            let target = targets.$idx;
+                            let target_rx = db_channels.$idx.target_rx;
+                            let finish_rx = db_channels.$idx.finish_rx;
+                            let reached_tx = db_channels.$idx.reached_tx;
+                            move |context| async move {
+                                let sync = $T::sync_db(
+                                    context,
+                                    config,
+                                    resolver,
+                                    target,
+                                    target_rx,
+                                    Some(finish_rx),
+                                    Some(reached_tx),
+                                    sync_config,
+                                );
+                                let forward_reached = async move {
+                                    loop {
+                                        drain_generation_updates(
+                                            &mut generation_rx,
+                                            &mut current_generation,
+                                            &mut current_target,
+                                            &last_reached_target,
+                                            &mut last_reported_generation,
+                                            &reached_event_sender,
+                                            $idx,
+                                        )
+                                        .await;
 
-                                    let update_future = generation_rx.as_mut().map_or_else(
-                                        || Either::Right(pending()),
-                                        |updates| Either::Left(updates.recv()),
-                                    );
-                                    select! {
-                                        reached_target = reached_target_rx.recv() => {
-                                            let Some(reached_target) = reached_target else {
-                                                return;
-                                            };
-
-                                            last_reached_target = Some(reached_target.clone());
-                                            drain_generation_updates(
-                                                &mut generation_rx,
-                                                &mut current_generation,
-                                                &mut current_target,
-                                                &last_reached_target,
-                                                &mut last_reported_generation,
-                                                &reached_event_sender,
-                                                $idx,
-                                            )
-                                            .await;
-
-                                            if reached_target != current_target {
-                                                continue;
-                                            }
-
-                                            if last_reported_generation != Some(current_generation) {
-                                                if !reached_event_sender
-                                                    .send_lossy(($idx, current_generation))
-                                                    .await
-                                                {
+                                        let update_future = generation_rx.as_mut().map_or_else(
+                                            || Either::Right(pending()),
+                                            |updates| Either::Left(updates.recv()),
+                                        );
+                                        select! {
+                                            reached_target = reached_target_rx.recv() => {
+                                                let Some(reached_target) = reached_target else {
                                                     return;
+                                                };
+
+                                                last_reached_target = Some(reached_target.clone());
+                                                drain_generation_updates(
+                                                    &mut generation_rx,
+                                                    &mut current_generation,
+                                                    &mut current_target,
+                                                    &last_reached_target,
+                                                    &mut last_reported_generation,
+                                                    &reached_event_sender,
+                                                    $idx,
+                                                )
+                                                .await;
+
+                                                if reached_target != current_target {
+                                                    continue;
                                                 }
-                                                last_reported_generation = Some(current_generation);
-                                            }
-                                        },
-                                        update = update_future => {
-                                            let Some((generation, target)) = update else {
-                                                generation_rx = None;
-                                                continue;
-                                            };
-                                            current_generation = generation;
-                                            current_target = target;
-                                            if last_reached_target.as_ref() == Some(&current_target)
-                                                && last_reported_generation != Some(current_generation)
-                                            {
-                                                if !reached_event_sender
-                                                    .send_lossy(($idx, current_generation))
-                                                    .await
+
+                                                if last_reported_generation != Some(current_generation) {
+                                                    if !reached_event_sender
+                                                        .send_lossy(($idx, current_generation))
+                                                        .await
+                                                    {
+                                                        return;
+                                                    }
+                                                    last_reported_generation = Some(current_generation);
+                                                }
+                                            },
+                                            update = update_future => {
+                                                let Some((generation, target)) = update else {
+                                                    generation_rx = None;
+                                                    continue;
+                                                };
+                                                current_generation = generation;
+                                                current_target = target;
+                                                if last_reached_target.as_ref() == Some(&current_target)
+                                                    && last_reported_generation != Some(current_generation)
                                                 {
-                                                    return;
+                                                    if !reached_event_sender
+                                                        .send_lossy(($idx, current_generation))
+                                                        .await
+                                                    {
+                                                        return;
+                                                    }
+                                                    last_reported_generation = Some(current_generation);
                                                 }
-                                                last_reported_generation = Some(current_generation);
-                                            }
-                                        },
-                                    };
+                                            },
+                                        };
+                                    }
+                                };
+                                let (sync_result, _) = join!(sync, forward_reached);
+                                let result = sync_result
+                                    .map(|database| Arc::new(AsyncRwLock::new(database)))
+                                    .map_err(|err| {
+                                        format!(
+                                            "state sync failed (index {}, db {}): {err:?}",
+                                            $idx,
+                                            core::any::type_name::<$T>(),
+                                        )
+                                    });
+                                if let Err(err) = &result {
+                                    let mut first = first_db_error.lock();
+                                    if first.is_none() {
+                                        *first = Some(err.clone());
+                                    }
                                 }
-                            };
-                            let (sync_result, _) = join!(sync, forward_reached);
-                            let result = sync_result
-                                .map(|database| Arc::new(AsyncRwLock::new(database)))
-                                .map_err(|err| {
-                                    format!(
-                                        "state sync failed (index {}, db {}): {err:?}",
-                                        $idx,
-                                        core::any::type_name::<$T>(),
-                                    )
-                                });
-                            if let Err(err) = &result {
-                                let mut first = first_db_error.lock();
-                                if first.is_none() {
-                                    *first = Some(err.clone());
-                                }
+                                let _ = completion_signal.send_lossy(()).await;
+                                result
                             }
-                            let _ = completion_signal.send_lossy(()).await;
-                            result
+                        }),
+                    )+
+                );
+
+                let synced = join!(
+                    $(
+                        async {
+                            db_handles.$idx
+                                .await
+                                .expect("state sync database task exited")
                         },
                     )+
-                    finish_coordinator,
                 );
+                let converged_anchor = coordinator_handle
+                    .await
+                    .expect("state sync coordinator task exited");
 
                 if let Some(err) = first_db_error.lock().take() {
                     return Err(err);
                 }
 
                 let synced = ($(synced.$idx?,)+);
-                let Some(converged_anchor) = coordinator_result.lock().take() else {
+                let Some(converged_anchor) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
 
@@ -881,9 +971,11 @@ async fn drain_generation_updates<T>(
     T: Clone + PartialEq,
 {
     if let Some(updates) = generation_rx.as_mut() {
+        let mut drained = 0usize;
         loop {
             match updates.try_recv() {
                 Ok((generation, target)) => {
+                    drained += 1;
                     *current_generation = generation;
                     *current_target = target;
 
@@ -897,6 +989,9 @@ async fn drain_generation_updates<T>(
                             return;
                         }
                         *last_reported_generation = Some(*current_generation);
+                    }
+                    if drained % MAX_CHANNEL_DRAIN_PER_TICK == 0 {
+                        reschedule().await;
                     }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
@@ -1210,13 +1305,15 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, CoordinatorAction, CoordinatorState,
-        DatabaseSet, ManagedDb, Merkleized, StateSyncDb, StateSyncSet, SyncEngineConfig,
-        Unmerkleized,
+        DatabaseSet, ManagedDb, Merkleized, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
+        Unmerkleized, MAX_CHANNEL_DRAIN_PER_TICK,
     };
     use commonware_consensus::types::{Epoch, Height, Round, View};
     use commonware_cryptography::sha256;
     use commonware_macros::select;
-    use commonware_runtime::{deterministic, Clock, Runner as _, Spawner as _, Supervisor as _};
+    use commonware_runtime::{
+        deterministic, reschedule, Clock, Runner as _, Spawner as _, Supervisor as _,
+    };
     use commonware_utils::{
         channel::{mpsc, oneshot, ring},
         sync::AsyncRwLock,
@@ -1803,9 +1900,9 @@ mod tests {
                 |finish_rx| futures::future::Either::Left(finish_rx.recv()),
             );
             select! {
-                _ = finish_signal => {
-                    Ok(Self { final_target: target })
-                },
+                _ = finish_signal => Ok(Self {
+                    final_target: target
+                }),
                 _ = context.sleep(Duration::from_millis(10)) => {
                     if let Some(reached_target) = reached_target.as_ref() {
                         let _ = reached_target.send(update).await;
@@ -1813,7 +1910,9 @@ mod tests {
                     if let Some(finish_rx) = finish.as_mut() {
                         let _ = finish_rx.recv().await;
                     }
-                    Ok(Self { final_target: update })
+                    Ok(Self {
+                        final_target: update,
+                    })
                 },
             }
         }
@@ -1969,12 +2068,17 @@ mod tests {
             let mut observed_update = false;
             loop {
                 if let Some(update_rx) = tip_updates.as_mut() {
+                    let mut drained = 0usize;
                     loop {
                         match update_rx.try_recv() {
                             Ok(update) => {
+                                drained += 1;
                                 final_target = update;
                                 observed_update = true;
                                 reported_target = None;
+                                if drained % MAX_CHANNEL_DRAIN_PER_TICK == 0 {
+                                    reschedule().await;
+                                }
                             }
                             Err(mpsc::error::TryRecvError::Empty) => {
                                 break;
@@ -2364,8 +2468,8 @@ mod tests {
                     .expect("single state sync should succeed")
                 });
 
-            let _ = tip_tx.send((anchor(2), 2)).await;
-            let _ = tip_tx.send((anchor(1), 1)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), 2)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), 1)).await;
             drop(tip_tx);
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
@@ -2414,7 +2518,7 @@ mod tests {
                         .expect("single state sync should succeed")
                     });
 
-            let _ = tip_tx.send((anchor(2), 2)).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), 2)).await;
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
             let final_target = database.read().await.final_target;
@@ -2468,8 +2572,8 @@ mod tests {
             while !fast_done.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
-            let _ = tip_tx.send((anchor(1), (1, 1))).await;
-            let _ = tip_tx.send((anchor(2), (2, 2))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 
@@ -2528,8 +2632,8 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let _ = tip_tx.send((anchor(2), (2, 2))).await;
-            let _ = tip_tx.send((anchor(1), (1, 1))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
             drop(tip_tx);
             context.sleep(Duration::from_millis(1)).await;
             slow_release.store(true, Ordering::SeqCst);
@@ -2804,7 +2908,7 @@ mod tests {
             }
 
             for target in 1..=16u64 {
-                let _ = tip_tx.send((anchor(target), (target, target))).await;
+                let _ = tip_tx.send(TipUpdate::new(anchor(target), (target, target))).await;
             }
             drop(tip_tx);
 
@@ -2941,7 +3045,7 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let _ = tip_tx.send((anchor(9), (9, 7))).await;
+            let _ = tip_tx.send(TipUpdate::new(anchor(9), (9, 7))).await;
             context.sleep(Duration::from_millis(1)).await;
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);

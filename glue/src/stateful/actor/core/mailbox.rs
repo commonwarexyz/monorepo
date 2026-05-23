@@ -43,8 +43,8 @@ where
 
     /// Requests the attached database set.
     ///
-    /// The actor replies once the database set is attached, or immediately if
-    /// it is already available.
+    /// The actor replies once the database set has been attached to the
+    /// serving stateful actor, or immediately if that has already happened.
     SubscribeDatabases {
         response: oneshot::Sender<A::Databases>,
     },
@@ -163,9 +163,9 @@ where
 {
     /// Wait for the attached database set.
     ///
-    /// This resolves when startup bootstrap finishes and the actor has
-    /// attached the database set. Late callers receive the current database
-    /// set immediately.
+    /// This resolves once startup handoff has attached the database set to the
+    /// serving actor. Late callers receive the current database set
+    /// immediately.
     pub async fn subscribe_databases(&self) -> A::Databases {
         let (response, receiver) = oneshot::channel();
         let _ = self

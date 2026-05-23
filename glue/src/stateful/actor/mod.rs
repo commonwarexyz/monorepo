@@ -1,11 +1,7 @@
 mod core;
-pub use core::{Config, Stateful, SyncPlan};
+pub use core::{Config, Mailbox, Stateful};
 
-mod mailbox;
-pub use mailbox::Mailbox;
-
-mod bootstrap;
-
-mod metrics;
+mod syncer;
+pub use syncer::SyncPlan;
 
 mod processor;
