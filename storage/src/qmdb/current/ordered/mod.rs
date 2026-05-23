@@ -664,9 +664,15 @@ pub mod tests {
                 assert!(!TestDb::<F, C, V>::verify_key_value_proof(
                     &hasher, key, value, &bad_proof, &root,
                 ));
-                let mut bad_update = update;
-                bad_update.next_key = wrong_key;
-                assert!(!proof.verify_operation(&hasher, Operation::Update(bad_update), &root));
+                assert!(!proof.verify_operation(
+                    &hasher,
+                    Operation::Update(Update {
+                        key,
+                        value,
+                        next_key: wrong_key,
+                    }),
+                    &root
+                ));
             }
 
             db.destroy().await.unwrap();
