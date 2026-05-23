@@ -150,7 +150,7 @@ where
         proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let (op_proof, operation) = match proof {
+        let (op_proof, op) = match proof {
             super::ExclusionProof::KeyValue(op_proof, update) => {
                 if update.key == *key {
                     // The provided `key` is in the DB if it matches the start of the span.
@@ -173,7 +173,7 @@ where
             }
         };
 
-        op_proof.verify(hasher, operation, root)
+        op_proof.verify(hasher, op, root)
     }
 }
 
