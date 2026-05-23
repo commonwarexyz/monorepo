@@ -151,7 +151,7 @@ impl Handler for FuzzHandler {
     type Request = FuzzRequest;
     type Response = FuzzResponse;
 
-    async fn process(
+    fn process(
         &mut self,
         _origin: Self::PublicKey,
         request: Self::Request,
@@ -186,12 +186,7 @@ impl Monitor for FuzzMonitor {
     type PublicKey = PublicKey;
     type Response = FuzzResponse;
 
-    async fn collected(
-        &mut self,
-        _handler: Self::PublicKey,
-        _response: Self::Response,
-        _count: usize,
-    ) {
+    fn collected(&mut self, _handler: Self::PublicKey, _response: Self::Response, _count: usize) {
         self.collected_count += 1;
     }
 }
@@ -379,9 +374,7 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(handler) = handlers.get_mut(&handler_idx) {
                         let (tx, rx) = oneshot::channel();
-                        handler
-                            .process(peers[origin_idx].public_key(), request.clone(), tx)
-                            .await;
+                        handler.process(peers[origin_idx].public_key(), request.clone(), tx);
 
                         if should_respond {
                             if let Ok(response) = rx.await {
@@ -400,9 +393,7 @@ fn fuzz(input: FuzzInput) {
                     let handler_idx = (peer_idx as usize) % peers.len();
 
                     if let Some(monitor) = monitors.get_mut(&monitor_idx) {
-                        monitor
-                            .collected(peers[handler_idx].public_key(), response, count)
-                            .await;
+                        monitor.collected(peers[handler_idx].public_key(), response, count);
                     }
                 }
 

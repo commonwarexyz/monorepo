@@ -109,7 +109,8 @@ impl<
                             );
 
                             // Register peer with the router (may fail during shutdown)
-                            let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                            let Some(channels) = router.ready(peer.clone(), messenger).await.ok()
+                            else {
                                 debug!(?peer, "router shut down during peer setup");
                                 return;
                             };

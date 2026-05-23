@@ -12,10 +12,7 @@ use commonware_actor::{
     Feedback,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    ordered::Map,
-};
+use commonware_utils::{channel::oneshot, ordered::Map};
 use std::{collections::VecDeque, net::IpAddr};
 
 /// Messages that can be sent to the tracker actor.
@@ -138,48 +135,51 @@ impl<C: PublicKey> Mailbox<C> {
 
     /// Request dialable peers from the tracker.
     ///
-    /// Returns an empty response if the tracker is shut down.
-    pub(crate) async fn dialable(&self) -> Dialable<C> {
+    /// The returned receiver is closed if the tracker is shut down.
+    pub(crate) fn dialable(&self) -> oneshot::Receiver<Dialable<C>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dialable { responder });
-        receiver.await.unwrap_or_default()
+        receiver
     }
 
     /// Send a `Dial` message to the tracker.
     ///
-    /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
+    /// The returned receiver is closed if the tracker is shut down.
+    pub(crate) fn dial(
+        &self,
+        public_key: C,
+    ) -> oneshot::Receiver<Option<(Reservation<C>, Ingress)>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dial {
             public_key,
             reservation,
         });
-        receiver.await.ok().flatten()
+        receiver
     }
 
     /// Send an `Acceptable` message to the tracker.
     ///
-    /// Returns `false` if the tracker is shut down.
-    pub(crate) async fn acceptable(&self, public_key: C, source_ip: IpAddr) -> bool {
+    /// The returned receiver is closed if the tracker is shut down.
+    pub(crate) fn acceptable(&self, public_key: C, source_ip: IpAddr) -> oneshot::Receiver<bool> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Acceptable {
             public_key,
             source_ip,
             responder,
         });
-        receiver.await.unwrap_or(false)
+        receiver
     }
 
     /// Send a `Listen` message to the tracker.
     ///
-    /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
+    /// The returned receiver is closed if the tracker is shut down.
+    pub(crate) fn listen(&self, public_key: C) -> oneshot::Receiver<Option<Reservation<C>>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,
             reservation,
         });
-        receiver.await.ok().flatten()
+        receiver
     }
 }
 
@@ -219,22 +219,19 @@ impl<C: PublicKey> Oracle<C> {
 impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
-    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+    fn peer_set(&mut self, id: u64) -> oneshot::Receiver<Option<TrackedPeers<Self::PublicKey>>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::PeerSet {
             index: id,
             responder,
         });
-        receiver.await.ok().flatten()
+        receiver
     }
 
-    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+    fn subscribe(&mut self) -> oneshot::Receiver<PeerSetSubscription<Self::PublicKey>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Subscribe { responder });
-        receiver.await.unwrap_or_else(|_| {
-            let (_, rx) = mpsc::unbounded_channel();
-            rx
-        })
+        receiver
     }
 }
 

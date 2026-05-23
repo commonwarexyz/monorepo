@@ -723,7 +723,7 @@ mod tests {
             network.start();
 
             // Subscribe to peer sets
-            let mut subscription = oracle.subscribe().await;
+            let mut subscription = oracle.subscribe().await.unwrap();
 
             // Register initial peer set
             let set10: Map<_, _> = peers_and_sks
@@ -926,7 +926,7 @@ mod tests {
             network.start();
 
             // Subscribe to peer sets
-            let mut subscription = oracle.subscribe().await;
+            let mut subscription = oracle.subscribe().await.unwrap();
 
             // Register a peer set that does NOT include self
             let peer_set: Map<_, _> = [(other_pk.clone(), other_addr.into())].try_into().unwrap();
@@ -1868,7 +1868,7 @@ mod tests {
 
             // Oracle operations should not panic even after shutdown
             oracle.track(1, peers.clone());
-            let _ = oracle.peer_set(0).await;
+            let _ = oracle.peer_set(0).await.ok().flatten();
             let _ = oracle.subscribe().await;
             crate::block_peer(&mut oracle, address.clone());
 
@@ -2130,7 +2130,7 @@ mod tests {
             let (slow_relay, _slow_receivers) =
                 Relay::new(context.child("slow_relay"), NZUsize!(10));
             assert!(
-                mailbox.ready(slow_peer, slow_relay).await.is_some(),
+                mailbox.ready(slow_peer, slow_relay).await.ok().is_some(),
                 "Failed to register slow peer"
             );
 
@@ -2138,7 +2138,7 @@ mod tests {
             let (fast_relay, mut fast_receivers) =
                 Relay::new(context.child("fast_relay"), NZUsize!(100));
             assert!(
-                mailbox.ready(fast_peer, fast_relay).await.is_some(),
+                mailbox.ready(fast_peer, fast_relay).await.ok().is_some(),
                 "Failed to register fast peer"
             );
 

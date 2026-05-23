@@ -107,7 +107,8 @@ impl<
                             let info_verifier = self.info_verifier.clone();
                             move |context| async move {
                                 // Get greeting from tracker (returns None if not eligible)
-                                let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
+                                let Some(greeting) =
+                                    tracker.connect(peer.clone(), is_dialer).await.ok()
                                 else {
                                     debug!(?peer, "peer not eligible");
                                     drop(reservation);
@@ -132,7 +133,8 @@ impl<
                                 );
 
                                 // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await
+                                let Some(channels) =
+                                    router.ready(peer.clone(), messenger).await.ok()
                                 else {
                                     debug!(?peer, "router shut down during peer setup");
                                     return;

@@ -18,7 +18,7 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
-        channel::mpsc,
+        channel::{mpsc, oneshot},
         ordered::{Map, Set},
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
@@ -271,10 +271,12 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// Fetch the primary and secondary peers tracked at the given ID.
+        ///
+        /// The returned receiver is closed if the provider is shut down.
         fn peer_set(
             &mut self,
             id: u64,
-        ) -> impl Future<Output = Option<TrackedPeers<Self::PublicKey>>> + Send;
+        ) -> oneshot::Receiver<Option<TrackedPeers<Self::PublicKey>>>;
 
         /// Subscribe to notifications when new peer sets are added.
         ///
@@ -282,9 +284,9 @@ stability_scope!(BETA {
         /// `latest` reflects how [`Manager::track`] stored the set: a peer listed in
         /// both roles appears only under `latest.primary`. The `all` field aggregates
         /// across tracked sets with the same rule (secondary excludes keys present as primary).
-        fn subscribe(
-            &mut self,
-        ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
+        ///
+        /// The returned receiver is closed if the provider is shut down.
+        fn subscribe(&mut self) -> oneshot::Receiver<PeerSetSubscription<Self::PublicKey>>;
     }
 
     /// Interface for managing peer set membership (where peer addresses are not known).

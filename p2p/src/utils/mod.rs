@@ -6,6 +6,7 @@ use commonware_utils::{
     channel::{
         fallible::FallibleExt,
         mpsc::{self, UnboundedReceiver, UnboundedSender},
+        oneshot,
     },
     ordered::Set,
 };
@@ -47,12 +48,14 @@ impl<P: PublicKey> StaticProvider<P> {
 impl<P: PublicKey> Provider for StaticProvider<P> {
     type PublicKey = P;
 
-    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<P>> {
+    fn peer_set(&mut self, id: u64) -> oneshot::Receiver<Option<TrackedPeers<P>>> {
         assert_eq!(id, self.id);
-        Some(TrackedPeers::primary(self.peers.clone()))
+        let (sender, receiver) = oneshot::channel();
+        let _ = sender.send(Some(TrackedPeers::primary(self.peers.clone())));
+        receiver
     }
 
-    async fn subscribe(&mut self) -> UnboundedReceiver<PeerSetUpdate<P>> {
+    fn subscribe(&mut self) -> oneshot::Receiver<UnboundedReceiver<PeerSetUpdate<P>>> {
         let (sender, receiver) = mpsc::unbounded_channel();
         sender.send_lossy(PeerSetUpdate {
             index: self.id,
@@ -60,6 +63,8 @@ impl<P: PublicKey> Provider for StaticProvider<P> {
             all: TrackedPeers::new(self.peers.clone(), Set::default()),
         });
         self.senders.push(sender); // prevent the receiver from closing
-        receiver
+        let (response, result) = oneshot::channel();
+        let _ = response.send(receiver);
+        result
     }
 }

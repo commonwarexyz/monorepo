@@ -97,7 +97,10 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     ) {
         let (peer, send, recv) = match listen(
             context,
-            |peer| tracker.acceptable(peer),
+            |peer| {
+                let accepted = tracker.acceptable(peer);
+                async move { accepted.await.unwrap_or(false) }
+            },
             stream_cfg,
             stream,
             sink,
@@ -113,7 +116,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "completed handshake");
 
         // Attempt to claim the connection
-        let Some(reservation) = tracker.listen(peer.clone()).await else {
+        let Some(reservation) = tracker.listen(peer.clone()).await.ok().flatten() else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };

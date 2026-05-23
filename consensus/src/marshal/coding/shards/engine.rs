@@ -439,7 +439,10 @@ where
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
-        let mut peer_set_subscription = self.peer_provider.subscribe().await;
+        let Ok(mut peer_set_subscription) = self.peer_provider.subscribe().await else {
+            debug!("peer set subscription failed");
+            return;
+        };
 
         select_loop! {
             self.context,

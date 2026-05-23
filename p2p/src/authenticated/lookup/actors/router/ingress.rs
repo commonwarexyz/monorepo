@@ -76,15 +76,15 @@ impl<P: PublicKey> Mailbox<P> {
 
     /// Notify the router that a peer is ready to communicate.
     ///
-    /// Returns `None` if the router has shut down.
-    pub async fn ready(&self, peer: P, relay: Relay<EncodedData>) -> Option<Channels<P>> {
+    /// The returned receiver is closed if the router has shut down.
+    pub fn ready(&self, peer: P, relay: Relay<EncodedData>) -> oneshot::Receiver<Channels<P>> {
         let (channels, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Ready {
             peer,
             relay,
             channels,
         });
-        receiver.await.ok()
+        receiver
     }
 
     /// Notify the router that a peer is no longer available.

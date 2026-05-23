@@ -1564,14 +1564,14 @@ mod tests {
             network.start();
 
             let mut manager = oracle.manager();
-            let peer_set = manager.peer_set(0).await.unwrap();
+            let peer_set = manager.peer_set(0).await.ok().flatten().unwrap();
             assert_eq!(peer_set.primary, Set::try_from([primary.clone()]).unwrap());
             assert_eq!(
                 peer_set.secondary,
                 Set::try_from([secondary.clone()]).unwrap()
             );
 
-            let mut updates = manager.subscribe().await;
+            let mut updates = manager.subscribe().await.unwrap();
             let update = updates.recv().await.unwrap();
             assert_eq!(update.index, 0);
             assert_eq!(
@@ -1866,7 +1866,7 @@ mod tests {
 
             // Subscribe to peer sets
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe().await;
+            let mut subscription = manager.subscribe().await.unwrap();
 
             // Register initial peer set
             manager.track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
@@ -1915,7 +1915,7 @@ mod tests {
             let pk_sec = ed25519::PrivateKey::from_seed(24).public_key();
 
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe().await;
+            let mut subscription = manager.subscribe().await.unwrap();
 
             manager.track(
                 10,
@@ -2194,7 +2194,7 @@ mod tests {
                 ),
             );
 
-            let mut updates = manager.subscribe().await;
+            let mut updates = manager.subscribe().await.unwrap();
             let update = updates.recv().await.unwrap();
             assert_eq!(update.index, 0);
             assert!(update.latest.primary.position(&pk2).is_some());
@@ -2276,7 +2276,7 @@ mod tests {
             let pk_y = ed25519::PrivateKey::from_seed(2).public_key();
 
             let mut manager = oracle.manager();
-            let mut sub = manager.subscribe().await;
+            let mut sub = manager.subscribe().await.unwrap();
 
             // Index 0: X is primary, Y is secondary.
             manager.track(

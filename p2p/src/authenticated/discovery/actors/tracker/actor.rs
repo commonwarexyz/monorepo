@@ -368,9 +368,11 @@ mod tests {
         let res = mailbox
             .listen(peer.clone())
             .await
+            .ok()
+            .flatten()
             .expect("reservation failed");
         let dialer = false;
-        let greeting = mailbox.connect(peer.clone(), dialer).await;
+        let greeting = mailbox.connect(peer.clone(), dialer).await.ok();
         assert!(
             greeting.is_some(),
             "expected greeting info for authorized peer"
@@ -428,7 +430,7 @@ mod tests {
                 .unwrap();
             oracle.track(0, too_many_peers);
             // Ensure the message is processed causing the panic
-            let _ = mailbox.dialable().await;
+            let _ = mailbox.dialable().await.unwrap_or_default();
         });
     }
 
@@ -453,7 +455,7 @@ mod tests {
                 .unwrap();
             let primary: Set<PublicKey> = Set::default();
             oracle.track(0, TrackedPeers::new(primary, large_secondary));
-            let _ = mailbox.dialable().await;
+            let _ = mailbox.dialable().await.unwrap_or_default();
         });
     }
 
@@ -467,14 +469,14 @@ mod tests {
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
 
             // Connect as listener - should return None for unauthorized peer
-            let result = mailbox.connect(unauth_pk.clone(), false).await;
+            let result = mailbox.connect(unauth_pk.clone(), false).await.ok();
             assert!(
                 result.is_none(),
                 "Unauthorized peer should get None on Connect"
             );
 
             // Connect as dialer - should return None for unauthorized peer
-            let result = mailbox.connect(unauth_pk, true).await;
+            let result = mailbox.connect(unauth_pk, true).await.ok();
             assert!(
                 result.is_none(),
                 "Unauthorized peer should get None on Connect"
@@ -503,7 +505,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
+            let _res = mailbox.listen(auth_pk.clone()).await.ok().flatten().unwrap();
             let tracker_info = mailbox
                 .connect(auth_pk.clone(), false)
                 .await
@@ -610,7 +612,7 @@ mod tests {
                 Some(peer::Message::Kill)
             ));
 
-            let dialable_peers = mailbox.dialable().await;
+            let dialable_peers = mailbox.dialable().await.unwrap_or_default();
             assert!(!dialable_peers.peers.iter().any(|peer| peer == &pk1));
         });
     }
@@ -822,9 +824,9 @@ mod tests {
             } = setup_actor(context.child("actor"), cfg_initial);
 
             // None listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk2.clone()).await);
-            assert!(!mailbox.acceptable(peer_pk3.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk.clone()).await.unwrap_or(false));
+            assert!(!mailbox.acceptable(peer_pk2.clone()).await.unwrap_or(false));
+            assert!(!mailbox.acceptable(peer_pk3.clone()).await.unwrap_or(false));
 
             oracle.track(
                 0,
@@ -833,11 +835,11 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Not listenable because self
-            assert!(!mailbox.acceptable(peer_pk).await);
+            assert!(!mailbox.acceptable(peer_pk).await.unwrap_or(false));
             // Listenable because registered
-            assert!(mailbox.acceptable(peer_pk2).await);
+            assert!(mailbox.acceptable(peer_pk2).await.unwrap_or(false));
             // Not listenable because not registered
-            assert!(!mailbox.acceptable(peer_pk3).await);
+            assert!(!mailbox.acceptable(peer_pk3).await.unwrap_or(false));
         });
     }
 
@@ -854,26 +856,26 @@ mod tests {
 
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
 
-            let reservation = mailbox.listen(peer_pk.clone()).await;
+            let reservation = mailbox.listen(peer_pk.clone()).await.ok().flatten();
             assert!(reservation.is_none());
 
             oracle.track(0, Set::try_from([peer_pk.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox.acceptable(peer_pk.clone()).await);
+            assert!(mailbox.acceptable(peer_pk.clone()).await.unwrap_or(false));
 
-            let reservation = mailbox.listen(peer_pk.clone()).await;
+            let reservation = mailbox.listen(peer_pk.clone()).await.ok().flatten();
             assert!(reservation.is_some());
 
-            assert!(!mailbox.acceptable(peer_pk.clone()).await);
+            assert!(!mailbox.acceptable(peer_pk.clone()).await.unwrap_or(false));
 
-            let failed_reservation = mailbox.listen(peer_pk.clone()).await;
+            let failed_reservation = mailbox.listen(peer_pk.clone()).await.ok().flatten();
             assert!(failed_reservation.is_none());
 
             drop(reservation.unwrap());
             context.sleep(Duration::from_millis(1_010)).await; // Allow release and rate limit to pass
 
-            let reservation_after_release = mailbox.listen(peer_pk.clone()).await;
+            let reservation_after_release = mailbox.listen(peer_pk.clone()).await.ok().flatten();
             assert!(reservation_after_release.is_some());
         });
     }
@@ -890,7 +892,7 @@ mod tests {
             );
             let TestHarness { mailbox, .. } = setup_actor(context.child("actor"), cfg_initial);
 
-            let dialable_peers = mailbox.dialable().await;
+            let dialable_peers = mailbox.dialable().await.unwrap_or_default();
             assert_eq!(dialable_peers.peers.len(), 1);
             assert_eq!(dialable_peers.peers[0], boot_pk);
         });
@@ -908,7 +910,7 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let mut subscription = oracle.subscribe().await;
+            let mut subscription = oracle.subscribe().await.unwrap();
 
             let (_primary_signer, primary_pk) = new_signer_and_pk(1);
             let (mut secondary_signer, secondary_pk) = new_signer_and_pk(2);
@@ -934,7 +936,7 @@ mod tests {
                 update.all.secondary,
                 Set::try_from([secondary_pk.clone()]).unwrap()
             );
-            assert!(mailbox.acceptable(secondary_pk.clone()).await);
+            assert!(mailbox.acceptable(secondary_pk.clone()).await.unwrap_or(false));
 
             let secondary_info = new_peer_info(
                 &mut secondary_signer,
@@ -947,7 +949,7 @@ mod tests {
             mailbox.peers(vec![secondary_info]);
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable = mailbox.dialable().await;
+            let dialable = mailbox.dialable().await.unwrap_or_default();
             assert!(!dialable.peers.iter().any(|peer| peer == &secondary_pk));
         });
     }
@@ -964,7 +966,7 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let mut subscription = oracle.subscribe().await;
+            let mut subscription = oracle.subscribe().await.unwrap();
 
             let (_signer, pk) = new_signer_and_pk(1);
             oracle.track(
@@ -988,7 +990,7 @@ mod tests {
                 update.all.secondary.is_empty(),
                 "aggregate secondary excludes keys that are primary"
             );
-            assert!(mailbox.acceptable(pk).await);
+            assert!(mailbox.acceptable(pk).await.unwrap_or(false));
         });
     }
 
@@ -1005,7 +1007,7 @@ mod tests {
 
             let TestHarness { mailbox, .. } = setup_actor(context.child("actor"), cfg_initial);
 
-            let reservation = mailbox.dial(boot_pk.clone()).await;
+            let reservation = mailbox.dial(boot_pk.clone()).await.ok().flatten();
             assert!(reservation.is_some());
             if let Some(res) = reservation {
                 match res.metadata() {
@@ -1021,7 +1023,7 @@ mod tests {
             }
 
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
-            let no_reservation = mailbox.dial(unknown_pk).await;
+            let no_reservation = mailbox.dial(unknown_pk).await.ok().flatten();
             assert!(no_reservation.is_none());
         });
     }

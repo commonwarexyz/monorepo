@@ -125,7 +125,6 @@ where
 
         // Create futures pools
         let mut processed: Pool<Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
-        let mut monitored: Pool<()> = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {
@@ -162,7 +161,6 @@ where
                 // Send the response
                 let _ = res_tx.send(Recipients::One(peer), reply, self.priority_response);
             },
-            _ = monitored.next_completed() => {},
 
             // Request from an originator
             message = req_rx.recv() => {
@@ -186,9 +184,8 @@ where
 
                 // Handle the request
                 let (tx, rx) = oneshot::channel();
-                let mut handler = self.handler.clone();
+                self.handler.process(peer.clone(), msg, tx);
                 processed.push(async move {
-                    handler.process(peer.clone(), msg, tx).await;
                     Ok((peer, rx.await?))
                 });
             },
@@ -227,11 +224,8 @@ where
                 }
 
                 // Send the response to the monitor
-                let mut monitor = self.monitor.clone();
                 let count = responses.1.len();
-                monitored.push(async move {
-                    monitor.collected(peer, msg, count).await;
-                });
+                self.monitor.collected(peer, msg, count);
             },
         }
     }

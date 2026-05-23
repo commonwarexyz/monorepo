@@ -34,7 +34,7 @@ impl crate::Monitor for Monitor {
     type PublicKey = PublicKey;
     type Response = Response;
 
-    async fn collected(
+    fn collected(
         &mut self,
         handler: Self::PublicKey,
         response: Self::Response,

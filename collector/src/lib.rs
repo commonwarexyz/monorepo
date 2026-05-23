@@ -15,7 +15,6 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_cryptography::{Committable, Digestible, PublicKey};
     use commonware_p2p::Recipients;
     use commonware_utils::channel::oneshot;
-    use std::future::Future;
 
     pub mod p2p;
 
@@ -53,15 +52,17 @@ commonware_macros::stability_scope!(ALPHA {
             + Digestible<Digest = <Self::Request as Digestible>::Digest>
             + Codec;
 
-        /// Processes a `request` from an [Originator] and (optionally) send a response.
+        /// Processes a `request` from an [Originator] and (optionally) sends a response.
         ///
-        /// If no response is needed, the `responder` should be dropped.
+        /// Implementations should return promptly. If processing requires async work,
+        /// enqueue it and use `response` to send the result later. If no response is
+        /// needed, the `response` should be dropped.
         fn process(
             &mut self,
             origin: Self::PublicKey,
             request: Self::Request,
             response: oneshot::Sender<Self::Response>,
-        ) -> impl Future<Output = ()> + Send;
+        );
     }
 
     /// A [Monitor] collects responses from [Handler]s.
@@ -75,12 +76,15 @@ commonware_macros::stability_scope!(ALPHA {
         /// Called for each response collected with the number of responses collected so far for
         /// the same commitment.
         ///
+        /// Implementations should return promptly. If observing a collection event
+        /// requires async work, enqueue it before returning.
+        ///
         /// [Monitor::collected] is only called once per `handler`.
         fn collected(
             &mut self,
             handler: Self::PublicKey,
             response: Self::Response,
             count: usize,
-        ) -> impl Future<Output = ()> + Send;
+        );
     }
 });
