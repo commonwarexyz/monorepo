@@ -1,101 +1,21 @@
-//! Fuzz driver for the marshal actor.
+//! Deterministic-runtime driver for the marshal fuzz target.
 //!
-//! Drives a single marshal actor under test by synthesizing every input
-//! marshal would normally receive from the consensus engine and from peers
-//! (blocks, notarizations, finalizations) and feeding them through the
-//! mailbox directly. Generic over `H: TestHarness` so the standard and
-//! coding variants share the same driver and corpora-per-binary discipline.
-//!
-//! # Invariants checked
-//!
-//! - **In-order delivery, no gaps within a marshal instance.** Within each
-//!   actor lifetime (segment between restarts), the first delivery is
-//!   `setup.height + 1` and subsequent deliveries advance strictly by one.
-//!   Marshal documents this guarantee on `Update::Block`.
-//! - **Ready-prefix delivery (anchor-based, chain-aware repair).**
-//!   When a `ReportFinalization` at height `h` arrives while block
-//!   `h` is locally available (durable or variant), marshal stores a
-//!   finalized anchor at `h` in its finalized archive. The driver
-//!   mirrors this with a persistent `finalized_anchors` set.
-//!
-//!   A `ReportFinalization` only triggers a repair wake when its
-//!   height is strictly above marshal's `processed_height` AND the
-//!   block is locally available. At-or-below-floor finalizations
-//!   are dropped by marshal's `store_finalization` (see
-//!   actor.rs:1732) and `try_repair_gaps` is gated on store success
-//!   (actor.rs:648). The driver mirrors this with a shadow
-//!   `processed_height`: initialized to `setup.height.get()`,
-//!   advanced on non-stale `AckNext`, and reset to
-//!   `setup.height.get()` after `Restart`.
-//!
-//!   On each repair wake (every above-floor `ReportFinalization`
-//!   that found its block, and every `Restart` after the variant
-//!   cache is cleared, since marshal's startup path runs
-//!   `try_repair_gaps` unconditionally) the driver finds the largest
-//!   anchor `a` for
-//!   which every height `1..=a` is currently available in
-//!   (`durable_available` union `variant_available`). If `a >
-//!   ready_prefix`, the gap is repairable: marshal can walk the
-//!   chain from `a` back to 1 and deliver. The driver bumps
-//!   `ready_prefix = a` and promotes heights `prev_ready+1..=a` into
-//!   `durable_available` (marshal moves them to the finalized
-//!   archive, so they survive future restarts even if originally
-//!   sourced from the variant cache).
-//!
-//!   Availability state:
-//!     - `durable_available`: heights set by Propose / Verify /
-//!       Certify (marshal persists them), anchor blocks persisted by
-//!       `ReportFinalization` when the block was locally available
-//!       at that moment (marshal writes the block to
-//!       `finalized_blocks` alongside the finalization), plus
-//!       heights promoted by `ready_prefix` advances. Survives
-//!       restart.
-//!     - `variant_available`: heights set by `PublishViaVariant`
-//!       after confirmed local availability. Lives only in the
-//!       in-memory buffered / shards cache; cleared on `Restart`.
-//!     - `finalized_anchors`: heights at which a usable finalization
-//!       is stored. Survives restart.
-//! - **At-least-once across restart.** Heights pending ack at the moment
-//!   of restart are tracked. The new actor instance must redeliver each
-//!   of them at least once before the run ends.
-//! - **Digest fidelity.** Every block surfaced in `application.blocks()`
-//!   must match the canonical chain digest at its height.
-//! - **Durability acks.** `H::propose`/`H::verify`/`H::certify` return
-//!   `true` on durable persist; `false` surfaces an actor-died panic.
-//!
-//! # Variant buffer coverage
-//!
-//! `PublishViaVariant` exercises marshal's interaction with the local
-//! variant cache (buffered broadcast engine for Standard, shards engine
-//! for Coding). After publishing, the driver verifies the block actually
-//! landed in the local cache before counting it as `provided`; a publish
-//! that silently drops does not register.
-//!
-//! The marshal-mailbox path (`H::propose`/`H::verify`/`H::certify`) does
-//! NOT route through the shards mailbox for the coding harness: those
-//! wrappers call `handle.mailbox.proposed/verified/certified` directly.
-//! Shards-mailbox coverage is therefore exclusively via
-//! `PublishViaVariant`.
-//!
-//! # Known scope limitations
-//!
-//! - Single-validator only: peer-to-peer shard *dissemination* and
-//!   *reconstruction-from-peer-shards* are not exercised. Multi-validator
-//!   coding fuzz is a follow-up.
+//! Replays a [`MarshalFuzzInput`] event sequence against a single
+//! marshal actor (with restarts), maintains the shadow state described
+//! in the module-level docs, and asserts the marshal invariants at the
+//! end of the run.
 
-use arbitrary::Arbitrary;
-use commonware_broadcast::{buffered, Broadcaster as _};
-use commonware_codec::Codec;
-use commonware_coding::Scheme as CodingScheme;
+use super::{
+    input::{MarshalEvent, MarshalFuzzInput},
+    invariant,
+    variant::VariantPublish,
+};
 use commonware_consensus::{
-    marshal::{
-        coding::{shards, types::CodedBlock},
-        mocks::{
-            application::Application,
-            harness::{
-                setup_network_with_participants, TestHarness, ValidatorHandle, NAMESPACE,
-                NUM_VALIDATORS, QUORUM,
-            },
+    marshal::mocks::{
+        application::Application,
+        harness::{
+            setup_network_with_participants, TestHarness, ValidatorHandle, NAMESPACE,
+            NUM_VALIDATORS, QUORUM,
         },
     },
     simplex::{
@@ -103,21 +23,17 @@ use commonware_consensus::{
         types::{Activity, Proposal},
     },
     types::{Epoch, Height, Round, View},
-    CertifiableBlock, Reporter,
+    Reporter,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
     certificate::{mocks::Fixture, ConstantProvider},
     sha256::Sha256,
-    Committable, Digestible, Hasher as _, PublicKey,
+    Hasher as _,
 };
-use commonware_p2p::Recipients;
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
 use commonware_utils::{FuzzRng, NZUsize};
 use std::{collections::HashSet, num::NonZeroUsize, time::Duration};
-
-const MIN_EVENTS: usize = 1;
-const MAX_EVENTS: usize = 128;
 
 /// Number of blocks in the canonical chain. Kept well below
 /// `BLOCKS_PER_EPOCH` so every height maps to epoch 0 and the driver
@@ -137,100 +53,6 @@ const EVENT_SETTLE: Duration = Duration::from_millis(20);
 /// Final drain delay before the invariant check so any in-flight
 /// finalization deliveries reach the application.
 const FINAL_DRAIN: Duration = Duration::from_millis(200);
-
-#[derive(Debug, Clone, Copy, Arbitrary)]
-pub enum MarshalEvent {
-    /// Notify marshal that a block was locally proposed.
-    Propose { block_idx: u8 },
-    /// Notify marshal that a block was verified.
-    Verify { block_idx: u8 },
-    /// Notify marshal that a block was certified.
-    Certify { block_idx: u8 },
-    /// Report a finalization for a block.
-    ReportFinalization { block_idx: u8 },
-    /// Report a notarization for a block.
-    ReportNotarization { block_idx: u8 },
-    /// Publish a block through the variant's local buffer (buffered
-    /// broadcast engine for Standard, shards engine for Coding) without
-    /// going through marshal's mailbox.
-    PublishViaVariant { block_idx: u8 },
-    /// Release one pending application ack, recording the popped height
-    /// as a delivery observation.
-    AckNext,
-    /// Abort the marshal actor and re-initialize from the same on-disk
-    /// state. Pending acks at the moment of restart are NOT signaled,
-    /// so marshal's persistent state retains them as un-processed and
-    /// the new instance must redeliver them (at-least-once).
-    Restart,
-    /// Yield without dispatching a marshal-facing event.
-    Idle,
-}
-
-#[derive(Debug, Clone)]
-pub struct MarshalFuzzInput {
-    pub raw_bytes: Vec<u8>,
-    pub events: Vec<MarshalEvent>,
-}
-
-impl Arbitrary<'_> for MarshalFuzzInput {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
-        let mut events = Vec::with_capacity(event_count);
-        for _ in 0..event_count {
-            events.push(MarshalEvent::arbitrary(u)?);
-        }
-        let remaining = u.len().min(crate::MAX_RAW_BYTES);
-        let raw_bytes = if remaining == 0 {
-            vec![0]
-        } else {
-            u.bytes(remaining)?.to_vec()
-        };
-        Ok(Self { raw_bytes, events })
-    }
-}
-
-/// Variant-agnostic adapter for publishing a block through the variant's
-/// local cache and confirming it landed.
-pub trait VariantPublish<Block: Clone + Send + 'static>: Sync {
-    /// Best-effort publish. The implementation may silently drop the
-    /// request if the underlying mailbox enqueue fails; the driver
-    /// confirms availability via [`Self::locally_available`] before
-    /// counting the publish.
-    fn publish_via_variant(&self, round: Round, block: &Block);
-
-    /// Whether the variant's local cache currently holds the block.
-    /// Used after [`Self::publish_via_variant`] to verify the publish
-    /// was accepted before the driver treats the block as provided.
-    fn locally_available(&self, block: &Block) -> impl std::future::Future<Output = bool> + Send;
-}
-
-impl<P, M> VariantPublish<M> for buffered::Mailbox<P, M>
-where
-    P: PublicKey,
-    M: Codec + Digestible + Clone + Send + 'static,
-{
-    fn publish_via_variant(&self, _round: Round, block: &M) {
-        let _ = self.broadcast(Recipients::All, block.clone());
-    }
-    async fn locally_available(&self, block: &M) -> bool {
-        self.get(block.digest()).await.is_some()
-    }
-}
-
-impl<B, C, H, P> VariantPublish<CodedBlock<B, C, H>> for shards::Mailbox<B, C, H, P>
-where
-    B: CertifiableBlock,
-    C: CodingScheme,
-    H: commonware_cryptography::Hasher,
-    P: PublicKey,
-{
-    fn publish_via_variant(&self, round: Round, block: &CodedBlock<B, C, H>) {
-        self.proposed(round, block.clone());
-    }
-    async fn locally_available(&self, block: &CodedBlock<B, C, H>) -> bool {
-        self.get(block.commitment()).await.is_some()
-    }
-}
 
 fn round_for_height(height: Height) -> Round {
     Round::new(Epoch::zero(), View::new(height.get()))
@@ -572,90 +394,14 @@ where
         }
         segment_bounds.push(delivery_log.len());
 
-        // ready_prefix was maintained incrementally during the event
-        // loop. Every height in `1..=ready_prefix` was, at some wake
-        // event, simultaneously block-available (in the contiguous
-        // prefix) and at-or-below the highest reported finalization.
-        let delivered_set: HashSet<u64> = delivery_log.iter().map(|h| h.get()).collect();
-        for h in 1..=ready_prefix {
-            assert!(
-                delivered_set.contains(&h),
-                "marshal violated at-least-once delivery: ready height {h} never reached \
-                 the application (ready_prefix={ready_prefix}, delivered={delivered_set:?})",
-            );
-        }
-
-        // Per-segment ordering. Each segment begins at the restored
-        // processed height + 1 and advances strictly by one.
-        assert_eq!(
-            segment_bounds.len(),
-            segment_starts.len() + 1,
-            "segment bookkeeping inconsistency",
+        invariant::check_all::<H>(
+            ready_prefix,
+            &delivery_log,
+            &segment_bounds,
+            &segment_starts,
+            &expected_redeliveries,
+            &application.blocks(),
+            &canonical,
         );
-        for (segment_idx, window) in segment_bounds.windows(2).enumerate() {
-            let (start_idx, end_idx) = (window[0], window[1]);
-            if start_idx == end_idx {
-                continue;
-            }
-            let segment = &delivery_log[start_idx..end_idx];
-            let expected_start = segment_starts[segment_idx];
-            assert_eq!(
-                segment[0].get(),
-                expected_start,
-                "segment #{segment_idx} must start at restored processed height + 1 \
-                 ({expected_start}), got {} (segment={:?})",
-                segment[0].get(),
-                segment,
-            );
-            for (offset, h) in segment.iter().enumerate() {
-                let expected = expected_start + offset as u64;
-                assert_eq!(
-                    h.get(),
-                    expected,
-                    "marshal violated in-order delivery within segment #{segment_idx}: \
-                     expected height {expected}, observed {} (segment={:?})",
-                    h.get(),
-                    segment,
-                );
-            }
-        }
-
-        // At-least-once across restart. Each height pending at the moment
-        // of restart i must reappear in delivery_log at some segment
-        // strictly after i (i.e., at byte offset >= segment_bounds[i+1]).
-        for (restart_idx, expected) in expected_redeliveries.iter().enumerate() {
-            if expected.is_empty() {
-                continue;
-            }
-            let post_restart_start = segment_bounds[restart_idx + 1];
-            let post_restart: HashSet<u64> = delivery_log[post_restart_start..]
-                .iter()
-                .map(|h| h.get())
-                .collect();
-            for h in expected {
-                assert!(
-                    post_restart.contains(&h.get()),
-                    "marshal violated at-least-once across restart: height {} was \
-                     pending at restart #{} but was never redelivered \
-                     (post-restart deliveries={post_restart:?})",
-                    h.get(),
-                    restart_idx + 1,
-                );
-            }
-        }
-
-        // Digest fidelity for every block surfaced in the application's
-        // height map. Re-emits after restart overwrite the prior entry,
-        // so the latest delivery at each height is what we compare.
-        for (height, block) in application.blocks().iter() {
-            let canonical_block = &canonical[(height.get() - 1) as usize];
-            assert_eq!(
-                block.digest(),
-                H::digest(canonical_block),
-                "marshal delivered a block whose digest does not match the canonical \
-                 chain at height {}",
-                height.get(),
-            );
-        }
     });
 }
