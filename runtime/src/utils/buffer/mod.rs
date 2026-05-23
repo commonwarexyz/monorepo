@@ -128,6 +128,129 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RangeSyncState {
+        /// All data currently stored in the blob.
+        ///
+        /// This includes every durable byte plus any newer bytes that have not
+        /// been made durable yet.
+        data: Vec<u8>,
+
+        /// Prefix/ranges of `data` that would survive a crash.
+        durable: Vec<u8>,
+
+        /// Number of write operations.
+        writes: usize,
+
+        /// Number of full sync barriers.
+        full_syncs: usize,
+
+        /// Number of range-scoped write syncs.
+        range_syncs: usize,
+    }
+
+    /// Test blob with separate visible and durable state.
+    ///
+    /// Plain writes and resizes only update `data`. `write_at_sync` updates `data`
+    /// and then copies only that submitted range into `durable`. `sync` copies all
+    /// of `data` to `durable`. This lets tests assert that `Write::sync` uses range
+    /// sync only when no earlier unsynced mutation needs a full durability barrier.
+    #[derive(Clone)]
+    pub struct SyncTrackingBlob {
+        state: Arc<Mutex<RangeSyncState>>,
+    }
+
+    impl SyncTrackingBlob {
+        pub fn new() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(RangeSyncState::default())),
+            }
+        }
+
+        pub fn snapshot(&self) -> (Vec<u8>, usize, usize, usize) {
+            let state = self.state.lock();
+            (
+                state.durable.clone(),
+                state.writes,
+                state.full_syncs,
+                state.range_syncs,
+            )
+        }
+
+        pub fn size(&self) -> u64 {
+            self.state.lock().data.len() as u64
+        }
+
+        fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    impl crate::Blob for SyncTrackingBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::default()).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            let state = self.state.lock();
+            if end > state.data.len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+
+            let mut out = buf.into();
+            out.put_slice(&state.data[start..end]);
+            Ok(out)
+        }
+
+        async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            let buf = buf.into().coalesce();
+            let mut state = self.state.lock();
+            Self::write(&mut state.data, offset, buf.as_ref())?;
+            state.writes += 1;
+            Ok(())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let buf = buf.into().coalesce();
+            let mut state = self.state.lock();
+            Self::write(&mut state.data, offset, buf.as_ref())?;
+            Self::write(&mut state.durable, offset, buf.as_ref())?;
+            state.writes += 1;
+            state.range_syncs += 1;
+            Ok(())
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+            self.state.lock().data.resize(len, 0);
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            let mut state = self.state.lock();
+            state.durable = state.data.clone();
+            state.full_syncs += 1;
+            Ok(())
+        }
+    }
+
     #[test_traced]
     fn test_read_basic() {
         let executor = deterministic::Runner::default();
@@ -1329,7 +1452,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_resize_then_append_at_size() {
+    fn test_write_resize_then_append_at_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test truncating, then appending at the new size
@@ -1373,6 +1496,159 @@ mod tests {
             let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(10));
             let read = reader.read(10).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), b"01234XXXXX");
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_uses_range_sync_for_buffer_only_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+
+            // A fresh writer preserves one sync barrier for mutations that predate wrapping.
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // The write remains entirely buffered, so sync can make just this range durable.
+            writer.write_at(0, b"abc").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // No prior plain blob mutation required another full sync barrier.
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+
+            // The prior sync used write_at_sync, so there is still no pending full-sync barrier.
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_persists_pre_wrapped_blob_mutation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+
+            // Simulate a plain blob mutation before the writer wraps it.
+            blob.write_at(0, b"abc").await.unwrap();
+
+            let writer = Write::from_pooler(&context, blob.clone(), 3, NZUsize!(8));
+            writer.sync().await.unwrap();
+
+            // The first sync must use a full barrier to make the pre-wrapped write durable.
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // After the barrier is clear, a buffered tip-only write can use range sync again.
+            writer.write_at(3, b"d").await.unwrap();
+            writer.sync().await.unwrap();
+
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_failed_range_sync_does_not_mark_clean() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let name = b"failed_range_sync";
+            let (blob, size) = context.open("partition", name).await.unwrap();
+            let writer = Write::from_pooler(&context, blob, size, NZUsize!(8));
+            writer.sync().await.unwrap();
+
+            // Keep the write buffered so sync attempts the clean `write_at_sync` path.
+            writer.write_at(0, b"abc").await.unwrap();
+
+            // Removing the blob makes the range-sync flush fail.
+            context.remove("partition", Some(name)).await.unwrap();
+            assert!(writer.sync().await.is_err());
+
+            // The failed `write_at_sync` must leave a pending full-sync barrier, so a
+            // later sync cannot report success.
+            assert!(writer.sync().await.is_err());
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_persists_prior_direct_flushes_with_buffered_tip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(4));
+
+            // This exceeds the buffer and forces a plain write before the final buffered tip.
+            writer.write_at(0, b"abcdef").await.unwrap();
+            writer.write_at(6, b"g").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // The final sync must cover both the prior plain write and the buffered tip.
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdefg");
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // With no new writes, sync has no work left.
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdefg");
+            assert_eq!(writes, 2);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            // After the full sync, the next buffer-only write can use range sync again.
+            writer.write_at(7, b"h").await.unwrap();
+            writer.sync().await.unwrap();
+
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdefgh");
+            assert_eq!(writes, 3);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_uses_full_sync_after_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+            writer.sync().await.unwrap();
+
+            // Establish already-durable data with a range sync.
+            writer.write_at(0, b"abcdef").await.unwrap();
+            writer.sync().await.unwrap();
+
+            // Resize alone is an unsynced blob mutation.
+            writer.resize(4).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // The resized contents require a full sync barrier to become durable.
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 1);
         });
     }
 }

@@ -1286,8 +1286,7 @@ mod tests {
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
                 // Corrupt CRC of second slot (last 4 bytes of second slot)
                 corrupted.as_mut()[Entry::FULL_SIZE - 4] ^= 0xFF;
-                blob.write_at(0, corrupted).await.unwrap();
-                blob.sync().await.unwrap();
+                blob.write_at_sync(0, corrupted).await.unwrap();
             }
 
             // Reopen to trigger recovery. The bug would set both cleared entries to

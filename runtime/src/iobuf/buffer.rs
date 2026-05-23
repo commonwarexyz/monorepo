@@ -830,16 +830,15 @@ impl BufMut<PooledBacking> {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCacheConfig},
+        iobuf::{
+            cache_line_size, page_size, pool::BufferPoolThreadCacheConfig, BufferPool,
+            BufferPoolConfig,
+        },
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use commonware_utils::{NZUsize, NZU32};
     use std::ops::Bound;
-
-    fn page_size() -> usize {
-        BufferPoolConfig::for_storage().min_size.get()
-    }
 
     fn test_pool(config: BufferPoolConfig) -> BufferPool {
         let mut registry = Registry::default();
@@ -868,7 +867,7 @@ mod tests {
         assert!((buf.as_ptr() as usize).is_multiple_of(page));
 
         // Cache-line-aligned allocation should also satisfy its alignment.
-        let cache_line = BufferPoolConfig::for_network().alignment.get();
+        let cache_line = cache_line_size();
         let buf2 = AlignedBuffer::new(4096, cache_line);
         assert_eq!(buf2.capacity(), 4096);
         assert!((buf2.as_ptr() as usize).is_multiple_of(cache_line));
@@ -1319,7 +1318,7 @@ mod tests {
     fn test_alignment_after_advance() {
         // Advancing breaks base-pointer alignment, which is expected.
         let page = page_size();
-        let pool = test_pool(BufferPoolConfig::for_storage());
+        let pool = test_pool(BufferPoolConfig::for_storage().with_alignment(NZUsize!(page)));
 
         let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0; 100]);

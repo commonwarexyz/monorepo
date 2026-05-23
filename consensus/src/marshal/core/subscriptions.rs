@@ -1,4 +1,4 @@
-use super::{variant::OptionalBuffer, Buffer, Variant};
+use super::{Buffer, Variant};
 use commonware_cryptography::Digestible;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -71,7 +71,7 @@ impl<V: Variant> Subscriptions<V> {
         key: KeyFor<V>,
         response: oneshot::Sender<V::Block>,
         waiters: &mut AbortablePool<Result<V::Block, KeyFor<V>>>,
-        buffer: &OptionalBuffer<V, Buf>,
+        buffer: &Buf,
     ) {
         match self.entries.entry(key) {
             Entry::Occupied(mut entry) => {
@@ -99,7 +99,7 @@ impl<V: Variant> Subscriptions<V> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{mocks::block::Block, standard::Standard},
+        marshal::{core::variant::NoBuffer, mocks::block::Block, standard::Standard},
         types::{Height, Round},
     };
     use commonware_cryptography::{
@@ -147,16 +147,19 @@ mod tests {
             None
         }
 
-        fn subscribe_by_digest(&self, _digest: Digest) -> oneshot::Receiver<TestBlock> {
+        fn subscribe_by_digest(&self, _digest: Digest) -> Option<oneshot::Receiver<TestBlock>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscribers.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
-        fn subscribe_by_commitment(&self, _commitment: Digest) -> oneshot::Receiver<TestBlock> {
+        fn subscribe_by_commitment(
+            &self,
+            _commitment: Digest,
+        ) -> Option<oneshot::Receiver<TestBlock>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscribers.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
         fn finalized(&self, _commitment: Digest) {}
@@ -179,7 +182,7 @@ mod tests {
     #[test]
     fn insert_coalesces_duplicate_keys() {
         let test_buffer = TestBuffer::default();
-        let buffer = OptionalBuffer::new(Some(test_buffer.clone()));
+        let buffer = test_buffer.clone();
         let mut waiters = TestWaiters::default();
         let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(1, 10);
@@ -211,7 +214,7 @@ mod tests {
     #[test]
     fn notify_wakes_digest_and_commitment_subscribers() {
         let test_buffer = TestBuffer::default();
-        let buffer = OptionalBuffer::new(Some(test_buffer.clone()));
+        let buffer = test_buffer.clone();
         let mut waiters = TestWaiters::default();
         let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(2, 20);
@@ -243,7 +246,7 @@ mod tests {
 
     #[test]
     fn retain_open_drops_closed_subscribers_and_keeps_open_ones() {
-        let buffer = OptionalBuffer::new(Some(TestBuffer::default()));
+        let buffer = TestBuffer::default();
         let mut waiters = TestWaiters::default();
         let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(3, 30);
@@ -279,7 +282,7 @@ mod tests {
     #[test]
     fn remove_drops_waiter_and_aborts_buffer_waiter() {
         deterministic::Runner::default().start(|context| async move {
-            let buffer = OptionalBuffer::new(Some(TestBuffer::default()));
+            let buffer = TestBuffer::default();
             let mut waiters = TestWaiters::default();
             let mut subscriptions = Subscriptions::<TestVariant>::new();
             let block = block(4, 40);
@@ -307,16 +310,11 @@ mod tests {
     fn insert_without_buffer_keeps_local_subscriber() {
         let mut waiters = TestWaiters::default();
         let mut subscriptions = Subscriptions::<TestVariant>::new();
-        let buffer = OptionalBuffer::<TestVariant, TestBuffer>::new(None);
+        let buffer = NoBuffer::<PublicKey>::new();
         let block = block(5, 50);
 
         let (sender, receiver) = oneshot::channel();
-        subscriptions.insert::<TestBuffer>(
-            Key::Digest(block.digest()),
-            sender,
-            &mut waiters,
-            &buffer,
-        );
+        subscriptions.insert(Key::Digest(block.digest()), sender, &mut waiters, &buffer);
 
         assert_eq!(subscriptions.entries.len(), 1);
         subscriptions.notify(&block);
