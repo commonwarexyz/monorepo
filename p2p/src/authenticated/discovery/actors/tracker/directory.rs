@@ -318,6 +318,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn listen(&mut self, peer: &C) -> Option<Reservation<C>> {
+        if !self.acceptable(peer) {
+            return None;
+        }
         self.reserve(Metadata::Listener(peer.clone()))
     }
 

@@ -105,23 +105,14 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer to reserve.
         public_key: C,
 
-        /// sender to respond with the reservation.
+        /// Sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<C>>>,
     },
 
     // ---------- Used by listener ----------
-    /// Check if a peer is acceptable (can accept an incoming connection from them).
-    Acceptable {
-        /// The public key of the peer to check.
-        public_key: C,
-
-        /// The sender to respond with whether the peer is acceptable.
-        responder: oneshot::Sender<bool>,
-    },
-
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if  the
+    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Listen {
@@ -130,6 +121,17 @@ pub enum Message<C: PublicKey> {
 
         /// The sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<C>>>,
+    },
+
+    // ---------- Used by tests ----------
+    /// Check if a peer is acceptable (can accept an incoming connection from them).
+    #[cfg(test)]
+    Acceptable {
+        /// The public key of the peer to check.
+        public_key: C,
+
+        /// The sender to respond with whether the peer is acceptable.
+        responder: oneshot::Sender<bool>,
     },
 
     // ---------- Used by reservation ----------
@@ -213,6 +215,7 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send an `Acceptable` message to the tracker.
     ///
     /// The returned receiver is closed if the tracker is shut down.
+    #[cfg(test)]
     pub(crate) fn acceptable(&self, public_key: C) -> oneshot::Receiver<bool> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Acceptable {

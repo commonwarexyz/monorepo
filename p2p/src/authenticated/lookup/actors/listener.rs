@@ -136,14 +136,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        // Perform handshake
         let source_ip = address.ip();
+        // The tracker owns acceptance and reservation so the handshake callback stays synchronous.
         let (peer, send, recv) = match listen(
             context,
-            |peer| {
-                let accepted = tracker.acceptable(peer, source_ip);
-                async move { accepted.await.unwrap_or(false) }
-            },
+            |_| true,
             stream_cfg,
             stream,
             sink,
@@ -159,7 +156,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "completed handshake");
 
         // Attempt to claim the connection
-        let Some(reservation) = tracker.listen(peer.clone()).await.ok().flatten() else {
+        let Some(reservation) = tracker.listen(peer.clone(), source_ip).await.ok().flatten() else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };
@@ -375,9 +372,6 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
-                        tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
-                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }
@@ -539,9 +533,6 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
-                        tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
-                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }
@@ -624,9 +615,6 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
-                        tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
-                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }
@@ -714,9 +702,6 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
-                        tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
-                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }

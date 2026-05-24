@@ -95,12 +95,10 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
+        // The tracker owns acceptance and reservation so the handshake callback stays synchronous.
         let (peer, send, recv) = match listen(
             context,
-            |peer| {
-                let accepted = tracker.acceptable(peer);
-                async move { accepted.await.unwrap_or(false) }
-            },
+            |_| true,
             stream_cfg,
             stream,
             sink,
@@ -293,9 +291,6 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
-                        tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
-                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }
@@ -439,9 +434,6 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
-                        tracker::Message::Acceptable { responder, .. } => {
-                            let _ = responder.send(true);
-                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }

@@ -78,7 +78,25 @@ pub enum Message<C: PublicKey> {
     },
 
     // ---------- Used by listener ----------
+    /// Request a reservation for a particular peer.
+    ///
+    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
+    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
+    /// has an active reservation).
+    Listen {
+        /// The public key of the peer to reserve.
+        public_key: C,
+
+        /// The IP address the peer connected from.
+        source_ip: IpAddr,
+
+        /// The sender to respond with the reservation.
+        reservation: oneshot::Sender<Option<Reservation<C>>>,
+    },
+
+    // ---------- Used by tests ----------
     /// Check if a peer is acceptable (can accept an incoming connection from them).
+    #[cfg(test)]
     Acceptable {
         /// The public key of the peer to check.
         public_key: C,
@@ -88,19 +106,6 @@ pub enum Message<C: PublicKey> {
 
         /// The sender to respond with whether the peer is acceptable.
         responder: oneshot::Sender<bool>,
-    },
-
-    /// Request a reservation for a particular peer.
-    ///
-    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if  the
-    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
-    /// has an active reservation).
-    Listen {
-        /// The public key of the peer to reserve.
-        public_key: C,
-
-        /// The sender to respond with the reservation.
-        reservation: oneshot::Sender<Option<Reservation<C>>>,
     },
 
     // ---------- Used by reservation ----------
@@ -160,6 +165,7 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send an `Acceptable` message to the tracker.
     ///
     /// The returned receiver is closed if the tracker is shut down.
+    #[cfg(test)]
     pub(crate) fn acceptable(&self, public_key: C, source_ip: IpAddr) -> oneshot::Receiver<bool> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Acceptable {
@@ -173,10 +179,15 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Listen` message to the tracker.
     ///
     /// The returned receiver is closed if the tracker is shut down.
-    pub(crate) fn listen(&self, public_key: C) -> oneshot::Receiver<Option<Reservation<C>>> {
+    pub(crate) fn listen(
+        &self,
+        public_key: C,
+        source_ip: IpAddr,
+    ) -> oneshot::Receiver<Option<Reservation<C>>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,
+            source_ip,
             reservation,
         });
         receiver

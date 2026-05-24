@@ -201,16 +201,16 @@ where
     S: Scheme,
     D: Digest,
 {
-    pub async fn get_tip(&mut self) -> Option<(Height, Epoch)> {
+    pub fn get_tip(&mut self) -> oneshot::Receiver<Option<(Height, Epoch)>> {
         let (sender, receiver) = oneshot::channel();
         assert!(
             self.sender.enqueue(Message::GetTip(sender)).accepted(),
             "Failed to send get tip"
         );
-        receiver.await.unwrap()
+        receiver
     }
 
-    pub async fn get_contiguous_tip(&mut self) -> Option<Height> {
+    pub fn get_contiguous_tip(&mut self) -> oneshot::Receiver<Option<Height>> {
         let (sender, receiver) = oneshot::channel();
         assert!(
             self.sender
@@ -218,15 +218,15 @@ where
                 .accepted(),
             "Failed to send get contiguous tip"
         );
-        receiver.await.unwrap()
+        receiver
     }
 
-    pub async fn get(&mut self, height: Height) -> Option<(D, Epoch)> {
+    pub fn get(&mut self, height: Height) -> oneshot::Receiver<Option<(D, Epoch)>> {
         let (sender, receiver) = oneshot::channel();
         assert!(
             self.sender.enqueue(Message::Get(height, sender)).accepted(),
             "Failed to send get"
         );
-        receiver.await.unwrap()
+        receiver
     }
 }

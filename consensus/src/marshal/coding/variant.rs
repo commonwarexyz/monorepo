@@ -85,11 +85,11 @@ where
         &self,
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
     ) -> Option<CodedBlock<B, C, H>> {
-        self.get_by_digest(digest).await
+        self.get_by_digest(digest).await.ok().flatten()
     }
 
     async fn find_by_commitment(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
-        self.get(commitment).await
+        self.get(commitment).await.ok().flatten()
     }
 
     fn subscribe_by_digest(

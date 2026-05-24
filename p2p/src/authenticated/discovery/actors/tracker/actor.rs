@@ -249,6 +249,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 let _ = reservation.send(self.directory.dial(&public_key));
             }
+            #[cfg(test)]
             Message::Acceptable {
                 public_key,
                 responder,

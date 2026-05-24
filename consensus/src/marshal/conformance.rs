@@ -114,7 +114,7 @@ async fn wait_processed<H: TestHarness>(
     height: Height,
 ) {
     loop {
-        if setup.mailbox.get_processed_height().await == Some(height) {
+        if setup.mailbox.get_processed_height().await.ok().flatten() == Some(height) {
             break;
         }
         context.sleep(Duration::from_millis(1)).await;

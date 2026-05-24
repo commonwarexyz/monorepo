@@ -439,7 +439,7 @@ mod tests {
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
-                        |_| async { true },
+                        |_| true,
                         remote_config,
                         remote_stream,
                         remote_sink,
@@ -548,7 +548,7 @@ mod tests {
                 move |ctx| async move {
                     commonware_stream::encrypted::listen(
                         ctx,
-                        |_| async { true },
+                        |_| true,
                         remote_config,
                         remote_stream,
                         CountingSink::new(remote_sink, sends),

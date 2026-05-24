@@ -558,51 +558,54 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
-    pub async fn get_info(
+    pub fn get_info(
         &self,
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
-    ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
+    ) -> oneshot::Receiver<Option<(Height, <V::Block as Digestible>::Digest)>> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetInfo {
             identifier,
             response,
         });
-        receiver.await.ok().flatten()
+        receiver
     }
 
     /// A best-effort attempt to retrieve a given block from local
     /// storage. It is not an indication to go fetch the block from the network.
-    pub async fn get_block(
+    pub fn get_block(
         &self,
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
-    ) -> Option<V::Block> {
+    ) -> oneshot::Receiver<Option<V::Block>> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetBlock {
             identifier,
             response,
         });
-        receiver.await.ok().flatten()
+        receiver
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
-    pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
+    pub fn get_finalization(
+        &self,
+        height: Height,
+    ) -> oneshot::Receiver<Option<Finalization<S, V::Commitment>>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
             .enqueue(Message::GetFinalization { height, response });
-        receiver.await.ok().flatten()
+        receiver
     }
 
     /// Retrieve the latest processed height.
-    pub async fn get_processed_height(&self) -> Option<Height> {
+    pub fn get_processed_height(&self) -> oneshot::Receiver<Option<Height>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
             .enqueue(Message::GetProcessedHeight { response });
-        receiver.await.ok().flatten()
+        receiver
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -720,54 +723,54 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
-    pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
+    pub fn get_verified(&self, round: Round) -> oneshot::Receiver<Option<V::Block>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
             .enqueue(Message::GetVerified { round, response });
-        receiver.await.ok().flatten()
+        receiver
     }
 
     /// Notifies the actor that a block has been locally proposed.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
+    pub fn proposed(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Proposed {
             round,
             block,
             ack: Some(ack),
         });
-        receiver.await.is_ok()
+        receiver
     }
 
     /// Notifies the actor that a block has been verified.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
+    pub fn verified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Verified {
             round,
             block,
             ack: Some(ack),
         });
-        receiver.await.is_ok()
+        receiver
     }
 
     /// Notifies the actor that a block has been certified.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn certified(&self, round: Round, block: V::Block) -> bool {
+    pub fn certified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Certified {
             round,
             block,
             ack: Some(ack),
         });
-        receiver.await.is_ok()
+        receiver
     }
 
     /// Attempts to set the sync starting point from a finalized commitment.

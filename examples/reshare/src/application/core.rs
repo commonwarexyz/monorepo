@@ -80,7 +80,7 @@ where
         // This approach does allow duplicate commitments to be proposed, but
         // the arbiter handles this by choosing the first commitment it sees
         // from any given dealer.
-        let reshare = self.dkg.act().await;
+        let reshare = self.dkg.act().await.ok().flatten();
 
         // Create a new block with the consensus context
         Some(Block::new(

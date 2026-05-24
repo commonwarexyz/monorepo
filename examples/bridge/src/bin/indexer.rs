@@ -255,10 +255,7 @@ fn main() {
 
             let (peer, mut sender, mut receiver) = match listen(
                 context.child("listener"),
-                |peer| {
-                    let out = validators.position(&peer).is_some();
-                    async move { out }
-                },
+                |peer| validators.position(&peer).is_some(),
                 config.clone(),
                 stream,
                 sink,

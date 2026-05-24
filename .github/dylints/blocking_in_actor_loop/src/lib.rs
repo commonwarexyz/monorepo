@@ -18,14 +18,17 @@ dylint_linting::declare_late_lint! {
     ///
     /// Detects blocking waits in actor event loops, such as awaiting an actor
     /// mailbox request/reply method or an async handler callback inside
-    /// `select_loop!`.
+    /// `select_loop!`. It also detects async mailbox request/reply helpers that
+    /// create a oneshot channel, enqueue a message with the sender, and then
+    /// await the receiver before returning.
     ///
     /// ### Why is this bad?
     ///
     /// Actor loops must keep polling their mailbox and other event sources.
     /// Awaiting another actor or an application callback from a branch body can
-    /// starve the loop. Spawn or pool the work and select on its completion
-    /// instead.
+    /// starve the loop. Hiding the wait behind an async mailbox helper makes it
+    /// too easy for actor loops to block accidentally. Spawn or pool the work
+    /// and select on its completion instead.
     ///
     /// ### Example
     ///
@@ -61,6 +64,20 @@ impl<'tcx> LateLintPass<'tcx> for BlockingInActorLoop {
         match actor_loop_kind(cx, body) {
             Some(kind) => BlockingAwaitVisitor { cx, kind }.visit_expr(body.value),
             None => {}
+        }
+
+        if let Some(span) = request_reply_helper_wait(cx, body) {
+            cx.emit_span_lint(
+                BLOCKING_IN_ACTOR_LOOP,
+                span,
+                DiagDecorator(|diag| {
+                    diag.primary_message("async mailbox request/reply helper hides an actor wait");
+                    diag.span_help(
+                        span,
+                        "return the oneshot receiver and let callers select or await explicitly",
+                    );
+                }),
+            );
         }
     }
 }
@@ -133,6 +150,50 @@ fn actor_loop_kind(cx: &LateContext<'_>, body: &Body<'_>) -> Option<ActorLoopKin
         return Some(ActorLoopKind::MailboxWhile);
     }
     None
+}
+
+fn request_reply_helper_wait(cx: &LateContext<'_>, body: &Body<'_>) -> Option<Span> {
+    let snippet = cx
+        .sess()
+        .source_map()
+        .span_to_snippet(body.value.span)
+        .ok()?;
+
+    if !snippet.contains("oneshot::channel")
+        || !snippet.contains(".enqueue(Message::")
+        || !snippet.contains(".await")
+    {
+        return None;
+    }
+
+    AwaitVisitor::default().await_span(body.value)
+}
+
+#[derive(Default)]
+struct AwaitVisitor {
+    span: Option<Span>,
+}
+
+impl AwaitVisitor {
+    fn await_span<'tcx>(mut self, expr: &'tcx Expr<'tcx>) -> Option<Span> {
+        self.visit_expr(expr);
+        self.span
+    }
+}
+
+impl<'tcx> Visitor<'tcx> for AwaitVisitor {
+    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        if self.span.is_some() {
+            return;
+        }
+
+        if matches!(expr.kind, ExprKind::Match(_, _, MatchSource::AwaitDesugar)) {
+            self.span = Some(expr.span);
+            return;
+        }
+
+        walk_expr(self, expr);
+    }
 }
 
 fn awaited_call<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<AwaitedCall<'tcx>> {

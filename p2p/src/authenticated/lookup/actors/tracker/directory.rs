@@ -304,7 +304,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C) -> Option<Reservation<C>> {
+    pub fn listen(&mut self, peer: &C, source_ip: IpAddr) -> Option<Reservation<C>> {
+        if !self.acceptable(peer, source_ip) {
+            return None;
+        }
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
@@ -1187,7 +1190,9 @@ mod tests {
                 )
                 .unwrap();
 
-            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
+            let _reservation = directory
+                .listen(&pk_1, addr_1.ip())
+                .expect("peer should reserve");
             let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
             directory.connect(&pk_1);
 

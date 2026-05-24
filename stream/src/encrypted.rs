@@ -73,7 +73,7 @@ use commonware_runtime::{
 };
 use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
-use std::{future::Future, ops::Range, time::Duration};
+use std::{ops::Range, time::Duration};
 use thiserror::Error;
 
 const TAG_SIZE: u32 = {
@@ -243,13 +243,13 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
 
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
+/// The bouncer runs synchronously after the peer key frame is decoded.
 pub async fn listen<
     R: BufferPooler + CryptoRngCore + Clock,
     S: Signer,
     I: Stream,
     O: Sink,
-    Fut: Future<Output = bool>,
-    F: FnOnce(S::PublicKey) -> Fut,
+    F: FnOnce(S::PublicKey) -> bool,
 >(
     ctx: R,
     bouncer: F,
@@ -261,7 +261,7 @@ pub async fn listen<
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
         let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
-        if !bouncer(peer.clone()).await {
+        if !bouncer(peer.clone()) {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
         }
 
@@ -594,7 +594,7 @@ mod test {
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
-                    |_| async { true },
+                    |_| true,
                     listener_config,
                     listener_stream,
                     listener_sink,
@@ -645,7 +645,7 @@ mod test {
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
-                    |_| async { true },
+                    |_| true,
                     listener_config,
                     listener_stream,
                     listener_sink,
@@ -720,7 +720,7 @@ mod test {
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
-                    |_| async { true },
+                    |_| true,
                     listener_config,
                     listener_stream,
                     listener_sink,
@@ -791,7 +791,7 @@ mod test {
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
-                    |_| async { true },
+                    |_| true,
                     listener_config,
                     listener_stream,
                     listener_sink,
@@ -850,7 +850,7 @@ mod test {
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 listen(
                     context,
-                    |_| async { true },
+                    |_| true,
                     listener_config,
                     listener_stream,
                     listener_sink,
@@ -921,7 +921,7 @@ mod test {
 
             let result = listen(
                 context,
-                |_| async { true },
+                |_| true,
                 listener_config,
                 listener_stream,
                 listener_sink,

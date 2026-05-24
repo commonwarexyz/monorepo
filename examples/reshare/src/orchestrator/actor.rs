@@ -269,6 +269,8 @@ where
                             Some(boundary_height) => marshal
                                 .get_block(boundary_height)
                                 .await
+                                .ok()
+                                .flatten()
                                 .map(|block| block.digest())
                                 .ok_or(boundary_height),
                             None => Ok(genesis::<H, C, V>().digest()),

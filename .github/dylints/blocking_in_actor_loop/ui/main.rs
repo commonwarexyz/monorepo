@@ -14,6 +14,31 @@ macro_rules! select_loop {
     }};
 }
 
+mod oneshot {
+    use std::{
+        future::Future,
+        marker::PhantomData,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    pub struct Sender<T>(PhantomData<T>);
+
+    pub struct Receiver<T>(PhantomData<T>);
+
+    pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+        (Sender(PhantomData), Receiver(PhantomData))
+    }
+
+    impl<T> Future for Receiver<T> {
+        type Output = Result<T, ()>;
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+}
+
 trait Handler {
     async fn process(&mut self);
 }
@@ -48,6 +73,28 @@ impl Stream {
     async fn send(&mut self) {}
 
     async fn recv(&mut self) {}
+}
+
+enum Message {
+    Ready { responder: oneshot::Sender<()> },
+}
+
+struct RequestReplyMailbox;
+
+impl RequestReplyMailbox {
+    fn enqueue(&self, _: Message) {}
+
+    async fn ready(&self) -> Option<()> {
+        let (responder, receiver) = oneshot::channel();
+        self.enqueue(Message::Ready { responder });
+        receiver.await.ok()
+    }
+
+    fn ready_receiver(&self) -> oneshot::Receiver<()> {
+        let (responder, receiver) = oneshot::channel();
+        self.enqueue(Message::Ready { responder });
+        receiver
+    }
 }
 
 async fn bad_handler(mut handler: impl Handler) {

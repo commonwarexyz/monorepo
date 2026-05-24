@@ -127,11 +127,11 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
 
     /// Get a message by digest.
     ///
-    /// If the engine has shut down, returns `None`.
-    pub async fn get(&self, digest: M::Digest) -> Option<M> {
+    /// The returned receiver is closed if the engine has shut down.
+    pub fn get(&self, digest: M::Digest) -> oneshot::Receiver<Option<M>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Get { digest, responder });
-        receiver.await.unwrap_or_default()
+        receiver
     }
 }
 

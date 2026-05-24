@@ -414,7 +414,7 @@ mod tests {
             for peer in peers.iter() {
                 let mailbox = mailboxes.get(peer).unwrap().clone();
                 let digest = message.digest();
-                let receiver = mailbox.get(digest).await;
+                let receiver = mailbox.get(digest).await.unwrap_or_default();
                 if let Some(receiver) = receiver {
                     assert_eq!(receiver, message.clone());
                     found += 1;
@@ -442,7 +442,7 @@ mod tests {
             let digest_m1 = m1.digest();
 
             // Attempt immediate retrieval before broadcasting
-            let receiver_before = mailbox_a.get(digest_m1).await;
+            let receiver_before = mailbox_a.get(digest_m1).await.unwrap_or_default();
             assert!(receiver_before.is_none());
 
             // Attempt retrieval before broadcasting
@@ -458,7 +458,7 @@ mod tests {
             assert_eq!(msg_before, m1);
 
             // Attempt immediate retrieval after broadcasting
-            let receiver_after = mailbox_a.get(digest_m1).await;
+            let receiver_after = mailbox_a.get(digest_m1).await.unwrap_or_default();
             assert_eq!(receiver_after, Some(m1.clone()));
 
             // Perform a second retrieval after the broadcast
@@ -721,7 +721,8 @@ mod tests {
                 .unwrap()
                 .clone()
                 .get(msg.digest())
-                .await;
+                .await
+                .unwrap_or_default();
             assert_eq!(got_target, Some(msg.clone()));
 
             // Non-target peer should not retrieve the message.
@@ -730,7 +731,8 @@ mod tests {
                 .unwrap()
                 .clone()
                 .get(msg.digest())
-                .await;
+                .await
+                .unwrap_or_default();
             assert!(got_other.is_none());
         });
     }
@@ -763,7 +765,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // observer must get it now
-            assert_eq!(obs.get(digest).await, Some(dup.clone()));
+            assert_eq!(obs.get(digest).await.unwrap_or_default(), Some(dup.clone()));
 
             // Evict from p0's deque only
             for i in 0..CACHE_SIZE {
@@ -771,7 +773,7 @@ mod tests {
                 assert!(mb0.broadcast(Recipients::All, spam).accepted());
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-            assert_eq!(obs.get(digest).await, Some(dup.clone()));
+            assert_eq!(obs.get(digest).await.unwrap_or_default(), Some(dup.clone()));
 
             // Evict from p1's deque as well
             for i in 0..CACHE_SIZE {
@@ -779,7 +781,7 @@ mod tests {
                 assert!(mb1.broadcast(Recipients::All, spam).accepted());
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-            assert!(obs.get(digest).await.is_none());
+            assert!(obs.get(digest).await.unwrap_or_default().is_none());
         });
     }
 
@@ -809,7 +811,7 @@ mod tests {
 
                 let mut hasher = Sha256::default();
                 for msg in [&m1, &m2, &m3] {
-                    if let Some(value) = mb1.get(msg.digest()).await {
+                    if let Some(value) = mb1.get(msg.digest()).await.unwrap_or_default() {
                         hasher.update(&value.content);
                     }
                 }
@@ -1029,7 +1031,7 @@ mod tests {
             );
 
             // Get should not panic
-            let result = mailbox.get(digest).await;
+            let result = mailbox.get(digest).await.unwrap_or_default();
             assert!(result.is_none(), "get after shutdown should return None");
         });
     }
@@ -1075,7 +1077,10 @@ mod tests {
 
             // Verify message received
             let peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
-            let received = peer_mailbox.get(message.digest()).await;
+            let received = peer_mailbox
+                .get(message.digest())
+                .await
+                .unwrap_or_default();
             assert_eq!(received, Some(message));
 
             // Abort all engine handles
@@ -1153,7 +1158,7 @@ mod tests {
             // Peer B should have cached the message (received from A).
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
             assert_eq!(
-                mailbox_b.get(msg.digest()).await,
+                mailbox_b.get(msg.digest()).await.unwrap_or_default(),
                 Some(msg.clone()),
                 "peer B should have the message before eviction"
             );
@@ -1165,7 +1170,11 @@ mod tests {
 
             // Peer A's deque was evicted; the message should be gone.
             assert!(
-                mailbox_b.get(msg.digest()).await.is_none(),
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .unwrap_or_default()
+                    .is_none(),
                 "message should be evicted after peer A left the peer set"
             );
         });
@@ -1264,7 +1273,7 @@ mod tests {
 
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
             assert_eq!(
-                mailbox_b.get(msg.digest()).await,
+                mailbox_b.get(msg.digest()).await.unwrap_or_default(),
                 Some(msg.clone()),
                 "peer B should have the message before eviction"
             );
@@ -1280,7 +1289,11 @@ mod tests {
             context.sleep(A_JIFFY).await;
 
             assert!(
-                mailbox_b.get(msg.digest()).await.is_none(),
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .unwrap_or_default()
+                    .is_none(),
                 "message should be evicted: peer A is not in the latest peer set"
             );
 
@@ -1292,7 +1305,11 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert!(
-                mailbox_b.get(fresh.digest()).await.is_none(),
+                mailbox_b
+                    .get(fresh.digest())
+                    .await
+                    .unwrap_or_default()
+                    .is_none(),
                 "message should not be rebuffered after peer A left latest.primary"
             );
         });
@@ -1385,12 +1402,16 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert_eq!(
-                mailbox_a.get(msg.digest()).await,
+                mailbox_a.get(msg.digest()).await.unwrap_or_default(),
                 None,
                 "sender not in latest.primary should not buffer, including own broadcasts"
             );
             assert!(
-                mailbox_b.get(msg.digest()).await.is_none(),
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .unwrap_or_default()
+                    .is_none(),
                 "peer B should not cache messages from a sender excluded by the initial latest.primary set"
             );
         });
@@ -1429,7 +1450,7 @@ mod tests {
             engine.start(network);
 
             assert_eq!(
-                mailbox.get(msg.digest()).await,
+                mailbox.get(msg.digest()).await.unwrap_or_default(),
                 Some(msg),
                 "sender is already in the initial latest.primary set, so its local broadcast should be cached"
             );
@@ -1513,12 +1534,16 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             assert_eq!(
-                mailbox_a.get(before.digest()).await,
+                mailbox_a.get(before.digest()).await.unwrap_or_default(),
                 None,
                 "without latest.primary, local broadcasts are not buffered"
             );
             assert!(
-                mailbox_b.get(before.digest()).await.is_none(),
+                mailbox_b
+                    .get(before.digest())
+                    .await
+                    .unwrap_or_default()
+                    .is_none(),
                 "without latest.primary, remote peers do not cache inbound messages"
             );
 
@@ -1534,7 +1559,10 @@ mod tests {
                 .accepted());
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
-            assert_eq!(mailbox_b.get(after.digest()).await, Some(after));
+            assert_eq!(
+                mailbox_b.get(after.digest()).await.unwrap_or_default(),
+                Some(after)
+            );
         });
     }
 
@@ -1593,7 +1621,10 @@ mod tests {
 
             // B has the message in both A's and C's deques (ref count = 2).
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
-            assert_eq!(mailbox_b.get(msg.digest()).await, Some(msg.clone()));
+            assert_eq!(
+                mailbox_b.get(msg.digest()).await.unwrap_or_default(),
+                Some(msg.clone())
+            );
 
             // Evict peer A only; C is still in the latest primary set.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
@@ -1602,7 +1633,7 @@ mod tests {
 
             // Message should still be available (C's deque still holds it).
             assert_eq!(
-                mailbox_b.get(msg.digest()).await,
+                mailbox_b.get(msg.digest()).await.unwrap_or_default(),
                 Some(msg.clone()),
                 "message should survive when another peer in the primary set still references it"
             );

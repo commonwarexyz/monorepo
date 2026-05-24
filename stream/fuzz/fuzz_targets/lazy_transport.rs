@@ -48,7 +48,7 @@ thread_local! {
         let listener_handle = context.child("listener").spawn(move |context| async move {
             listen(
                 context,
-                |_| async { true },
+                |_| true,
                 listener_config,
                 listener_stream,
                 listener_sink,
