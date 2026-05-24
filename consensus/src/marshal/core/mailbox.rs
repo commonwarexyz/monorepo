@@ -733,7 +733,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Notifies the actor that a block has been locally proposed.
     ///
-    /// Returns after the block is durably persisted.
+    /// The returned receiver resolves after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
     pub fn proposed(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
@@ -747,7 +747,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Notifies the actor that a block has been verified.
     ///
-    /// Returns after the block is durably persisted.
+    /// The returned receiver resolves after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
     pub fn verified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
@@ -761,7 +761,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Notifies the actor that a block has been certified.
     ///
-    /// Returns after the block is durably persisted.
+    /// The returned receiver resolves after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
     pub fn certified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();

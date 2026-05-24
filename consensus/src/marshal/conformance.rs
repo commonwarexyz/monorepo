@@ -114,7 +114,13 @@ async fn wait_processed<H: TestHarness>(
     height: Height,
 ) {
     loop {
-        if setup.mailbox.get_processed_height().await.unwrap_or_default() == Some(height) {
+        if setup
+            .mailbox
+            .get_processed_height()
+            .await
+            .unwrap_or_default()
+            == Some(height)
+        {
             break;
         }
         context.sleep(Duration::from_millis(1)).await;

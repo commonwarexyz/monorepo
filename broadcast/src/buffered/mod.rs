@@ -1077,10 +1077,7 @@ mod tests {
 
             // Verify message received
             let peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
-            let received = peer_mailbox
-                .get(message.digest())
-                .await
-                .unwrap_or_default();
+            let received = peer_mailbox.get(message.digest()).await.unwrap_or_default();
             assert_eq!(received, Some(message));
 
             // Abort all engine handles

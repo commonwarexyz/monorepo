@@ -1058,11 +1058,21 @@ mod tests {
             // Wait until the descendant is archived: that proves finalization processing
             // has completed, at which point the parent must already have been repaired
             // from the shard buffer.
-            while handle.mailbox.get_block(Height::new(2)).await.unwrap_or_default().is_none() {
+            while handle
+                .mailbox
+                .get_block(Height::new(2))
+                .await
+                .unwrap_or_default()
+                .is_none()
+            {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let parent = handle.mailbox.get_block(Height::new(1)).await.unwrap_or_default();
+            let parent = handle
+                .mailbox
+                .get_block(Height::new(1))
+                .await
+                .unwrap_or_default();
             assert!(
                 parent.is_some(),
                 "parent must be archived from shard buffer before height-prune evicts it"
@@ -2366,7 +2376,10 @@ mod tests {
 
             // Validator 1 proposes coded_block_b (same inner block, different coding).
             // This stores it in v1's shard engine and actor cache.
-            assert!(v1_mailbox.verified(round1, coded_block_b.clone()).await.is_ok());
+            assert!(v1_mailbox
+                .verified(round1, coded_block_b.clone())
+                .await
+                .is_ok());
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
@@ -2388,14 +2401,20 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
 
             // The mismatched block must not be stored.
-            let stored = v0_mailbox.get_block(Height::new(1)).await.unwrap_or_default();
+            let stored = v0_mailbox
+                .get_block(Height::new(1))
+                .await
+                .unwrap_or_default();
             assert!(
                 stored.is_none(),
                 "v0 should reject backfilled block with mismatched commitment"
             );
 
             // Without the block, finalization should not be persisted by height yet.
-            let stored_finalization = v0_mailbox.get_finalization(Height::new(1)).await.unwrap_or_default();
+            let stored_finalization = v0_mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .unwrap_or_default();
             assert!(
                 stored_finalization.is_none(),
                 "finalization should not be archived until matching block is available"

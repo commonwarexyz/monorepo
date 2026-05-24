@@ -261,7 +261,8 @@ where
             // Skip this view and let the voter nullify it via timeout.
             if marshal
                 .get_verified(consensus_context.round)
-                .await.unwrap_or_default()
+                .await
+                .unwrap_or_default()
                 .is_some()
             {
                 debug!(

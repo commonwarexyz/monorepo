@@ -341,7 +341,8 @@ mod tests {
         for (sequencer, mailbox) in reporters.iter_mut() {
             let (height, _) = mailbox
                 .get_tip(sequencer.clone())
-                .await.unwrap_or_default()
+                .await
+                .unwrap_or_default()
                 .unwrap_or((Height::zero(), Epoch::zero()));
             if height > max_height {
                 max_height = height;

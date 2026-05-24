@@ -35,6 +35,8 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
 
+type PendingFloor<D, V, P> = (u64, EpochTransition<V, P>, Result<D, Height>);
+
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S, L, T>
 where
@@ -202,11 +204,7 @@ where
         let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
         let mut pending_epochs = BTreeMap::new();
         let mut next_pending_epoch_id = 0u64;
-        let mut pending_floors: Pool<(
-            u64,
-            EpochTransition<V, C::PublicKey>,
-            Result<H::Digest, Height>,
-        )> = Pool::default();
+        let mut pending_floors: Pool<PendingFloor<H::Digest, V, C::PublicKey>> = Pool::default();
 
         select_loop! {
             self.context,

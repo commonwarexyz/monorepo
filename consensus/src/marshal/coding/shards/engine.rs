@@ -2077,7 +2077,9 @@ mod tests {
                     let reconstructed = peer
                         .mailbox
                         .get(commitment)
-                        .await.unwrap_or_default().expect("block should be reconstructed");
+                        .await
+                        .unwrap_or_default()
+                        .expect("block should be reconstructed");
                     assert_eq!(reconstructed.commitment(), commitment);
                     assert_eq!(reconstructed.height(), coded_block.height());
                 }
@@ -2124,7 +2126,9 @@ mod tests {
                     let reconstructed = peer
                         .mailbox
                         .get(commitment)
-                        .await.unwrap_or_default().expect("block should be reconstructed");
+                        .await
+                        .unwrap_or_default()
+                        .expect("block should be reconstructed");
                     assert_eq!(reconstructed.commitment(), commitment);
                     assert_eq!(reconstructed.height(), coded_block.height());
                 }
@@ -2335,15 +2339,27 @@ mod tests {
 
             // Verify all blocks are in the cache.
             assert!(
-                peer.mailbox.get(commitment1).await.unwrap_or_default().is_some(),
+                peer.mailbox
+                    .get(commitment1)
+                    .await
+                    .unwrap_or_default()
+                    .is_some(),
                 "block1 should be cached"
             );
             assert!(
-                peer.mailbox.get(commitment2).await.unwrap_or_default().is_some(),
+                peer.mailbox
+                    .get(commitment2)
+                    .await
+                    .unwrap_or_default()
+                    .is_some(),
                 "block2 should be cached"
             );
             assert!(
-                peer.mailbox.get(commitment3).await.unwrap_or_default().is_some(),
+                peer.mailbox
+                    .get(commitment3)
+                    .await
+                    .unwrap_or_default()
+                    .is_some(),
                 "block3 should be cached"
             );
 
@@ -2353,17 +2369,29 @@ mod tests {
 
             // Blocks at heights 1 and 2 should be pruned.
             assert!(
-                peer.mailbox.get(commitment1).await.unwrap_or_default().is_none(),
+                peer.mailbox
+                    .get(commitment1)
+                    .await
+                    .unwrap_or_default()
+                    .is_none(),
                 "block1 should be pruned"
             );
             assert!(
-                peer.mailbox.get(commitment2).await.unwrap_or_default().is_none(),
+                peer.mailbox
+                    .get(commitment2)
+                    .await
+                    .unwrap_or_default()
+                    .is_none(),
                 "block2 should be pruned"
             );
 
             // Block at height 3 should still be cached.
             assert!(
-                peer.mailbox.get(commitment3).await.unwrap_or_default().is_some(),
+                peer.mailbox
+                    .get(commitment3)
+                    .await
+                    .unwrap_or_default()
+                    .is_some(),
                 "block3 should still be cached"
             );
         });
@@ -3029,7 +3057,9 @@ mod tests {
                 let reconstructed = peers[2]
                     .mailbox
                     .get(commitment_b)
-                    .await.unwrap_or_default().expect("block B should reconstruct");
+                    .await
+                    .unwrap_or_default()
+                    .expect("block B should reconstruct");
                 assert_eq!(reconstructed.commitment(), commitment_b);
 
                 // A state should be pruned (at/below reconstructed view). Sending the same
@@ -3102,7 +3132,12 @@ mod tests {
 
                 peers[2].mailbox.proposed(round_b, block_b);
                 assert!(
-                    peers[2].mailbox.get(commitment_b).await.unwrap_or_default().is_some(),
+                    peers[2]
+                        .mailbox
+                        .get(commitment_b)
+                        .await
+                        .unwrap_or_default()
+                        .is_some(),
                     "local proposal should be cached before pruning"
                 );
                 peers[2].mailbox.prune(commitment_b);
@@ -3276,7 +3311,12 @@ mod tests {
                     "shard subscription should not resolve before leader announcement"
                 );
                 assert!(
-                    peers[receiver_idx].mailbox.get(commitment).await.unwrap_or_default().is_none(),
+                    peers[receiver_idx]
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .unwrap_or_default()
+                        .is_none(),
                     "block should not reconstruct before leader announcement"
                 );
 
@@ -3296,7 +3336,12 @@ mod tests {
 
                 context.sleep(config.link.latency * 2).await;
                 assert!(
-                    peers[receiver_idx].mailbox.get(commitment).await.unwrap_or_default().is_some(),
+                    peers[receiver_idx]
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .unwrap_or_default()
+                        .is_some(),
                     "block should reconstruct after buffered shards are ingested"
                 );
 
@@ -3508,7 +3553,9 @@ mod tests {
                 let reconstructed = peers[receiver_idx]
                     .mailbox
                     .get(commitment)
-                    .await.unwrap_or_default().expect("block should reconstruct from post-leader shards");
+                    .await
+                    .unwrap_or_default()
+                    .expect("block should reconstruct from post-leader shards");
                 assert_eq!(reconstructed.commitment(), commitment);
 
                 assert!(
@@ -3837,7 +3884,12 @@ mod tests {
                 )
                 .await;
                 assert!(
-                    peers[receiver_idx].mailbox.get(commitment1).await.unwrap_or_default().is_none(),
+                    peers[receiver_idx]
+                        .mailbox
+                        .get(commitment1)
+                        .await
+                        .unwrap_or_default()
+                        .is_none(),
                     "block should not reconstruct with only 3 checked shards"
                 );
 
@@ -3855,7 +3907,9 @@ mod tests {
                 let reconstructed = peers[receiver_idx]
                     .mailbox
                     .get(commitment1)
-                    .await.unwrap_or_default().expect("block should reconstruct after additional valid shard");
+                    .await
+                    .unwrap_or_default()
+                    .expect("block should reconstruct after additional valid shard");
                 assert_eq!(reconstructed.commitment(), commitment1);
             },
         );
@@ -4299,7 +4353,9 @@ mod tests {
                     peers[receiver_idx]
                         .mailbox
                         .get(fake_commitment)
-                        .await.unwrap_or_default().is_none(),
+                        .await
+                        .unwrap_or_default()
+                        .is_none(),
                     "block should not be available after DigestMismatch"
                 );
 
@@ -4345,7 +4401,9 @@ mod tests {
                 let reconstructed = peers[receiver_idx]
                     .mailbox
                     .get(real_commitment1)
-                    .await.unwrap_or_default().expect("valid block should reconstruct after prior failure");
+                    .await
+                    .unwrap_or_default()
+                    .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
             },
         );
@@ -4418,7 +4476,9 @@ mod tests {
                     peers[receiver_idx]
                         .mailbox
                         .get(fake_commitment)
-                        .await.unwrap_or_default().is_none(),
+                        .await
+                        .unwrap_or_default()
+                        .is_none(),
                     "block should not be available after ContextMismatch"
                 );
                 assert!(
@@ -4456,7 +4516,9 @@ mod tests {
                 let reconstructed = peers[receiver_idx]
                     .mailbox
                     .get(real_commitment)
-                    .await.unwrap_or_default().expect("valid block should reconstruct after prior context mismatch");
+                    .await
+                    .unwrap_or_default()
+                    .expect("valid block should reconstruct after prior context mismatch");
                 assert_eq!(reconstructed.commitment(), real_commitment);
             },
         );
@@ -4685,7 +4747,9 @@ mod tests {
                     let reconstructed = peer
                         .mailbox
                         .get(commitment)
-                        .await.unwrap_or_default().expect("block should be reconstructed");
+                        .await
+                        .unwrap_or_default()
+                        .expect("block should be reconstructed");
                     assert_eq!(reconstructed.commitment(), commitment);
                 }
 
@@ -4807,7 +4871,9 @@ mod tests {
                     let reconstructed = np
                         .mailbox
                         .get(commitment)
-                        .await.unwrap_or_default().expect("non-participant should reconstruct block");
+                        .await
+                        .unwrap_or_default()
+                        .expect("non-participant should reconstruct block");
                     assert_eq!(reconstructed.commitment(), commitment);
                 }
 

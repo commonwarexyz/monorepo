@@ -394,7 +394,8 @@ mod tests {
     ) -> tracker::Reservation<PublicKey> {
         let res = mailbox
             .listen(peer.clone())
-            .await.unwrap_or_default()
+            .await
+            .unwrap_or_default()
             .expect("reservation failed");
         let dialer = false;
         let greeting = mailbox.connect(peer.clone(), dialer).await.ok();
@@ -530,7 +531,11 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let _res = mailbox.listen(auth_pk.clone()).await.unwrap_or_default().unwrap();
+            let _res = mailbox
+                .listen(auth_pk.clone())
+                .await
+                .unwrap_or_default()
+                .unwrap();
             let tracker_info = mailbox
                 .connect(auth_pk.clone(), false)
                 .await
@@ -900,7 +905,8 @@ mod tests {
             drop(reservation.unwrap());
             context.sleep(Duration::from_millis(1_010)).await; // Allow release and rate limit to pass
 
-            let reservation_after_release = mailbox.listen(peer_pk.clone()).await.unwrap_or_default();
+            let reservation_after_release =
+                mailbox.listen(peer_pk.clone()).await.unwrap_or_default();
             assert!(reservation_after_release.is_some());
         });
     }
@@ -961,7 +967,10 @@ mod tests {
                 update.all.secondary,
                 Set::try_from([secondary_pk.clone()]).unwrap()
             );
-            assert!(mailbox.acceptable(secondary_pk.clone()).await.unwrap_or(false));
+            assert!(mailbox
+                .acceptable(secondary_pk.clone())
+                .await
+                .unwrap_or(false));
 
             let secondary_info = new_peer_info(
                 &mut secondary_signer,

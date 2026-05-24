@@ -17,14 +17,7 @@ use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRngCore;
-use std::{
-    collections::HashSet,
-    fmt,
-    net::SocketAddr,
-    num::NonZeroU32,
-    pin::Pin,
-    sync::Arc,
-};
+use std::{collections::HashSet, fmt, net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc};
 use tracing::debug;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
@@ -68,7 +61,7 @@ pub(crate) struct Acceptable<C: PublicKey> {
 }
 
 impl<C: PublicKey> Acceptable<C> {
-    fn new(peers: HashSet<C>) -> Self {
+    const fn new(peers: HashSet<C>) -> Self {
         Self { peers }
     }
 
@@ -150,7 +143,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
@@ -179,11 +172,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "completed handshake");
 
         // Attempt to claim the connection
-        let Some(reservation) = tracker
-            .listen(peer.clone())
-            .await
-            .unwrap_or_default()
-        else {
+        let Some(reservation) = tracker.listen(peer.clone()).await.unwrap_or_default() else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };

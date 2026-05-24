@@ -289,7 +289,8 @@ mod tests {
                         loop {
                             let (height, epoch) = mailbox
                                 .get_tip()
-                                .await.unwrap_or_default()
+                                .await
+                                .unwrap_or_default()
                                 .unwrap_or((Height::zero(), Epoch::zero()));
                             debug!(
                                 %height,
@@ -517,8 +518,10 @@ mod tests {
                             .child("completion_watcher")
                             .spawn(move |context| async move {
                                 loop {
-                                    if let Some(tip_height) =
-                                        reporter_mailbox.get_contiguous_tip().await.unwrap_or_default()
+                                    if let Some(tip_height) = reporter_mailbox
+                                        .get_contiguous_tip()
+                                        .await
+                                        .unwrap_or_default()
                                     {
                                         if tip_height >= target_height {
                                             break;
@@ -665,7 +668,9 @@ mod tests {
 
                 // Wait for validators to reach target_height (past skip_height)
                 loop {
-                    if let Some((tip_height, _)) = reporter_mailbox.get_tip().await.unwrap_or_default() {
+                    if let Some((tip_height, _)) =
+                        reporter_mailbox.get_tip().await.unwrap_or_default()
+                    {
                         debug!(%tip_height, %skip_height, %target_height, "reporter status");
                         if tip_height >= skip_height.saturating_add(window).previous().unwrap() {
                             // max we can proceed before item confirmed
@@ -750,7 +755,11 @@ mod tests {
 
                 // Wait for skip_height to be confirmed (should happen on replay)
                 loop {
-                    if let Some(tip_height) = reporter_mailbox.get_contiguous_tip().await.unwrap_or_default() {
+                    if let Some(tip_height) = reporter_mailbox
+                        .get_contiguous_tip()
+                        .await
+                        .unwrap_or_default()
+                    {
                         debug!(
                             %tip_height,
                             %skip_height, %target_height, "reporter status on restart"

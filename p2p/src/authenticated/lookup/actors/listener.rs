@@ -162,7 +162,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
@@ -371,8 +371,14 @@ mod tests {
             let second_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
             let third_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
 
-            assert_eq!(mailbox.set(HashMap::from([(peer.clone(), first_ip)])), Feedback::Ok);
-            assert_eq!(mailbox.set(HashMap::from([(peer.clone(), second_ip)])), Feedback::Ok);
+            assert_eq!(
+                mailbox.set(HashMap::from([(peer.clone(), first_ip)])),
+                Feedback::Ok
+            );
+            assert_eq!(
+                mailbox.set(HashMap::from([(peer.clone(), second_ip)])),
+                Feedback::Ok
+            );
             assert_eq!(mailbox.set(HashMap::from([(peer, third_ip)])), Feedback::Ok);
 
             let latest = receiver.next().await.expect("latest update missing");

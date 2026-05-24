@@ -162,11 +162,7 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Connect` message to the tracker and receive the greeting info.
     ///
     /// The returned receiver is closed if the peer is not eligible or the tracker is shut down.
-    pub(crate) fn connect(
-        &self,
-        public_key: C,
-        dialer: bool,
-    ) -> oneshot::Receiver<types::Info<C>> {
+    pub(crate) fn connect(&self, public_key: C, dialer: bool) -> oneshot::Receiver<types::Info<C>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Connect {
             public_key,

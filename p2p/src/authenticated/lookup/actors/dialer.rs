@@ -200,10 +200,9 @@ impl<
                 } else {
                     Either::Right(self.context.sleep_until(dial_deadline))
                 };
-                let wait_for_query = match &mut query {
-                    Some(query) => Either::Left(query.recv()),
-                    None => Either::Right(future::pending()),
-                };
+                let wait_for_query = query
+                    .as_mut()
+                    .map_or_else(|| Either::Right(future::pending()), |query| Either::Left(query.recv()));
             },
             on_stopped => {
                 debug!("context shutdown, stopping dialer");

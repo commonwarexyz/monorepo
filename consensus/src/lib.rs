@@ -104,6 +104,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// For [`CertifiableAutomaton`] implementations, returning a payload from
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
+        ///
+        /// Implementations should return the receiver promptly. Expensive or
+        /// blocking proposal work should be queued or spawned, then reported
+        /// through the returned receiver.
         fn propose(
             &mut self,
             context: Self::Context,
@@ -123,6 +127,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Closing the channel is also terminal for this request and should be reserved for cases
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
+        ///
+        /// Implementations should return the receiver promptly. Expensive or
+        /// blocking verification work should be queued or spawned, then reported
+        /// through the returned receiver.
         fn verify(
             &mut self,
             context: Self::Context,
@@ -156,6 +164,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Closing the channel is also terminal for this request and should be reserved for cases
         /// where certification can no longer produce a verdict (for example, shutdown), not for temporary
         /// inability to decide.
+        ///
+        /// Implementations should return the receiver promptly. Expensive or
+        /// blocking certification work should be queued or spawned, then reported
+        /// through the returned receiver.
         ///
         /// # Determinism Requirement
         ///
