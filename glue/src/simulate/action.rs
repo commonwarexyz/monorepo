@@ -45,7 +45,15 @@ impl<P: PublicKey> Schedule<P> {
     }
 
     /// Add an action at the given simulation time.
+    ///
+    /// Panics if `time` is earlier than the most recently added event.
     pub fn at(mut self, time: Duration, action: Action<P>) -> Self {
+        if let Some((last_time, _)) = self.events.last() {
+            assert!(
+                time >= *last_time,
+                "schedule events must be added in nondecreasing time order"
+            );
+        }
         self.events.push((time, action));
         self
     }
@@ -81,4 +89,21 @@ pub enum Action<P: PublicKey> {
 
     /// Restart a previously crashed validator.
     Restart(P),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, Schedule};
+    use commonware_cryptography::{ed25519, Signer as _};
+    use std::time::Duration;
+
+    #[test]
+    #[should_panic(expected = "schedule events must be added in nondecreasing time order")]
+    fn schedule_rejects_out_of_order_events() {
+        let pk = ed25519::PrivateKey::from_seed(0).public_key();
+
+        let _ = Schedule::new()
+            .at(Duration::from_secs(5), Action::Crash(pk.clone()))
+            .at(Duration::from_secs(2), Action::Restart(pk));
+    }
 }
