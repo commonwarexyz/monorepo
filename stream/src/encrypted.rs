@@ -243,14 +243,13 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
 
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
-/// The bouncer runs after the peer key frame is decoded.
 pub async fn listen<
     R: BufferPooler + CryptoRngCore + Clock,
     S: Signer,
     I: Stream,
     O: Sink,
-    F: FnOnce(S::PublicKey) -> B,
-    B: Future<Output = bool>,
+    Fut: Future<Output = bool>,
+    F: FnOnce(S::PublicKey) -> Fut,
 >(
     ctx: R,
     bouncer: F,

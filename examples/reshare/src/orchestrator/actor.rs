@@ -295,10 +295,11 @@ where
                 }
             },
             (pending_epoch_id, transition, floor) = pending_floors.next_completed() => {
-                if pending_epochs.remove(&transition.epoch) != Some(pending_epoch_id) {
+                if pending_epochs.get(&transition.epoch).copied() != Some(pending_epoch_id) {
                     debug!(epoch = %transition.epoch, "ignoring canceled epoch");
                     continue;
                 }
+                pending_epochs.remove(&transition.epoch);
 
                 if engines.contains_key(&transition.epoch) {
                     warn!(epoch = %transition.epoch, "entered existing epoch");

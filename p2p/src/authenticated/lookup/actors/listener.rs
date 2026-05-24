@@ -17,7 +17,13 @@ use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRngCore;
-use std::{collections::HashSet, fmt, net::SocketAddr, num::NonZeroU32, pin::Pin};
+use std::{
+    collections::HashSet,
+    fmt,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
+    pin::Pin,
+};
 use tracing::debug;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
@@ -26,10 +32,10 @@ const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
 
-pub(crate) type Updates = ring::Receiver<HashSet<std::net::IpAddr>>;
+pub(crate) type Updates = ring::Receiver<HashSet<IpAddr>>;
 
 #[derive(Clone)]
-pub(crate) struct Mailbox(ring::Sender<HashSet<std::net::IpAddr>>);
+pub(crate) struct Mailbox(ring::Sender<HashSet<IpAddr>>);
 
 impl fmt::Debug for Mailbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -43,7 +49,7 @@ impl Mailbox {
         (Self(sender), receiver)
     }
 
-    pub(crate) fn set(&mut self, registered_ips: HashSet<std::net::IpAddr>) -> Feedback {
+    pub(crate) fn set(&mut self, registered_ips: HashSet<IpAddr>) -> Feedback {
         if Pin::new(&mut self.0).start_send(registered_ips).is_ok() {
             Feedback::Ok
         } else {
@@ -73,7 +79,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    registered_ips: HashSet<std::net::IpAddr>,
+    registered_ips: HashSet<IpAddr>,
     updates: Updates,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
