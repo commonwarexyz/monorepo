@@ -1,9 +1,6 @@
 //! Tracker
 
-use crate::{
-    authenticated::discovery::{actors::listener, config::Bootstrapper},
-    Ingress,
-};
+use crate::{authenticated::discovery::config::Bootstrapper, Ingress};
 use commonware_cryptography::Signer;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -38,6 +35,5 @@ pub struct Config<C: Signer> {
     pub peer_connection_cooldown: Duration,
     pub peer_gossip_max_count: usize,
     pub dial_fail_limit: usize,
-    pub listener: listener::Mailbox<C::PublicKey>,
     pub block_duration: Duration,
 }

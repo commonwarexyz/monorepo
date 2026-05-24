@@ -416,26 +416,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
     }
 
-    /// Return peers the listener should currently accept during the stream handshake.
-    pub fn acceptable_peers(&self) -> HashMap<C, IpAddr> {
-        self.peers
-            .iter()
-            .filter(|(peer, _)| !self.is_blocked(peer))
-            .filter_map(|(peer, record)| {
-                let source_ip = record.egress_ip()?;
-                record
-                    .acceptable(source_ip, self.bypass_ip_check)
-                    .then_some((peer.clone(), source_ip))
-            })
-            .collect()
-    }
-
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
     /// Only includes IPs from peers that are:
     /// - Currently eligible (not blocked, in a peer set)
     /// - Have a valid egress IP (global, or private IPs are allowed)
-    #[cfg(test)]
     pub fn listenable(&self) -> std::collections::HashSet<IpAddr> {
         self.peers
             .iter()

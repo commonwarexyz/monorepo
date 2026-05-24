@@ -94,9 +94,8 @@ pub enum Message<C: PublicKey> {
         reservation: oneshot::Sender<Option<Reservation<C>>>,
     },
 
-    // ---------- Used by tests ----------
+    // ---------- Used by listener ----------
     /// Check if a peer is acceptable (can accept an incoming connection from them).
-    #[cfg(test)]
     Acceptable {
         /// The public key of the peer to check.
         public_key: C,
@@ -165,7 +164,6 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send an `Acceptable` message to the tracker.
     ///
     /// The returned receiver is closed if the tracker is shut down.
-    #[cfg(test)]
     pub(crate) fn acceptable(&self, public_key: C, source_ip: IpAddr) -> oneshot::Receiver<bool> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Acceptable {

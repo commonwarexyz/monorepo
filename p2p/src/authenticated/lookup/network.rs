@@ -34,7 +34,7 @@ pub struct Network<
     tracker_mailbox: tracker::Mailbox<C::PublicKey>,
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
-    listener: listener::Updates<C::PublicKey>,
+    listener: listener::Updates,
 }
 
 impl<

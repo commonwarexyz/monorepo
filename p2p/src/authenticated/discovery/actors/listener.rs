@@ -2,10 +2,9 @@
 
 use crate::authenticated::{
     discovery::actors::{spawner, tracker},
-    Mailbox as SpawnerMailbox,
+    Mailbox,
 };
-use commonware_actor::Feedback;
-use commonware_cryptography::{PublicKey, Signer};
+use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
@@ -14,10 +13,9 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
-use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
-use futures::{Sink, StreamExt};
+use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use rand_core::CryptoRngCore;
-use std::{collections::HashSet, fmt, net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc};
+use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
@@ -25,58 +23,6 @@ const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
-
-pub(crate) type Updates<C> = ring::Receiver<Arc<Acceptable<C>>>;
-
-#[derive(Clone)]
-pub(crate) struct Mailbox<C: PublicKey>(ring::Sender<Arc<Acceptable<C>>>);
-
-impl<C: PublicKey> fmt::Debug for Mailbox<C> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Mailbox").finish()
-    }
-}
-
-impl<C: PublicKey> Mailbox<C> {
-    pub(crate) fn new() -> (Self, Updates<C>) {
-        let (sender, receiver) = ring::channel(NZUsize!(1));
-        (Self(sender), receiver)
-    }
-
-    pub(crate) fn set(&mut self, peers: HashSet<C>) -> Feedback {
-        if Pin::new(&mut self.0)
-            .start_send(Arc::new(Acceptable::new(peers)))
-            .is_ok()
-        {
-            Feedback::Ok
-        } else {
-            Feedback::Closed
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct Acceptable<C: PublicKey> {
-    peers: HashSet<C>,
-}
-
-impl<C: PublicKey> Acceptable<C> {
-    const fn new(peers: HashSet<C>) -> Self {
-        Self { peers }
-    }
-
-    fn accepts(&self, peer: &C) -> bool {
-        self.peers.contains(peer)
-    }
-}
-
-impl<C: PublicKey> Default for Acceptable<C> {
-    fn default() -> Self {
-        Self {
-            peers: HashSet::new(),
-        }
-    }
-}
 
 /// Configuration for the listener actor.
 pub struct Config<C: Signer> {
@@ -97,8 +43,6 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    acceptable: Arc<Acceptable<C::PublicKey>>,
-    updates: Updates<C::PublicKey>,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -106,7 +50,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, updates: Updates<C::PublicKey>) -> Self {
+    pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -134,8 +78,6 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
-            acceptable: Arc::new(Acceptable::default()),
-            updates,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
             handshakes_ip_rate_limited,
@@ -143,20 +85,20 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         }
     }
 
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        acceptable: Arc<Acceptable<C::PublicKey>>,
         tracker: tracker::Mailbox<C::PublicKey>,
-        mut supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
+        let bouncer = tracker.clone();
         let (peer, send, recv) = match listen(
             context,
-            |peer| acceptable.accepts(&peer),
+            |peer| async move { bouncer.acceptable(peer).await.unwrap_or(false) },
             stream_cfg,
             stream,
             sink,
@@ -186,16 +128,16 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     pub fn start(
         mut self,
         tracker: tracker::Mailbox<C::PublicKey>,
-        supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]
     async fn run(
-        mut self,
+        self,
         tracker: tracker::Mailbox<C::PublicKey>,
-        supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Create the rate limiters
         let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
@@ -220,12 +162,6 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             self.context,
             on_stopped => {
                 debug!("context shutdown, stopping listener");
-            },
-            Some(acceptable) = self.updates.next() else {
-                debug!("listener updates closed");
-                break;
-            } => {
-                self.acceptable = acceptable;
             },
             conn = listener.accept() => {
                 // Accept a new connection
@@ -285,13 +221,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 // Spawn a new handshaker to upgrade connection
                 self.context.child("handshaker").spawn({
                     let stream_cfg = self.stream_cfg.clone();
-                    let acceptable = self.acceptable.clone();
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context, address, stream_cfg, sink, stream, acceptable, tracker,
-                            supervisor,
+                            context, address, stream_cfg, sink, stream, tracker, supervisor,
                         )
                         .await;
 
@@ -338,7 +272,6 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -349,7 +282,6 @@ mod tests {
                     allowed_handshake_rate_per_ip,
                     allowed_handshake_rate_per_subnet,
                 },
-                updates_rx,
             );
 
             let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
@@ -369,7 +301,7 @@ mod tests {
             });
 
             let (supervisor_mailbox, mut supervisor_rx) =
-                SpawnerMailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
+                Mailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
@@ -483,7 +415,6 @@ mod tests {
                 handshake_timeout: Duration::from_millis(5),
             };
 
-            let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -494,7 +425,6 @@ mod tests {
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),
                     allowed_handshake_rate_per_subnet: Quota::per_hour(NZU32!(100)),
                 },
-                updates_rx,
             );
 
             let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
@@ -514,7 +444,7 @@ mod tests {
             });
 
             let (supervisor_mailbox, mut supervisor_rx) =
-                SpawnerMailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
+                Mailbox::new(context.child("supervisor_mailbox"), NZUsize!(1));
             let supervisor_task = context
                 .child("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });

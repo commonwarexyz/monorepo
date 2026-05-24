@@ -2,7 +2,6 @@
 
 use crate::{
     authenticated::{
-        dialing::Dialable,
         lookup::{
             actors::{
                 spawner,
@@ -14,7 +13,7 @@ use crate::{
     },
     Ingress,
 };
-use commonware_cryptography::{PublicKey, Signer};
+use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
@@ -23,35 +22,14 @@ use commonware_runtime::{
     StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::channel::oneshot;
-use futures::future::{self, Either};
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tracing::debug;
 
 // Mailbox for the spawner actor.
 type SupervisorMailbox<E, C> =
     Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey>>;
-
-enum TrackerQuery<C: PublicKey> {
-    Dialable(oneshot::Receiver<Dialable<C>>),
-    Dial(oneshot::Receiver<Option<(Reservation<C>, Ingress)>>),
-}
-
-enum TrackerReply<C: PublicKey> {
-    Dialable(Dialable<C>),
-    Dial(Option<(Reservation<C>, Ingress)>),
-}
-
-impl<C: PublicKey> TrackerQuery<C> {
-    async fn recv(&mut self) -> TrackerReply<C> {
-        match self {
-            Self::Dialable(receiver) => TrackerReply::Dialable(receiver.await.unwrap_or_default()),
-            Self::Dial(receiver) => TrackerReply::Dial(receiver.await.unwrap_or_default()),
-        }
-    }
-}
 
 /// Configuration for the dialer actor.
 pub struct Config<C: Signer> {
@@ -166,16 +144,6 @@ impl<
         });
     }
 
-    fn empty_queue_deadline(
-        &self,
-        now: SystemTime,
-        next_query_at: Option<SystemTime>,
-    ) -> SystemTime {
-        let min = now + self.dial_frequency;
-        let max = (now + self.peer_connection_cooldown).max(min);
-        next_query_at.unwrap_or(max).clamp(min, max)
-    }
-
     /// Start the dialer actor.
     pub fn start(
         mut self,
@@ -191,57 +159,38 @@ impl<
         mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
-        let mut query: Option<TrackerQuery<C::PublicKey>> = None;
         select_loop! {
             self.context,
-            on_start => {
-                let wait_for_deadline = if query.is_some() {
-                    Either::Left(future::pending())
-                } else {
-                    Either::Right(self.context.sleep_until(dial_deadline))
-                };
-                let wait_for_query = query
-                    .as_mut()
-                    .map_or_else(|| Either::Right(future::pending()), |query| Either::Left(query.recv()));
-            },
             on_stopped => {
                 debug!("context shutdown, stopping dialer");
             },
-            _ = wait_for_deadline => {
+            _ = self.context.sleep_until(dial_deadline) => {
+                // Refill the queue if empty.
                 let now = self.context.current();
+                let mut next_query_at = None;
                 if self.queue.is_empty() {
-                    query = Some(TrackerQuery::Dialable(tracker.dialable()));
-                    continue;
+                    let dialable = tracker.dialable().await.unwrap_or_default();
+                    self.queue = dialable.peers;
+                    self.queue.shuffle(self.context.as_mut());
+                    next_query_at = dialable.next_query_at;
                 }
 
-                if let Some(peer) = self.queue.pop() {
-                    query = Some(TrackerQuery::Dial(tracker.dial(peer)));
+                // Set next deadline.
+                dial_deadline = if self.queue.is_empty() {
+                    let min = now + self.dial_frequency;
+                    let max = (now + self.peer_connection_cooldown).max(min);
+                    next_query_at.unwrap_or(max).clamp(min, max)
                 } else {
-                    dial_deadline = self.empty_queue_deadline(now, None);
-                }
-            },
-            reply = wait_for_query => {
-                query = None;
-                let now = self.context.current();
-                match reply {
-                    TrackerReply::Dialable(dialable) => {
-                        self.queue = dialable.peers;
-                        self.queue.shuffle(self.context.as_mut());
-                        dial_deadline = if self.queue.is_empty() {
-                            self.empty_queue_deadline(now, dialable.next_query_at)
-                        } else {
-                            now
-                        };
-                    }
-                    TrackerReply::Dial(result) => {
-                        if let Some((reservation, ingress)) = result {
-                            self.dial_peer(reservation, ingress, &mut supervisor);
-                            dial_deadline = now + self.dial_frequency;
-                        } else if self.queue.is_empty() {
-                            dial_deadline = now + self.dial_frequency;
-                        } else {
-                            dial_deadline = now;
-                        }
+                    now + self.dial_frequency
+                };
+
+                // Pop through peers until we can reserve and dial one.
+                while let Some(peer) = self.queue.pop() {
+                    if let Some((reservation, ingress)) =
+                        tracker.dial(peer).await.unwrap_or_default()
+                    {
+                        self.dial_peer(reservation, ingress, &mut supervisor);
+                        break;
                     }
                 }
             },

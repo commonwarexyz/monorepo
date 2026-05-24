@@ -99,7 +99,7 @@ mod tests {
             move |context| async move {
                 listen(
                     context,
-                    |_| true,
+                    |_| async { true },
                     stream_config(remote_key),
                     remote_stream,
                     remote_sink,
