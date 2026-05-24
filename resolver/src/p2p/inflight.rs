@@ -132,11 +132,11 @@ where
         &mut self,
     ) -> Result<(P, Delivery<Key, Con::Subscriber>, bool), Aborted> {
         let Completion {
-            source,
+            context,
             delivery,
             valid,
         } = self.deliveries.next_completion().await?;
-        Ok((source, delivery, valid))
+        Ok((context, delivery, valid))
     }
 }
 

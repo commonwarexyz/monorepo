@@ -15,9 +15,9 @@ use std::{
 
 /// Completed consumer validation for a delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Completion<K, S, Source = ()> {
-    /// Resolver-specific source associated with the response.
-    pub source: Source,
+pub struct Completion<K, S, Context = ()> {
+    /// Resolver-specific context associated with the delivery attempt.
+    pub context: Context,
 
     /// Key and subscribers that were passed to the consumer.
     pub delivery: Delivery<K, S>,
@@ -26,18 +26,18 @@ pub struct Completion<K, S, Source = ()> {
     pub valid: bool,
 }
 
-struct Response<Source, V> {
-    source: Source,
+struct Response<Context, V> {
+    context: Context,
     value: V,
     accepted: bool,
 }
 
-struct Entry<Source, V> {
+struct Entry<Context, V> {
     delivery: Option<Aborter>,
-    response: Option<Response<Source, V>>,
+    response: Option<Response<Context, V>>,
 }
 
-impl<Source, V> Entry<Source, V> {
+impl<Context, V> Entry<Context, V> {
     const fn new() -> Self {
         Self {
             delivery: None,
@@ -48,25 +48,25 @@ impl<Source, V> Entry<Source, V> {
 
 /// Tracks in-flight consumer deliveries keyed by resolver key.
 ///
-/// `Source` carries resolver-specific response metadata back to the caller when
+/// `Context` carries resolver-specific metadata back to the caller when
 /// validation completes. A P2P resolver can use it for the peer that sent the
-/// response; a local resolver can leave it as `()`.
-pub struct Tracker<Con, Source = ()>
+/// response; another resolver can use it for a local attempt identifier.
+pub struct Tracker<Con, Context = ()>
 where
     Con: Consumer,
     Con::Value: Clone + Send + 'static,
-    Source: Clone + Send + 'static,
+    Context: Clone + Send + 'static,
 {
-    entries: HashMap<Con::Key, Entry<Source, Con::Value>>,
-    deliveries: AbortablePool<Completion<Con::Key, Con::Subscriber, Source>>,
+    entries: HashMap<Con::Key, Entry<Context, Con::Value>>,
+    deliveries: AbortablePool<Completion<Con::Key, Con::Subscriber, Context>>,
     consumer: Con,
 }
 
-impl<Con, Source> Tracker<Con, Source>
+impl<Con, Context> Tracker<Con, Context>
 where
     Con: Consumer,
     Con::Value: Clone + Send + 'static,
-    Source: Clone + Send + 'static,
+    Context: Clone + Send + 'static,
 {
     /// Create an empty tracker backed by the provided consumer.
     pub fn new(consumer: Con) -> Self {
@@ -133,49 +133,51 @@ where
     pub fn deliver(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
-        source: Source,
+        context: Context,
         value: Con::Value,
     ) {
         let key = delivery.key.clone();
         let entry = self.entries.get_mut(&key).expect("delivery entry");
         entry.response = Some(Response {
-            source: source.clone(),
+            context: context.clone(),
             value: value.clone(),
             accepted: false,
         });
-        self.push_delivery(delivery, source, value);
+        self.push_delivery(delivery, context, value);
     }
 
     /// Deliver the cached response to another set of subscribers.
     ///
-    /// This is intended for subscribers added while the first validation was
-    /// still pending. Panics if the key is not tracked or no response is cached.
+    /// This is intended for subscribers added while the first validation was still
+    /// pending. Panics if the key is not tracked, no response is cached, or the
+    /// cached response has not yet been accepted.
     pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
         let key = delivery.key.clone();
-        let source = {
+        let context = {
             let entry = self.entries.get(&key).expect("delivery entry");
             let response = entry.response.as_ref().expect("response");
-            response.source.clone()
+            response.context.clone()
         };
-        self.redeliver_with_source(delivery, source);
+        self.redeliver_with_context(delivery, context);
     }
 
     /// Deliver the cached response with new completion metadata.
     ///
     /// Use this when each local delivery attempt needs a fresh identifier even
     /// though every attempt uses the same cached response bytes.
-    pub fn redeliver_with_source(
+    pub fn redeliver_with_context(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
-        source: Source,
+        context: Context,
     ) {
         let key = delivery.key.clone();
         let value = {
             let entry = self.entries.get(&key).expect("delivery entry");
             let response = entry.response.as_ref().expect("response");
+            assert!(response.accepted, "accepted response");
             response.value.clone()
         };
-        self.push_delivery(delivery, source, value);
+        self.push_delivery(delivery, context, value);
     }
 
     /// Returns true if the cached response for this key has been accepted.
@@ -198,7 +200,7 @@ where
     /// Drop the cached response without removing the tracked key.
     ///
     /// Use this after a consumer rejects a response and the resolver wants to
-    /// retry the same key with a different source.
+    /// retry the same key with different bytes or metadata.
     pub fn discard_response(&mut self, key: &Con::Key) {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.response = None;
@@ -212,7 +214,7 @@ where
     /// can be retried or redelivered.
     pub async fn next_completion(
         &mut self,
-    ) -> Result<Completion<Con::Key, Con::Subscriber, Source>, Aborted> {
+    ) -> Result<Completion<Con::Key, Con::Subscriber, Context>, Aborted> {
         let completed = self.deliveries.next_completed().await?;
         let Some(entry) = self.entries.get_mut(&completed.delivery.key) else {
             return Err(Aborted);
@@ -224,7 +226,7 @@ where
     fn push_delivery(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
-        source: Source,
+        context: Context,
         value: Con::Value,
     ) {
         let key = delivery.key.clone();
@@ -233,7 +235,7 @@ where
         let receiver = consumer.deliver(delivery, value);
         let aborter = self.deliveries.push(async move {
             Completion {
-                source,
+                context,
                 delivery: completed,
                 valid: receiver.await.unwrap_or(false),
             }
@@ -278,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deliver_completes_with_source_and_consumer_result() {
+    fn test_deliver_completes_with_context_and_consumer_result() {
         let runner = Runner::default();
         runner.start(|_| async move {
             let (consumer, mut events) = MockConsumer::<MockKey, Bytes>::new();
@@ -293,7 +295,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("delivery should complete");
-            assert_eq!(completed.source, 9);
+            assert_eq!(completed.context, 9);
             assert_eq!(completed.delivery.key, key);
             assert!(completed.valid);
 
@@ -344,7 +346,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("redelivery should complete");
-            assert_eq!(redelivered.source, 3);
+            assert_eq!(redelivered.context, 3);
             assert_eq!(redelivered.delivery.key, key);
             assert!(redelivered.valid);
 
@@ -356,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_redeliver_with_source_overrides_completion_source() {
+    fn test_redeliver_with_context_overrides_completion_context() {
         let runner = Runner::default();
         runner.start(|_| async move {
             let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
@@ -369,15 +371,36 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert_eq!(completed.source, 3);
+            assert_eq!(completed.context, 3);
             tracker.accept_response(&key);
 
-            tracker.redeliver_with_source(delivery(key), 4);
+            tracker.redeliver_with_context(delivery(key), 4);
             let redelivered = tracker
                 .next_completion()
                 .await
                 .expect("redelivery should complete");
-            assert_eq!(redelivered.source, 4);
+            assert_eq!(redelivered.context, 4);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "accepted response")]
+    fn test_redeliver_requires_accepted_response() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+            let mut tracker = TestTracker::new(consumer);
+            let key = MockKey(7);
+
+            tracker.insert(key.clone());
+            tracker.deliver(delivery(key.clone()), 3, Bytes::from("first"));
+            let completed = tracker
+                .next_completion()
+                .await
+                .expect("first delivery should complete");
+            assert!(completed.valid);
+
+            tracker.redeliver(delivery(key));
         });
     }
 
@@ -406,7 +429,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("accepted delivery should complete");
-            assert_eq!(accepted.source, 2);
+            assert_eq!(accepted.context, 2);
             assert!(accepted.valid);
         });
     }
