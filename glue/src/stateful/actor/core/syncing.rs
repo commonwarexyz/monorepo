@@ -27,7 +27,7 @@ use commonware_utils::{
     Acknowledgement,
 };
 use rand::Rng;
-use tracing::debug;
+use tracing::{debug, error};
 
 /// Verify request buffered while startup sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
@@ -77,6 +77,9 @@ where
     /// The state sync resolvers used for startup sync fetching and post-bootstrap
     /// serving.
     pub(super) resolvers: R,
+
+    /// Signals that the syncer has produced a usable artifact.
+    pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -99,6 +102,14 @@ where
             },
             on_stopped => {
                 debug!("processor received shutdown signal");
+            },
+            Ok(artifact) = &mut self.sync_completed else {
+                error!("syncer stopped before publishing state sync artifact");
+                break;
+            } => {
+                self.artifact = Some(artifact);
+                self.transition(None).await;
+                return;
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down processor");
@@ -136,7 +147,7 @@ where
                     if let Some((block, acknowledgement)) =
                         self.process_finalized(block, acknowledgement).await
                     {
-                        self.transition(block, acknowledgement).await;
+                        self.transition(Some((block, acknowledgement))).await;
                         return;
                     }
                 }
@@ -157,10 +168,6 @@ where
         block: A::Block,
         acknowledgement: Exact,
     ) -> Option<(A::Block, Exact)> {
-        if self.artifact.is_none() {
-            self.artifact = self.syncer.try_finish().await;
-        }
-
         if self.artifact.is_none() {
             let anchor = Anchor::from(&block);
             let targets = A::sync_targets(&block);
@@ -200,7 +207,7 @@ where
 
     /// Transitions to [`Processing`] state following the alignment of marshal's processed height
     /// on the converged database [`Anchor`].
-    async fn transition(mut self, handoff_finalized: A::Block, acknowledgement: Exact) {
+    async fn transition(mut self, handoff: Option<(A::Block, Exact)>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
 
         let metrics = ProcessorMetrics::new(self.context.child("processor_metrics"));
@@ -211,16 +218,18 @@ where
             metrics,
         );
 
-        if let FinalizeStatus::Persisted { height } = processor
-            .finalize(self.context.as_present(), handoff_finalized)
-            .await
-        {
-            debug!(
-                height = height.get(),
-                "persisted finalized database batch during sync handoff"
-            );
+        if let Some((handoff_finalized, acknowledgement)) = handoff {
+            if let FinalizeStatus::Persisted { height } = processor
+                .finalize(self.context.as_present(), handoff_finalized)
+                .await
+            {
+                debug!(
+                    height = height.get(),
+                    "persisted finalized database batch during sync handoff"
+                );
+            }
+            acknowledgement.acknowledge();
         }
-        acknowledgement.acknowledge();
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs.

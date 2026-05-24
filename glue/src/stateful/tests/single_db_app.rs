@@ -405,8 +405,8 @@ impl EngineDefinition for SingleDbEngine {
             )
         };
 
-        let mut plan =
-            SyncPlan::init(&context.child("stateful_startup"), partition_prefix.clone()).await;
+        let stateful_startup_context = context.child("stateful_startup");
+        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
         let startup_sync_height = if self.enable_state_sync && plan.may_state_sync() {
             match fetch_majority_sync_floor(&self.marshal_mailboxes, &context, public_key).await {
                 Some((finalization, height)) => {

@@ -42,6 +42,19 @@ where
     pub anchor: Anchor<BlockDigest<A, E>>,
 }
 
+impl<E, A> Clone for SyncResult<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            databases: self.databases.clone(),
+            anchor: self.anchor,
+        }
+    }
+}
+
 /// Loads the sync metadata from storage, initializing it if it does not already
 /// exist.
 async fn load_metadata<E>(context: &E, partition_prefix: &str) -> Metadata<E, FixedBytes<1>, bool>

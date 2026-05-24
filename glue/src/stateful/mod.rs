@@ -51,11 +51,11 @@
 //!   is live, the actor synchronously asks bootstrap to observe that block's
 //!   sync targets. If the live session accepts the block, the actor
 //!   acknowledges it immediately. Once bootstrap freezes databases at
-//!   `database_anchor`, the actor keeps acknowledging finalized delivery
-//!   through that anchor. The first finalized block above `database_anchor`
-//!   then transitions directly into normal processing. A durable metadata flag
-//!   records that this one-time peer sync/bootstrap has completed; subsequent
-//!   restarts must take the marshal sync path to ensure a contiguous stream.
+//!   `database_anchor`, the actor enters normal processing. If a finalized block
+//!   above `database_anchor` arrives first, the actor processes it during handoff.
+//!   A durable metadata flag records that this one-time peer sync/bootstrap has
+//!   completed; subsequent restarts must take the marshal sync path to ensure a
+//!   contiguous stream.
 //!
 //! # Lazy Recovery
 //!
