@@ -39,7 +39,7 @@ where
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(Message<E, A>) -> Option<Message<E, A>>,
+        F: FnMut(Message<E, A>) -> Self,
     {
         if let Some(message) = self.take() {
             if let Some(message) = push(message) {
@@ -54,7 +54,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    type Overflow = Option<Message<E, A>>;
+    type Overflow = Option<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         *overflow = Some(message);
@@ -75,7 +75,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    pub fn new(sender: Sender<Message<E, A>>) -> Self {
+    pub const fn new(sender: Sender<Message<E, A>>) -> Self {
         Self { sender }
     }
 

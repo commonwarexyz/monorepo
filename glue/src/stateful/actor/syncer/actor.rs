@@ -118,7 +118,7 @@ where
         )
     }
 
-    pub async fn start(mut self) -> Handle<()> {
+    pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run())
     }
 

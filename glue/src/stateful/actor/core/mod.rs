@@ -176,7 +176,7 @@ where
             artifact: None,
             resolvers: self.resolvers,
         };
-        join!(syncer.start(), syncing.start());
+        let _ = join!(syncer.start(), syncing.start());
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.

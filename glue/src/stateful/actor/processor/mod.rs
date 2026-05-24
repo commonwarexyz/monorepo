@@ -119,7 +119,7 @@ where
     }
 
     /// Returns a reference to the database set.
-    pub(super) fn databases(&self) -> &A::Databases {
+    pub(super) const fn databases(&self) -> &A::Databases {
         &self.databases
     }
 

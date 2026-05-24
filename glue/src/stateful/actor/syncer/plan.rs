@@ -88,9 +88,8 @@ where
     /// Otherwise marshal starts from genesis and relies on its own durable
     /// progress to override that anchor when available.
     pub fn marshal_start<B>(&self, genesis: B) -> Start<S, C, B> {
-        match self.floor.clone() {
-            Some(floor) => Start::Floor(floor),
-            None => Start::Genesis(genesis),
-        }
+        self.floor
+            .clone()
+            .map_or_else(|| Start::Genesis(genesis), Start::Floor)
     }
 }
