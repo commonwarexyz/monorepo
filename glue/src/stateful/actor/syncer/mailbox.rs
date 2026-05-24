@@ -19,9 +19,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    TakeDatabases {
-        response: oneshot::Sender<Option<SyncResult<E, A>>>,
-    },
     UpdateTargets {
         update: TipUpdate<BlockDigest<E, A>, SyncTargets<E, A>>,
         response: oneshot::Sender<Option<SyncResult<E, A>>>,
@@ -77,17 +74,6 @@ where
 {
     pub const fn new(sender: Sender<Message<E, A>>) -> Self {
         Self { sender }
-    }
-
-    /// Attempts to collect the complete artifact of the state sync operation.
-    ///
-    /// If the process is still ongoing, returns [`None`].
-    pub async fn try_finish(&self) -> Option<SyncResult<E, A>> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::TakeDatabases { response });
-        receiver
-            .await
-            .expect("Syncer should respond to take_databases")
     }
 
     /// Sends a target update and waits until the live sync coordinator records it.

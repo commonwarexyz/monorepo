@@ -23,6 +23,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_utils::channel::oneshot;
 use futures::join;
 use rand::Rng;
 use std::num::NonZeroUsize;
@@ -155,6 +156,7 @@ where
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
+        let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
@@ -163,6 +165,7 @@ where
             resolvers: self.resolvers.clone(),
             finalization: floor,
             marshal: self.marshal.clone(),
+            sync_complete,
         });
         let syncing = Syncing {
             context: self.context,
@@ -175,6 +178,7 @@ where
             database_subscribers: Vec::new(),
             artifact: None,
             resolvers: self.resolvers,
+            sync_completed,
         };
         let _ = join!(syncer.start(), syncing.start());
     }

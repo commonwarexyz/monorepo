@@ -15,7 +15,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_utils::{
-    channel::{fallible::OneshotExt, ring},
+    channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
     NZUsize,
 };
@@ -52,6 +52,9 @@ where
 
     /// Marshal mailbox used to query the finalized floor.
     pub marshal: MarshalMailbox<S, V>,
+
+    /// Notifies the stateful actor when state sync has produced an artifact.
+    pub sync_complete: oneshot::Sender<SyncResult<E, A>>,
 }
 
 pub struct Syncer<E, A, R, S, V>
@@ -88,6 +91,9 @@ where
 
     /// Marshal mailbox used to query the finalized floor.
     marshal: MarshalMailbox<S, V>,
+
+    /// Notifies the stateful actor when state sync has produced an artifact.
+    sync_complete: Option<oneshot::Sender<SyncResult<E, A>>>,
 }
 
 impl<E, A, R, S, V> Syncer<E, A, R, S, V>
@@ -113,6 +119,7 @@ where
                 resolvers: config.resolvers,
                 finalization: config.finalization,
                 marshal: config.marshal,
+                sync_complete: Some(config.sync_complete),
             },
             mailbox,
         )
@@ -145,32 +152,74 @@ where
                 error!("critical: state sync task failed");
                 panic!("state sync task failed");
             } => {
-                self.artifact = Some(SyncResult { databases, anchor });
+                Self::publish_artifact(
+                    &self.context,
+                    self.partition_prefix.as_str(),
+                    &mut self.artifact,
+                    &mut self.sync_complete,
+                    databases,
+                    anchor,
+                )
+                .await;
                 state_sync_task = None.into();
-                super::set_sync_complete(self.context.as_present(), &self.partition_prefix).await;
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down syncer");
                 break;
             } => match message {
-                Message::TakeDatabases { response } => {
-                    response.send_lossy(self.artifact.take());
-                }
                 Message::UpdateTargets { update, response } => {
-                    if let Some(artifact) = self.artifact.take() {
+                    if let Some(artifact) = self.artifact.clone() {
                         response.send_lossy(Some(artifact));
                         continue;
                     }
 
                     // If sync had already completed, the state-sync branch above would
                     // have published `self.artifact` before this mailbox branch ran.
-                    tip_updates_tx
-                        .send(update)
-                        .await
-                        .expect("tip update receiver must remain alive while sync is in progress");
+                    if tip_updates_tx.send(update).await.is_err() {
+                        // Tuple sync closes the live tip-update receiver as soon as the
+                        // coordinator converges, before the database tasks have necessarily
+                        // finished. Treat that close as "wait for the in-flight sync task to
+                        // publish its artifact", not as a hard failure.
+                        match (&mut state_sync_task).await {
+                            Ok((databases, anchor)) => {
+                                Self::publish_artifact(
+                                    &self.context,
+                                    self.partition_prefix.as_str(),
+                                    &mut self.artifact,
+                                    &mut self.sync_complete,
+                                    databases,
+                                    anchor,
+                                )
+                                .await;
+                                state_sync_task = None.into();
+                            }
+                            Err(_) => {
+                                error!("critical: state sync task failed");
+                                panic!("state sync task failed");
+                            }
+                        }
+                        response.send_lossy(self.artifact.clone());
+                        continue;
+                    }
                     response.send_lossy(None);
                 }
             },
+        }
+    }
+
+    async fn publish_artifact(
+        context: &ContextCell<E>,
+        partition_prefix: &str,
+        artifact: &mut Option<SyncResult<E, A>>,
+        sync_complete: &mut Option<oneshot::Sender<SyncResult<E, A>>>,
+        databases: A::Databases,
+        anchor: Anchor<BlockDigest<A, E>>,
+    ) {
+        let sync_result = SyncResult { databases, anchor };
+        *artifact = Some(sync_result.clone());
+        super::set_sync_complete(context.as_present(), partition_prefix).await;
+        if let Some(sync_complete) = sync_complete.take() {
+            sync_complete.send_lossy(sync_result);
         }
     }
 
