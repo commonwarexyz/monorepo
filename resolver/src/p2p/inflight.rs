@@ -1,25 +1,12 @@
-use crate::{Consumer, Delivery};
+use crate::{
+    delivery::{Completion, Tracker},
+    Consumer, Delivery,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::histogram, Clock};
-use commonware_utils::{
-    futures::{AbortablePool, Aborter},
-    Span,
-};
+use commonware_utils::Span;
 use futures::future::Aborted;
 use std::{collections::HashMap, marker::PhantomData};
-
-struct Response<P: PublicKey, V> {
-    peer: P,
-    value: V,
-    accepted: bool,
-}
-
-/// Tracks per-key state for an in-flight fetch.
-struct Entry<P: PublicKey, V> {
-    timer: Option<histogram::Timer>,
-    delivery: Option<Aborter>,
-    response: Option<Response<P, V>>,
-}
 
 /// Tracks all in-flight fetch state.
 pub(super) struct Inflight<E, Con, P, Key>
@@ -28,17 +15,13 @@ where
     Con: Consumer<Key = Key>,
     P: PublicKey,
     Key: Span,
+    Con::Value: Clone + Send + 'static,
 {
-    /// Per-key entries tracking fetch duration timers and (when validating a response)
-    /// the [Aborter] that cancels the in-flight consumer delivery.
-    entries: HashMap<Key, Entry<P, Con::Value>>,
+    /// Fetch duration timers for keys that have not yet accepted a response.
+    timers: HashMap<Key, histogram::Timer>,
 
-    /// Holds futures that resolve once the `Consumer` has validated fetched data.
-    /// Each completion yields `(peer, delivery, valid)`.
-    deliveries: AbortablePool<(P, Delivery<Key, Con::Subscriber>, bool)>,
-
-    /// Consumer cloned per delivery to validate fetched data.
-    consumer: Con,
+    /// Resolver-agnostic delivery state shared with non-P2P resolver implementations.
+    deliveries: Tracker<Con, P>,
 
     /// Clock type used to observe timers on completion.
     _clock: PhantomData<E>,
@@ -54,81 +37,57 @@ where
 {
     pub(super) fn new(consumer: Con) -> Self {
         Self {
-            entries: HashMap::new(),
-            deliveries: AbortablePool::default(),
-            consumer,
+            timers: HashMap::new(),
+            deliveries: Tracker::new(consumer),
             _clock: PhantomData,
         }
     }
 
     /// Returns true if there is an in-flight entry for the key.
     pub(super) fn contains(&self, key: &Key) -> bool {
-        self.entries.contains_key(key)
+        self.deliveries.contains(key)
     }
 
     /// Insert a new in-flight entry for the key.
     pub(super) fn insert(&mut self, key: Key, timer: histogram::Timer) {
-        self.entries.insert(
-            key,
-            Entry {
-                timer: Some(timer),
-                delivery: None,
-                response: None,
-            },
-        );
+        assert!(self.deliveries.insert(key.clone()), "inflight entry");
+        self.timers.insert(key, timer);
     }
 
     /// Remove the in-flight entry for the key and cancel its duration timer (suppressing
     /// the recording). If delivery validation was in progress, it is aborted and any
     /// invalid result is discarded. Returns true if an entry was present.
     pub(super) fn cancel(&mut self, key: &Key) -> bool {
-        let Some(_entry) = self.entries.remove(key) else {
-            return false;
-        };
-        // Dropping the entry aborts the in-flight delivery (if any) and suppresses duration
-        // recording.
-        true
+        let removed = self.deliveries.remove(key);
+        if removed {
+            // Dropping the timer without observing suppresses duration recording.
+            self.timers.remove(key);
+        }
+        removed
     }
 
     /// Mark the in-flight entry for the key as complete, recording its duration.
     /// Panics if no entry exists for the key.
     pub(super) fn complete(&mut self, key: &Key, clock: &E) {
-        if let Some(timer) = self.entries.remove(key).expect("inflight entry").timer {
+        assert!(self.deliveries.remove(key), "inflight entry");
+        if let Some(timer) = self.timers.remove(key) {
             timer.observe(clock);
         }
     }
 
     /// Drop entries for which the predicate returns false. Returns the count of dropped entries.
     pub(super) fn retain<F: FnMut(&Key) -> bool>(&mut self, mut predicate: F) -> usize {
-        let removed: Vec<_> = self.entries.extract_if(|r, _| !predicate(r)).collect();
-        removed.len()
+        let removed = self.deliveries.retain(|key| predicate(key));
+        let deliveries = &self.deliveries;
+        self.timers.retain(|key, _| deliveries.contains(key));
+        removed
     }
 
     /// Drop all entries. Returns the count of dropped entries.
     pub(super) fn drain(&mut self) -> usize {
-        let count = self.entries.len();
-        self.entries.clear();
+        let count = self.deliveries.drain();
+        self.timers.clear();
         count
-    }
-
-    /// Begin a consumer delivery for the entry, attaching the abort handle.
-    /// Spawns `consumer.deliver(delivery, value)` as an in-flight future and records
-    /// the result for later handling.
-    fn push_delivery(
-        &mut self,
-        delivery: Delivery<Key, Con::Subscriber>,
-        peer: P,
-        value: Con::Value,
-    ) {
-        let lookup_key = delivery.key.clone();
-        let completed = delivery.clone();
-        let mut consumer = self.consumer.clone();
-        let receiver = consumer.deliver(delivery, value);
-        let aborter = self
-            .deliveries
-            .push(async move { (peer, completed, receiver.await.unwrap_or(false)) });
-        let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
-        assert!(entry.delivery.replace(aborter).is_none());
     }
 
     /// Begin a consumer delivery for a network response, attaching the abort handle.
@@ -140,50 +99,30 @@ where
         peer: P,
         value: Con::Value,
     ) {
-        let lookup_key = delivery.key.clone();
-        let entry = self.entries.get_mut(&lookup_key).expect("inflight entry");
-        entry.response = Some(Response {
-            peer: peer.clone(),
-            value: value.clone(),
-            accepted: false,
-        });
-        self.push_delivery(delivery, peer, value);
+        self.deliveries.deliver(delivery, peer, value);
     }
 
     /// Begin another consumer delivery for an already received response.
     pub(super) fn redeliver(&mut self, delivery: Delivery<Key, Con::Subscriber>) {
-        let lookup_key = delivery.key.clone();
-        let (peer, value) = {
-            let entry = self.entries.get(&lookup_key).expect("inflight entry");
-            let response = entry.response.as_ref().expect("response");
-            (response.peer.clone(), response.value.clone())
-        };
-        self.push_delivery(delivery, peer, value);
+        self.deliveries.redeliver(delivery);
     }
 
     /// Returns whether the current response has already been accepted by the consumer.
     pub(super) fn response_accepted(&self, key: &Key) -> bool {
-        self.entries
-            .get(key)
-            .and_then(|entry| entry.response.as_ref())
-            .is_some_and(|response| response.accepted)
+        self.deliveries.response_accepted(key)
     }
 
     /// Mark the current response accepted and record the fetch duration.
     pub(super) fn accept_response(&mut self, key: &Key, clock: &E) {
-        let entry = self.entries.get_mut(key).expect("inflight entry");
-        let response = entry.response.as_mut().expect("response");
-        response.accepted = true;
-        if let Some(timer) = entry.timer.take() {
+        self.deliveries.accept_response(key);
+        if let Some(timer) = self.timers.remove(key) {
             timer.observe(clock);
         }
     }
 
     /// Drop the current response without completing the fetch.
     pub(super) fn discard_response(&mut self, key: &Key) {
-        if let Some(entry) = self.entries.get_mut(key) {
-            entry.response = None;
-        }
+        self.deliveries.discard_response(key);
     }
 
     /// Returns the next completed delivery as `(peer, delivery, valid)`, or [Aborted] if the
@@ -192,10 +131,12 @@ where
     pub(super) async fn next_delivery(
         &mut self,
     ) -> Result<(P, Delivery<Key, Con::Subscriber>, bool), Aborted> {
-        let (peer, delivery, valid) = self.deliveries.next_completed().await?;
-        let entry = self.entries.get_mut(&delivery.key).expect("inflight entry");
-        entry.delivery = None;
-        Ok((peer, delivery, valid))
+        let Completion {
+            source,
+            delivery,
+            valid,
+        } = self.deliveries.next_completion().await?;
+        Ok((source, delivery, valid))
     }
 }
 

@@ -10,6 +10,7 @@ commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
 
+    pub mod delivery;
     pub mod p2p;
 
     /// A key to fetch data for a subscriber.
