@@ -526,9 +526,7 @@ mod tests {
 
             let reservation = mailbox
                 .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(reservation.is_none());
 
             oracle.track(
@@ -541,18 +539,14 @@ mod tests {
 
             let reservation = mailbox
                 .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(reservation.is_some());
 
             assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await.unwrap_or(false));
 
             let failed_reservation = mailbox
                 .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(failed_reservation.is_none());
 
             drop(reservation.unwrap());
@@ -560,9 +554,7 @@ mod tests {
 
             let reservation_after_release = mailbox
                 .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(reservation_after_release.is_some());
         });
     }
@@ -609,7 +601,7 @@ mod tests {
                 Map::<_, crate::Address>::try_from([(boot_pk.clone(), boot_addr.into())]).unwrap(),
             );
 
-            let result = mailbox.dial(boot_pk.clone()).await.ok().flatten();
+            let result = mailbox.dial(boot_pk.clone()).await.unwrap_or_default();
             assert!(result.is_some());
             if let Some((res, ingress)) = result {
                 match res.metadata() {
@@ -622,7 +614,7 @@ mod tests {
             }
 
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
-            let no_reservation = mailbox.dial(unknown_pk).await.ok().flatten();
+            let no_reservation = mailbox.dial(unknown_pk).await.unwrap_or_default();
             assert!(no_reservation.is_none());
         });
     }
@@ -679,9 +671,7 @@ mod tests {
             assert!(
                 mailbox
                     .dial(secondary_pk.clone())
-                    .await
-                    .ok()
-                    .flatten()
+                    .await.unwrap_or_default()
                     .is_none()
             );
             assert!(mailbox.acceptable(secondary_pk, secondary_addr.ip()).await.unwrap_or(false));
@@ -756,9 +746,7 @@ mod tests {
 
             let reservation = mailbox
                 .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -827,9 +815,7 @@ mod tests {
             // Mark peer as connected
             let reservation = mailbox
                 .listen(pk_1.clone(), addr_1.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -909,7 +895,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let result = mailbox.dial(pk.clone()).await.ok().flatten();
+            let result = mailbox.dial(pk.clone()).await.unwrap_or_default();
             assert!(result.is_some());
             let (_, ingress) = result.unwrap();
             assert_eq!(ingress, Ingress::Socket(addr_1));
@@ -918,7 +904,7 @@ mod tests {
 
             context.sleep(Duration::from_millis(1010)).await;
 
-            let result = mailbox.dial(pk.clone()).await.ok().flatten();
+            let result = mailbox.dial(pk.clone()).await.unwrap_or_default();
             assert!(result.is_some());
             let (_, ingress) = result.unwrap();
             assert_eq!(ingress, Ingress::Socket(addr_2));
@@ -1031,7 +1017,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Establish connection
-            let reservation = mailbox.listen(pk.clone(), addr_1.ip()).await.ok().flatten();
+            let reservation = mailbox.listen(pk.clone(), addr_1.ip()).await.unwrap_or_default();
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -1071,9 +1057,7 @@ mod tests {
             // Establish connection to peer
             let reservation = mailbox
                 .listen(pk.clone(), addr_a.ip())
-                .await
-                .ok()
-                .flatten()
+                .await.unwrap_or_default()
                 .expect("reservation failed");
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -1133,9 +1117,7 @@ mod tests {
             // Establish connection to pk_tracked
             let reservation = mailbox
                 .listen(pk_tracked.clone(), addr_1.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(reservation.is_some());
             let (tracked_mailbox, mut tracked_rx) = peer::Mailbox::new(NZUsize!(1));
             mailbox.connect(pk_tracked.clone(), tracked_mailbox);
@@ -1143,9 +1125,7 @@ mod tests {
             // Establish connection to pk_unchanged
             let reservation = mailbox
                 .listen(pk_unchanged.clone(), addr_unchanged.ip())
-                .await
-                .ok()
-                .flatten();
+                .await.unwrap_or_default();
             assert!(reservation.is_some());
             let (unchanged_mailbox, mut unchanged_rx) = peer::Mailbox::new(NZUsize!(1));
             mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);

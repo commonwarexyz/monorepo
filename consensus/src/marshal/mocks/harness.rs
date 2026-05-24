@@ -395,8 +395,8 @@ async fn wait_for_validator_height<H: TestHarness>(
     label: &str,
 ) {
     loop {
-        let block = validator.handle.mailbox.get_block(height).await.ok().flatten();
-        let finalization = validator.handle.mailbox.get_finalization(height).await.ok().flatten();
+        let block = validator.handle.mailbox.get_block(height).await.unwrap_or_default();
+        let finalization = validator.handle.mailbox.get_finalization(height).await.unwrap_or_default();
         if let (Some(block), Some(finalization)) = (block, finalization) {
             assert_eq!(
                 block.digest(),
@@ -474,7 +474,7 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
             .handle
             .mailbox
             .get_block(*height)
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap_or_else(|| {
                 panic!(
                     "{label}: missing finalized block at height {}",
@@ -492,7 +492,7 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
             .handle
             .mailbox
             .get_finalization(*height)
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap_or_else(|| panic!("{label}: missing finalization at height {}", height.get()));
         assert_eq!(
             stored_finalization.round(),
@@ -510,7 +510,7 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
 
     if let Some((height, digest, _)) = canonical.last() {
         assert_eq!(
-            validator.handle.mailbox.get_info(Identifier::Latest).await.ok().flatten(),
+            validator.handle.mailbox.get_info(Identifier::Latest).await.unwrap_or_default(),
             Some((*height, *digest)),
             "{label}: latest info should match the canonical tip",
         );
@@ -984,7 +984,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             restarted
                                 .mailbox
                                 .get_verified(round)
-                                .await.ok().flatten()
+                                .await.unwrap_or_default()
                                 .unwrap_or_else(|| {
                                     panic!(
                                         "marshal.proposed() returning true must imply \
@@ -999,7 +999,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                              (seed={seed}, cycle={cycle})"
                         );
                         assert!(
-                            restarted.mailbox.get_block(&digest).await.ok().flatten().is_some(),
+                            restarted.mailbox.get_block(&digest).await.unwrap_or_default().is_some(),
                             "get_block(&digest) must also recover the proposed block \
                              (seed={seed}, cycle={cycle})"
                         );
@@ -1094,7 +1094,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                             restarted
                                 .mailbox
                                 .get_verified(round)
-                                .await.ok().flatten()
+                                .await.unwrap_or_default()
                                 .unwrap_or_else(|| {
                                     panic!(
                                         "marshal.verified() returning true must imply \
@@ -1109,7 +1109,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                              (seed={seed}, cycle={cycle})"
                         );
                         assert!(
-                            restarted.mailbox.get_block(&digest).await.ok().flatten().is_some(),
+                            restarted.mailbox.get_block(&digest).await.unwrap_or_default().is_some(),
                             "get_block(&digest) must also recover the verified block \
                              (seed={seed}, cycle={cycle})"
                         );
@@ -1211,7 +1211,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                             restarted
                                 .mailbox
                                 .get_block(&digest)
-                                .await.ok().flatten()
+                                .await.unwrap_or_default()
                                 .unwrap_or_else(|| {
                                     panic!(
                                         "marshal.certified() returning true must imply \
@@ -1316,7 +1316,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // Verify `orphan` at its own distinct view V=2 (no certify).
         H::verify(&mut handle, v_orphan, &orphan, &mut peers).await;
         assert!(
-            handle.mailbox.get_block(&orphan_digest).await.ok().flatten().is_some(),
+            handle.mailbox.get_block(&orphan_digest).await.unwrap_or_default().is_some(),
             "negative control assumes `orphan` is present before pruning; \
              if it is not, the V=2 write was dropped and the post-prune \
              assertion would pass vacuously"
@@ -1361,13 +1361,13 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
         // proves retention pruning actually evicted the early-view entries at
         // the expected floor.
         assert!(
-            handle.mailbox.get_block(&orphan_digest).await.ok().flatten().is_none(),
+            handle.mailbox.get_block(&orphan_digest).await.unwrap_or_default().is_none(),
             "verify-only block at V=2 must be evicted by retention pruning"
         );
 
         // The repeated block must still be retrievable: verified_blocks[V=1]
         // has been pruned, but notarized_blocks[V=25] still holds it.
-        let recovered = handle.mailbox.get_block(&repeated_digest).await.ok().flatten();
+        let recovered = handle.mailbox.get_block(&repeated_digest).await.unwrap_or_default();
         assert!(
             recovered.is_some(),
             "block certified at V=25 must survive retention pruning of V=1"
@@ -1439,13 +1439,13 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
             "certified must ack"
         );
 
-        let got_a = handle.mailbox.get_block(&digest_a).await.ok().flatten();
+        let got_a = handle.mailbox.get_block(&digest_a).await.unwrap_or_default();
         assert!(
             got_a.is_some(),
             "verified block A must be persisted in verified_blocks"
         );
         assert_eq!(got_a.unwrap().digest(), digest_a);
-        let got_b = handle.mailbox.get_block(&digest_b).await.ok().flatten();
+        let got_b = handle.mailbox.get_block(&digest_b).await.unwrap_or_default();
         assert!(
             got_b.is_some(),
             "certified block B must be persisted despite a verify at the same round"
@@ -1559,7 +1559,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                             provider.clone(),
                         )
                         .await;
-                        let recovered = restarted.mailbox.get_block(Height::new(1)).await.ok().flatten().expect(
+                        let recovered = restarted.mailbox.get_block(Height::new(1)).await.unwrap_or_default().expect(
                             "delivered finalized block must be recoverable after restart \
                              (seed={seed}, cycle={cycle})",
                         );
@@ -1573,7 +1573,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                             restarted
                                 .mailbox
                                 .get_finalization(Height::new(1))
-                                .await.ok().flatten()
+                                .await.unwrap_or_default()
                                 .expect(
                                     "delivered finalization must be recoverable after restart \
                                  (seed={seed}, cycle={cycle})",
@@ -3208,11 +3208,11 @@ pub fn genesis_emitted_once<H: TestHarness>() {
         )
         .await;
         assert_eq!(setup.height, None);
-        assert_eq!(setup.mailbox.get_processed_height().await.ok().flatten(), None);
+        assert_eq!(setup.mailbox.get_processed_height().await.unwrap_or_default(), None);
         assert_eq!(setup.application.acknowledged().await, Height::zero());
         context.sleep(Duration::from_millis(10)).await;
         assert_eq!(
-            setup.mailbox.get_processed_height().await.ok().flatten(),
+            setup.mailbox.get_processed_height().await.unwrap_or_default(),
             Some(Height::zero())
         );
         assert!(setup.application.blocks().contains_key(&Height::zero()));
@@ -3377,12 +3377,12 @@ pub fn sync_height_floor<H: TestHarness>() {
         let latest_finalization = second_handle
             .mailbox
             .get_finalization(Height::new(NUM_BLOCKS))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap();
         let floor_finalization = second_handle
             .mailbox
             .get_finalization(Height::new(NEW_SYNC_FLOOR))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap();
 
         mailbox.set_floor(floor_finalization);
@@ -3409,7 +3409,7 @@ pub fn sync_height_floor<H: TestHarness>() {
         for height in 1..=NUM_BLOCKS {
             let block = mailbox
                 .get_block(Identifier::Height(Height::new(height)))
-                .await.ok().flatten();
+                .await.unwrap_or_default();
             if height < NEW_SYNC_FLOOR {
                 assert!(block.is_none());
             } else {
@@ -3502,11 +3502,11 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         for i in 1..=20u64 {
             assert!(
-                mailbox.get_block(Height::new(i)).await.ok().flatten().is_some(),
+                mailbox.get_block(Height::new(i)).await.unwrap_or_default().is_some(),
                 "block {i} should exist before pruning"
             );
             assert!(
-                mailbox.get_finalization(Height::new(i)).await.ok().flatten().is_some(),
+                mailbox.get_finalization(Height::new(i)).await.unwrap_or_default().is_some(),
                 "finalization {i} should exist before pruning"
             );
         }
@@ -3515,7 +3515,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         context.sleep(Duration::from_millis(50)).await;
         for i in 1..=20u64 {
             assert!(
-                mailbox.get_block(Height::new(i)).await.ok().flatten().is_some(),
+                mailbox.get_block(Height::new(i)).await.unwrap_or_default().is_some(),
                 "block {i} should still exist after pruning above floor"
             );
         }
@@ -3524,22 +3524,22 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         context.sleep(Duration::from_millis(100)).await;
         for i in 1..10u64 {
             assert!(
-                mailbox.get_block(Height::new(i)).await.ok().flatten().is_none(),
+                mailbox.get_block(Height::new(i)).await.unwrap_or_default().is_none(),
                 "block {i} should be pruned"
             );
             assert!(
-                mailbox.get_finalization(Height::new(i)).await.ok().flatten().is_none(),
+                mailbox.get_finalization(Height::new(i)).await.unwrap_or_default().is_none(),
                 "finalization {i} should be pruned"
             );
         }
 
         for i in 10..=20u64 {
             assert!(
-                mailbox.get_block(Height::new(i)).await.ok().flatten().is_some(),
+                mailbox.get_block(Height::new(i)).await.unwrap_or_default().is_some(),
                 "block {i} should still exist after pruning"
             );
             assert!(
-                mailbox.get_finalization(Height::new(i)).await.ok().flatten().is_some(),
+                mailbox.get_finalization(Height::new(i)).await.unwrap_or_default().is_some(),
                 "finalization {i} should still exist after pruning"
             );
         }
@@ -3548,21 +3548,21 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         context.sleep(Duration::from_millis(100)).await;
         for i in 10..20u64 {
             assert!(
-                mailbox.get_block(Height::new(i)).await.ok().flatten().is_none(),
+                mailbox.get_block(Height::new(i)).await.unwrap_or_default().is_none(),
                 "block {i} should be pruned after second prune"
             );
             assert!(
-                mailbox.get_finalization(Height::new(i)).await.ok().flatten().is_none(),
+                mailbox.get_finalization(Height::new(i)).await.unwrap_or_default().is_none(),
                 "finalization {i} should be pruned after second prune"
             );
         }
 
         assert!(
-            mailbox.get_block(Height::new(20)).await.ok().flatten().is_some(),
+            mailbox.get_block(Height::new(20)).await.unwrap_or_default().is_some(),
             "block 20 should still exist"
         );
         assert!(
-            mailbox.get_finalization(Height::new(20)).await.ok().flatten().is_some(),
+            mailbox.get_finalization(Height::new(20)).await.unwrap_or_default().is_some(),
             "finalization 20 should still exist"
         );
 
@@ -3572,21 +3572,21 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         for i in 1..20u64 {
             assert!(
-                mailbox.get_block(Height::new(i)).await.ok().flatten().is_none(),
+                mailbox.get_block(Height::new(i)).await.unwrap_or_default().is_none(),
                 "block {i} should still be pruned after restart"
             );
             assert!(
-                mailbox.get_finalization(Height::new(i)).await.ok().flatten().is_none(),
+                mailbox.get_finalization(Height::new(i)).await.unwrap_or_default().is_none(),
                 "finalization {i} should still be pruned after restart"
             );
         }
 
         assert!(
-            mailbox.get_block(Height::new(20)).await.ok().flatten().is_some(),
+            mailbox.get_block(Height::new(20)).await.unwrap_or_default().is_some(),
             "block 20 should still exist after restart"
         );
         assert!(
-            mailbox.get_finalization(Height::new(20)).await.ok().flatten().is_some(),
+            mailbox.get_finalization(Height::new(20)).await.unwrap_or_default().is_some(),
             "finalization 20 should still exist after restart"
         );
     })
@@ -3718,7 +3718,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         .await;
         // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
         // has been processed before we re-enable the delayed delivery path.
-        let _ = victim_mailbox.get_finalization(floor).await.ok().flatten();
+        let _ = victim_mailbox.get_finalization(floor).await.unwrap_or_default();
 
         // Restore attacker -> victim traffic so delayed resolver responses can arrive.
         oracle
@@ -3737,13 +3737,13 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         );
 
         assert!(
-            victim_mailbox.get_block(stale_height).await.ok().flatten().is_none(),
+            victim_mailbox.get_block(stale_height).await.unwrap_or_default().is_none(),
             "stale block below floor must not be persisted"
         );
         assert!(
             victim_mailbox
                 .get_finalization(stale_height)
-                .await.ok().flatten()
+                .await.unwrap_or_default()
                 .is_none(),
             "stale finalization below floor must not be persisted"
         );
@@ -3834,7 +3834,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
         let cached = victim_handle
             .mailbox
             .get_block(&received.digest())
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .expect("height-hint-mismatched fetch should cache by decoded height");
         assert_eq!(cached.height(), actual_height);
     });
@@ -4344,22 +4344,22 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         };
 
         // Initially, no latest
-        assert!(handle.mailbox.get_info(Identifier::Latest).await.ok().flatten().is_none());
+        assert!(handle.mailbox.get_info(Identifier::Latest).await.unwrap_or_default().is_none());
 
         // The genesis anchor is stored as a finalized block without a finalization row.
         let genesis = H::genesis_block(participants.len() as u16);
         let genesis_digest = H::digest(&genesis);
         assert_eq!(
-            handle.mailbox.get_info(Height::zero()).await.ok().flatten(),
+            handle.mailbox.get_info(Height::zero()).await.unwrap_or_default(),
             Some((Height::zero(), genesis_digest))
         );
         assert_eq!(
-            handle.mailbox.get_info(&genesis_digest).await.ok().flatten(),
+            handle.mailbox.get_info(&genesis_digest).await.unwrap_or_default(),
             Some((Height::zero(), genesis_digest))
         );
 
         // Before finalization, specific height returns None
-        assert!(handle.mailbox.get_info(Height::new(1)).await.ok().flatten().is_none());
+        assert!(handle.mailbox.get_info(Height::new(1)).await.unwrap_or_default().is_none());
 
         // Create and verify a block, then finalize it
         let parent = Sha256::hash(b"");
@@ -4388,28 +4388,28 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
 
         // Latest should now be the finalized block
         assert_eq!(
-            handle.mailbox.get_info(Identifier::Latest).await.ok().flatten(),
+            handle.mailbox.get_info(Identifier::Latest).await.unwrap_or_default(),
             Some((Height::new(1), digest))
         );
 
         // Height 1 now present
         assert_eq!(
-            handle.mailbox.get_info(Height::new(1)).await.ok().flatten(),
+            handle.mailbox.get_info(Height::new(1)).await.unwrap_or_default(),
             Some((Height::new(1), digest))
         );
 
         // Commitment should map to its height
         assert_eq!(
-            handle.mailbox.get_info(&digest).await.ok().flatten(),
+            handle.mailbox.get_info(&digest).await.unwrap_or_default(),
             Some((Height::new(1), digest))
         );
 
         // Missing height
-        assert!(handle.mailbox.get_info(Height::new(2)).await.ok().flatten().is_none());
+        assert!(handle.mailbox.get_info(Height::new(2)).await.unwrap_or_default().is_none());
 
         // Missing commitment
         let missing = Sha256::hash(b"missing");
-        assert!(handle.mailbox.get_info(&missing).await.ok().flatten().is_none());
+        assert!(handle.mailbox.get_info(&missing).await.unwrap_or_default().is_none());
     })
 }
 
@@ -4471,7 +4471,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
 
             // Latest should always point to most recently finalized
             assert_eq!(
-                handle.mailbox.get_info(Identifier::Latest).await.ok().flatten(),
+                handle.mailbox.get_info(Identifier::Latest).await.unwrap_or_default(),
                 Some((Height::new(i), digest))
             );
 
@@ -4484,7 +4484,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
         for (i, digest) in digests.iter().enumerate() {
             let height = Height::new(i as u64 + 1);
             assert_eq!(
-                handle.mailbox.get_info(height).await.ok().flatten(),
+                handle.mailbox.get_info(height).await.unwrap_or_default(),
                 Some((height, *digest))
             );
         }
@@ -4524,9 +4524,9 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert!(handle
             .mailbox
             .get_block(Identifier::Height(Height::new(1)))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .is_none());
-        assert!(handle.mailbox.get_block(Identifier::Latest).await.ok().flatten().is_none());
+        assert!(handle.mailbox.get_block(Identifier::Latest).await.unwrap_or_default().is_none());
 
         let mut parent = Sha256::hash(b"");
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
@@ -4566,14 +4566,14 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             let fetched = handle
                 .mailbox
                 .get_block(Identifier::Height(height))
-                .await.ok().flatten()
+                .await.unwrap_or_default()
                 .unwrap();
             assert_eq!(fetched.digest(), *digest);
             assert_eq!(fetched.height(), height);
         }
 
         // Latest should be last block
-        let latest = handle.mailbox.get_block(Identifier::Latest).await.ok().flatten().unwrap();
+        let latest = handle.mailbox.get_block(Identifier::Latest).await.unwrap_or_default().unwrap();
         assert_eq!(latest.digest(), blocks[2].0);
         assert_eq!(latest.height(), Height::new(3));
 
@@ -4581,7 +4581,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert!(handle
             .mailbox
             .get_block(Identifier::Height(Height::new(10)))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .is_none());
     })
 }
@@ -4641,13 +4641,13 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
         H::report_finalization(&mut handle.mailbox, finalization).await;
 
         // Get by commitment
-        let fetched = handle.mailbox.get_block(&digest).await.ok().flatten().unwrap();
+        let fetched = handle.mailbox.get_block(&digest).await.unwrap_or_default().unwrap();
         assert_eq!(fetched.digest(), digest);
         assert_eq!(fetched.height(), Height::new(1));
 
         // Missing commitment
         let missing = Sha256::hash(b"missing");
-        assert!(handle.mailbox.get_block(&missing).await.ok().flatten().is_none());
+        assert!(handle.mailbox.get_block(&missing).await.unwrap_or_default().is_none());
     })
 }
 
@@ -4684,7 +4684,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         assert!(handle
             .mailbox
             .get_finalization(Height::new(1))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .is_none());
 
         let mut parent = Sha256::hash(b"");
@@ -4717,7 +4717,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             let fin = handle
                 .mailbox
                 .get_finalization(Height::new(i))
-                .await.ok().flatten()
+                .await.unwrap_or_default()
                 .unwrap();
             assert_eq!(fin.proposal.payload, commitment);
             assert_eq!(fin.round().view(), View::new(i));
@@ -4730,7 +4730,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
         assert!(handle
             .mailbox
             .get_finalization(Height::new(10))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .is_none());
     })
 }
@@ -4823,7 +4823,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         assert!(handle1
             .mailbox
             .get_finalization(Height::new(5))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .is_none());
 
         // Validator 1: hint that block 5 is finalized, targeting validator 0
@@ -4835,7 +4835,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         while handle1
             .mailbox
             .get_finalization(Height::new(5))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .is_none()
         {
             context.sleep(Duration::from_millis(10)).await;
@@ -4845,7 +4845,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         let finalization = handle1
             .mailbox
             .get_finalization(Height::new(5))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .expect("finalization should be fetched");
         assert_eq!(finalization.proposal.round.view(), View::new(5));
     })
@@ -4914,7 +4914,7 @@ where
         }
 
         // Stream from latest -> height 1
-        let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.ok().flatten().unwrap();
+        let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap_or_default().unwrap();
         let fetch_duration = Timed::new(context.histogram(
             "ancestor_fetch_duration",
             "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
@@ -5016,8 +5016,8 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         context.sleep(Duration::from_millis(100)).await;
 
         // Verify both validators stored the block correctly
-        let block0 = handles[0].mailbox.get_block(Height::new(1)).await.ok().flatten().unwrap();
-        let block1 = handles[1].mailbox.get_block(Height::new(1)).await.ok().flatten().unwrap();
+        let block0 = handles[0].mailbox.get_block(Height::new(1)).await.unwrap_or_default().unwrap();
+        let block1 = handles[1].mailbox.get_block(Height::new(1)).await.unwrap_or_default().unwrap();
         assert_eq!(block0.digest(), digest);
         assert_eq!(block1.digest(), digest);
 
@@ -5025,12 +5025,12 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         let fin0 = handles[0]
             .mailbox
             .get_finalization(Height::new(1))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap();
         let fin1 = handles[1]
             .mailbox
             .get_finalization(Height::new(1))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap();
 
         // Verify the finalizations have the expected different views
@@ -5041,11 +5041,11 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 
         // Both validators can retrieve block by height
         assert_eq!(
-            handles[0].mailbox.get_info(Height::new(1)).await.ok().flatten(),
+            handles[0].mailbox.get_info(Height::new(1)).await.unwrap_or_default(),
             Some((Height::new(1), digest))
         );
         assert_eq!(
-            handles[1].mailbox.get_info(Height::new(1)).await.ok().flatten(),
+            handles[1].mailbox.get_info(Height::new(1)).await.unwrap_or_default(),
             Some((Height::new(1), digest))
         );
 
@@ -5058,7 +5058,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         let fin0_after = handles[0]
             .mailbox
             .get_finalization(Height::new(1))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap();
         assert_eq!(fin0_after.round().view(), View::new(1));
 
@@ -5066,7 +5066,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
         let fin1_after = handles[1]
             .mailbox
             .get_finalization(Height::new(1))
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .unwrap();
         assert_eq!(fin1_after.round().view(), View::new(2));
     })
@@ -5213,7 +5213,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
         handle
             .mailbox
             .get_block(&digest)
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .expect("block should be cached after broadcast");
 
         // Restart marshal, removing any in-memory cache
@@ -5248,7 +5248,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
         handle2
             .mailbox
             .get_block(&digest)
-            .await.ok().flatten()
+            .await.unwrap_or_default()
             .expect("block should be cached after broadcast");
     })
 }

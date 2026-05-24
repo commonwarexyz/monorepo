@@ -1564,7 +1564,7 @@ mod tests {
             network.start();
 
             let mut manager = oracle.manager();
-            let peer_set = manager.peer_set(0).await.ok().flatten().unwrap();
+            let peer_set = manager.peer_set(0).await.unwrap_or_default().unwrap();
             assert_eq!(peer_set.primary, Set::try_from([primary.clone()]).unwrap());
             assert_eq!(
                 peer_set.secondary,

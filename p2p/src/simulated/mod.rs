@@ -218,7 +218,7 @@ mod tests {
     {
         let mut manager = oracle.manager();
         manager.track(0, Set::from_iter_dedup(peers));
-        assert!(manager.peer_set(0).await.ok().flatten().is_some());
+        assert!(manager.peer_set(0).await.unwrap_or_default().is_some());
     }
 
     async fn wait_for_task_count(
@@ -2359,14 +2359,14 @@ mod tests {
             network.start();
 
             let mut manager = oracle.manager();
-            assert_eq!(manager.peer_set(0).await.ok().flatten(), None);
+            assert_eq!(manager.peer_set(0).await.unwrap_or_default(), None);
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
             manager.track(0xFF, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
 
             assert_eq!(
-                manager.peer_set(0xFF).await.ok().flatten().unwrap(),
+                manager.peer_set(0xFF).await.unwrap_or_default().unwrap(),
                 TrackedPeers::primary(Set::try_from([pk1, pk2]).unwrap())
             );
         });
@@ -2401,7 +2401,7 @@ mod tests {
                 .unwrap(),
             );
 
-            let peer_set = manager.peer_set(1).await.ok().flatten().expect("peer set missing");
+            let peer_set = manager.peer_set(1).await.unwrap_or_default().expect("peer set missing");
             let keys: Vec<_> = Vec::from(peer_set.primary.clone());
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
@@ -2458,7 +2458,7 @@ mod tests {
             );
 
             assert_eq!(
-                manager.peer_set(7).await.ok().flatten().unwrap(),
+                manager.peer_set(7).await.unwrap_or_default().unwrap(),
                 TrackedPeers::new(
                     Set::try_from([pk1]).unwrap(),
                     Set::try_from([PrivateKey::from_seed(2).public_key()]).unwrap(),
@@ -2497,7 +2497,7 @@ mod tests {
             );
 
             assert_eq!(
-                manager.peer_set(9).await.ok().flatten().unwrap(),
+                manager.peer_set(9).await.unwrap_or_default().unwrap(),
                 TrackedPeers::new(
                     Set::try_from([pk1.clone(), pk2.clone()]).unwrap(),
                     Set::try_from([pk3.clone()]).unwrap(),
@@ -2544,7 +2544,7 @@ mod tests {
             );
 
             assert_eq!(
-                manager.peer_set(7).await.ok().flatten().unwrap(),
+                manager.peer_set(7).await.unwrap_or_default().unwrap(),
                 TrackedPeers::new(
                     Set::try_from([pk1]).unwrap(),
                     Set::try_from([PrivateKey::from_seed(2).public_key()]).unwrap(),
@@ -2628,7 +2628,7 @@ mod tests {
             );
 
             // Verify peer set contains expected keys (addresses are ignored by simulated network)
-            let peer_set = manager.peer_set(1).await.ok().flatten().expect("peer set missing");
+            let peer_set = manager.peer_set(1).await.unwrap_or_default().expect("peer set missing");
             let keys: Vec<_> = Vec::from(peer_set.primary);
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
@@ -2715,7 +2715,7 @@ mod tests {
 
             // Register second peer set with pk2 and pk3
             manager.track(2, Set::try_from(vec![pk2.clone(), pk3.clone()]).unwrap());
-            assert!(manager.peer_set(2).await.ok().flatten().is_some());
+            assert!(manager.peer_set(2).await.unwrap_or_default().is_some());
 
             // Now pk3 is in a peer set and pk1 can broadcast to it.
             let recipients = sender1.check(Recipients::All).unwrap().recipients();
@@ -2723,7 +2723,7 @@ mod tests {
 
             // Register third peer set with pk3 and pk4 (this will evict peer set 1)
             manager.track(3, Set::try_from(vec![pk3.clone(), pk4.clone()]).unwrap());
-            assert!(manager.peer_set(3).await.ok().flatten().is_some());
+            assert!(manager.peer_set(3).await.unwrap_or_default().is_some());
 
             // pk1 should now be removed from all peer sets.
             let recipients = sender2.check(Recipients::All).unwrap().recipients();
@@ -2737,16 +2737,16 @@ mod tests {
             assert!(recipients.contains(&pk4));
 
             // Verify peer set contents
-            let peer_set_2 = manager.peer_set(2).await.ok().flatten().unwrap();
+            let peer_set_2 = manager.peer_set(2).await.unwrap_or_default().unwrap();
             assert!(peer_set_2.primary.position(&pk2).is_some());
             assert!(peer_set_2.primary.position(&pk3).is_some());
 
-            let peer_set_3 = manager.peer_set(3).await.ok().flatten().unwrap();
+            let peer_set_3 = manager.peer_set(3).await.unwrap_or_default().unwrap();
             assert!(peer_set_3.primary.position(&pk3).is_some());
             assert!(peer_set_3.primary.position(&pk4).is_some());
 
             // Peer set 1 should no longer exist
-            assert!(manager.peer_set(1).await.ok().flatten().is_none());
+            assert!(manager.peer_set(1).await.unwrap_or_default().is_none());
         });
     }
 
@@ -2780,7 +2780,7 @@ mod tests {
 
             let mut manager = oracle.manager();
             manager.track(1, Set::try_from([pk1, pk2.clone()]).unwrap());
-            assert!(manager.peer_set(1).await.ok().flatten().is_some());
+            assert!(manager.peer_set(1).await.unwrap_or_default().is_some());
 
             assert_eq!(
                 sender.check(Recipients::All).unwrap().recipients(),
@@ -3260,7 +3260,7 @@ mod tests {
 
             // Manager operations should not panic
             manager.track(1, Set::try_from([pk1.clone()]).unwrap());
-            let _ = manager.peer_set(0).await.ok().flatten();
+            let _ = manager.peer_set(0).await.unwrap_or_default();
             let _ = manager.subscribe().await;
 
             // Oracle operations should not panic

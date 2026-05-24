@@ -48,7 +48,7 @@ impl<C: PublicKey> TrackerQuery<C> {
     async fn recv(&mut self) -> TrackerReply<C> {
         match self {
             Self::Dialable(receiver) => TrackerReply::Dialable(receiver.await.unwrap_or_default()),
-            Self::Dial(receiver) => TrackerReply::Dial(receiver.await.ok().flatten()),
+            Self::Dial(receiver) => TrackerReply::Dial(receiver.await.unwrap_or_default()),
         }
     }
 }

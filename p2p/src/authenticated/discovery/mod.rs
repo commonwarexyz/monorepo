@@ -2306,7 +2306,7 @@ mod tests {
 
             // Oracle operations should not panic even after shutdown
             oracle.track(1, peers.clone());
-            let _ = oracle.peer_set(0).await.ok().flatten();
+            let _ = oracle.peer_set(0).await.unwrap_or_default();
             let _ = oracle.subscribe().await;
             crate::block_peer(&mut oracle, address.clone());
 

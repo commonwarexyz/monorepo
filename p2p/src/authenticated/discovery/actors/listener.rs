@@ -179,7 +179,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "completed handshake");
 
         // Attempt to claim the connection
-        let Some(reservation) = tracker.listen(peer.clone()).await.ok().flatten() else {
+        let Some(reservation) = tracker
+            .listen(peer.clone())
+            .await
+            .unwrap_or_default()
+        else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };

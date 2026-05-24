@@ -32,12 +32,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{futures::Pool, vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
-    num::NonZeroUsize,
-    time::Duration,
-};
+use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
@@ -205,8 +200,10 @@ where
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
-        let mut pending_epochs = BTreeSet::new();
+        let mut pending_epochs = BTreeMap::new();
+        let mut next_pending_epoch_id = 0u64;
         let mut pending_floors: Pool<(
+            u64,
             EpochTransition<V, C::PublicKey>,
             Result<H::Digest, Height>,
         )> = Pool::default();
@@ -254,7 +251,7 @@ where
             } => match transition {
                 Message::Enter(transition) => {
                     if engines.contains_key(&transition.epoch)
-                        || !pending_epochs.insert(transition.epoch)
+                        || pending_epochs.contains_key(&transition.epoch)
                     {
                         warn!(epoch = %transition.epoch, "entered existing epoch");
                         continue;
@@ -264,22 +261,24 @@ where
                     // finalized boundary block when entering each epoch.
                     let boundary = Self::floor_boundary(&epocher, transition.epoch);
                     let marshal = self.marshal.clone();
+                    let pending_epoch_id = next_pending_epoch_id;
+                    next_pending_epoch_id = next_pending_epoch_id.wrapping_add(1);
+                    pending_epochs.insert(transition.epoch, pending_epoch_id);
                     pending_floors.push(async move {
                         let floor = match boundary {
                             Some(boundary_height) => marshal
                                 .get_block(boundary_height)
                                 .await
-                                .ok()
-                                .flatten()
+                                .unwrap_or_default()
                                 .map(|block| block.digest())
                                 .ok_or(boundary_height),
                             None => Ok(genesis::<H, C, V>().digest()),
                         };
-                        (transition, floor)
+                        (pending_epoch_id, transition, floor)
                     });
                 }
                 Message::Exit(epoch) => {
-                    if pending_epochs.remove(&epoch) {
+                    if pending_epochs.remove(&epoch).is_some() {
                         info!(%epoch, "exited pending epoch");
                         continue;
                     }
@@ -297,8 +296,8 @@ where
                     info!(%epoch, "exited epoch");
                 }
             },
-            (transition, floor) = pending_floors.next_completed() => {
-                if !pending_epochs.remove(&transition.epoch) {
+            (pending_epoch_id, transition, floor) = pending_floors.next_completed() => {
+                if pending_epochs.remove(&transition.epoch) != Some(pending_epoch_id) {
                     debug!(epoch = %transition.epoch, "ignoring canceled epoch");
                     continue;
                 }
