@@ -1,4 +1,4 @@
-//! Metrics for the [`Processor`](super::processor::Processor).
+//! Metrics for the [`Processor`](super::Processor).
 
 use commonware_runtime::{
     telemetry::metrics::{histogram::Timed, Registered},

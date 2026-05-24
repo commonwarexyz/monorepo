@@ -36,6 +36,9 @@ pub(super) struct HeldVerify<C, B> {
     response: oneshot::Sender<bool>,
 }
 
+type HeldVerifyRequest<E, A> =
+    HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
+
 pub(super) struct Syncing<E, A, S, V, R>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -63,7 +66,7 @@ where
     pub(super) syncer: syncer::Mailbox<E, A>,
 
     /// Verify requests held while syncing.
-    pub(super) held_verify_requests: Vec<HeldVerify<(E, A::Context), A::Block>>,
+    pub(super) held_verify_requests: Vec<HeldVerifyRequest<E, A>>,
 
     /// Open subscriptions to the synced databases.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,

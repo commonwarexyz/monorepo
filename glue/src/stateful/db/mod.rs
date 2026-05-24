@@ -351,7 +351,7 @@ pub struct TipUpdate<D: Digest, T> {
 }
 
 impl<D: Digest, T> TipUpdate<D, T> {
-    pub fn new(anchor: Anchor<D>, targets: T) -> Self {
+    pub const fn new(anchor: Anchor<D>, targets: T) -> Self {
         Self {
             anchor,
             targets,
@@ -762,9 +762,7 @@ macro_rules! impl_state_sync_set {
                             );
                             select! {
                                 reached_event = reached_event_rx.recv() => {
-                                    let Some((idx, generation)) = reached_event else {
-                                        return None;
-                                    };
+                                    let (idx, generation) = reached_event?;
                                     state.record_reached(idx, generation);
                                 },
                                 _ = completion_rx.recv() => {
@@ -990,7 +988,7 @@ async fn drain_generation_updates<T>(
                         }
                         *last_reported_generation = Some(*current_generation);
                     }
-                    if drained % MAX_CHANNEL_DRAIN_PER_TICK == 0 {
+                    if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
                         reschedule().await;
                     }
                 }
@@ -2076,7 +2074,7 @@ mod tests {
                                 final_target = update;
                                 observed_update = true;
                                 reported_target = None;
-                                if drained % MAX_CHANNEL_DRAIN_PER_TICK == 0 {
+                                if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
                                     reschedule().await;
                                 }
                             }

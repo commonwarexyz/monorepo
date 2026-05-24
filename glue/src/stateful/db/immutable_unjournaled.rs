@@ -39,7 +39,7 @@ async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T
             Ok(update) => {
                 latest = Some(update);
                 drained += 1;
-                if drained % MAX_CHANNEL_DRAIN_PER_TICK == 0 {
+                if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
                     reschedule().await;
                 }
             }
