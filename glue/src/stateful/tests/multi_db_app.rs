@@ -617,7 +617,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_reporters = MonitorReporter::new(public_key.clone(), monitor, stateful_mailbox);
 
         // Start marshal actor with monitored reporters.
-        marshal_actor.start(marshal_reporters, Some(buffer), resolver);
+        marshal_actor.start(marshal_reporters, buffer, resolver);
 
         // Initialize stateful from marshal's processed frontier.
         stateful_actor.start();
