@@ -153,29 +153,11 @@ where
     /// cached response has not yet been accepted.
     pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
         let key = delivery.key.clone();
-        let context = {
-            let entry = self.entries.get(&key).expect("delivery entry");
-            let response = entry.response.as_ref().expect("response");
-            response.context.clone()
-        };
-        self.redeliver_with_context(delivery, context);
-    }
-
-    /// Deliver the cached response with new completion metadata.
-    ///
-    /// Use this when each local delivery attempt needs a fresh identifier even
-    /// though every attempt uses the same cached response bytes.
-    pub fn redeliver_with_context(
-        &mut self,
-        delivery: Delivery<Con::Key, Con::Subscriber>,
-        context: Context,
-    ) {
-        let key = delivery.key.clone();
-        let value = {
+        let (context, value) = {
             let entry = self.entries.get(&key).expect("delivery entry");
             let response = entry.response.as_ref().expect("response");
             assert!(response.accepted, "accepted response");
-            response.value.clone()
+            (response.context.clone(), response.value.clone())
         };
         self.push_delivery(delivery, context, value);
     }
@@ -354,32 +336,6 @@ mod tests {
             let second = events.recv().await.unwrap();
             assert_eq!(first, (key.clone(), value.clone()));
             assert_eq!(second, (key, value));
-        });
-    }
-
-    #[test]
-    fn test_redeliver_with_context_overrides_completion_context() {
-        let runner = Runner::default();
-        runner.start(|_| async move {
-            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
-            let mut tracker = TestTracker::new(consumer);
-            let key = MockKey(6);
-
-            tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 3, Bytes::from("first"));
-            let completed = tracker
-                .next_completion()
-                .await
-                .expect("first delivery should complete");
-            assert_eq!(completed.context, 3);
-            tracker.accept_response(&key);
-
-            tracker.redeliver_with_context(delivery(key), 4);
-            let redelivered = tracker
-                .next_completion()
-                .await
-                .expect("redelivery should complete");
-            assert_eq!(redelivered.context, 4);
         });
     }
 
