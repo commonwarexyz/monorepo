@@ -7,7 +7,7 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant},
         Identifier,
     },
-    types::Round,
+    types::{Height, Round},
     CertifiableBlock, Epochable, Heightable, Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
@@ -100,10 +100,12 @@ where
         .expect("failed to set sync complete flag");
 }
 
-/// Initializes databases at the current processed height of marshal.
+/// Initializes databases at marshal's current startup anchor.
 ///
-/// This initialization route is used when startup should recover from marshal's
-/// current processed height instead of running peer state sync.
+/// This initialization route is used when startup should recover from marshal
+/// instead of running peer state sync. If marshal has not yet recorded a
+/// processed height, this falls back to marshal's genesis block so fresh boots
+/// and post-sync restarts share the same path.
 ///
 /// If the databases are found to be inconsistent with the marshal floor, this
 /// function will attempt to repair by rewinding the databases which are ahead. If the
@@ -123,7 +125,7 @@ where
     let marshal_floor = marshal
         .get_processed_height()
         .await
-        .expect("marshal must return processed height");
+        .unwrap_or_else(Height::zero);
     let floor_block = {
         let marshal_block = marshal
             .get_block(Identifier::Height(marshal_floor))
