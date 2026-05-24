@@ -5,7 +5,7 @@ use crate::authenticated::{
     Mailbox as SpawnerMailbox,
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::Signer;
+use commonware_cryptography::{PublicKey, Signer};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell,
@@ -18,11 +18,12 @@ use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpA
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRngCore;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     pin::Pin,
+    sync::Arc,
 };
 use tracing::debug;
 
@@ -32,28 +33,63 @@ const SUBNET_MASK: SubnetMask = SubnetMask::new(24, 48);
 /// Interval at which to prune tracked IPs and Subnets.
 const CLEANUP_INTERVAL: u32 = 16_384;
 
-pub(crate) type Updates = ring::Receiver<HashSet<IpAddr>>;
+pub(crate) type Updates<C> = ring::Receiver<Arc<Acceptable<C>>>;
 
 #[derive(Clone)]
-pub(crate) struct Mailbox(ring::Sender<HashSet<IpAddr>>);
+pub(crate) struct Mailbox<C: PublicKey>(ring::Sender<Arc<Acceptable<C>>>);
 
-impl fmt::Debug for Mailbox {
+impl<C: PublicKey> fmt::Debug for Mailbox<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Mailbox").finish()
     }
 }
 
-impl Mailbox {
-    pub(crate) fn new() -> (Self, Updates) {
+impl<C: PublicKey> Mailbox<C> {
+    pub(crate) fn new() -> (Self, Updates<C>) {
         let (sender, receiver) = ring::channel(NZUsize!(1));
         (Self(sender), receiver)
     }
 
-    pub(crate) fn set(&mut self, registered_ips: HashSet<IpAddr>) -> Feedback {
-        if Pin::new(&mut self.0).start_send(registered_ips).is_ok() {
+    pub(crate) fn set(&mut self, peers: HashMap<C, IpAddr>) -> Feedback {
+        if Pin::new(&mut self.0)
+            .start_send(Arc::new(Acceptable::new(peers)))
+            .is_ok()
+        {
             Feedback::Ok
         } else {
             Feedback::Closed
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Acceptable<C: PublicKey> {
+    peers: HashMap<C, IpAddr>,
+    ips: HashSet<IpAddr>,
+}
+
+impl<C: PublicKey> Acceptable<C> {
+    fn new(peers: HashMap<C, IpAddr>) -> Self {
+        let ips = peers.values().copied().collect();
+        Self { peers, ips }
+    }
+
+    fn accepts(&self, peer: &C, source_ip: IpAddr, bypass_ip_check: bool) -> bool {
+        self.peers
+            .get(peer)
+            .is_some_and(|ip| bypass_ip_check || *ip == source_ip)
+    }
+
+    pub(crate) fn contains_ip(&self, ip: &IpAddr) -> bool {
+        self.ips.contains(ip)
+    }
+}
+
+impl<C: PublicKey> Default for Acceptable<C> {
+    fn default() -> Self {
+        Self {
+            peers: HashMap::new(),
+            ips: HashSet::new(),
         }
     }
 }
@@ -79,8 +115,8 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
     allowed_handshake_rate_per_subnet: Quota,
-    registered_ips: HashSet<IpAddr>,
-    updates: Updates,
+    acceptable: Arc<Acceptable<C::PublicKey>>,
+    updates: Updates<C::PublicKey>,
     handshakes_blocked: Counter,
     handshakes_concurrent_rate_limited: Counter,
     handshakes_ip_rate_limited: Counter,
@@ -88,7 +124,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 }
 
 impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, updates: Updates) -> Self {
+    pub fn new(context: E, cfg: Config<C>, updates: Updates<C::PublicKey>) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -117,7 +153,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
             allowed_handshake_rate_per_subnet: cfg.allowed_handshake_rate_per_subnet,
-            registered_ips: HashSet::new(),
+            acceptable: Arc::new(Acceptable::default()),
             updates,
             handshakes_blocked,
             handshakes_concurrent_rate_limited,
@@ -133,14 +169,15 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
+        acceptable: Arc<Acceptable<C::PublicKey>>,
+        bypass_ip_check: bool,
         tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let source_ip = address.ip();
-        // The tracker owns acceptance and reservation so the handshake callback stays synchronous.
         let (peer, send, recv) = match listen(
             context,
-            |_| true,
+            |peer| acceptable.accepts(&peer, source_ip, bypass_ip_check),
             stream_cfg,
             stream,
             sink,
@@ -205,11 +242,11 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             on_stopped => {
                 debug!("context shutdown, stopping listener");
             },
-            Some(registered_ips) = self.updates.next() else {
+            Some(acceptable) = self.updates.next() else {
                 debug!("listener updates closed");
                 break;
             } => {
-                self.registered_ips = registered_ips;
+                self.acceptable = acceptable;
             },
             listener = listener.accept() => {
                 // Accept a new connection
@@ -231,7 +268,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 }
 
                 // Check whether the IP is registered
-                if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
+                if !self.bypass_ip_check && !self.acceptable.contains_ip(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting unregistered address");
                     continue;
@@ -278,11 +315,21 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 // Spawn a new handshaker to upgrade connection
                 self.context.child("handshaker").spawn({
                     let stream_cfg = self.stream_cfg.clone();
+                    let acceptable = self.acceptable.clone();
+                    let bypass_ip_check = self.bypass_ip_check;
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context, address, stream_cfg, sink, stream, tracker, supervisor,
+                            context,
+                            address,
+                            stream_cfg,
+                            sink,
+                            stream,
+                            acceptable,
+                            bypass_ip_check,
+                            tracker,
+                            supervisor,
                         )
                         .await;
 
@@ -311,19 +358,23 @@ mod tests {
     };
 
     #[test]
-    fn mailbox_keeps_latest_registered_ips() {
+    fn mailbox_keeps_latest_acceptable_peers() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
             let (mut mailbox, mut receiver) = Mailbox::new();
-            let first = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]);
-            let second = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
-            let third = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3))]);
+            let peer = PrivateKey::from_seed(1).public_key();
+            let first_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+            let second_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+            let third_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
 
-            assert_eq!(mailbox.set(first), Feedback::Ok);
-            assert_eq!(mailbox.set(second), Feedback::Ok);
-            assert_eq!(mailbox.set(third.clone()), Feedback::Ok);
+            assert_eq!(mailbox.set(HashMap::from([(peer.clone(), first_ip)])), Feedback::Ok);
+            assert_eq!(mailbox.set(HashMap::from([(peer.clone(), second_ip)])), Feedback::Ok);
+            assert_eq!(mailbox.set(HashMap::from([(peer, third_ip)])), Feedback::Ok);
 
-            assert_eq!(receiver.next().await, Some(third));
+            let latest = receiver.next().await.expect("latest update missing");
+            assert!(!latest.contains_ip(&first_ip));
+            assert!(!latest.contains_ip(&second_ip));
+            assert!(latest.contains_ip(&third_ip));
         });
     }
 
@@ -361,9 +412,13 @@ mod tests {
                 updates_rx,
             );
 
-            let mut allowed = HashSet::new();
-            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            assert_eq!(updates_tx.set(allowed), Feedback::Ok);
+            assert_eq!(
+                updates_tx.set(HashMap::from([(
+                    PrivateKey::from_seed(2).public_key(),
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                )])),
+                Feedback::Ok
+            );
 
             let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
                 context.child("tracker_mailbox"),
@@ -690,10 +745,14 @@ mod tests {
                 updates_rx,
             );
 
-            // Register the IP so it would be allowed if not for the private IP check
-            let mut allowed = HashSet::new();
-            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
-            assert_eq!(updates_tx.set(allowed), Feedback::Ok);
+            // Publish an acceptable peer on the IP so only the private-IP check blocks it.
+            assert_eq!(
+                updates_tx.set(HashMap::from([(
+                    PrivateKey::from_seed(2).public_key(),
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                )])),
+                Feedback::Ok
+            );
 
             let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
                 context.child("tracker_mailbox"),

@@ -30,7 +30,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     receiver: mailbox::Receiver<Message<C::PublicKey>>,
 
     /// The mailbox for the listener.
-    listener: listener::Mailbox,
+    listener: listener::Mailbox<C::PublicKey>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -98,7 +98,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    let _ = self.listener.set(self.directory.listenable());
+                    self.update_listener();
                 }
             },
             Some(msg) = self.receiver.recv() else {
@@ -127,8 +127,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                 }
 
-                // Send the updated listenable IPs to the listener.
-                let _ = self.listener.set(self.directory.listenable());
+                self.update_listener();
 
                 // Notify all subscribers about the new peer set
                 let update = self
@@ -153,9 +152,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                 }
 
-                // Send the updated listenable IPs to the listener (if any changes occurred).
                 if any_changed {
-                    let _ = self.listener.set(self.directory.listenable());
+                    self.update_listener();
                 }
             }
             Message::PeerSet { index, responder } => {
@@ -184,6 +182,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Mark the record as connected
                 self.directory.connect(&public_key);
                 self.mailboxes.insert(public_key, peer);
+                self.update_listener();
             }
             Message::Dialable { responder } => {
                 let _ = responder.send(self.directory.dialable());
@@ -192,7 +191,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 public_key,
                 reservation,
             } => {
-                let _ = reservation.send(self.directory.dial(&public_key));
+                let result = self.directory.dial(&public_key);
+                if result.is_some() {
+                    self.update_listener();
+                }
+                let _ = reservation.send(result);
             }
             #[cfg(test)]
             Message::Acceptable {
@@ -207,7 +210,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 source_ip,
                 reservation,
             } => {
-                let _ = reservation.send(self.directory.listen(&public_key, source_ip));
+                let result = self.directory.listen(&public_key, source_ip);
+                if result.is_some() {
+                    self.update_listener();
+                }
+                let _ = reservation.send(result);
             }
             Message::Block { public_key } => {
                 // Block the peer
@@ -218,8 +225,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     peer.kill();
                 }
 
-                // Send the updated listenable IPs to the listener.
-                let _ = self.listener.set(self.directory.listenable());
+                self.update_listener();
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -227,8 +233,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Release the peer
                 self.directory.release(metadata);
+                self.update_listener();
             }
         }
+    }
+
+    fn update_listener(&mut self) {
+        let _ = self.listener.set(self.directory.acceptable_peers());
     }
 }
 
@@ -258,8 +269,11 @@ mod tests {
     };
 
     // Test Configuration Setup
-    fn test_config<C: Signer>(crypto: C, bypass_ip_check: bool) -> (Config<C>, listener::Updates) {
-        let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new();
+    fn test_config<C: Signer>(
+        crypto: C,
+        bypass_ip_check: bool,
+    ) -> (Config<C>, listener::Updates<C::PublicKey>) {
+        let (listener, updates) = listener::Mailbox::new();
         (
             Config {
                 crypto,
@@ -269,10 +283,10 @@ mod tests {
                 allow_private_ips: true,
                 allow_dns: true,
                 bypass_ip_check,
-                listener: registered_ips_sender,
+                listener,
                 block_duration: Duration::from_secs(100),
             },
-            registered_ips_receiver,
+            updates,
         )
     }
 
@@ -291,10 +305,9 @@ mod tests {
 
     fn setup_actor(
         runner_context: deterministic::Context,
-        cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
+        cfg: Config<PrivateKey>,
     ) -> TestHarness {
-        // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
-        let (actor, mailbox, oracle) = Actor::new(runner_context, cfg_to_clone);
+        let (actor, mailbox, oracle) = Actor::new(runner_context, cfg);
         actor.start();
 
         TestHarness { mailbox, oracle }
@@ -780,7 +793,7 @@ mod tests {
             let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
 
             let pk_1 = new_signer_and_pk(1).1;
-            let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
+            let addr_1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 9001);
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
@@ -806,10 +819,10 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains(&my_addr.ip()));
-            assert!(registered_ips.contains(&addr_1.ip()));
-            assert!(!registered_ips.contains(&addr_2.ip()));
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(!acceptable.contains_ip(&my_addr.ip()));
+            assert!(acceptable.contains_ip(&addr_1.ip()));
+            assert!(!acceptable.contains_ip(&addr_2.ip()));
 
             // Mark peer as connected
             let reservation = mailbox
@@ -820,7 +833,7 @@ mod tests {
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            mailbox.connect(my_pk.clone(), peer_mailbox);
+            mailbox.connect(pk_1.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
             oracle.track(
@@ -828,15 +841,15 @@ mod tests {
                 Map::<_, crate::Address>::try_from([(pk_2.clone(), addr_2.into())]).unwrap(),
             );
 
-            // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&my_addr.ip()));
-            assert!(!registered_ips.contains(&addr_1.ip()));
-            assert!(registered_ips.contains(&addr_2.ip()));
-
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
-            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
+            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),);
+
+            // Wait for a listener update
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(!acceptable.contains_ip(&my_addr.ip()));
+            assert!(!acceptable.contains_ip(&addr_1.ip()));
+            assert!(acceptable.contains_ip(&addr_2.ip()));
         });
     }
 
@@ -863,15 +876,15 @@ mod tests {
                 .unwrap(),
             );
 
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains(&addr_1.ip()));
-            assert!(!registered_ips.contains(&addr_2.ip()));
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(acceptable.contains_ip(&addr_1.ip()));
+            assert!(!acceptable.contains_ip(&addr_2.ip()));
 
             oracle.overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&addr_1.ip()));
-            assert!(registered_ips.contains(&addr_2.ip()));
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(!acceptable.contains_ip(&addr_1.ip()));
+            assert!(acceptable.contains_ip(&addr_2.ip()));
         });
     }
 
@@ -935,18 +948,18 @@ mod tests {
                 .unwrap(),
             );
 
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains(&addr_1.ip()));
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(acceptable.contains_ip(&addr_1.ip()));
 
             crate::block_peer(&mut oracle, pk_1.clone());
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&addr_1.ip()));
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(!acceptable.contains_ip(&addr_1.ip()));
 
             oracle.overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&addr_1.ip()));
-            assert!(!registered_ips.contains(&addr_2.ip()));
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(!acceptable.contains_ip(&addr_1.ip()));
+            assert!(!acceptable.contains_ip(&addr_2.ip()));
         });
     }
 
@@ -1052,12 +1065,16 @@ mod tests {
                 0,
                 Map::<_, crate::Address>::try_from([(pk.clone(), addr_a.into())]).unwrap(),
             );
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(registered_ips.contains(&addr_a.ip()));
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(acceptable.contains_ip(&addr_a.ip()));
 
             // Establish connection to peer
-            let reservation = mailbox.listen(pk.clone(), addr_a.ip()).await.ok().flatten();
-            assert!(reservation.is_some());
+            let reservation = mailbox
+                .listen(pk.clone(), addr_a.ip())
+                .await
+                .ok()
+                .flatten()
+                .expect("reservation failed");
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
             mailbox.connect(pk.clone(), peer_mailbox);
@@ -1071,10 +1088,15 @@ mod tests {
             // Peer should receive Kill message (connection severed due to address change)
             assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)));
 
-            // Verify listenable IPs updated to new address
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&addr_a.ip()));
-            assert!(registered_ips.contains(&addr_b.ip()));
+            // The listener should not accept either address while the old connection is active.
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(!acceptable.contains_ip(&addr_a.ip()));
+            assert!(!acceptable.contains_ip(&addr_b.ip()));
+
+            drop(reservation);
+            let acceptable = listener_receiver.next().await.unwrap();
+            assert!(!acceptable.contains_ip(&addr_a.ip()));
+            assert!(acceptable.contains_ip(&addr_b.ip()));
         });
     }
 

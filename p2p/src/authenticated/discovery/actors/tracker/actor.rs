@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     authenticated::discovery::{
-        actors::tracker::ingress::Releaser,
+        actors::{listener, tracker::ingress::Releaser},
         types::{self, Info, InfoVerifier},
     },
     PeerSetUpdate,
@@ -46,6 +46,9 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`].
     receiver: mailbox::Receiver<Message<C::PublicKey>>,
+
+    /// The mailbox for the listener.
+    listener: listener::Mailbox<C::PublicKey>,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
@@ -105,6 +108,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             ip_namespace,
         );
 
+        let mut listener = cfg.listener;
+        let _ = listener.set(directory.acceptable_peers());
+
         (
             Self {
                 context: ContextCell::new(context),
@@ -112,6 +118,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
+                listener,
                 directory,
                 subscribers: Vec::new(),
             },
@@ -134,6 +141,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 self.directory.unblock_expired();
+                self.update_listener();
             },
             Some(msg) = self.receiver.recv() else {
                 debug!("mailbox closed, stopping tracker");
@@ -164,6 +172,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 if !self.directory.track(index, peers) {
                     return;
                 }
+                self.update_listener();
 
                 // Notify all subscribers about the new peer set
                 let update = self
@@ -201,6 +210,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Mark the record as connected
                 self.directory.connect(&public_key, dialer);
+                self.update_listener();
 
                 // Return greeting with our own info
                 let info = self.directory.info(&self.crypto.public_key()).unwrap();
@@ -247,7 +257,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 public_key,
                 reservation,
             } => {
-                let _ = reservation.send(self.directory.dial(&public_key));
+                let result = self.directory.dial(&public_key);
+                if result.is_some() {
+                    self.update_listener();
+                }
+                let _ = reservation.send(result);
             }
             #[cfg(test)]
             Message::Acceptable {
@@ -260,11 +274,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 public_key,
                 reservation,
             } => {
-                let _ = reservation.send(self.directory.listen(&public_key));
+                let result = self.directory.listen(&public_key);
+                if result.is_some() {
+                    self.update_listener();
+                }
+                let _ = reservation.send(result);
             }
             Message::Block { public_key } => {
                 // Block the peer
                 self.directory.block(&public_key);
+                self.update_listener();
 
                 // We don't have to kill the peer now. It will be sent a `Kill` message the next
                 // time it sends the `Connect` or `Construct` message to the tracker.
@@ -272,8 +291,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Release { metadata } => {
                 // Release the peer
                 self.directory.release(metadata);
+                self.update_listener();
             }
         }
+    }
+
+    fn update_listener(&mut self) {
+        let _ = self.listener.set(self.directory.acceptable_peers());
     }
 }
 
@@ -308,6 +332,7 @@ mod tests {
         crypto: C,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
     ) -> Config<C> {
+        let (listener, _) = listener::Mailbox::new();
         Config {
             crypto,
             namespace: b"test_tracker_actor_namespace".to_vec(),
@@ -322,6 +347,7 @@ mod tests {
             peer_gossip_max_count: 5,
             max_peer_set_size: 128,
             dial_fail_limit: 1,
+            listener,
             block_duration: Duration::from_secs(100),
         }
     }

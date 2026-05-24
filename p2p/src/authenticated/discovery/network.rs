@@ -38,6 +38,7 @@ pub struct Network<
     router: router::Actor<E, C::PublicKey>,
     router_mailbox: router::Mailbox<C::PublicKey>,
     info_verifier: InfoVerifier<C::PublicKey>,
+    listener: listener::Updates<C::PublicKey>,
 }
 
 impl<
@@ -56,6 +57,7 @@ impl<
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+        let (listener_mailbox, listener) = listener::Mailbox::new();
         let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
@@ -72,6 +74,7 @@ impl<
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 max_peer_set_size: cfg.max_peer_set_size,
                 dial_fail_limit: cfg.dial_fail_limit,
+                listener: listener_mailbox,
                 block_duration: cfg.block_duration,
             },
         );
@@ -94,6 +97,7 @@ impl<
                 router,
                 router_mailbox,
                 info_verifier,
+                listener,
             },
             oracle,
         )
@@ -180,6 +184,7 @@ impl<
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
                 allowed_handshake_rate_per_subnet: self.cfg.allowed_handshake_rate_per_subnet,
             },
+            self.listener,
         );
         let mut listener_task =
             listener.start(self.tracker_mailbox.clone(), spawner_mailbox.clone());

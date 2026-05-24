@@ -10,10 +10,10 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{ordered::Set, IpAddrExt, PrioritySet, SystemTimeExt};
+use commonware_utils::{ordered::Set, PrioritySet, SystemTimeExt};
 use rand::Rng;
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
+    collections::{hash_map::Entry, BTreeMap, HashMap},
     net::IpAddr,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
@@ -229,8 +229,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(index = removed_index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(&primary).unwrap().decrement_primary();
-                let deleted = self.delete_if_needed(&primary);
-                if deleted {
+                let should_reset = self.should_reset_removed(&primary);
+                self.delete_if_needed(&primary);
+                if should_reset {
                     reset_peers.push(primary);
                 }
             });
@@ -239,8 +240,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                     .get_mut(&secondary)
                     .unwrap()
                     .decrement_secondary();
-                let deleted = self.delete_if_needed(&secondary);
-                if deleted {
+                let should_reset = self.should_reset_removed(&secondary);
+                self.delete_if_needed(&secondary);
+                if should_reset {
                     reset_peers.push(secondary);
                 }
             });
@@ -414,17 +416,32 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 .is_some_and(|record| record.acceptable(source_ip, self.bypass_ip_check))
     }
 
+    /// Return peers the listener should currently accept during the stream handshake.
+    pub fn acceptable_peers(&self) -> HashMap<C, IpAddr> {
+        self.peers
+            .iter()
+            .filter(|(peer, _)| !self.is_blocked(peer))
+            .filter_map(|(peer, record)| {
+                let source_ip = record.egress_ip()?;
+                record
+                    .acceptable(source_ip, self.bypass_ip_check)
+                    .then_some((peer.clone(), source_ip))
+            })
+            .collect()
+    }
+
     /// Return egress IPs we should listen for (accept incoming connections from).
     ///
     /// Only includes IPs from peers that are:
     /// - Currently eligible (not blocked, in a peer set)
     /// - Have a valid egress IP (global, or private IPs are allowed)
-    pub fn listenable(&self) -> HashSet<IpAddr> {
+    #[cfg(test)]
+    pub fn listenable(&self) -> std::collections::HashSet<IpAddr> {
         self.peers
             .iter()
             .filter(|(peer, r)| !self.is_blocked(peer) && r.eligible())
             .filter_map(|(_, r)| r.egress_ip())
-            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
+            .filter(|ip| self.allow_private_ips || commonware_utils::IpAddrExt::is_global(ip))
             .collect()
     }
 
@@ -508,6 +525,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true
+    }
+
+    fn should_reset_removed(&self, peer: &C) -> bool {
+        self.peers
+            .get(peer)
+            .is_some_and(|record| record.is_blockable() && !record.eligible())
     }
 }
 

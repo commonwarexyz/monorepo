@@ -15,7 +15,7 @@ use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics as Runtime
 use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroUsize,
     ops::Deref,
     time::{Duration, SystemTime},
@@ -470,6 +470,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
     pub fn acceptable(&self, peer: &C) -> bool {
         !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.acceptable())
+    }
+
+    /// Return peers the listener should currently accept during the stream handshake.
+    pub fn acceptable_peers(&self) -> HashSet<C> {
+        self.peers
+            .iter()
+            .filter(|(peer, record)| !self.is_blocked(peer) && record.acceptable())
+            .map(|(peer, _)| peer.clone())
+            .collect()
     }
 
     /// Unblock all peers whose block has expired and update primary peer set knowledge bitmaps.
