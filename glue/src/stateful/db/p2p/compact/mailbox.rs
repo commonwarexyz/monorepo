@@ -8,6 +8,33 @@ use commonware_storage::{merkle::Family, qmdb::sync::compact};
 use commonware_utils::{channel::oneshot, sync::AsyncRwLock};
 use std::{collections::VecDeque, future::Future, sync::Arc};
 
+struct CancelGuard<DB, F: Family, Op, D: Digest> {
+    sender: Sender<Message<DB, F, Op, D>>,
+    request: Option<handler::Request<F, D>>,
+}
+
+impl<DB, F: Family, Op, D: Digest> CancelGuard<DB, F, Op, D> {
+    const fn new(sender: Sender<Message<DB, F, Op, D>>, request: handler::Request<F, D>) -> Self {
+        Self {
+            sender,
+            request: Some(request),
+        }
+    }
+
+    const fn disarm(&mut self) {
+        self.request = None;
+    }
+}
+
+impl<DB, F: Family, Op, D: Digest> Drop for CancelGuard<DB, F, Op, D> {
+    fn drop(&mut self) {
+        let Some(request) = self.request.take() else {
+            return;
+        };
+        let _ = self.sender.enqueue(Message::CancelState { request });
+    }
+}
+
 /// The resolver actor dropped the response before completion.
 #[derive(Debug, thiserror::Error)]
 #[error("response dropped before completion")]
@@ -19,12 +46,15 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
         request: handler::Request<F, D>,
         response: oneshot::Sender<Result<compact::FetchResult<F, Op, D>, ResponseDropped>>,
     },
+    CancelState {
+        request: handler::Request<F, D>,
+    },
 }
 
 impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
     fn response_closed(&self) -> bool {
         match self {
-            Self::AttachDatabase(_) => false,
+            Self::AttachDatabase(_) | Self::CancelState { .. } => false,
             Self::GetState { response, .. } => response.is_closed(),
         }
     }
@@ -134,8 +164,14 @@ where
     ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let request = handler::Request::from_target(target);
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::GetState { request, response });
-        receiver.await.map_err(|_| ResponseDropped)?
+        let _ = self.sender.enqueue(Message::GetState {
+            request: request.clone(),
+            response,
+        });
+        let mut cancel = CancelGuard::new(self.sender.clone(), request);
+        let result = receiver.await;
+        cancel.disarm();
+        result.map_err(|_| ResponseDropped)?
     }
 }
 
@@ -159,6 +195,8 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_storage::{mmr, qmdb::sync::compact::Resolver as _};
     use commonware_utils::NZUsize;
+    use futures::future::poll_fn;
+    use std::task::Poll;
 
     #[test]
     fn get_compact_state_sends_request() {
@@ -182,6 +220,41 @@ mod tests {
 
             let (result, _) = futures::join!(get, observe);
             assert!(matches!(result, Err(ResponseDropped)));
+        });
+    }
+
+    #[test]
+    fn dropped_request_sends_cancel_message() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
+            let mailbox = Mailbox::<(), mmr::Family, u64, Sha256>::new(sender);
+            let target = compact::Target {
+                root: [2u8; 32].into(),
+                leaf_count: mmr::Location::new(9),
+            };
+
+            let mut get = Box::pin(mailbox.get_compact_state(target.clone()));
+            poll_fn(|cx| {
+                assert!(matches!(get.as_mut().poll(cx), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+            drop(get);
+
+            let message = receiver.recv().await.expect("request should be queued");
+            let Message::GetState { request, response } = message else {
+                panic!("unexpected attach message");
+            };
+            assert_eq!(request.to_target(), target);
+            drop(response);
+
+            match receiver.recv().await.expect("cancel should be queued") {
+                Message::CancelState { request } => {
+                    assert_eq!(request.to_target(), target);
+                }
+                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::GetState { .. } => panic!("unexpected duplicate request"),
+            }
         });
     }
 }

@@ -73,6 +73,7 @@ enum State<DB> {
 enum MailboxAction<F: Family, D: commonware_cryptography::Digest> {
     None,
     Fetch(handler::Request<F, D>),
+    Cancel(handler::Request<F, D>),
 }
 
 /// Runs a compact QMDB sync resolver service over P2P.
@@ -180,6 +181,9 @@ where
                     MailboxAction::Fetch(request) => {
                         resolver_mailbox.fetch(request);
                     }
+                    MailboxAction::Cancel(request) => {
+                        resolver_mailbox.retain(move |key, _| key != &request);
+                    }
                 }
             },
             Some(message) = handler_rx.recv() else {
@@ -221,7 +225,26 @@ where
                 self.pending.insert(request.clone(), vec![response]);
                 MailboxAction::Fetch(request)
             }
+            mailbox::Message::CancelState { request } => {
+                if self.should_cancel_request(&request) {
+                    MailboxAction::Cancel(request)
+                } else {
+                    MailboxAction::None
+                }
+            }
         }
+    }
+
+    fn should_cancel_request(&mut self, request: &handler::Request<F, H::Digest>) -> bool {
+        let Some(subscribers) = self.pending.get_mut(request) else {
+            return false;
+        };
+        subscribers.retain(|subscriber| !subscriber.is_closed());
+        if !subscribers.is_empty() {
+            return false;
+        }
+        self.pending.remove(request);
+        true
     }
 
     async fn handle_deliver(
@@ -427,9 +450,10 @@ mod tests {
         db.commit().await.unwrap();
 
         let target = db.current_target();
-        let fetch = compact::Resolver::get_compact_state(&Arc::new(AsyncRwLock::new(db)), target.clone())
-            .await
-            .expect("compact state should be available");
+        let fetch =
+            compact::Resolver::get_compact_state(&Arc::new(AsyncRwLock::new(db)), target.clone())
+                .await
+                .expect("compact state should be available");
         (target, fetch)
     }
 
@@ -504,7 +528,9 @@ mod tests {
             let (ack_tx, ack_rx) = oneshot::channel();
             futures::join!(
                 async {
-                    actor.handle_deliver(request, fetch.state.encode(), ack_tx).await;
+                    actor
+                        .handle_deliver(request, fetch.state.encode(), ack_tx)
+                        .await;
                 },
                 async {
                     let fetch = subscriber_rx.await.unwrap().unwrap();
@@ -517,6 +543,54 @@ mod tests {
             );
 
             assert!(!ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn cancel_state_cancels_last_subscriber() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (target, _) = compact_state(context.child("state")).await;
+            let request = handler::Request::from_target(target);
+
+            let (subscriber_tx, subscriber_rx) = oneshot::channel();
+            drop(subscriber_rx);
+            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+
+            let action = actor.handle_mailbox_message(mailbox::Message::CancelState {
+                request: request.clone(),
+            });
+
+            assert!(matches!(action, MailboxAction::Cancel(ref key) if key == &request));
+            assert!(!actor.pending.contains_key(&request));
+        });
+    }
+
+    #[test]
+    fn cancel_state_keeps_shared_request_alive() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (target, _) = compact_state(context.child("state")).await;
+            let request = handler::Request::from_target(target);
+
+            let (stale_tx, stale_rx) = oneshot::channel();
+            drop(stale_rx);
+            let (live_tx, _live_rx) = oneshot::channel();
+            actor
+                .pending
+                .insert(request.clone(), vec![stale_tx, live_tx]);
+
+            let action = actor.handle_mailbox_message(mailbox::Message::CancelState {
+                request: request.clone(),
+            });
+
+            assert!(matches!(action, MailboxAction::None));
+            let subscribers = actor
+                .pending
+                .get(&request)
+                .expect("request should remain pending");
+            assert_eq!(subscribers.len(), 1);
+            assert!(!subscribers[0].is_closed());
         });
     }
 }
