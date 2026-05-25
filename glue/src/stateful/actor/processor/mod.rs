@@ -71,6 +71,33 @@ pub(super) enum PrepareBatchesError {
     Invalid,
     /// Caller dropped the response while waiting.
     Cancelled,
+    /// Required ancestry may still become available, but the current provider stopped.
+    Incomplete,
+}
+
+pub(super) trait ProcessorProvider: BlockProvider {
+    /// Subscribe to a canonical block by digest with a trusted round.
+    fn subscribe_processed(
+        &self,
+        digest: <Self::Block as Digestible>::Digest,
+        round: Round,
+    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static;
+}
+
+impl<S, V> ProcessorProvider for MarshalMailbox<S, V>
+where
+    S: Scheme,
+    V: MarshalVariant,
+    Self: BlockProvider<Block = V::ApplicationBlock>,
+{
+    fn subscribe_processed(
+        &self,
+        digest: <Self::Block as Digestible>::Digest,
+        round: Round,
+    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+        let receiver = self.subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
+        async move { receiver.await.ok().map(V::into_inner) }
+    }
 }
 
 /// Finalization result for a finalized block report.
@@ -127,18 +154,17 @@ where
     /// build a new block proposal. The resulting block and its merkleized
     /// state are cached in `pending`. Sends `None` on `response` if the
     /// ancestry is invalid or the application declines to propose.
-    pub(super) async fn propose<S, V>(
+    pub(super) async fn propose<M>(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        marshal: M,
         (runtime_context, consensus_context): (E, A::Context),
         ancestry: impl Stream<Item = A::Block> + Send + 'static,
         input_provider: &mut A::InputProvider,
         mut response: oneshot::Sender<Option<A::Block>>,
-    ) where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    )
+    where
+        M: BlockProvider<Block = A::Block> + Clone,
     {
         let timer = self.metrics.propose_duration.timer(context);
 
@@ -165,6 +191,14 @@ where
                     ?parent_digest,
                     "proposal request cancelled during prepare_batches"
                 );
+                return;
+            }
+            Err(PrepareBatchesError::Incomplete) => {
+                debug!(
+                    ?parent_digest,
+                    "proposal request incomplete during prepare_batches"
+                );
+                wait_for_cancel(&mut response).await;
                 return;
             }
         };
@@ -200,17 +234,16 @@ where
     /// Prepare parent-relative batches and delegate to the application to
     /// verify a received block. On success the block's merkleized state is
     /// cached in `pending` and `true` is sent on `response`.
-    pub(super) async fn verify<S, V>(
+    pub(super) async fn verify<M>(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        marshal: M,
         (runtime_context, consensus_context): (E, A::Context),
         ancestry: impl Stream<Item = A::Block> + Send + 'static,
         mut response: oneshot::Sender<bool>,
-    ) where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    )
+    where
+        M: ProcessorProvider<Block = A::Block> + Clone,
     {
         let timer = self.metrics.verify_duration.timer(context);
 
@@ -259,6 +292,14 @@ where
                 );
                 return;
             }
+            Err(PrepareBatchesError::Incomplete) => {
+                debug!(
+                    ?block_digest,
+                    "verification request incomplete during processed-block check"
+                );
+                wait_for_cancel(&mut response).await;
+                return;
+            }
             Err(PrepareBatchesError::Invalid) => {
                 unreachable!("processed-block check cannot return Invalid")
             }
@@ -291,6 +332,14 @@ where
                     ?parent_digest,
                     "verification request cancelled during prepare_batches"
                 );
+                return;
+            }
+            Err(PrepareBatchesError::Incomplete) => {
+                debug!(
+                    ?parent_digest,
+                    "verification request incomplete during prepare_batches"
+                );
+                wait_for_cancel(&mut response).await;
                 return;
             }
         };
@@ -329,24 +378,22 @@ where
     }
 
     /// Ensure parent state exists, then prepare unmerkleized batches for execution.
-    pub(super) async fn prepare_batches<S, V, Response>(
+    pub(super) async fn prepare_batches<M, Response>(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        provider: M,
         parent: A::Block,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+        M: BlockProvider<Block = A::Block> + Clone,
     {
         let parent_digest = parent.digest();
         // Rebuild pending state if no pending state exists for the parent and the
         // parent is not the processed tip.
         if self.last_processed.digest != parent_digest && !self.pending.contains_key(&parent_digest)
         {
-            self.rebuild_pending(context, marshal, parent, response)
+            self.rebuild_pending(context, provider, parent, response)
                 .await?;
         }
 
@@ -372,17 +419,15 @@ where
     }
 
     /// Rebuild missing pending ancestry up to `target` lazily from marshal.
-    pub(super) async fn rebuild_pending<S, V, Response>(
+    pub(super) async fn rebuild_pending<M, Response>(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        provider: M,
         target: A::Block,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<(), PrepareBatchesError>
     where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+        M: BlockProvider<Block = A::Block> + Clone,
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
         let target_digest = target.digest();
@@ -393,27 +438,6 @@ where
         while cursor.digest() != self.last_processed.digest
             && !self.pending.contains_key(&cursor.digest())
         {
-            let Some(parent) =
-                await_or_cancel(response, marshal.clone().subscribe_parent(&cursor)).await
-            else {
-                return Err(PrepareBatchesError::Cancelled);
-            };
-
-            let Some(parent) = parent else {
-                // A dropped subscription is not proof of invalidity, so retry.
-                //
-                // This loop is cancellation-bound by consensus timeouts: the
-                // caller drops `response` when propose/verify expires, and every
-                // await in this method is wrapped with `await_or_cancel`. So,
-                // this will never deadlock.
-                debug!(
-                    ?target_digest,
-                    cursor = ?cursor.digest(),
-                    "ancestor subscription ended before delivery, retrying"
-                );
-                continue;
-            };
-
             let cursor_height = cursor.height();
             if cursor_height <= self.last_processed.height {
                 warn!(
@@ -439,6 +463,21 @@ where
                 );
                 return Err(PrepareBatchesError::Invalid);
             }
+
+            let Some(parent) =
+                await_or_cancel(response, provider.clone().subscribe_parent(&cursor)).await
+            else {
+                return Err(PrepareBatchesError::Cancelled);
+            };
+
+            let Some(parent) = parent else {
+                debug!(
+                    ?target_digest,
+                    cursor = ?cursor.digest(),
+                    "ancestor subscription ended before delivery"
+                );
+                return Err(PrepareBatchesError::Incomplete);
+            };
 
             replay_path.push(cursor);
             cursor = parent;
@@ -615,17 +654,15 @@ where
 }
 
 /// Returns true when `block` is already covered by committed state.
-async fn is_already_processed<S, V, Response>(
-    last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
-    marshal: MarshalMailbox<S, V>,
-    block: &V::ApplicationBlock,
+async fn is_already_processed<M, Response>(
+    last_processed: Anchor<<M::Block as Digestible>::Digest>,
+    provider: M,
+    block: &M::Block,
     response: &mut oneshot::Sender<Response>,
 ) -> Result<bool, PrepareBatchesError>
 where
-    S: Scheme,
-    V: MarshalVariant,
-    V::ApplicationBlock: Block + Clone,
-    MarshalMailbox<S, V>: BlockProvider<Block = V::ApplicationBlock>,
+    M: ProcessorProvider + Clone,
+    M::Block: Block + Clone,
 {
     let target_height = block.height();
     if target_height > last_processed.height {
@@ -637,25 +674,23 @@ where
 
     let Some(fetched) = await_or_cancel(
         response,
-        marshal.clone().subscribe_by_digest(
+        provider.clone().subscribe_processed(
             last_processed.digest,
-            DigestFallback::FetchByRound {
-                round: last_processed.round,
-            },
+            last_processed.round,
         ),
     )
     .await
     else {
         return Err(PrepareBatchesError::Cancelled);
     };
-    let Some(mut cursor) = fetched.ok().map(V::into_inner) else {
+    let Some(mut cursor) = fetched else {
         warn!(
             last_processed = ?last_processed.digest,
             target_height = target_height.get(),
             processed_height = last_processed.height.get(),
             "failed to fetch canonical processed ancestry for stale-block check"
         );
-        return Ok(false);
+        return Err(PrepareBatchesError::Incomplete);
     };
 
     loop {
@@ -668,7 +703,7 @@ where
         }
 
         let Some(canonical) =
-            await_or_cancel(response, marshal.clone().subscribe_parent(&cursor)).await
+            await_or_cancel(response, provider.clone().subscribe_parent(&cursor)).await
         else {
             return Err(PrepareBatchesError::Cancelled);
         };
@@ -679,11 +714,16 @@ where
                 processed_height = last_processed.height.get(),
                 "failed to fetch canonical processed ancestry for stale-block check"
             );
-            return Ok(false);
+            return Err(PrepareBatchesError::Incomplete);
         };
 
         cursor = canonical;
     }
+}
+
+/// Keep an incomplete request alive until its caller gives up.
+async fn wait_for_cancel<R>(response: &mut oneshot::Sender<R>) {
+    response.closed().await;
 }
 
 /// Wait for `future` unless the response receiver is dropped.
@@ -702,7 +742,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{await_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
+    use super::{
+        await_or_cancel, FinalizeStatus, PrepareBatchesError, Processor, ProcessorProvider,
+    };
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
@@ -720,7 +762,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock as _, ContextCell, Runner as _,
+        Spawner as _, Supervisor as _,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
@@ -735,7 +778,7 @@ mod tests {
         sync::{AsyncRwLock, Mutex},
         NZUsize, NZU16, NZU64,
     };
-    use futures::{Stream, StreamExt};
+    use futures::{stream, Stream, StreamExt};
     use std::{
         collections::BTreeMap,
         future::Future,
@@ -744,6 +787,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             Arc,
         },
+        time::Duration,
     };
 
     type TestContext = ConsensusContext<Digest, ed25519::PublicKey>;
@@ -1056,6 +1100,17 @@ mod tests {
             let provider = self.clone();
             let parent = block.parent();
             async move { provider.fetch_by_digest(parent) }
+        }
+    }
+
+    impl ProcessorProvider for MapProvider {
+        fn subscribe_processed(
+            &self,
+            digest: Digest,
+            _round: Round,
+        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+            let provider = self.clone();
+            async move { provider.fetch_by_digest(digest) }
         }
     }
 
@@ -1404,6 +1459,97 @@ mod tests {
                 harness.processor.pending.contains_key(&block3.digest()),
                 "target block should be reconstructed",
             );
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_reports_incomplete_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let missing_parent = u64_to_digest(404);
+            let target = Block {
+                context: consensus_context(missing_parent, View::new(1)),
+                parent: missing_parent,
+                height: Height::new(1),
+                state_root: Digest::EMPTY,
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            };
+
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let fetches_before = harness.provider.fetches();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    harness.provider.clone(),
+                    target,
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err(PrepareBatchesError::Incomplete),
+                "dropped ancestry subscriptions are incomplete, not invalid"
+            );
+            assert_eq!(
+                harness.provider.fetches().saturating_sub(fetches_before),
+                1,
+                "incomplete ancestry should not retry a closed provider"
+            );
+        });
+    }
+
+    #[test]
+    fn execution_verify_incomplete_parent_waits_for_cancellation() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = Harness::new(context.child("harness")).await;
+            let provider = harness.provider.clone();
+            let missing_parent = u64_to_digest(405);
+            let parent_context = consensus_context(missing_parent, View::new(1));
+            let parent = Block {
+                context: parent_context,
+                parent: missing_parent,
+                height: Height::new(1),
+                state_root: Digest::EMPTY,
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            };
+            let block_context = consensus_context(parent.digest(), View::new(2));
+            let block = Block {
+                context: block_context.clone(),
+                parent: parent.digest(),
+                height: Height::new(2),
+                state_root: Digest::EMPTY,
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            };
+            let (response, mut receiver) = oneshot::channel::<bool>();
+
+            let handle = context.child("verify").spawn(move |verify_context| async move {
+                let mut processor = harness.processor;
+                processor
+                    .verify(
+                        &verify_context,
+                        provider,
+                        (verify_context.child("app"), block_context),
+                        stream::iter([block, parent]),
+                        response,
+                    )
+                    .await;
+            });
+
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(
+                matches!(
+                    receiver.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "incomplete ancestry should keep the verification response pending"
+            );
+
+            drop(receiver);
+            handle
+                .await
+                .expect("verify task should stop after cancellation");
         });
     }
 
