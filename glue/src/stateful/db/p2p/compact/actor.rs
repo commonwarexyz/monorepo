@@ -1,6 +1,6 @@
 //! Actor for compact QMDB sync over P2P.
 
-use super::{handler, mailbox, Mailbox};
+use super::{super::MAX_PINNED_NODES, handler, mailbox, Mailbox};
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
 use commonware_cryptography::{Hasher, PublicKey};
@@ -20,8 +20,6 @@ use futures::future;
 use rand::Rng;
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
 use tracing::info;
-
-const MAX_PINNED_NODES: usize = 64;
 
 type DbResolver<DB> = Arc<AsyncRwLock<DB>>;
 type DbOp<DB> = <DbResolver<DB> as compact::Resolver>::Op;

@@ -20,8 +20,11 @@
 //! [`db::Merkleized`], [`db::ManagedDb`]) and a [`db::DatabaseSet`] trait that
 //! groups one or more databases into a single unit.
 //!
-//! The [`db::p2p`] submodule provides a P2P resolver actor that implements
-//! [`commonware_storage::qmdb::sync::resolver::Resolver`] over
+//! The [`db::p2p`] submodule provides P2P resolver actors (a
+//! [`db::p2p::standard`] resolver implementing
+//! [`commonware_storage::qmdb::sync::resolver::Resolver`] and a
+//! [`db::p2p::compact`] resolver implementing
+//! [`commonware_storage::qmdb::sync::compact::Resolver`]) over
 //! [`commonware-resolver`](commonware_resolver), enabling databases to fetch
 //! and serve sync operations from peers.
 //!

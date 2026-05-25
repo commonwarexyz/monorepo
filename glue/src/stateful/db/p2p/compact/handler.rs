@@ -96,7 +96,7 @@ impl<F: Family, D: Digest> Read for Request<F, D> {
         let target = compact::Target { root, leaf_count };
         target.validate().map_err(|reason| {
             CodecError::Invalid(
-                "commonware_glue::stateful::db::compact_p2p::Request",
+                "commonware_glue::stateful::db::p2p::compact::Request",
                 reason,
             )
         })?;
@@ -105,6 +105,16 @@ impl<F: Family, D: Digest> Read for Request<F, D> {
 }
 
 impl<F: Family, D: Digest> Span for Request<F, D> {}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Request<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::from_target(u.arbitrary()?))
+    }
+}
 
 pub(super) enum EngineMessage<F: Family, D: Digest> {
     Deliver {
@@ -208,5 +218,20 @@ impl<F: Family, D: Digest> Producer for Handler<F, D> {
             .sender
             .enqueue(EngineMessage::Produce { key, response });
         receiver
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::super::*;
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256;
+        use commonware_storage::merkle::mmr;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Request<mmr::Family, sha256::Digest>>,
+        }
     }
 }

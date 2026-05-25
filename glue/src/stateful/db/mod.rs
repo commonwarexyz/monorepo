@@ -99,7 +99,6 @@ use std::{
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
-pub mod compact_p2p;
 pub mod current;
 pub mod immutable;
 pub mod immutable_unjournaled;

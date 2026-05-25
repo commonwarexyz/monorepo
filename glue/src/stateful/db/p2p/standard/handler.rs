@@ -1,5 +1,6 @@
 //! Internal handler types for resolver actor coordination.
 
+use super::super::MAX_PINNED_NODES;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
@@ -14,9 +15,6 @@ use std::{
     hash::{Hash, Hasher},
     num::NonZeroU64,
 };
-
-/// Safe upper bound on pinned nodes for any u64-backed family.
-const MAX_PINNED_NODES: usize = 64;
 
 /// Request key sent through `resolver::p2p::Engine`.
 #[derive(Clone, Debug)]

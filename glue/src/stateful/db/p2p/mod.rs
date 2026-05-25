@@ -1,22 +1,20 @@
-//! P2P implementation of the QMDB sync resolver.
+//! P2P implementations of the QMDB sync resolvers.
 //!
-//! Implements [`commonware_storage::qmdb::sync::resolver::Resolver`] over
-//! [`commonware_resolver::p2p::Engine`], fetching operations from peers and
-//! serving local operations in response to incoming requests.
-//!
-//! - [`Mailbox`]: client-facing handle that the QMDB sync engine calls to
-//!   fetch operations. Each call is multiplexed through the P2P resolver
-//!   engine so that duplicate requests share a single network round-trip.
-//! - [`Actor`]: service loop that bridges the [`Mailbox`] with the P2P
-//!   engine, dispatches fetches, fans out deliveries to waiting callers,
-//!   and serves produce requests from the local database.
+//! - [`standard`]: resolver for standard QMDBs that fetch operations from peers.
+//! - [`compact`]: resolver for compact-storage QMDBs that fetch one
+//!   authenticated frontier state instead of replaying operations.
 
-mod actor;
-pub use actor::{Actor, Config};
+pub mod compact;
+pub mod standard;
 
-mod mailbox;
-pub use mailbox::{Mailbox, ResponseDropped};
-
-mod handler;
-
-mod metrics;
+/// Safe upper bound on the number of pinned nodes carried in a resolver
+/// response for any u64-backed merkle family.
+///
+/// Pinned nodes are produced by [`commonware_storage::merkle::Family::nodes_to_pin`],
+/// whose default (and only) implementation returns the peaks of the
+/// sub-structure at the prune location. An MMR with `n` leaves has
+/// `popcount(n)` peaks, and since [`commonware_storage::merkle::Location`] is
+/// backed by a `u64`, `n <= u64::MAX` gives at most `popcount(u64::MAX) = 64`
+/// peaks. Concrete families (e.g. `mmr::Family` with `MAX_LEAVES = 2^62`) cap
+/// the bound lower, but 64 covers them all.
+pub(super) const MAX_PINNED_NODES: usize = 64;

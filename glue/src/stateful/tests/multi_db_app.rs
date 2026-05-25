@@ -6,7 +6,8 @@ use crate::{
     },
     stateful::{
         db::{
-            p2p as qmdb_resolver, DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
+            p2p::standard as qmdb_resolver, DatabaseSet, Merkleized as _, SyncEngineConfig,
+            Unmerkleized as _,
         },
         Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
     },
