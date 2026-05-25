@@ -82,7 +82,11 @@ pub struct FetchedOperations<F: Family, Op, D: Digest> {
 
 impl<F: Family, Op, D: Digest> FetchedOperations<F, Op, D> {
     /// Creates fetched operations with optional pinned nodes.
-    pub const fn new(proof: Proof<F, D>, operations: Vec<Op>, pinned_nodes: Option<Vec<D>>) -> Self {
+    pub const fn new(
+        proof: Proof<F, D>,
+        operations: Vec<Op>,
+        pinned_nodes: Option<Vec<D>>,
+    ) -> Self {
         Self {
             proof,
             operations,
@@ -96,7 +100,10 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
         f.debug_struct("FetchResult")
             .field("proof", &self.proof)
             .field("operations", &self.operations)
-            .field("success_tx", &self.success_tx.as_ref().map(|_| "<callback>"))
+            .field(
+                "success_tx",
+                &self.success_tx.as_ref().map(|_| "<callback>"),
+            )
             .field("pinned_nodes", &self.pinned_nodes)
             .finish()
     }
@@ -125,7 +132,16 @@ where
 }
 
 /// Fetch an operation range and package it as a [`FetchResult`].
-pub async fn fetch_operations<F, Op, D, Error, HistoricalProof, HistoricalFuture, Pins, PinsFuture>(
+pub async fn fetch_operations<
+    F,
+    Op,
+    D,
+    Error,
+    HistoricalProof,
+    HistoricalFuture,
+    Pins,
+    PinsFuture,
+>(
     op_count: Location<F>,
     start_loc: Location<F>,
     max_ops: NonZeroU64,
@@ -616,14 +632,17 @@ pub(crate) mod tests {
     #[test]
     fn test_fetch_result_with_success_tx_reports_to_external_receiver() {
         let (success_tx, mut success_rx) = oneshot::channel();
-        let result =
-            FetchResult::<mmr::Family, (), ShaDigest>::with_success_tx(
-                empty_proof(),
-                vec![],
-                success_tx,
-                None,
-            );
-        assert!(result.success_tx.expect("success sender").send(true).is_ok());
+        let result = FetchResult::<mmr::Family, (), ShaDigest>::with_success_tx(
+            empty_proof(),
+            vec![],
+            success_tx,
+            None,
+        );
+        assert!(result
+            .success_tx
+            .expect("success sender")
+            .send(true)
+            .is_ok());
         assert_eq!(success_rx.try_recv(), Ok(true));
     }
 
