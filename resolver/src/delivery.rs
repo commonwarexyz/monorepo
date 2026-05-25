@@ -49,8 +49,7 @@ impl<Context, V, State> Entry<Context, V, State> {
 /// Tracks in-flight consumer deliveries keyed by resolver key.
 ///
 /// `Context` carries resolver-specific metadata back to the caller when
-/// validation completes. A P2P resolver can use it for the peer that sent the
-/// response; another resolver can use it for a local attempt identifier.
+/// validation completes.
 ///
 /// `State` holds per-key resolver state that should be dropped when the key is
 /// pruned, or explicitly taken when the resolver completes the fetch.

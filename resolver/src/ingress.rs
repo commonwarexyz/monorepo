@@ -78,8 +78,8 @@ impl<K, S> Overflow<Message<K, S>> for Pending<K, S> {
             }
         }
 
+        // Fetches are coalesced while pending and drained as one batch.
         if !self.fetches.is_empty() {
-            // Fetches are coalesced while pending and drained as one batch.
             let fetches = std::mem::take(&mut self.fetches);
             if let Some(message) = push(Message::Fetch(fetches)) {
                 self.push_front(message);
@@ -132,9 +132,9 @@ where
     fn handle(overflow: &mut Pending<K, S>, message: Self) {
         match message {
             Self::Fetch(fetches) => {
+                // Backpressure should not multiply work for the same key.
+                // Merge subscribers into the retained fetch instead.
                 for fetch in fetches {
-                    // Backpressure should not multiply work for the same key.
-                    // Merge subscribers into the retained fetch instead.
                     if let Some(existing) = overflow
                         .fetches
                         .iter_mut()

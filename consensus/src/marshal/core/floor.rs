@@ -240,6 +240,19 @@ mod tests {
             self.targeted.lock().push(fetch.into().key);
             Feedback::Ok
         }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.targeted
+                .lock()
+                .extend(fetches.into_iter().map(|(fetch, _)| fetch.into().key));
+            Feedback::Ok
+        }
     }
 
     fn round(view: u64) -> Round {

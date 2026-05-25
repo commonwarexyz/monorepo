@@ -459,10 +459,7 @@ where
         resolver: &mut R,
     ) where
         Buf: Buffer<V>,
-        R: Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
@@ -786,10 +783,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
-        R: Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let mut needs_sync = false;
         let mut handled = false;
@@ -909,10 +903,7 @@ where
         fallback: CommitmentFallback,
         key: SubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -1005,10 +996,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
-        R: Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let round = finalization.round();
         if round <= self.floor.processed_round() {
@@ -1069,10 +1057,7 @@ where
         block: &V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         let commitment = V::commitment(block);
         if !self.floor.matches_pending_anchor(commitment) {
@@ -1187,10 +1172,7 @@ where
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         let ResolverDelivery {
             delivery,
@@ -1364,10 +1346,7 @@ where
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
@@ -1901,10 +1880,7 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         // Gap repair needs a known processed floor. A floor transition may
@@ -2035,10 +2011,7 @@ where
     fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         self.stream.acknowledge(height);
         self.floor.set_processed_height(height);
@@ -2077,10 +2050,7 @@ where
     async fn update_processed_round(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         let Some(finalization) = self.get_finalization_by_height(height).await else {
             return;
@@ -2094,10 +2064,7 @@ where
         &mut self,
         height: Height,
         round: Round,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         if height > self.floor.processed_height() || round <= self.floor.processed_round() {
             return;

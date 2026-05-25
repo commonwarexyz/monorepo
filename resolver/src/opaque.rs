@@ -1,14 +1,14 @@
-//! Resolve keys from a direct asynchronous fetcher.
+//! Resolve keys from an opaque asynchronous fetcher.
 //!
 //! This module owns the generic resolver actor used when fetching data only
-//! requires directly asking some source for raw bytes or objects. Implementations
-//! provide [`Fetcher::fetch`]; this module handles request coalescing, retain
-//! pruning, retry scheduling, consumer delivery, and accepted-response
-//! redelivery.
+//! requires asking an application-provided source for raw bytes or objects.
+//! Implementations provide [`Fetcher::fetch`]; this module handles request
+//! coalescing, retain pruning, retry scheduling, consumer delivery, and
+//! accepted-response redelivery.
 //!
 //! Target hints supplied through [`crate::TargetedResolver::fetch_targeted`] and
-//! [`crate::TargetedResolver::fetch_all_targeted`] use the default untargeted
-//! behavior because direct fetchers do not have peer-specific routing.
+//! [`crate::TargetedResolver::fetch_all_targeted`] are ignored because opaque
+//! fetchers do not have peer-specific routing.
 
 use crate::{
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
@@ -50,7 +50,7 @@ pub trait Fetcher {
     fn fetch(&self, key: Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
 
-/// Handle to a direct-fetcher resolver actor.
+/// Handle to an opaque-fetcher resolver actor.
 pub struct Resolver<K, S, P>
 where
     K: Span,
@@ -120,6 +120,24 @@ where
     P: PublicKey,
 {
     type PublicKey = P;
+
+    fn fetch_targeted(
+        &mut self,
+        fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        _targets: NonEmptyVec<Self::PublicKey>,
+    ) -> Feedback {
+        <Self as crate::Resolver>::fetch(self, fetch)
+    }
+
+    fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
+    where
+        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+    {
+        <Self as crate::Resolver>::fetch_all(
+            self,
+            fetches.into_iter().map(|(fetch, _)| fetch).collect(),
+        )
+    }
 }
 
 impl<K, S, P> Resolver<K, S, P>
@@ -140,7 +158,7 @@ where
     }
 }
 
-/// Spawn a direct-fetcher resolver actor.
+/// Spawn an opaque-fetcher resolver actor.
 pub fn init<E, F, Con, P>(
     context: E,
     fetcher: F,
@@ -168,7 +186,7 @@ where
     Resolver::new(mailbox_tx)
 }
 
-/// Actor that coalesces direct fetches, retries failures, and delivers accepted values.
+/// Actor that coalesces opaque fetches, retries failures, and delivers accepted values.
 struct Actor<E, F, Con>
 where
     E: Clock + Spawner,
@@ -297,11 +315,13 @@ where
             .retain(|key, subscriber| predicate(key, subscriber))
         {
             self.deliveries.remove(&key);
-            // Removing the request drops any active fetch aborter or marks any
-            // active delivery completion as stale. Scheduled retries also need
-            // their timer entry removed explicitly.
-            if let Some(Attempt::Scheduled(deadline)) = self.requests.remove(&key) {
-                self.retry_schedule.remove(&(deadline, key));
+            if let Some(attempt) = self.requests.remove(&key) {
+                match attempt {
+                    Attempt::Fetching { .. } | Attempt::Delivering { .. } => {}
+                    Attempt::Scheduled(deadline) => {
+                        self.retry_schedule.remove(&(deadline, key));
+                    }
+                }
             }
         }
     }
@@ -499,7 +519,7 @@ where
             // feedback rather than re-fetching data that was accepted once.
             warn!(
                 ?key,
-                "previously accepted resolver response rejected during direct redelivery"
+                "previously accepted resolver response rejected during opaque redelivery"
             );
             self.requests.remove(&key);
             self.subscribers.remove(&key);
@@ -507,7 +527,7 @@ where
             return;
         }
 
-        warn!(?key, "consumer rejected direct resolver delivery");
+        warn!(?key, "consumer rejected opaque resolver delivery");
         self.deliveries.discard_response(&key);
         self.schedule_retry(key);
     }
@@ -519,7 +539,7 @@ where
             return;
         };
         *attempt = Attempt::Scheduled(deadline);
-        debug!(?key, ?deadline, "scheduled direct resolver retry");
+        debug!(?key, ?deadline, "scheduled opaque resolver retry");
         self.retry_schedule.insert((deadline, key));
     }
 
@@ -537,7 +557,7 @@ where
             };
             match state {
                 Attempt::Scheduled(state_deadline) if *state_deadline == deadline => {
-                    debug!(?key, "retrying direct resolver fetch");
+                    debug!(?key, "retrying opaque resolver fetch");
                     self.start_fetch(key);
                 }
                 Attempt::Scheduled(_) | Attempt::Fetching { .. } | Attempt::Delivering { .. } => {}
@@ -856,7 +876,66 @@ mod tests {
     }
 
     #[test]
-    fn targeted_fetch_uses_same_direct_fetch_path() {
+    fn retain_drops_last_subscriber_aborts_active_fetch() {
+        Runner::default().start(|context| async move {
+            let (fetcher, started, response) = BlockingFetcher::new();
+            let consumer = MockConsumer::default();
+            let mut resolver = start_resolver(context.child("resolver"), fetcher, consumer.clone());
+
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 10
+                })
+                .accepted());
+            started.await.expect("fetch did not start");
+            assert!(resolver.retain(|_, _| false).accepted());
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(
+                response.send(Some(Bytes::from_static(b"value"))).is_err(),
+                "fetch future should be aborted after its last subscriber is pruned"
+            );
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            assert_eq!(consumer.len(), 0);
+        });
+    }
+
+    #[test]
+    fn retain_drops_last_subscriber_aborts_active_delivery() {
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"value")));
+            let consumer = MockConsumer::default();
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 10
+                })
+                .accepted());
+            let delivery = wait_for_delivery(&context, &consumer).await;
+            assert!(resolver.retain(|_, _| false).accepted());
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(
+                delivery.response.send(false).is_err(),
+                "delivery future should be aborted after its last subscriber is pruned"
+            );
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
+            assert_eq!(fetcher.calls(), 1);
+            assert_eq!(consumer.len(), 0);
+        });
+    }
+
+    #[test]
+    fn targeted_fetch_uses_same_opaque_fetch_path() {
         Runner::default().start(|context| async move {
             let fetcher = MockFetcher::default();
             fetcher.push(1, Some(Bytes::from_static(b"value")));

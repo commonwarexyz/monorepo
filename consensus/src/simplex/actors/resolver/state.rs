@@ -233,7 +233,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_resolver::{Fetch, TargetedResolver};
-    use commonware_utils::{sync::Mutex, test_rng, NZUsize};
+    use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec, NZUsize};
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-state";
@@ -290,6 +290,27 @@ mod tests {
 
     impl TargetedResolver for MockResolver {
         type PublicKey = PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            <Self as Resolver>::fetch(self, fetch)
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            <Self as Resolver>::fetch_all(
+                self,
+                fetches.into_iter().map(|(fetch, _)| fetch).collect(),
+            )
+        }
     }
 
     fn ed25519_fixture() -> (Vec<TestScheme>, TestScheme) {

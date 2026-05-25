@@ -10,9 +10,9 @@ commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
 
-    pub mod direct;
     pub mod delivery;
     mod ingress;
+    pub mod opaque;
     pub mod p2p;
     mod subscribers;
 
@@ -127,21 +127,13 @@ commonware_macros::stability_scope!(BETA {
 
         /// Initiate a fetch with target peer hints.
         ///
-        /// By default, target hints are ignored and this is equivalent to
-        /// [`Resolver::fetch`]. Target-aware resolvers may override this to
-        /// prioritize or restrict lookup. Callers that require strict peer
-        /// targeting must rely on an implementation that documents that
-        /// guarantee.
-        ///
         /// Implementations define whether target hints persist through retries,
         /// merge with existing in-progress fetches, or are discarded.
         fn fetch_targeted(
             &mut self,
-            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            self.fetch(key)
-        }
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback;
 
         /// Initiate fetches for multiple keys, each with their own target hints.
         ///
@@ -151,9 +143,6 @@ commonware_macros::stability_scope!(BETA {
             keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            self.fetch_all(keys.into_iter().map(|(key, _)| key).collect())
-        }
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
     }
 });
