@@ -428,15 +428,6 @@ impl<D: EngineDefinition> Plan<D> {
         let scheduled_actions = Arc::new(AtomicU64::new(0));
 
         let delayed = self.delayed_participants();
-        team.start(
-            &ctx,
-            &oracle,
-            self.link.clone(),
-            monitor_tx.clone(),
-            &delayed,
-        )
-        .await;
-
         if let Some(storage_fault) = &self.storage_fault {
             *ctx.storage_fault_config().write() = storage_fault.clone();
             info!(
@@ -445,6 +436,14 @@ impl<D: EngineDefinition> Plan<D> {
                 "enabled storage fault injection"
             );
         }
+        team.start(
+            &ctx,
+            &oracle,
+            self.link.clone(),
+            monitor_tx.clone(),
+            &delayed,
+        )
+        .await;
 
         // Spawn crash ticker for Random crashes.
         if let Some((frequency, _, _)) = self.random_crash() {
@@ -786,6 +785,20 @@ mod tests {
         finalizations: u64,
     }
 
+    #[derive(Clone)]
+    struct FaultObservingEngine {
+        participants: Vec<ed25519::PublicKey>,
+    }
+
+    struct FaultObservingNode {
+        context: deterministic::Context,
+        monitor: mpsc::Sender<FinalizationUpdate<ed25519::PublicKey>>,
+        pk: ed25519::PublicKey,
+    }
+
+    #[derive(Clone)]
+    struct AllStatesSawFault;
+
     impl FinalizingEngine {
         fn new(num_validators: u64, finalize_after: Duration, finalizations: u64) -> Self {
             let participants = (0..num_validators)
@@ -796,6 +809,15 @@ mod tests {
                 finalize_after,
                 finalizations,
             }
+        }
+    }
+
+    impl FaultObservingEngine {
+        fn new(num_validators: u64) -> Self {
+            let participants = (0..num_validators)
+                .map(|seed| ed25519::PrivateKey::from_seed(seed).public_key())
+                .collect();
+            Self { participants }
         }
     }
 
@@ -854,6 +876,52 @@ mod tests {
         }
     }
 
+    impl EngineDefinition for FaultObservingEngine {
+        type PublicKey = ed25519::PublicKey;
+        type Engine = FaultObservingNode;
+        type State = bool;
+
+        fn participants(&self) -> Vec<Self::PublicKey> {
+            self.participants.clone()
+        }
+
+        fn channels(&self) -> Vec<(u64, Quota)> {
+            vec![]
+        }
+
+        fn init(
+            &self,
+            ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
+        ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
+            let saw_fault = ctx.context.storage_fault_config().read().open_rate == Some(1.0);
+            async move {
+                (
+                    FaultObservingNode {
+                        context: ctx.context,
+                        monitor: ctx.monitor,
+                        pk: ctx.public_key.clone(),
+                    },
+                    saw_fault,
+                )
+            }
+        }
+
+        fn start(engine: Self::Engine) -> Handle<()> {
+            let pk = engine.pk;
+            let monitor = engine.monitor;
+            engine.context.spawn(move |ctx| async move {
+                ctx.sleep(Duration::from_millis(10)).await;
+                let _ = monitor
+                    .send(FinalizationUpdate {
+                        pk,
+                        view: View::new(1),
+                        block_digest: vec![1],
+                    })
+                    .await;
+            })
+        }
+    }
+
     #[derive(Clone)]
     struct AtLeastTrackedValidators {
         min: usize,
@@ -871,6 +939,25 @@ mod tests {
             _target_count: usize,
         ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
             Box::pin(async move { Ok(tracker.tracked_count() >= self.min) })
+        }
+    }
+
+    impl Property<ed25519::PublicKey, bool> for AllStatesSawFault {
+        fn name(&self) -> &str {
+            "all_states_saw_fault"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+            states: &'a [&'a bool],
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                if states.iter().all(|state| **state) {
+                    return Ok(());
+                }
+                Err("storage fault was not visible during engine init".to_string())
+            })
         }
     }
 
@@ -1016,5 +1103,16 @@ mod tests {
             .property(SingleUseProperty::default())
             .run()
             .expect("stateful properties should not be reused across seed runs");
+    }
+
+    #[test]
+    fn storage_fault_is_visible_during_engine_init() {
+        PlanBuilder::new(FaultObservingEngine::new(1))
+            .with_storage_fault(deterministic::FaultConfig::default().open(1.0))
+            .timeout(Duration::from_secs(1))
+            .required_finalizations(1)
+            .property(AllStatesSawFault)
+            .run()
+            .expect("storage fault should be configured before engine init");
     }
 }
