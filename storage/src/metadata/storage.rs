@@ -270,6 +270,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     }
 
     /// Perform a [Self::put] and [Self::sync] in a single operation.
+    ///
+    /// Like calling [Self::sync] directly, this commits all pending metadata
+    /// changes, not just the provided key.
     pub async fn put_sync(&mut self, key: K, value: V) -> Result<(), Error> {
         self.put(key, value);
         self.sync().await
@@ -434,12 +437,16 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
         next_data.put_u32(Crc32::checksum(&next_data[..]));
 
-        // Write and persist the new data
-        target.blob.write_at(0, next_data.clone()).await?;
+        // Shrinking rewrites must also persist the resize, so they need a full sync.
         if next_data.len() < target.data.len() {
+            target.blob.write_at(0, next_data.clone()).await?;
             target.blob.resize(next_data.len() as u64).await?;
+            target.blob.sync().await?;
+        } else {
+            // Non-shrinking rewrites are a single write and can use range-scoped
+            // durability.
+            target.blob.write_at_sync(0, next_data.clone()).await?;
         }
-        target.blob.sync().await?;
 
         // Update blob state
         target.version = next_version;

@@ -28,12 +28,13 @@
 //!     blocks_archive,
 //!     config,
 //! ).await;
+//! // `last_height` is `None` until the application acknowledges a block.
 //!
 //! // Start with application and buffer
-//! actor.start(application, Some(buffer), resolver);
+//! actor.start(application, buffer, resolver);
 //!
 //! // Or omit broadcast buffering for follower-only chain tracking
-//! actor.start(application, None::<MyBuffer>, resolver);
+//! actor.start_unbuffered(application, resolver);
 //! ```
 //!
 //! For standard mode, use [`crate::marshal::standard::Standard`] as the variant and
@@ -48,6 +49,7 @@ mod acks;
 pub(crate) mod cache;
 mod delivery;
 mod floor;
+mod stream;
 
 mod mailbox;
 pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};

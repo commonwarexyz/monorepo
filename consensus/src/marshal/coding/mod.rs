@@ -101,7 +101,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::Recipients;
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Resolver};
+    use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Supervisor as _,
     };
@@ -156,19 +156,19 @@ mod tests {
             None
         }
 
-        fn subscribe_by_digest(&self, _digest: D) -> oneshot::Receiver<TestCodedBlock> {
+        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<TestCodedBlock>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscriptions.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
         fn subscribe_by_commitment(
             &self,
             _commitment: Commitment,
-        ) -> oneshot::Receiver<TestCodedBlock> {
+        ) -> Option<oneshot::Receiver<TestCodedBlock>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
-            receiver
+            Some(receiver)
         }
 
         fn finalized(&self, _commitment: Commitment) {}
@@ -255,7 +255,6 @@ mod tests {
     impl Resolver for RecordingResolver {
         type Key = handler::Key<Commitment>;
         type Subscriber = handler::Annotation;
-        type PublicKey = K;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
@@ -274,6 +273,17 @@ mod tests {
             }
             Feedback::Ok
         }
+
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for RecordingResolver {
+        type PublicKey = K;
 
         fn fetch_targeted(
             &mut self,
@@ -295,13 +305,6 @@ mod tests {
             for (fetch, targets) in fetches {
                 targeted.push((fetch.into().key, targets));
             }
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
             Feedback::Ok
         }
     }
@@ -408,7 +411,7 @@ mod tests {
         let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
         let actor_handle = actor.start(
             Application::<CodingB>::default(),
-            Some(buffer),
+            buffer,
             (resolver_rx, resolver.clone()),
         );
         (mailbox, resolver, actor_handle)
@@ -777,6 +780,11 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_ack_pipeline_backlog_persists_on_restart() {
         harness::ack_pipeline_backlog_persists_on_restart::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_genesis_emitted_once() {
+        harness::genesis_emitted_once::<CodingHarness>();
     }
 
     #[test_traced("WARN")]

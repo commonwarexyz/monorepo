@@ -150,6 +150,7 @@ where
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
+    ancestor_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
@@ -169,6 +170,7 @@ where
             verification_tasks: self.verification_tasks.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
+            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
         }
     }
 }
@@ -195,6 +197,12 @@ where
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
+        let ancestor_fetch_histogram = context.histogram(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+            Buckets::LOCAL,
+        );
+        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
             context: Arc::new(AsyncMutex::new(context)),
@@ -205,6 +213,7 @@ where
 
             build_duration,
             proposal_parent_fetch_duration,
+            ancestor_fetch_duration,
         }
     }
 
@@ -227,6 +236,7 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let runtime_context = self
             .context
             .lock()
@@ -250,6 +260,7 @@ where
                 &mut marshal,
                 &mut tx,
                 stage,
+                ancestor_fetch_duration,
             )
             .await
             {
@@ -449,6 +460,7 @@ where
         // Metrics
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -555,7 +567,11 @@ where
                 return;
             }
 
-            let ancestor_stream = marshal.ancestor_stream([parent]);
+            let ancestor_stream = marshal.ancestor_stream(
+                Arc::new(runtime_context.child("ancestor_stream")),
+                [parent],
+                ancestor_fetch_duration,
+            );
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),

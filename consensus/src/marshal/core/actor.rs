@@ -4,8 +4,9 @@ use super::{
     delivery::PendingVerification,
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
+    stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
-    variant::OptionalBuffer,
+    variant::NoBuffer,
     Buffer, Variant,
 };
 use crate::{
@@ -31,30 +32,23 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{Delivery, Resolver};
+use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::{
-    archive::Identifier as ArchiveID,
-    metadata::{self, Metadata},
-};
+use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     futures::AbortablePool,
-    sequence::U64,
     Acknowledgement, BoxedError,
 };
 use futures::{future::join_all, try_join};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
 use tracing::{debug, warn};
-
-/// The key used to store the last processed height in the metadata store.
-const LATEST_KEY: U64 = U64::new(0xFF);
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
@@ -121,6 +115,8 @@ where
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
+    // Application delivery cursor
+    stream: Stream<E>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
     // Highest known finalized height
@@ -131,8 +127,6 @@ where
     // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
-    // Metadata tracking application progress
-    application_metadata: Metadata<E, U64, Height>,
     // Finalizations stored by height
     finalizations_by_height: FC,
     // Finalized blocks stored by height
@@ -166,7 +160,7 @@ where
         finalizations_by_height: FC,
         mut finalized_blocks: FB,
         config: Config<P, ES, T, V::ApplicationBlock, V::Block, V::Commitment>,
-    ) -> (Self, Mailbox<P::Scheme, V>, Height) {
+    ) -> (Self, Mailbox<P::Scheme, V>, Option<Height>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix),
@@ -183,20 +177,11 @@ where
         )
         .await;
 
-        // Initialize metadata tracking application progress
-        let application_metadata = Metadata::init(
-            context.child("application_metadata"),
-            metadata::Config {
-                partition: format!("{}-application-metadata", config.partition_prefix),
-                codec_config: (),
-            },
-        )
-        .await
-        .expect("failed to initialize application metadata");
-        let last_processed_height = application_metadata
-            .get(&LATEST_KEY)
-            .copied()
-            .unwrap_or(Height::zero());
+        // The application metadata name is retained for legacy support.
+        let application_metadata_partition =
+            format!("{}-application-metadata", config.partition_prefix);
+        let stream = Stream::new(context.child("stream"), &application_metadata_partition).await;
+        let last_processed_height = stream.processed_height();
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
@@ -219,7 +204,9 @@ where
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
         let processed_height = context.gauge("processed_height", "Processed height of application");
-        let _ = processed_height.try_set(last_processed_height.get());
+        if let Some(last_processed_height) = last_processed_height {
+            let _ = processed_height.try_set(last_processed_height.get());
+        }
         let floor = pending_floor_anchor.map_or_else(
             || Floor::resolved(last_processed_height, last_processed_round),
             |finalization| {
@@ -241,11 +228,11 @@ where
                 strategy: config.strategy,
                 last_proposed_block: None,
                 floor,
+                stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 cache,
-                application_metadata,
                 finalizations_by_height,
                 finalized_blocks,
                 finalized_height,
@@ -259,7 +246,7 @@ where
     async fn ensure_genesis_anchor(
         finalized_blocks: &mut FB,
         anchor: V::Block,
-        last_processed_height: Height,
+        last_processed_height: Option<Height>,
     ) {
         let anchor_height = anchor.height();
         let anchor_commitment = V::commitment(&anchor);
@@ -280,10 +267,12 @@ where
                 );
             }
             Ok(None) => {
-                if anchor_height < last_processed_height {
+                if let Some(existing) =
+                    last_processed_height.filter(|height| anchor_height < *height)
+                {
                     warn!(
                         height = %anchor_height,
-                        existing = %last_processed_height,
+                        %existing,
                         "ignoring stale anchor"
                     );
                     return;
@@ -307,29 +296,48 @@ where
     pub fn start<R, Buf>(
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: Option<Buf>,
+        buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
-        R: Resolver<
+        R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
-        let buffer = OptionalBuffer::new(buffer);
         spawn_cell!(self.context, self.run(application, buffer, resolver))
+    }
+
+    /// Start the actor without a broadcast buffer.
+    pub fn start_unbuffered<R>(
+        self,
+        application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: (handler::Receiver<V::Commitment>, R),
+    ) -> Handle<()>
+    where
+        R: TargetedResolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+        >,
+    {
+        self.start(
+            application,
+            NoBuffer::<<P::Scheme as CertificateScheme>::PublicKey>::new(),
+            resolver,
+        )
     }
 
     /// Run the application actor.
     async fn run<R, Buf>(
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        mut buffer: OptionalBuffer<V, Buf>,
+        mut buffer: Buf,
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
-        R: Resolver<
+        R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
@@ -447,15 +455,11 @@ where
         &mut self,
         result: <A::Waiter as Future>::Output,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         resolver: &mut R,
     ) where
         Buf: Buffer<V>,
-        R: Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
@@ -482,8 +486,8 @@ where
             }
         };
 
-        // Persist buffered processed-height updates once after draining all ready acks.
-        self.application_metadata
+        // Persist buffered progress updates once after draining all ready acks.
+        self.stream
             .sync()
             .await
             .expect("failed to sync application progress");
@@ -502,11 +506,11 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
-        R: Resolver<
+        R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
@@ -692,6 +696,9 @@ where
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
+            Message::GetProcessedHeight { response } => {
+                response.send_lossy(self.stream.processed_height());
+            }
             Message::HintFinalized { height, targets } => {
                 // Skip if finalization is already available locally.
                 if self.get_finalization_by_height(height).await.is_some() {
@@ -772,15 +779,11 @@ where
         message: handler::Message<V::Commitment>,
         resolver_rx: &mut handler::Receiver<V::Commitment>,
         resolver: &mut R,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
-        R: Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let mut needs_sync = false;
         let mut handled = false;
@@ -858,7 +861,7 @@ where
         &self,
         key: ResolverRequestFor<V>,
         response: oneshot::Sender<Bytes>,
-        buffer: &OptionalBuffer<V, Buf>,
+        buffer: &Buf,
     ) {
         match key {
             Key::Block(commitment) => {
@@ -900,13 +903,9 @@ where
         fallback: CommitmentFallback,
         key: SubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
     ) {
         let digest = match key {
             SubscriptionKey::Digest(digest) => digest,
@@ -993,15 +992,11 @@ where
         finalization: Finalization<P::Scheme, V::Commitment>,
         skip_if_superseded: bool,
         resolver: &mut R,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
-        R: Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let round = finalization.round();
         if round <= self.floor.processed_round() {
@@ -1060,13 +1055,9 @@ where
     async fn apply_floor_anchor<Buf: Buffer<V>>(
         &mut self,
         block: &V::Block,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         let commitment = V::commitment(block);
         if !self.floor.matches_pending_anchor(commitment) {
@@ -1139,11 +1130,15 @@ where
             let _ = self.finalized_height.try_set(height.get());
         }
 
-        // Update the processed floor after the anchor and certificate are durable.
-        self.update_processed_height(height, resolver);
-        self.update_processed_round_floor(height, round, resolver)
+        // The anchor is durable, but the application still needs to process it.
+        // Record the previous height so dispatch resumes at the anchor itself.
+        let dispatch_floor = height
+            .previous()
+            .expect("floor anchor above processed height must have predecessor");
+        self.update_processed_height(dispatch_floor, resolver);
+        self.update_processed_round_floor(dispatch_floor, round, resolver)
             .await;
-        self.application_metadata
+        self.stream
             .sync()
             .await
             .expect("failed to sync floor metadata");
@@ -1175,13 +1170,9 @@ where
         &mut self,
         message: ResolverDelivery<V>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         let ResolverDelivery {
             delivery,
@@ -1353,13 +1344,9 @@ where
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
-        buffer: &mut OptionalBuffer<V, Buf>,
+        buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
         delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
@@ -1564,7 +1551,7 @@ where
     ///
     /// Iteration M (ack handler, M > N):
     ///   ack handler       ->  update_processed_height  ->  metadata buffered
-    ///   application_metadata.sync ->  metadata durable
+    ///   stream.sync       ->  metadata durable
     /// ```
     async fn try_dispatch_blocks(
         &mut self,
@@ -1578,7 +1565,7 @@ where
         while self.pending_acks.has_capacity() {
             let next_height = self
                 .pending_acks
-                .next_dispatch_height(self.floor.processed_height());
+                .next_dispatch_height(self.stream.next_height());
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
@@ -1852,7 +1839,7 @@ where
     /// parent links).
     async fn find_block_by_digest<Buf: Buffer<V>>(
         &self,
-        buffer: &OptionalBuffer<V, Buf>,
+        buffer: &Buf,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_digest(digest).await {
@@ -1867,7 +1854,7 @@ where
     /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: Buffer<V>>(
         &self,
-        buffer: &OptionalBuffer<V, Buf>,
+        buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_commitment(commitment).await {
@@ -1892,12 +1879,8 @@ where
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
-        buffer: &mut OptionalBuffer<V, Buf>,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        buffer: &mut Buf,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
         // Gap repair needs a known processed floor. A floor transition may
@@ -2028,13 +2011,9 @@ where
     fn update_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
-        self.application_metadata.put(LATEST_KEY, height);
+        self.stream.acknowledge(height);
         self.floor.set_processed_height(height);
         let _ = self
             .processed_height
@@ -2045,7 +2024,10 @@ where
     }
 
     /// Returns the latest known finalization round at or below the processed height.
-    async fn latest_processed_round(finalizations_by_height: &FC, height: Height) -> Round {
+    async fn latest_processed_round(finalizations_by_height: &FC, height: Option<Height>) -> Round {
+        let Some(height) = height else {
+            return Round::zero();
+        };
         let Some(finalization_height) = finalizations_by_height
             .ranges_from(Height::zero())
             .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
@@ -2068,11 +2050,7 @@ where
     async fn update_processed_round(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         let Some(finalization) = self.get_finalization_by_height(height).await else {
             return;
@@ -2086,11 +2064,7 @@ where
         &mut self,
         height: Height,
         round: Round,
-        resolver: &mut impl Resolver<
-            Key = ResolverRequestFor<V>,
-            Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
-        >,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         if height > self.floor.processed_height() || round <= self.floor.processed_round() {
             return;

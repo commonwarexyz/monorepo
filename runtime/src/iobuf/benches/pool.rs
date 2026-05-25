@@ -39,7 +39,7 @@
 
 use super::utils::{measure, Threading};
 use commonware_runtime::{
-    tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
+    page_size, tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
 };
 use commonware_utils::{NZUsize, NZU32};
 use criterion::Criterion;
@@ -227,23 +227,4 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_network_buffer_pool_config(cfg);
 
     tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
-}
-
-#[allow(clippy::missing_const_for_fn)]
-fn page_size() -> usize {
-    #[cfg(unix)]
-    {
-        // SAFETY: sysconf is safe to call.
-        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        if size <= 0 {
-            4096
-        } else {
-            size as usize
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        4096
-    }
 }

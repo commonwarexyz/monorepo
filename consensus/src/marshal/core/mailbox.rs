@@ -1,7 +1,7 @@
 use super::Variant;
 use crate::{
     marshal::{
-        ancestry::{AncestorStream, BlockProvider},
+        ancestry::{AncestorStream, Ancestry, BlockProvider},
         Identifier,
     },
     simplex::types::{Activity, Finalization, Notarization},
@@ -14,9 +14,12 @@ use commonware_actor::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
+use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use futures::Stream;
-use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
+use std::{
+    collections::{btree_map::Entry, BTreeMap, VecDeque},
+    sync::Arc,
+};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -48,6 +51,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         height: Height,
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
+    },
+    /// A request to retrieve the latest processed height.
+    GetProcessedHeight {
+        /// A channel to send the latest processed height.
+        response: oneshot::Sender<Option<Height>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -140,12 +148,11 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel signaled once the block is durably stored.
         ack: Option<oneshot::Sender<()>>,
     },
-    /// Attempts to set the sync starting point from an already-processed finalization.
+    /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the verified finalization advances marshal's current floor, marshal
     /// anchors on its block, prunes below it, then syncs and delivers blocks
-    /// starting at the floor height + 1. Stale or superseded floors may be
-    /// ignored.
+    /// starting at the floor height. Stale or superseded floors may be ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -253,7 +260,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetInfo {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
-            } => false,
+            }
+            | Self::GetProcessedHeight { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -273,6 +281,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 response.is_closed()
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
+            Self::GetProcessedHeight { response } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -529,15 +538,23 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// parent's height from its child before issuing a height-bound request.
     ///
     /// Do not use this to wait for pending candidate proposal data.
-    pub(crate) fn ancestor_stream<I>(
+    pub(crate) fn ancestor_stream<I, C>(
         &self,
+        clock: Arc<C>,
         initial: I,
-    ) -> impl Stream<Item = V::ApplicationBlock> + Send + use<S, V, I>
+        fetch_duration: Timed,
+    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
         I: IntoIterator<Item = V::Block>,
+        C: Clock,
     {
-        AncestorStream::new(self.clone(), initial.into_iter().map(V::into_inner))
+        AncestorStream::new(
+            clock,
+            self.clone(),
+            initial.into_iter().map(V::into_inner),
+            fetch_duration,
+        )
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
@@ -576,6 +593,15 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let _ = self
             .sender
             .enqueue(Message::GetFinalization { height, response });
+        receiver.await.ok().flatten()
+    }
+
+    /// Retrieve the latest processed height.
+    pub async fn get_processed_height(&self) -> Option<Height> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .enqueue(Message::GetProcessedHeight { response });
         receiver.await.ok().flatten()
     }
 
@@ -676,18 +702,21 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// verify, certify, or repair from. It is not a candidate fetch path.
     ///
     /// If the starting block is not found, `None` is returned.
-    pub async fn ancestry(
+    pub async fn ancestry<C>(
         &self,
+        clock: Arc<C>,
         (fallback, start_digest): (DigestFallback, <V::Block as Digestible>::Digest),
-    ) -> Option<impl Stream<Item = V::ApplicationBlock> + Send + use<S, V>>
+        fetch_duration: Timed,
+    ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C>>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
+        C: Clock,
     {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver
             .await
             .ok()
-            .map(|block| self.ancestor_stream([block]))
+            .map(|block| self.ancestor_stream(clock, [block], fetch_duration))
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
@@ -741,12 +770,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.is_ok()
     }
 
-    /// Attempts to set the sync starting point from an already-processed finalization.
+    /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the verified finalization advances marshal's current floor, marshal
     /// anchors on its block, prunes below it, then syncs and delivers blocks
-    /// starting at the floor height + 1. Stale or superseded floors may be
-    /// ignored.
+    /// starting at the floor height. Stale or superseded floors may be ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Self::prune] instead.

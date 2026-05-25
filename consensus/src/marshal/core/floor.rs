@@ -4,21 +4,23 @@ use crate::{
     types::{Height, Round},
 };
 use commonware_cryptography::{certificate::Scheme as CertificateScheme, Digest};
-use commonware_resolver::Resolver;
+use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::vec::NonEmptyVec;
 
 /// Durable processed floor used to admit or reject resolver fetches.
 #[derive(Clone, Copy)]
 struct ProcessedFloor {
-    height: Height,
+    height: Option<Height>,
     round: Round,
 }
 
 impl ProcessedFloor {
     /// Returns true when the resolver request is above all processed floors.
     fn permits<C: Digest>(&self, fetch: &Request<C>) -> bool {
-        if !fetch.above_height_floor(self.height) {
-            return false;
+        if let Some(height) = self.height {
+            if !fetch.above_height_floor(height) {
+                return false;
+            }
         }
 
         fetch.above_round_floor(self.round)
@@ -46,7 +48,7 @@ pub(super) struct Floor<S: CertificateScheme, C: Digest> {
 }
 
 impl<S: CertificateScheme, C: Digest> Floor<S, C> {
-    pub(super) const fn resolved(height: Height, round: Round) -> Self {
+    pub(super) const fn resolved(height: Option<Height>, round: Round) -> Self {
         Self {
             processed: ProcessedFloor { height, round },
             pending: None,
@@ -54,7 +56,7 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
     }
 
     pub(super) const fn awaiting_anchor(
-        height: Height,
+        height: Option<Height>,
         round: Round,
         finalization: Finalization<S, C>,
     ) -> Self {
@@ -65,7 +67,10 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
     }
 
     pub(super) const fn processed_height(&self) -> Height {
-        self.processed.height
+        match self.processed.height {
+            Some(height) => height,
+            None => Height::zero(),
+        }
     }
 
     pub(super) const fn processed_round(&self) -> Round {
@@ -73,7 +78,7 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
     }
 
     pub(super) const fn set_processed_height(&mut self, height: Height) {
-        self.processed.height = height;
+        self.processed.height = Some(height);
     }
 
     pub(super) const fn set_processed_round(&mut self, round: Round) {
@@ -128,7 +133,7 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
         targets: NonEmptyVec<R::PublicKey>,
     ) -> FetchAdmission
     where
-        R: Resolver<Key = Key<C>, Subscriber = Annotation>,
+        R: TargetedResolver<Key = Key<C>, Subscriber = Annotation>,
     {
         if !self.processed.permits(&fetch) {
             return FetchAdmission::Denied;
@@ -197,7 +202,6 @@ mod tests {
     impl Resolver for TestResolver {
         type Key = Key<TestDigest>;
         type Subscriber = Annotation;
-        type PublicKey = crypto_ed25519::PublicKey;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
@@ -217,6 +221,17 @@ mod tests {
             Feedback::Ok
         }
 
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for TestResolver {
+        type PublicKey = crypto_ed25519::PublicKey;
+
         fn fetch_targeted(
             &mut self,
             fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
@@ -228,18 +243,14 @@ mod tests {
 
         fn fetch_all_targeted<F>(
             &mut self,
-            _fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
+            self.targeted
+                .lock()
+                .extend(fetches.into_iter().map(|(fetch, _)| fetch.into().key));
             Feedback::Ok
         }
     }
@@ -253,7 +264,7 @@ mod tests {
     }
 
     fn floor() -> Floor<TestScheme, TestDigest> {
-        Floor::resolved(Height::new(5), round(5))
+        Floor::resolved(Some(Height::new(5)), round(5))
     }
 
     #[test]
@@ -374,5 +385,29 @@ mod tests {
             )
             .denied());
         assert!(resolver.fetches().is_empty());
+    }
+
+    #[test]
+    fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
+        let floor = Floor::<TestScheme, TestDigest>::resolved(None, round(5));
+        let mut resolver = TestResolver::default();
+
+        assert!(!floor
+            .fetch_if_permitted(&mut resolver, Request::finalized(Height::zero()))
+            .denied());
+
+        let fetches = resolver.fetches();
+        assert_eq!(fetches.len(), 1);
+        assert!(matches!(
+            fetches[0],
+            Fetch {
+                key: Key::Finalized {
+                    height
+                },
+                subscriber: Annotation::Finalized(Finalized::ByHeight {
+                    height: subscriber_height
+                }),
+            } if height == Height::zero() && subscriber_height == Height::zero()
+        ));
     }
 }

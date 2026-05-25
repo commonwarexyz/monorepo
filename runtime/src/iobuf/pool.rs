@@ -49,17 +49,16 @@
 //! first try to re-enter the dropping thread's local cache, spilling a bounded
 //! batch back to the global freelist if needed.
 
-use super::{freelist::Freelist, IoBufMut};
+use super::{freelist::Freelist, page_size, IoBufMut};
 use crate::{
     iobuf::buffer::{PooledBufMut, PooledBuffer},
     telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::{NZUsize, NZU32};
-use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::{Cell, UnsafeCell},
-    mem::{align_of, MaybeUninit},
+    mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
     ptr,
     sync::{
@@ -94,35 +93,6 @@ impl std::fmt::Display for PoolError {
 }
 
 impl std::error::Error for PoolError {}
-
-/// Returns the system page size.
-///
-/// On Unix systems, queries the actual page size via `sysconf`.
-/// On other systems (Windows), defaults to 4KB.
-#[cfg(unix)]
-fn page_size() -> usize {
-    // SAFETY: sysconf is safe to call.
-    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if size <= 0 {
-        4096 // Safe fallback if sysconf fails
-    } else {
-        size as usize
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::missing_const_for_fn)]
-fn page_size() -> usize {
-    4096
-}
-
-/// Returns the cache line size for the current architecture.
-///
-/// Matches the architecture-specific alignment used by
-/// [`crossbeam_utils::CachePadded`].
-const fn cache_line_size() -> usize {
-    align_of::<CachePadded<u8>>()
-}
 
 /// Policy for sizing each thread's cache within a buffer pool size class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,40 +154,36 @@ pub struct BufferPoolConfig {
 }
 
 impl BufferPoolConfig {
-    /// Network I/O preset: cache-line aligned, 1KB to 64KB buffers,
-    /// 4096 per class, not prefilled.
+    /// Network I/O preset: 1KB to 128KB buffers, 4096 per class, not prefilled.
     ///
-    /// Network operations typically need multiple concurrent buffers per connection
-    /// (message, encoding, encryption) so we allow 4096 buffers per size class.
-    /// Cache-line alignment is used because network buffers don't require page
-    /// alignment for DMA, and smaller alignment reduces internal fragmentation.
+    /// Network operations typically need multiple concurrent buffers per
+    /// connection (message, encoding, encryption) so we allow 4096 buffers per
+    /// size class.
     pub const fn for_network() -> Self {
-        let cache_line = NZUsize!(cache_line_size());
         Self {
-            pool_min_size: 1024,
+            pool_min_size: 0,
             min_size: NZUsize!(1024),
-            max_size: NZUsize!(64 * 1024),
+            max_size: NZUsize!(128 * 1024),
             max_per_class: NZU32!(4096),
             prefill: false,
-            alignment: cache_line,
+            alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
     }
 
-    /// Storage I/O preset: page-aligned, page_size to 8MB buffers, 64 per class,
+    /// Storage I/O preset: `page_size` (usually 4KB) to 8MB buffers, 64 per class,
     /// not prefilled.
-    ///
-    /// Page alignment is required for direct I/O and efficient DMA transfers.
     pub fn for_storage() -> Self {
         let page = NZUsize!(page_size());
         Self {
-            pool_min_size: 1024,
+            pool_min_size: 0,
             min_size: page,
             max_size: NZUsize!(8 * 1024 * 1024),
             max_per_class: NZU32!(64),
             prefill: false,
-            alignment: page,
+            // TODO (#2960): this needs to be page/block aligned for O_DIRECT
+            alignment: NZUsize!(1),
             parallelism: NZUsize!(1),
             thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
         }
@@ -1745,7 +1711,7 @@ impl BufferPool {
 mod tests {
     use super::*;
     use crate::{
-        iobuf::{freelist, IoBuf},
+        iobuf::{cache_line_size, freelist, IoBuf},
         telemetry::metrics::Registry,
     };
     use bytes::{Buf, BufMut};
@@ -2053,9 +2019,9 @@ mod tests {
     fn test_config_for_network() {
         let config = BufferPoolConfig::for_network();
         config.validate();
-        assert_eq!(config.pool_min_size, 1024);
+        assert_eq!(config.pool_min_size, 0);
         assert_eq!(config.min_size.get(), 1024);
-        assert_eq!(config.max_size.get(), 64 * 1024);
+        assert_eq!(config.max_size.get(), 128 * 1024);
         assert_eq!(config.max_per_class.get(), 4096);
         assert_eq!(config.parallelism, NZUsize!(1));
         assert_eq!(
@@ -2063,14 +2029,14 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(None)
         );
         assert!(!config.prefill);
-        assert_eq!(config.alignment.get(), cache_line_size());
+        assert_eq!(config.alignment.get(), 1);
     }
 
     #[test]
     fn test_config_for_storage() {
         let config = BufferPoolConfig::for_storage();
         config.validate();
-        assert_eq!(config.pool_min_size, 1024);
+        assert_eq!(config.pool_min_size, 0);
         assert_eq!(config.min_size.get(), page_size());
         assert_eq!(config.max_size.get(), 8 * 1024 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
@@ -2080,7 +2046,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(None)
         );
         assert!(!config.prefill);
-        assert_eq!(config.alignment.get(), page_size());
+        assert_eq!(config.alignment.get(), 1);
     }
 
     #[test]
@@ -2115,8 +2081,7 @@ mod tests {
             BufferPoolThreadCacheConfig::Enabled(Some(NZUsize!(8)))
         );
         assert!(config.prefill);
-        // Storage profile alignment stays page-sized unless explicitly changed.
-        assert_eq!(config.alignment.get(), page_size());
+        assert_eq!(config.alignment.get(), 1);
 
         // Alignment can be tuned explicitly as long as min_size is also adjusted.
         let aligned = BufferPoolConfig::for_network()
@@ -3142,20 +3107,23 @@ mod tests {
     fn test_buffer_alignment() {
         let page = page_size();
         let cache_line = cache_line_size();
+
         // Reduce max_per_class under miri (atomics are slow)
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
                 let storage_config = BufferPoolConfig {
                     max_per_class: NZU32!(32),
-                    ..BufferPoolConfig::for_storage()
+                    ..BufferPoolConfig::for_storage().with_alignment(NZUsize!(page))
                 };
                 let network_config = BufferPoolConfig {
                     max_per_class: NZU32!(32),
-                    ..BufferPoolConfig::for_network()
+                    ..BufferPoolConfig::for_network().with_alignment(NZUsize!(cache_line))
                 };
             } else {
-                let storage_config = BufferPoolConfig::for_storage();
-                let network_config = BufferPoolConfig::for_network();
+                let storage_config =
+                    BufferPoolConfig::for_storage().with_alignment(NZUsize!(page));
+                let network_config =
+                    BufferPoolConfig::for_network().with_alignment(NZUsize!(cache_line));
             }
         }
 

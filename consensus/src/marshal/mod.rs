@@ -82,6 +82,9 @@ pub mod resolver;
 pub mod standard;
 pub mod store;
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
 commonware_macros::stability_scope!(ALPHA {
     pub(crate) mod application;
     pub mod coding;

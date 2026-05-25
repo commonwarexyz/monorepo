@@ -12,9 +12,10 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
 use rand::Rng;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Validation failures for standard verification.
@@ -116,6 +117,7 @@ where
 /// - `Some(valid)` when a verification verdict is available.
 /// - `None` when work should stop early (e.g., receiver dropped or parent unavailable).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn verify_with_parent<E, S, A, B>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
@@ -124,6 +126,7 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
     marshal: &mut Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
     stage: Stage,
+    ancestor_fetch_duration: Timed,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -174,7 +177,11 @@ where
     }
 
     // Request verification from the application over the two-block ancestry prefix.
-    let ancestry_stream = marshal.ancestor_stream([block.clone(), parent]);
+    let ancestry_stream = marshal.ancestor_stream(
+        Arc::new(runtime_context.child("ancestor_stream")),
+        [block.clone(), parent],
+        ancestor_fetch_duration,
+    );
     let validity_request = application.verify(
         (runtime_context.child("app_verify"), context.clone()),
         ancestry_stream,

@@ -10,7 +10,11 @@ commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
 
+    pub mod delivery;
+    mod ingress;
+    pub mod opaque;
     pub mod p2p;
+    mod subscribers;
 
     /// A key to fetch data for a subscriber.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -59,7 +63,7 @@ commonware_macros::stability_scope!(BETA {
         /// resolver discards the validation result.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
-        /// previously requested via [`Resolver::fetch`] (or its variants).
+        /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).
         ///
         /// `delivery` contains the peer-visible key and the retained subscribers
         /// for the fetch. Subscribers decide who should observe a valid response;
@@ -82,9 +86,6 @@ commonware_macros::stability_scope!(BETA {
         /// [`Consumer::deliver`] when a fetch resolves.
         type Subscriber: Clone + Eq + Send + 'static;
 
-        /// Type used to identify peers for targeted fetches.
-        type PublicKey: PublicKey;
-
         /// Initiate a fetch.
         ///
         /// The resolver fetches and delivers the key. The subscriber is
@@ -106,38 +107,6 @@ commonware_macros::stability_scope!(BETA {
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
-        /// Initiate a fetch restricted to specific target peers.
-        ///
-        /// Only target peers are tried, there is no fallback to other peers. Targets
-        /// persist through transient failures (timeout, "no data" response, send failure)
-        /// since the peer might be slow or might receive the data later.
-        ///
-        /// If a fetch is already in progress for this key:
-        /// - If the existing fetch has targets, the new targets are added to the set
-        /// - If the existing fetch has no targets (can try any peer), it remains
-        ///   unrestricted (this call is ignored)
-        ///
-        /// To clear targeting and fall back to any peer, call [`fetch`](Self::fetch).
-        ///
-        /// Targets are automatically cleared when the fetch succeeds or is canceled.
-        /// When a peer is blocked (sent invalid data), only that peer is removed
-        /// from the target set.
-        fn fetch_targeted(
-            &mut self,
-            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback;
-
-        /// Initiate fetches for multiple keys, each with their own targets.
-        ///
-        /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-        fn fetch_all_targeted<F>(
-            &mut self,
-            keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
-
         /// Retain only fetch subscribers satisfying the predicate.
         ///
         /// The predicate receives the peer-visible key and subscriber.
@@ -149,5 +118,31 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback;
+    }
+
+    /// Extension for resolvers that accept target peer hints.
+    pub trait TargetedResolver: Resolver {
+        /// Type used to identify peers for targeted fetch hints.
+        type PublicKey: PublicKey;
+
+        /// Initiate a fetch with target peer hints.
+        ///
+        /// Implementations define whether target hints persist through retries,
+        /// merge with existing in-progress fetches, or are discarded.
+        fn fetch_targeted(
+            &mut self,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback;
+
+        /// Initiate fetches for multiple keys, each with their own target hints.
+        ///
+        /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
+        fn fetch_all_targeted<F>(
+            &mut self,
+            keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
     }
 });

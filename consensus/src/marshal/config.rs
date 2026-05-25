@@ -18,7 +18,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),
-    /// Start from an already-processed finalized commitment.
+    /// Start from a finalized commitment.
     Floor(Finalization<S, C>),
 }
 
