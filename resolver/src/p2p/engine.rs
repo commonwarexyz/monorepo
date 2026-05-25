@@ -444,7 +444,7 @@ where
                 if !already_accepted {
                     self.metrics.fetch.inc(Status::Success);
                 }
-                self.inflight.complete(&key, self.context.as_ref());
+                self.inflight.complete(self.context.as_ref(), &key);
                 self.fetcher.clear_targets(&key);
             }
             return;
@@ -456,7 +456,7 @@ where
                 "previously accepted response was rejected during local redelivery"
             );
             self.metrics.fetch.inc(Status::Failure);
-            self.inflight.complete(&key, self.context.as_ref());
+            self.inflight.complete(self.context.as_ref(), &key);
             self.subscribers.remove(&key);
             self.fetcher.clear_targets(&key);
             return;

@@ -51,7 +51,7 @@ where
 
     /// Mark the in-flight entry for the key as complete, recording its duration.
     /// Panics if no entry exists for the key.
-    pub(super) fn complete<E: Clock>(&mut self, key: &Con::Key, clock: &E) {
+    pub(super) fn complete<E: Clock>(&mut self, clock: &E, key: &Con::Key) {
         if let Some(timer) = self
             .deliveries
             .remove_with_state(key)
@@ -201,7 +201,7 @@ mod tests {
             let mut inflight: TestInflight = dummy_inflight();
 
             inflight.insert(MockKey(1), timed.timer(&context));
-            inflight.complete(&MockKey(1), &context);
+            inflight.complete(&context, &MockKey(1));
 
             let metrics = context.encode();
             assert!(metrics.contains("test_duration_count 1"));
@@ -214,7 +214,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let mut inflight: TestInflight = dummy_inflight();
-            inflight.complete(&MockKey(1), &context);
+            inflight.complete(&context, &MockKey(1));
         });
     }
 
@@ -323,7 +323,7 @@ mod tests {
             let (_, delivered, valid) = inflight.next_delivery().await.expect("delivery completed");
             assert_eq!(delivered.key, key);
             assert!(valid);
-            inflight.complete(&key, &context);
+            inflight.complete(&context, &key);
 
             // Late cancel finds no entry; must not panic.
             assert!(!inflight.cancel(&key));
