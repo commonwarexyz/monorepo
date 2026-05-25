@@ -24,13 +24,14 @@
 //!
 //! # Targeting
 //!
-//! Callers can restrict fetches to specific target peers using [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted).
+//! Callers can restrict fetches to specific target peers using
+//! [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted).
 //! Only target peers are tried, there is no automatic fallback to other peers. Targets persist through
 //! transient failures (timeout, "no data" response, send failure) since the peer might be slow or
 //! receive the data later.
 //!
 //! While a fetch is in progress, callers can modify targeting:
-//! - [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted) adds peers to the existing target set
+//! - [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) adds peers to the existing target set
 //!   (only if the fetch already has targets, an "all" fetch remains unrestricted)
 //! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
 //!
@@ -53,7 +54,7 @@
 //! requests are handled for all connected peers. Thus, callers that still expect a key to be fetchable after
 //! a peer set update must ensure the latest primary set can serve it.
 //!
-//! [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted) can narrow the current primary set
+//! [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) can narrow the current primary set
 //! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
 //! in the latest primary set are ignored until they become primary again.
 //!
@@ -94,7 +95,7 @@ mod tests {
         mocks::{Consumer, Key, Producer},
         Config, Engine, Mailbox,
     };
-    use crate::{Delivery, Fetch, Resolver};
+    use crate::{Delivery, Fetch, Resolver, TargetedResolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
