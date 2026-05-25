@@ -1,28 +1,28 @@
-use commonware_consensus::{marshal::Start, simplex::types::Finalization};
+use commonware_consensus::{marshal::Start, simplex::types::Finalization, types::Height};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Startup plan that determines whether one-time peer state sync may still run.
 ///
 /// Construction is two-phase so the caller can avoid fetching a finalized
-/// floor from peers when state sync has already completed:
+/// floor from peers when a startup-sync height is already stored:
 ///
-/// 1. [`SyncPlan::init`] reads the durable state-sync flag.
+/// 1. [`SyncPlan::init`] reads the durable startup-sync height.
 /// 2. If [`SyncPlan::may_state_sync`] returns `true`, the caller fetches a
 ///    finalized floor and attaches it via [`SyncPlan::with_floor`]. Otherwise
 ///    the caller skips floor selection entirely.
 ///
-/// Once the durable flag has been set, this node never performs peer state
-/// sync again. Future startups must recover by aligning databases with
+/// Once the durable height has been set, this node never performs peer state
+/// sync again. Future startups must recover from the later of that height and
 /// marshal's processed height instead.
 pub struct SyncPlan<F> {
     partition_prefix: String,
-    state_sync_complete: bool,
+    sync_height: Option<Height>,
     floor: Option<F>,
 }
 
 impl<F> SyncPlan<F> {
-    /// Load the durable state-sync completion flag for this partition prefix.
+    /// Load the durable startup-sync height for this partition prefix.
     ///
     /// # Panics
     ///
@@ -33,10 +33,10 @@ impl<F> SyncPlan<F> {
     where
         E: Clock + Metrics + Storage,
     {
-        let state_sync_complete = super::sync_complete(context, partition_prefix.as_ref()).await;
+        let sync_height = super::sync_height(context, partition_prefix.as_ref()).await;
         Self {
             partition_prefix: partition_prefix.as_ref().into(),
-            state_sync_complete,
+            sync_height,
             floor: None,
         }
     }
@@ -44,15 +44,20 @@ impl<F> SyncPlan<F> {
     /// Returns whether state sync can still run on this node.
     ///
     /// When `false`, the caller should skip floor selection: any floor passed
-    /// to [`SyncPlan::with_floor`] would be ignored. The node has already
-    /// completed its one-time startup sync, so future boots must recover from
-    /// marshal's processed height instead of running peer state sync again.
+    /// to [`SyncPlan::with_floor`] would be ignored. The node already has a
+    /// durable startup-sync height, so future boots must recover from that
+    /// height or marshal's processed height instead of running peer state sync again.
     ///
     /// When `true`, the caller can optionally attach a finalized floor via
     /// [`SyncPlan::with_floor`]. If a floor is not attached, the node will
     /// attempt to sync from genesis via marshal.
     pub const fn may_state_sync(&self) -> bool {
-        !self.state_sync_complete
+        self.sync_height.is_none()
+    }
+
+    /// Returns the durable startup-sync height, if one has been stored.
+    pub const fn sync_height(&self) -> Option<Height> {
+        self.sync_height
     }
 
     /// Returns the partition prefix to use for state sync metadata storage.
@@ -91,5 +96,30 @@ where
         self.floor
             .clone()
             .map_or_else(|| Start::Genesis(genesis), Start::Floor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SyncPlan;
+    use commonware_consensus::types::Height;
+    use commonware_runtime::{deterministic, Runner as _};
+
+    #[test]
+    fn stored_sync_height_disables_state_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "stored_sync_height";
+
+            let plan = SyncPlan::<()>::init(&context, partition_prefix).await;
+            assert!(plan.may_state_sync());
+            assert_eq!(plan.sync_height(), None);
+
+            super::super::set_sync_height(&context, partition_prefix, Height::new(7)).await;
+
+            let plan = SyncPlan::<()>::init(&context, partition_prefix).await;
+            assert!(!plan.may_state_sync());
+            assert_eq!(plan.sync_height(), Some(Height::new(7)));
+            assert!(plan.with_floor(()).floor().is_none());
+        });
     }
 }

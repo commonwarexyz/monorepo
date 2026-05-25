@@ -195,11 +195,15 @@ where
 
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
-        let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
+        let syncer::StartupResult {
+            sync: SyncResult { databases, anchor },
+            skip_finalized_until,
+        } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
             &self.marshal,
             self.db_config,
             self.plan.partition_prefix(),
+            self.plan.sync_height(),
         )
         .await;
 
@@ -216,6 +220,7 @@ where
             marshal: self.marshal,
             resolvers: self.resolvers,
             processor,
+            skip_finalized_until,
         }
         .start()
         .await

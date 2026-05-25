@@ -51,7 +51,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{test_rng_seeded, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
-use futures::{pin_mut, StreamExt};
+use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng,
@@ -3178,100 +3178,6 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         )
         .await;
         assert_eq!(restart.height, Some(Height::new(3)));
-    });
-}
-
-/// Test that processed-height waiters resolve only after application progress is durable.
-pub fn wait_processed_height_resolves_after_ack_sync<H: TestHarness>() {
-    let runner = deterministic::Runner::timed(Duration::from_secs(60));
-    runner.start(|mut context| async move {
-        let Fixture {
-            participants,
-            schemes,
-            ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle = setup_network_with_participants(
-            context.child("network"),
-            NZUsize!(1),
-            participants.clone(),
-        )
-        .await;
-
-        let validator = participants[0].clone();
-        let application = Application::<H::ApplicationBlock>::manual_ack();
-        let setup = H::setup_validator_with(
-            context.child("validator").with_attribute("index", 0),
-            &mut oracle,
-            validator,
-            ConstantProvider::new(schemes[0].clone()),
-            NZUsize!(1),
-            application,
-        )
-        .await;
-        let application = setup.application;
-        let mut handle = ValidatorHandle {
-            mailbox: setup.mailbox,
-            extra: setup.extra,
-        };
-
-        assert_eq!(application.acknowledged().await, Height::zero());
-        while handle.mailbox.get_processed_height().await != Some(Height::zero()) {
-            context.sleep(Duration::from_millis(10)).await;
-        }
-
-        let block = H::make_test_block(
-            Sha256::hash(b""),
-            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
-            Height::new(1),
-            1,
-            NUM_VALIDATORS as u16,
-        );
-        let commitment = H::commitment(&block);
-        let round = Round::new(Epoch::zero(), View::new(1));
-        H::propose(&mut handle, round, &block).await;
-        context.sleep(LINK.latency).await;
-
-        let proposal = Proposal {
-            round,
-            parent: View::zero(),
-            payload: commitment,
-        };
-        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
-        H::report_finalization(&mut handle.mailbox, finalization).await;
-
-        while application.pending_ack_heights() != vec![Height::new(1)] {
-            context.sleep(Duration::from_millis(10)).await;
-        }
-
-        let waiter = handle.mailbox.wait_processed_height(Height::new(1));
-        pin_mut!(waiter);
-        select! {
-            reached = &mut waiter => {
-                panic!("processed-height waiter resolved before ack: {reached}");
-            },
-            _ = context.sleep(Duration::from_millis(50)) => {},
-        }
-
-        assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
-        let reached = select! {
-            reached = waiter => reached,
-            _ = context.sleep(Duration::from_secs(5)) => {
-                panic!("processed-height waiter did not resolve after ack");
-            },
-        };
-        assert!(reached);
-        assert_eq!(
-            handle.mailbox.get_processed_height().await,
-            Some(Height::new(1))
-        );
-
-        let reached = select! {
-            reached = handle.mailbox.wait_processed_height(Height::new(1)) => reached,
-            _ = context.sleep(Duration::from_secs(5)) => {
-                panic!("processed-height waiter did not resolve immediately");
-            },
-        };
-        assert!(reached);
     });
 }
 

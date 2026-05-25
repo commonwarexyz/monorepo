@@ -26,7 +26,7 @@ mod plan;
 pub use plan::SyncPlan;
 
 const SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
-const SYNC_COMPLETE_KEY: FixedBytes<1> = fixed_bytes!("C0");
+const SYNC_HEIGHT_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
@@ -57,7 +57,7 @@ where
 
 /// Loads the sync metadata from storage, initializing it if it does not already
 /// exist.
-async fn load_metadata<E>(context: &E, partition_prefix: &str) -> Metadata<E, FixedBytes<1>, bool>
+async fn load_metadata<E>(context: &E, partition_prefix: &str) -> Metadata<E, FixedBytes<1>, Height>
 where
     E: Storage + Supervisor + Clock + Metrics,
 {
@@ -72,32 +72,49 @@ where
     .expect("failed to load sync metadata")
 }
 
-/// Loads the durable startup-sync flag from storage.
+/// Loads the durable startup-sync height from storage.
 ///
-/// When this returns `true`, the node has already completed its one-time
-/// state sync for this partition and must recover from marshal's
-/// processed height on future startups instead of running state sync again.
-pub(crate) async fn sync_complete<E>(context: &E, partition_prefix: &str) -> bool
+/// When this returns [`Some`], the node has already completed its one-time
+/// state sync for this partition and must recover from the later of that
+/// height and marshal's processed height on future startups instead of
+/// running peer state sync again.
+pub(crate) async fn sync_height<E>(context: &E, partition_prefix: &str) -> Option<Height>
 where
     E: Storage + Supervisor + Clock + Metrics,
 {
     let metadata = load_metadata(context, partition_prefix).await;
-    metadata.get(&SYNC_COMPLETE_KEY).copied().unwrap_or(false)
+    metadata.get(&SYNC_HEIGHT_KEY).copied()
 }
 
-/// Marks one-time startup sync as complete for this partition.
+/// Records the height reached by one-time startup sync for this partition.
 ///
-/// Once this flag is set, future startups skip peer state sync and initialize
-/// from marshal's processed height instead. This action is irreversible.
-pub(crate) async fn set_sync_complete<E>(context: &E, partition_prefix: &str)
+/// Once this height is set, future startups skip peer state sync and initialize
+/// from the later of this height and marshal's processed height instead. This
+/// action is irreversible.
+pub(crate) async fn set_sync_height<E>(context: &E, partition_prefix: &str, height: Height)
 where
     E: Storage + Supervisor + Clock + Metrics,
 {
     let mut metadata = load_metadata(context, partition_prefix).await;
     metadata
-        .put_sync(SYNC_COMPLETE_KEY, true)
+        .put_sync(SYNC_HEIGHT_KEY, height)
         .await
-        .expect("failed to set sync complete flag");
+        .expect("failed to set sync height");
+}
+
+/// The result of initializing state from marshal on startup.
+pub(crate) struct StartupResult<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// The initialized database set and anchor.
+    pub sync: SyncResult<E, A>,
+
+    /// Finalized marshal blocks at or below this height are already reflected
+    /// in the initialized database set and should be acknowledged without
+    /// applying them again.
+    pub skip_finalized_until: Option<Height>,
 }
 
 /// Initializes databases at marshal's current startup anchor.
@@ -115,7 +132,8 @@ pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     partition_prefix: &str,
-) -> SyncResult<E, A>
+    sync_height: Option<Height>,
+) -> StartupResult<E, A>
 where
     E: Rng + Storage + Spawner + Clock + Metrics,
     A: Application<E>,
@@ -123,14 +141,18 @@ where
     V: Variant<ApplicationBlock = A::Block>,
 {
     let processed_height = marshal.get_processed_height().await;
-    if let Some(height) = processed_height {
-        assert!(
-            marshal.wait_processed_height(height).await,
-            "marshal stopped before processed height became durable"
-        );
-    }
-
-    let marshal_floor = processed_height.unwrap_or_else(Height::zero);
+    let skip_finalized_until = match (sync_height, processed_height) {
+        (Some(sync_height), Some(processed_height)) if processed_height < sync_height => {
+            Some(sync_height)
+        }
+        (Some(sync_height), None) => Some(sync_height),
+        _ => None,
+    };
+    let marshal_floor = sync_height
+        .into_iter()
+        .chain(processed_height)
+        .max()
+        .unwrap_or_else(Height::zero);
     let floor_block = {
         let marshal_block = marshal
             .get_block(Identifier::Height(marshal_floor))
@@ -157,13 +179,17 @@ where
     }
 
     // Once startup has aligned databases with marshal, future boots should skip peer
-    // state sync and recover from marshal directly.
-    set_sync_complete(context, partition_prefix).await;
+    // state sync and recover from the later of this anchor and marshal's durable
+    // processed height.
+    set_sync_height(context, partition_prefix, floor_block.height()).await;
 
     let anchor = Anchor {
         height: floor_block.height(),
         round: floor_block.context().round(),
         digest: floor_block.digest(),
     };
-    SyncResult { databases, anchor }
+    StartupResult {
+        sync: SyncResult { databases, anchor },
+        skip_finalized_until,
+    }
 }
