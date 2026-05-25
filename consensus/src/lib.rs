@@ -284,6 +284,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// ancestry. If validity may still change as additional information becomes available,
         /// continue waiting instead of returning `false`.
         ///
+        /// In other words, to abstain from voting, do not resolve this future yet. Keep it
+        /// pending until the implementation can either prove the block valid, prove it invalid,
+        /// or the consensus engine cancels the request. Abstaining is not represented by a
+        /// special return value.
+        ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
         fn verify(

@@ -175,9 +175,18 @@ where
     /// Verify a block received from a peer, relative to its ancestry.
     ///
     /// Called before voting. The implementation should execute the block
-    /// against the provided batches and merkleize them. Returns [`None`]
-    /// only when the block is permanently invalid; if validity may still
-    /// change as additional information arrives, continue waiting.
+    /// against the provided batches and merkleize them.
+    ///
+    /// This future should not resolve until the implementation can produce a
+    /// stable verdict. Return [`None`] only when the block is permanently
+    /// invalid for the supplied context, ancestry, and batches. If validity may
+    /// still change as additional information becomes available, continue
+    /// waiting instead of returning [`None`].
+    ///
+    /// In other words, to abstain from voting, do not resolve this future yet.
+    /// Keep it pending until the implementation can either prove the block
+    /// valid, prove it invalid, or the consensus engine cancels the request.
+    /// Abstaining is not represented by a special return value.
     ///
     /// Verification must reject any block whose execution result does not
     /// match the block's committed state (for example, a state root mismatch).
