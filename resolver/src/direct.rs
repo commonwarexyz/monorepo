@@ -13,8 +13,7 @@
 use crate::{
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
     ingress::{self, FetchKey, Message},
-    subscribers::Tracker as SubscriberTracker,
-    Consumer, Delivery, Fetch,
+    subscribers, Consumer, Delivery, Fetch,
 };
 use commonware_actor::{mailbox, Feedback};
 use commonware_cryptography::PublicKey;
@@ -196,7 +195,7 @@ where
     fetches: AbortablePool<FetchCompletion<F::Key, F::Value>>,
     deliveries: DeliveryTracker<Con, u64>,
     requests: BTreeMap<F::Key, Attempt>,
-    subscribers: SubscriberTracker<F::Key, Con::Subscriber>,
+    subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,
     retry_schedule: BTreeSet<(SystemTime, F::Key)>,
     fetch_retry_timeout: Duration,
     next_id: u64,
@@ -235,7 +234,7 @@ where
             fetches: AbortablePool::default(),
             deliveries: DeliveryTracker::new(consumer),
             requests: BTreeMap::new(),
-            subscribers: SubscriberTracker::new(),
+            subscribers: subscribers::Tracker::new(),
             retry_schedule: BTreeSet::new(),
             fetch_retry_timeout,
             next_id: 0,

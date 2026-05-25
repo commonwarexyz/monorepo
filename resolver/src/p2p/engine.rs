@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchKey, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::{subscribers::Tracker as SubscriberTracker, Consumer, Delivery};
+use crate::{subscribers, Consumer, Delivery};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -72,7 +72,7 @@ where
     inflight: Inflight<E, Con, P, Key>,
 
     /// Subscribers that keep each fetch alive.
-    subscribers: SubscriberTracker<Key, Con::Subscriber>,
+    subscribers: subscribers::Tracker<Key, Con::Subscriber>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -133,7 +133,7 @@ where
                 mailbox: receiver,
                 fetcher,
                 inflight: Inflight::new(cfg.consumer),
-                subscribers: SubscriberTracker::new(),
+                subscribers: subscribers::Tracker::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
