@@ -376,7 +376,12 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         batch.root() == target.root
+            && batch.ops_root() == target.ops_root
+            && target.verify(&hasher)
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -528,7 +533,12 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         batch.root() == target.root
+            && batch.ops_root() == target.ops_root
+            && target.verify(&hasher)
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -671,5 +681,114 @@ where
             max_retained_roots: sync_config.max_retained_roots,
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    };
+    use commonware_storage::{
+        journal::contiguous::fixed::Config as FixedJournalConfig,
+        merkle::{full::Config as MerkleConfig, mmr},
+        qmdb::current::unordered::fixed,
+        translator::TwoCap,
+    };
+    use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+    use std::num::{NonZeroU16, NonZeroUsize};
+
+    type FixedDb = fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        64,
+        Sequential,
+    >;
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
+
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        FixedConfig {
+            merkle_config: MerkleConfig {
+                journal_partition: format!("stateful-current-journal-{suffix}"),
+                metadata_partition: format!("stateful-current-metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FixedJournalConfig {
+                partition: format!("stateful-current-log-{suffix}"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
+            grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
+            translator: TwoCap,
+        }
+    }
+
+    #[test]
+    fn managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("matches-sync-target", &context);
+            let db = FixedDb::init(context.child("db"), config.clone())
+                .await
+                .unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+
+            let key = Sha256::hash(b"key");
+            let value = Sha256::hash(b"value");
+            let metadata = Sha256::hash(b"metadata");
+
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key, Some(value))
+                .with_metadata(metadata);
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+
+            let mut verification_db = FixedDb::init(context.child("verification_db"), config)
+                .await
+                .unwrap();
+            verification_db
+                .apply_batch(merkleized.inner.clone())
+                .await
+                .unwrap();
+            verification_db.sync().await.unwrap();
+
+            let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db).await;
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
+
+            let mut wrong_ops_root = valid_target.clone();
+            wrong_ops_root.ops_root = Sha256::hash(b"wrong ops root");
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_ops_root,
+            ));
+
+            let mut wrong_range = valid_target.clone();
+            wrong_range.range = non_empty_range!(
+                mmr::Location::new(*valid_target.range.start()),
+                mmr::Location::new(*valid_target.range.end() + 1)
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_range,
+            ));
+        });
     }
 }

@@ -274,6 +274,8 @@ where
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -347,6 +349,8 @@ where
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -464,7 +468,7 @@ mod tests {
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
     };
-    use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
+    use commonware_utils::{non_empty_range, sequence::U64, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type FixedDb = fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
@@ -544,6 +548,60 @@ mod tests {
             assert_eq!(target.root, guard.root());
             assert_eq!(target.range.start(), mmr::Location::new(1));
             assert_eq!(target.range.end(), mmr::Location::new(3));
+        });
+    }
+
+    #[test]
+    fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("stateful-keyless-matches-sync-target", &context);
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1))
+                .with_metadata(U64::new(9));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+
+            let valid_target = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    mmr::Location::new(merkleized.bounds().total_size)
+                ),
+            );
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
+
+            let wrong_start = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
+                    mmr::Location::new(0),
+                    mmr::Location::new(merkleized.bounds().total_size)
+                ),
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_start,
+            ));
+
+            let wrong_end = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    mmr::Location::new(merkleized.bounds().total_size - 1)
+                ),
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_end,
+            ));
         });
     }
 }

@@ -235,7 +235,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
+        batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -296,7 +296,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
+        batch.root() == target.root && target.leaf_count == Location::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -649,6 +649,42 @@ mod tests {
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard).await;
             assert_eq!(target.root, guard.root());
             assert_eq!(target.leaf_count, mmr::Location::new(3));
+        });
+    }
+
+    #[test]
+    fn managed_db_matches_sync_target_rejects_wrong_leaf_count() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("matches-sync-target");
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1))
+                .with_metadata(U64::new(9));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+
+            let valid_target = sync::compact::Target::new(
+                merkleized.root(),
+                mmr::Location::new(merkleized.bounds().total_size),
+            );
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
+
+            let wrong_leaf_count = sync::compact::Target::new(
+                merkleized.root(),
+                mmr::Location::new(merkleized.bounds().total_size - 1),
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_leaf_count,
+            ));
         });
     }
 

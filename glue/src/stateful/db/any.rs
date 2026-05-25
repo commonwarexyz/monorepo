@@ -381,6 +381,8 @@ where
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -473,6 +475,8 @@ where
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
         batch.root() == target.root
+            && *target.range.start() == batch.bounds().inactivity_floor
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {

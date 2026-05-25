@@ -471,6 +471,15 @@ where
                 return Err(PrepareBatchesError::Cancelled);
             };
 
+            if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
+                warn!(
+                    ?target_digest,
+                    block = ?digest,
+                    "rebuild replay state root must match block commitments"
+                );
+                return Err(PrepareBatchesError::Invalid);
+            }
+
             self.cache_pending(digest, parent_digest, round, merkleized);
         }
 
@@ -963,7 +972,10 @@ mod tests {
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(Location::new(0), Location::new(1)),
+                range: non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    Location::new(merkleized.bounds().total_size)
+                ),
             };
             Some(Proposed { block, merkleized })
         }
@@ -1133,7 +1145,10 @@ mod tests {
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(Location::new(0), Location::new(1)),
+                range: non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    Location::new(merkleized.bounds().total_size)
+                ),
             };
             let round = Round::new(Epoch::zero(), view);
             self.processor
@@ -1195,6 +1210,12 @@ mod tests {
                         batches,
                     )
                     .await;
+                if !DbSet::<deterministic::Context>::matches_sync_targets(
+                    &merkleized,
+                    &ExecutionApp::sync_targets(&block),
+                ) {
+                    return Err(PrepareBatchesError::Invalid);
+                }
                 self.processor
                     .cache_pending(digest, parent_digest, round, merkleized);
             }
@@ -1445,6 +1466,43 @@ mod tests {
                 fetches_after.saturating_sub(fetches_before),
                 1,
                 "stale ancestry should be rejected after a single fetch",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_rejects_sync_target_mismatch_before_caching() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let status = harness.finalize(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+
+            let mut block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            harness.processor.pending.clear();
+
+            block2.range = non_empty_range!(Location::new(1), Location::new(2));
+            harness.provider.insert(block2.clone());
+
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .rebuild_pending(block2.digest(), &mut response)
+                .await;
+            assert_eq!(
+                result,
+                Err(PrepareBatchesError::Invalid),
+                "rebuild should reject a replayed batch whose sync target does not match the block",
+            );
+            assert!(
+                !harness.processor.pending.contains_key(&block2.digest()),
+                "rejected replay must not be inserted into the pending cache",
             );
         });
     }
