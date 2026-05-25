@@ -419,6 +419,21 @@ where
         while cursor.digest() != self.last_processed.digest
             && !self.pending.contains_key(&cursor.digest())
         {
+            let Some(parent) =
+                await_or_cancel(response, provider.clone().subscribe_parent(&cursor)).await
+            else {
+                return Err(PrepareBatchesError::Cancelled);
+            };
+
+            let Some(parent) = parent else {
+                debug!(
+                    ?target_digest,
+                    cursor = ?cursor.digest(),
+                    "ancestor subscription ended before delivery"
+                );
+                return Err(PrepareBatchesError::Incomplete);
+            };
+
             let cursor_height = cursor.height();
             if cursor_height <= self.last_processed.height {
                 warn!(
@@ -444,21 +459,6 @@ where
                 );
                 return Err(PrepareBatchesError::Invalid);
             }
-
-            let Some(parent) =
-                await_or_cancel(response, provider.clone().subscribe_parent(&cursor)).await
-            else {
-                return Err(PrepareBatchesError::Cancelled);
-            };
-
-            let Some(parent) = parent else {
-                debug!(
-                    ?target_digest,
-                    cursor = ?cursor.digest(),
-                    "ancestor subscription ended before delivery"
-                );
-                return Err(PrepareBatchesError::Incomplete);
-            };
 
             replay_path.push(cursor);
             cursor = parent;
