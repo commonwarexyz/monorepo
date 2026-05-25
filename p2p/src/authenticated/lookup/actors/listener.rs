@@ -126,7 +126,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         }
     }
 
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
@@ -136,6 +136,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
+        // Perform handshake
         let source_ip = address.ip();
         let (peer, send, recv) = match listen(
             context,
@@ -281,13 +282,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context,
-                            address,
-                            stream_cfg,
-                            sink,
-                            stream,
-                            tracker,
-                            supervisor,
+                            context, address, stream_cfg, sink, stream, tracker, supervisor,
                         )
                         .await;
 
@@ -311,7 +306,6 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NZU32};
     use std::{
-        collections::HashSet,
         net::{IpAddr, Ipv4Addr},
         time::Duration,
     };
@@ -321,18 +315,15 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
             let (mut mailbox, mut receiver) = Mailbox::new();
-            let first_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-            let second_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
-            let third_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3));
+            let first = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]);
+            let second = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
+            let third = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3))]);
 
-            assert_eq!(mailbox.set(HashSet::from([first_ip])), Feedback::Ok);
-            assert_eq!(mailbox.set(HashSet::from([second_ip])), Feedback::Ok);
-            assert_eq!(mailbox.set(HashSet::from([third_ip])), Feedback::Ok);
+            assert_eq!(mailbox.set(first), Feedback::Ok);
+            assert_eq!(mailbox.set(second), Feedback::Ok);
+            assert_eq!(mailbox.set(third.clone()), Feedback::Ok);
 
-            let latest = receiver.next().await.expect("latest update missing");
-            assert!(!latest.contains(&first_ip));
-            assert!(!latest.contains(&second_ip));
-            assert!(latest.contains(&third_ip));
+            assert_eq!(receiver.next().await, Some(third));
         });
     }
 
@@ -370,10 +361,9 @@ mod tests {
                 updates_rx,
             );
 
-            assert_eq!(
-                updates_tx.set(HashSet::from([IpAddr::V4(Ipv4Addr::LOCALHOST)])),
-                Feedback::Ok
-            );
+            let mut allowed = HashSet::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            assert_eq!(updates_tx.set(allowed), Feedback::Ok);
 
             let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
                 context.child("tracker_mailbox"),
@@ -709,11 +699,10 @@ mod tests {
                 updates_rx,
             );
 
-            // Publish an acceptable peer on the IP so only the private-IP check blocks it.
-            assert_eq!(
-                updates_tx.set(HashSet::from([IpAddr::V4(Ipv4Addr::LOCALHOST)])),
-                Feedback::Ok
-            );
+            // Register the IP so it would be allowed if not for the private IP check
+            let mut allowed = HashSet::new();
+            allowed.insert(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            assert_eq!(updates_tx.set(allowed), Feedback::Ok);
 
             let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
                 context.child("tracker_mailbox"),

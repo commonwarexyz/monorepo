@@ -10,10 +10,10 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner};
-use commonware_utils::{ordered::Set, PrioritySet, SystemTimeExt};
+use commonware_utils::{ordered::Set, IpAddrExt, PrioritySet, SystemTimeExt};
 use rand::Rng;
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap},
+    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::IpAddr,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
@@ -421,12 +421,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Only includes IPs from peers that are:
     /// - Currently eligible (not blocked, in a peer set)
     /// - Have a valid egress IP (global, or private IPs are allowed)
-    pub fn listenable(&self) -> std::collections::HashSet<IpAddr> {
+    pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
             .iter()
             .filter(|(peer, r)| !self.is_blocked(peer) && r.eligible())
             .filter_map(|(_, r)| r.egress_ip())
-            .filter(|ip| self.allow_private_ips || commonware_utils::IpAddrExt::is_global(ip))
+            .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
     }
 

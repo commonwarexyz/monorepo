@@ -258,7 +258,7 @@ mod tests {
 
     // Test Configuration Setup
     fn test_config<C: Signer>(crypto: C, bypass_ip_check: bool) -> (Config<C>, listener::Updates) {
-        let (listener, updates) = listener::Mailbox::new();
+        let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new();
         (
             Config {
                 crypto,
@@ -268,10 +268,10 @@ mod tests {
                 allow_private_ips: true,
                 allow_dns: true,
                 bypass_ip_check,
-                listener,
+                listener: registered_ips_sender,
                 block_duration: Duration::from_secs(100),
             },
-            updates,
+            registered_ips_receiver,
         )
     }
 
@@ -288,8 +288,12 @@ mod tests {
         oracle: Oracle<PublicKey>,
     }
 
-    fn setup_actor(runner_context: deterministic::Context, cfg: Config<PrivateKey>) -> TestHarness {
-        let (actor, mailbox, oracle) = Actor::new(runner_context, cfg);
+    fn setup_actor(
+        runner_context: deterministic::Context,
+        cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
+    ) -> TestHarness {
+        // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
+        let (actor, mailbox, oracle) = Actor::new(runner_context, cfg_to_clone);
         actor.start();
 
         TestHarness { mailbox, oracle }
@@ -774,10 +778,10 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Wait for a listener update
-            let acceptable = listener_receiver.next().await.unwrap();
-            assert!(!acceptable.contains(&my_addr.ip()));
-            assert!(acceptable.contains(&addr_1.ip()));
-            assert!(!acceptable.contains(&addr_2.ip()));
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&my_addr.ip()));
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
 
             // Mark peer as connected
             let reservation = mailbox.listen(pk_1.clone(), addr_1.ip()).await;
@@ -792,15 +796,15 @@ mod tests {
                 Map::<_, crate::Address>::try_from([(pk_2.clone(), addr_2.into())]).unwrap(),
             );
 
+            // Wait for a listener update
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&my_addr.ip()));
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
+
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
-            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),);
-
-            // Wait for a listener update
-            let acceptable = listener_receiver.next().await.unwrap();
-            assert!(!acceptable.contains(&my_addr.ip()));
-            assert!(!acceptable.contains(&addr_1.ip()));
-            assert!(acceptable.contains(&addr_2.ip()));
+            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
         });
     }
 
@@ -827,15 +831,15 @@ mod tests {
                 .unwrap(),
             );
 
-            let acceptable = listener_receiver.next().await.unwrap();
-            assert!(acceptable.contains(&addr_1.ip()));
-            assert!(!acceptable.contains(&addr_2.ip()));
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
 
             oracle.overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
-            let acceptable = listener_receiver.next().await.unwrap();
-            assert!(!acceptable.contains(&addr_1.ip()));
-            assert!(acceptable.contains(&addr_2.ip()));
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
         });
     }
 
@@ -899,18 +903,18 @@ mod tests {
                 .unwrap(),
             );
 
-            let acceptable = listener_receiver.next().await.unwrap();
-            assert!(acceptable.contains(&addr_1.ip()));
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&addr_1.ip()));
 
             crate::block_peer(&mut oracle, pk_1.clone());
-            let acceptable = listener_receiver.next().await.unwrap();
-            assert!(!acceptable.contains(&addr_1.ip()));
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&addr_1.ip()));
 
             oracle.overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
-            let acceptable = listener_receiver.next().await.unwrap();
-            assert!(!acceptable.contains(&addr_1.ip()));
-            assert!(!acceptable.contains(&addr_2.ip()));
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
         });
     }
 
@@ -1020,10 +1024,8 @@ mod tests {
             assert!(registered_ips.contains(&addr_a.ip()));
 
             // Establish connection to peer
-            let _reservation = mailbox
-                .listen(pk.clone(), addr_a.ip())
-                .await
-                .expect("reservation failed");
+            let reservation = mailbox.listen(pk.clone(), addr_a.ip()).await;
+            assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
             mailbox.connect(pk.clone(), peer_mailbox);
@@ -1037,7 +1039,7 @@ mod tests {
             // Peer should receive Kill message (connection severed due to address change)
             assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)));
 
-            // The listener IP filter should move to the new address.
+            // Verify listenable IPs updated to new address
             let registered_ips = listener_receiver.next().await.unwrap();
             assert!(!registered_ips.contains(&addr_a.ip()));
             assert!(registered_ips.contains(&addr_b.ip()));

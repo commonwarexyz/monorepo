@@ -1390,10 +1390,7 @@ mod tests {
                 "sender not in latest.primary should not buffer, including own broadcasts"
             );
             assert!(
-                mailbox_b
-                    .get(msg.digest())
-                    .await
-                    .is_none(),
+                mailbox_b.get(msg.digest()).await.is_none(),
                 "peer B should not cache messages from a sender excluded by the initial latest.primary set"
             );
         });
