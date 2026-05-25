@@ -69,6 +69,8 @@ where
 pub(super) enum PrepareBatchesError {
     /// Parent ancestry is provably invalid.
     Invalid,
+    /// Parent ancestry ended before validity could be proven.
+    Incomplete,
     /// Caller dropped the response while waiting.
     Cancelled,
 }
@@ -143,9 +145,16 @@ where
         let timer = self.metrics.propose_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let Some(parent) = ancestry.next().await else {
-            response.send_lossy(None);
-            return;
+        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+            Some(Some(parent)) => parent,
+            Some(None) => {
+                response.send_lossy(None);
+                return;
+            }
+            None => {
+                debug!("proposal request cancelled before initial ancestry arrived");
+                return;
+            }
         };
         let parent_digest = parent.digest();
         let ancestry = stream::once(std::future::ready(parent.clone())).chain(ancestry);
@@ -158,6 +167,14 @@ where
             Ok(batches) => batches,
             Err(PrepareBatchesError::Invalid) => {
                 response.send_lossy(None);
+                return;
+            }
+            Err(PrepareBatchesError::Incomplete) => {
+                debug!(
+                    ?parent_digest,
+                    "proposal request waiting on incomplete ancestry during prepare_batches"
+                );
+                response.closed().await;
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
@@ -215,9 +232,17 @@ where
         let timer = self.metrics.verify_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let Some(block) = ancestry.next().await else {
-            response.send_lossy(false);
-            return;
+        let block = match next_or_cancel(&mut response, &mut ancestry).await {
+            Some(Some(block)) => block,
+            Some(None) => {
+                debug!("verification request waiting on incomplete block ancestry");
+                response.closed().await;
+                return;
+            }
+            None => {
+                debug!("verification request cancelled before initial block arrived");
+                return;
+            }
         };
         let block_digest = block.digest();
 
@@ -259,15 +284,37 @@ where
                 );
                 return;
             }
+            Err(PrepareBatchesError::Incomplete) => {
+                debug!(
+                    ?block_digest,
+                    "verification request waiting on incomplete processed-block ancestry"
+                );
+                response.closed().await;
+                return;
+            }
             Err(PrepareBatchesError::Invalid) => {
                 unreachable!("processed-block check cannot return Invalid")
             }
         }
 
         let round = consensus_context.round();
-        let Some(parent) = ancestry.next().await else {
-            response.send_lossy(false);
-            return;
+        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+            Some(Some(parent)) => parent,
+            Some(None) => {
+                debug!(
+                    ?block_digest,
+                    "verification request waiting on incomplete parent ancestry"
+                );
+                response.closed().await;
+                return;
+            }
+            None => {
+                debug!(
+                    ?block_digest,
+                    "verification request cancelled before parent ancestry arrived"
+                );
+                return;
+            }
         };
         let parent_digest = parent.digest();
         let batches = match self
@@ -284,6 +331,15 @@ where
                     "verification rejected: prepare_batches returned Invalid"
                 );
                 response.send_lossy(false);
+                return;
+            }
+            Err(PrepareBatchesError::Incomplete) => {
+                debug!(
+                    ?parent_digest,
+                    ?block_digest,
+                    "verification request waiting on incomplete ancestry during prepare_batches"
+                );
+                response.closed().await;
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
@@ -371,18 +427,16 @@ where
         Err(PrepareBatchesError::Invalid)
     }
 
-    /// Rebuild missing pending ancestry up to `target` lazily from marshal.
-    pub(super) async fn rebuild_pending<S, V, Response>(
+    /// Rebuild missing pending ancestry up to `target` lazily from a block provider.
+    pub(super) async fn rebuild_pending<P, Response>(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        provider: P,
         target: A::Block,
         response: &mut oneshot::Sender<Response>,
     ) -> Result<(), PrepareBatchesError>
     where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+        P: BlockProvider<Block = A::Block> + Clone,
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
         let target_digest = target.digest();
@@ -394,24 +448,18 @@ where
             && !self.pending.contains_key(&cursor.digest())
         {
             let Some(parent) =
-                await_or_cancel(response, marshal.clone().subscribe_parent(&cursor)).await
+                await_or_cancel(response, provider.clone().subscribe_parent(&cursor)).await
             else {
                 return Err(PrepareBatchesError::Cancelled);
             };
 
             let Some(parent) = parent else {
-                // A dropped subscription is not proof of invalidity, so retry.
-                //
-                // This loop is cancellation-bound by consensus timeouts: the
-                // caller drops `response` when propose/verify expires, and every
-                // await in this method is wrapped with `await_or_cancel`. So,
-                // this will never deadlock.
                 debug!(
                     ?target_digest,
                     cursor = ?cursor.digest(),
-                    "ancestor subscription ended before delivery, retrying"
+                    "ancestor subscription ended before delivery"
                 );
-                continue;
+                return Err(PrepareBatchesError::Incomplete);
             };
 
             let cursor_height = cursor.height();
@@ -657,14 +705,14 @@ where
     else {
         return Err(PrepareBatchesError::Cancelled);
     };
-    let Some(mut cursor) = fetched.ok().map(V::into_inner) else {
+    let Ok(mut cursor) = fetched.map(V::into_inner) else {
         warn!(
             last_processed = ?last_processed.digest,
             target_height = target_height.get(),
             processed_height = last_processed.height.get(),
             "failed to fetch canonical processed ancestry for stale-block check"
         );
-        return Ok(false);
+        return Err(PrepareBatchesError::Incomplete);
     };
 
     loop {
@@ -688,11 +736,22 @@ where
                 processed_height = last_processed.height.get(),
                 "failed to fetch canonical processed ancestry for stale-block check"
             );
-            return Ok(false);
+            return Err(PrepareBatchesError::Incomplete);
         };
 
         cursor = canonical;
     }
+}
+
+/// Read the next ancestry item unless the response receiver is dropped.
+pub(super) async fn next_or_cancel<R, T, S>(
+    response: &mut oneshot::Sender<R>,
+    stream: &mut S,
+) -> Option<Option<T>>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    await_or_cancel(response, stream.next()).await
 }
 
 /// Wait for `future` unless the response receiver is dropped.
@@ -711,7 +770,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{await_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
+    use super::{await_or_cancel, next_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
@@ -746,7 +805,7 @@ mod tests {
     };
     use futures::{Stream, StreamExt};
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, VecDeque},
         future::Future,
         num::NonZeroUsize,
         sync::{
@@ -1068,6 +1127,45 @@ mod tests {
             let provider = self.clone();
             let parent = block.parent();
             async move { provider.fetch_by_digest(parent) }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ScriptedParentProvider {
+        responses: Arc<Mutex<BTreeMap<Digest, VecDeque<Option<Block>>>>>,
+        fetches: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedParentProvider {
+        fn push(&self, child: &Block, responses: impl IntoIterator<Item = Option<Block>>) {
+            self.responses
+                .lock()
+                .insert(child.digest(), responses.into_iter().collect());
+        }
+
+        fn fetches(&self) -> usize {
+            self.fetches.load(Ordering::SeqCst)
+        }
+    }
+
+    impl BlockProvider for ScriptedParentProvider {
+        type Block = Block;
+
+        fn subscribe_parent(
+            &self,
+            block: &Self::Block,
+        ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+            let provider = self.clone();
+            let child = block.digest();
+            async move {
+                provider.fetches.fetch_add(1, Ordering::SeqCst);
+                provider
+                    .responses
+                    .lock()
+                    .get_mut(&child)
+                    .and_then(VecDeque::pop_front)
+                    .flatten()
+            }
         }
     }
 
@@ -1610,6 +1708,92 @@ mod tests {
                 harness.finalized_reopened_counters(),
                 vec![1],
                 "finalized hook should observe the durably committed state",
+            );
+        });
+    }
+
+    #[test]
+    fn initial_ancestry_read_cancels_when_response_dropped() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (mut response, receiver) = oneshot::channel::<bool>();
+            let mut ancestry = Box::pin(futures::stream::pending::<Block>());
+            drop(receiver);
+
+            assert_eq!(next_or_cancel(&mut response, &mut ancestry).await, None);
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_returns_incomplete_when_parent_subscription_ends() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let status = harness.finalize(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            harness.processor.pending.clear();
+
+            let provider = ScriptedParentProvider::default();
+            provider.push(&block2, [None]);
+
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider,
+                    block2,
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(result, Err(PrepareBatchesError::Incomplete));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_does_not_retry_closed_provider_forever() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let status = harness.finalize(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            harness.processor.pending.clear();
+
+            let provider = ScriptedParentProvider::default();
+            provider.push(&block2, [None, Some(block1.clone())]);
+
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.clone(),
+                    block2,
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(result, Err(PrepareBatchesError::Incomplete));
+            assert_eq!(
+                provider.fetches(),
+                1,
+                "closed ancestry should not be retried"
             );
         });
     }
