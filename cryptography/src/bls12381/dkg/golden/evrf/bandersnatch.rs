@@ -6,36 +6,23 @@
 
 use crate::{
     bls12381::primitives::group::Scalar,
-    zk::bulletproofs::circuit::{
-        r1cs_to_circuit, r1cs_to_circuit_and_witness, Circuit, R1cs, SparseMatrix, Witness,
-    },
+    zk::bulletproofs::circuit::{Circuit, SparseMatrix, Witness},
 };
 use ark_ec::{
     hashing::{
         curve_maps::elligator2::Elligator2Map, map_to_curve_hasher::MapToCurveBasedHasher,
         HashToCurve,
     },
+    twisted_edwards::MontCurveConfig,
     twisted_edwards::Projective,
     AdditiveGroup, CurveGroup, PrimeGroup, VariableBaseMSM,
 };
 use ark_ed_on_bls12_381_bandersnatch::{
-    constraints::EdwardsVar, BandersnatchConfig, EdwardsAffine, Fq, Fr,
+    BandersnatchConfig, EdwardsAffine, Fq, Fr, SWAffine, SWProjective,
 };
 use ark_ff::{
     field_hashers::DefaultFieldHasher, BigInteger, Field as ArkField, PrimeField, UniformRand,
     Zero as ArkZero,
-};
-use ark_r1cs_std::{
-    alloc::{AllocVar, AllocationMode},
-    eq::EqGadget,
-    fields::fp::{AllocatedFp, FpVar},
-    groups::CurveVar,
-    prelude::{Boolean, ToBitsGadget},
-    R1CSVar,
-};
-use ark_relations::r1cs::{
-    ConstraintMatrices, ConstraintSystem, ConstraintSystemRef, OptimizationGoal, SynthesisError,
-    SynthesisMode,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use bytes::{Buf, BufMut};
@@ -48,7 +35,6 @@ use core::{
     fmt::{Debug, Formatter},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand::rngs::StdRng;
 use rand_core::CryptoRngCore;
 use sha2::Sha256;
 use std::sync::LazyLock;
@@ -203,12 +189,55 @@ fn scalar_to_fq(x: &Scalar) -> Fq {
     Fq::from_be_bytes_mod_order(&x.encode())
 }
 
+fn montgomery_a() -> Fq {
+    <BandersnatchConfig as MontCurveConfig>::COEFF_A
+}
+
+fn montgomery_b() -> Fq {
+    <BandersnatchConfig as MontCurveConfig>::COEFF_B
+}
+
+fn montgomery_a_over_3() -> Fq {
+    montgomery_a() * Fq::from(3u64).inverse().expect("3 is nonzero")
+}
+
+fn te_to_sw_affine(point: &EdwardsAffine) -> Option<SWAffine> {
+    if point.is_zero() {
+        return None;
+    }
+
+    // TE -> Montgomery:
+    //   u = (1 + y) / (1 - y)
+    //   v = u / x
+    //
+    // Montgomery -> SW:
+    //   X = (u + A / 3) / B
+    //   Y = v / B
+    let one = Fq::ONE;
+    let u = (one + point.y) * (one - point.y).inverse()?;
+    let v = u * point.x.inverse()?;
+    let b_inv = montgomery_b().inverse().expect("Montgomery B is nonzero");
+    Some(SWAffine::new_unchecked(
+        (u + montgomery_a_over_3()) * b_inv,
+        v * b_inv,
+    ))
+}
+
 /// A point on the Bandersnatch curve (twisted Edwards form).
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G(Projective<BandersnatchConfig>);
 
 impl G {
+    fn sw_affine(&self) -> SWAffine {
+        te_to_sw_affine(&self.0.into_affine())
+            .expect("prime-subgroup Bandersnatch points used in eVRF are finite in SW form")
+    }
+
+    fn sw_projective(&self) -> SWProjective {
+        self.sw_affine().into()
+    }
+
     /// Returns the affine x-coordinate as the shared BLS12-381 scalar type.
     pub fn x_as_scalar(&self) -> Scalar {
         fq_to_scalar(&self.0.into_affine().x)
@@ -390,6 +419,8 @@ static GOLDEN_BETA: LazyLock<Scalar> =
     LazyLock::new(|| Scalar::map(b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BETA", b""));
 
 const POINT_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_POINT_HASH";
+const SW_CORRECTION_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_SW_CORRECTION";
+const SW_WINDOW_BITS: usize = 2;
 
 fn point_hash(pk1: &G, pk2: &G, msg: &[u8]) -> (G, G) {
     let msg0 = [&pk1.to_bytes(), &pk2.to_bytes(), msg, &[0]].concat();
@@ -408,109 +439,498 @@ fn point_hash(pk1: &G, pk2: &G, msg: &[u8]) -> (G, G) {
     (t0, t1)
 }
 
-type GVar = EdwardsVar;
-
-fn vrf_gadget(
-    x_bits_le: &[Boolean<Fq>],
-    receiver: &GVar,
-    t0: &GVar,
-    t1: &GVar,
-    beta: &FpVar<Fq>,
-) -> Result<FpVar<Fq>, SynthesisError> {
-    let s = {
-        let mut out = receiver.scalar_mul_le(x_bits_le.iter())?;
-        out.double_in_place()?;
-        out.double_in_place()?;
-        out
-    };
-    // Use only the x-coordinate bits as the scalar. `AffineVar::to_bits_le`
-    // returns `x_bits ++ y_bits`, which would not match `vrf_recv` (which
-    // scalar-multiplies by `s.x_as_f()`).
-    let k = s.x.to_bits_le()?;
-    Ok(t0.scalar_mul_le(k.iter())?.x * beta + t1.scalar_mul_le(k.iter())?.x)
+#[derive(Clone, Copy)]
+enum Slot {
+    Committed(usize),
+    Left(usize),
+    Right(usize),
+    Out(usize),
 }
 
-fn vrf_batch_circuit(
-    msg: &[u8],
-    cs: ConstraintSystemRef<Fq>,
-    beta: &Fq,
-    sender: &G,
-    receivers: &[G],
-    x: Option<&F>,
-) -> Result<Vec<usize>, SynthesisError> {
-    let beta = FpVar::new_constant(cs.clone(), beta)?;
-    // The witness shape (the number of scalar bits) must be the same for
-    // setup-mode synthesis (no `x`) as it is for proving. When `x` is missing,
-    // we fall back to a fixed-length all-zero bit vector matching `F`'s bigint
-    // representation.
-    let x_bits_le = Vec::<Boolean<_>>::new_witness(cs.clone(), || {
-        Ok::<_, SynthesisError>(x.map(F::bits_le).unwrap_or_else(|| F::zero().bits_le()))
-    })?;
-    let sender_var = GVar::new_variable_omit_on_curve_check(
-        cs.clone(),
-        || Ok(sender.0),
-        AllocationMode::Constant,
-    )?;
-    let generator = GVar::new_variable_omit_on_curve_check(
-        cs.clone(),
-        || Ok(G::generator().0),
-        AllocationMode::Constant,
-    )?;
-    sender_var.enforce_equal(&generator.scalar_mul_le(x_bits_le.iter())?)?;
-    let mut out = Vec::new();
-    for receiver in receivers {
-        let (t0, t1) = point_hash(sender, receiver, msg);
-        let t0 = GVar::new_variable_omit_on_curve_check(
-            cs.clone(),
-            || Ok(t0.0),
-            AllocationMode::Constant,
-        )?;
-        let t1 = GVar::new_variable_omit_on_curve_check(
-            cs.clone(),
-            || Ok(t1.0),
-            AllocationMode::Constant,
-        )?;
-        let receiver = GVar::new_variable_omit_on_curve_check(
-            cs.clone(),
-            || Ok(receiver.0),
-            AllocationMode::Constant,
-        )?;
-        let out_i = vrf_gadget(&x_bits_le, &receiver, &t0, &t1, &beta)?;
-        // In setup mode, `out_i.value()` is unavailable; fall back to zero so
-        // synthesis can still produce the correct constraint matrices.
-        let out_i_witness = AllocatedFp::new_witness(cs.clone(), || {
-            Ok::<_, SynthesisError>(out_i.value().unwrap_or(Fq::ZERO))
-        })?;
-        out_i.enforce_equal(&out_i_witness.clone().into())?;
-        // The R1CS matrix lays out columns as
-        // `[instance_assignment | witness_assignment]`, so witness variables
-        // start at column `num_instance_variables`. Use that offset so the
-        // returned indices match the matrix column space.
-        out.push(
-            out_i_witness
-                .variable
-                .get_index_unchecked(cs.num_instance_variables())
-                .expect("new_witness returns witness"),
-        );
+#[derive(Clone)]
+struct Var {
+    value: Scalar,
+    slot: Option<Slot>,
+}
+
+#[derive(Clone)]
+struct Lin {
+    value: Scalar,
+    constant: Scalar,
+    terms: Vec<(Scalar, Slot)>,
+}
+
+impl Lin {
+    fn zero() -> Self {
+        Self {
+            value: Scalar::zero(),
+            constant: Scalar::zero(),
+            terms: Vec::new(),
+        }
     }
-    Ok(out)
+
+    fn one() -> Self {
+        Self::constant(Scalar::one())
+    }
+
+    fn constant(value: Scalar) -> Self {
+        Self {
+            value: value.clone(),
+            constant: value,
+            terms: Vec::new(),
+        }
+    }
+
+    fn var(var: Var) -> Self {
+        let mut out = Self::zero();
+        out.add_scaled_var(Scalar::one(), &var);
+        out
+    }
+
+    fn add_scaled_var(&mut self, coeff: Scalar, var: &Var) {
+        let delta = coeff.clone() * &var.value;
+        self.value += &delta;
+        if let Some(slot) = var.slot {
+            self.terms.push((coeff, slot));
+        } else {
+            self.constant += &delta;
+        }
+    }
+
+    fn add_scaled_lin(&mut self, coeff: Scalar, rhs: &Self) {
+        let delta = coeff.clone() * &rhs.value;
+        self.value += &delta;
+        let constant_delta = coeff.clone() * &rhs.constant;
+        self.constant += &constant_delta;
+        for (rhs_coeff, slot) in &rhs.terms {
+            self.terms.push((coeff.clone() * rhs_coeff, *slot));
+        }
+    }
+
+    fn scaled(mut self, coeff: Scalar) -> Self {
+        self.value *= &coeff;
+        self.constant *= &coeff;
+        for (term_coeff, _) in &mut self.terms {
+            *term_coeff *= &coeff;
+        }
+        self
+    }
+
+    fn plus(mut self, rhs: &Self) -> Self {
+        self.add_scaled_lin(Scalar::one(), rhs);
+        self
+    }
 }
 
-fn constraint_matrices_to_r1cs(matrices: ConstraintMatrices<Fq>) -> R1cs<Scalar> {
-    fn convert_matrix(m: Vec<Vec<(Fq, usize)>>) -> SparseMatrix<Scalar> {
-        let mut out = SparseMatrix::default();
-        for (i, m_i) in m.into_iter().enumerate() {
-            for (m_ij, j) in m_i {
-                out[(i, j)] = fq_to_scalar(&m_ij);
+#[derive(Clone)]
+struct SwPoint {
+    x: Scalar,
+    y: Scalar,
+}
+
+impl SwPoint {
+    fn from_affine(point: SWAffine) -> Self {
+        assert!(
+            !point.infinity,
+            "paper-style eVRF exponentiation requires finite SW points"
+        );
+        Self {
+            x: fq_to_scalar(&point.x),
+            y: fq_to_scalar(&point.y),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SwPointLin {
+    x: Lin,
+    y: Lin,
+}
+
+impl SwPointLin {
+    fn constant(point: &G) -> Self {
+        let point = SwPoint::from_affine(point.sw_affine());
+        Self {
+            x: Lin::constant(point.x),
+            y: Lin::constant(point.y),
+        }
+    }
+}
+
+struct NativeCircuitBuilder {
+    committed: Vec<Scalar>,
+    left: Vec<Scalar>,
+    right: Vec<Scalar>,
+    out: Vec<Scalar>,
+    constraints: Vec<Lin>,
+}
+
+impl NativeCircuitBuilder {
+    fn new(committed: usize) -> Self {
+        Self {
+            committed: vec![Scalar::zero(); committed],
+            left: Vec::new(),
+            right: Vec::new(),
+            out: Vec::new(),
+            constraints: Vec::new(),
+        }
+    }
+
+    fn committed(&self, index: usize) -> Var {
+        Var {
+            value: self.committed[index].clone(),
+            slot: Some(Slot::Committed(index)),
+        }
+    }
+
+    fn set_committed(&mut self, index: usize, value: Scalar) {
+        self.committed[index] = value;
+    }
+
+    fn push_gate(&mut self, left: Scalar, right: Scalar, out: Scalar) -> usize {
+        let index = self.left.len();
+        self.left.push(left);
+        self.right.push(right);
+        self.out.push(out);
+        index
+    }
+
+    fn left_var(&self, index: usize) -> Var {
+        Var {
+            value: self.left[index].clone(),
+            slot: Some(Slot::Left(index)),
+        }
+    }
+
+    fn right_var(&self, index: usize) -> Var {
+        Var {
+            value: self.right[index].clone(),
+            slot: Some(Slot::Right(index)),
+        }
+    }
+
+    fn out_var(&self, index: usize) -> Var {
+        Var {
+            value: self.out[index].clone(),
+            slot: Some(Slot::Out(index)),
+        }
+    }
+
+    fn assert_zero(&mut self, expr: Lin) {
+        self.constraints.push(expr);
+    }
+
+    fn assert_equal(&mut self, lhs: Lin, rhs: Lin) {
+        let mut expr = lhs;
+        expr.add_scaled_lin(-Scalar::one(), &rhs);
+        self.assert_zero(expr);
+    }
+
+    fn mul(&mut self, lhs: Lin, rhs: Lin) -> Var {
+        let product = lhs.value.clone() * &rhs.value;
+        let index = self.push_gate(lhs.value.clone(), rhs.value.clone(), product);
+        self.assert_equal(Lin::var(self.left_var(index)), lhs);
+        self.assert_equal(Lin::var(self.right_var(index)), rhs);
+        self.out_var(index)
+    }
+
+    fn mul_lin(&mut self, lhs: Lin, rhs: Lin) -> Lin {
+        if lhs.terms.is_empty() {
+            if lhs.constant == Scalar::zero() {
+                return Lin::zero();
+            }
+            if lhs.constant == Scalar::one() {
+                return rhs;
+            }
+            return rhs.scaled(lhs.constant);
+        }
+        if rhs.terms.is_empty() {
+            if rhs.constant == Scalar::zero() {
+                return Lin::zero();
+            }
+            if rhs.constant == Scalar::one() {
+                return lhs;
+            }
+            return lhs.scaled(rhs.constant);
+        }
+        Lin::var(self.mul(lhs, rhs))
+    }
+
+    fn mul_left_witness(&mut self, left: Scalar, right: Lin, product: Lin) -> Var {
+        let index = self.push_gate(left, right.value.clone(), product.value.clone());
+        self.assert_equal(Lin::var(self.right_var(index)), right);
+        self.assert_equal(Lin::var(self.out_var(index)), product);
+        self.left_var(index)
+    }
+
+    fn boolean(&mut self, value: bool) -> Var {
+        let bit = if value { Scalar::one() } else { Scalar::zero() };
+        let right = bit.clone() - &Scalar::one();
+        let index = self.push_gate(bit, right, Scalar::zero());
+        let mut right_minus_left = Lin::var(self.right_var(index));
+        right_minus_left.add_scaled_var(-Scalar::one(), &self.left_var(index));
+        right_minus_left.add_scaled_lin(Scalar::one(), &Lin::one());
+        self.assert_zero(right_minus_left);
+        self.assert_equal(Lin::var(self.out_var(index)), Lin::zero());
+        self.left_var(index)
+    }
+
+    fn bit_decompose(&mut self, value: Lin, bits: &[bool], enforce_field: bool) -> Vec<Var> {
+        let bit_vars = bits
+            .iter()
+            .map(|&bit| self.boolean(bit))
+            .collect::<Vec<_>>();
+        let mut reconstructed = Lin::zero();
+        let mut coeff = Scalar::one();
+        let two = Scalar::from_u64(2);
+        for bit in &bit_vars {
+            reconstructed.add_scaled_var(coeff.clone(), bit);
+            coeff *= &two;
+        }
+        self.assert_equal(reconstructed, value);
+        if enforce_field {
+            self.enforce_field_bits(&bit_vars);
+        }
+        bit_vars
+    }
+
+    fn enforce_field_bits(&mut self, bits: &[Var]) {
+        let modulus = fq_modulus_bits_le();
+        assert_eq!(bits.len(), modulus.len(), "field bit check length mismatch");
+
+        // Subtract the field modulus from the reconstructed integer. Because
+        // `bits` has exactly the modulus bit length, the final borrow is one
+        // iff the represented integer is strictly less than the modulus.
+        let mut borrow = Lin::zero();
+        for (bit, &modulus_bit) in bits.iter().zip(modulus.iter()) {
+            let mut not_bit = Lin::one();
+            not_bit.add_scaled_var(-Scalar::one(), bit);
+            if modulus_bit {
+                let mut not_borrow = Lin::one();
+                not_borrow.add_scaled_lin(-Scalar::one(), &borrow);
+                let bit_and_not_borrow = self.mul_lin(Lin::var(bit.clone()), not_borrow);
+                let mut next = Lin::one();
+                next.add_scaled_lin(-Scalar::one(), &bit_and_not_borrow);
+                borrow = next;
+            } else {
+                borrow = self.mul_lin(borrow, not_bit);
             }
         }
+        self.assert_equal(borrow, Lin::one());
+    }
+
+    fn sw_delta_coordinate(bit: &Var, zero: &Scalar, one: &Scalar) -> Lin {
+        let mut out = Lin::constant(zero.clone());
+        let mut coeff = one.clone();
+        coeff -= zero;
+        out.add_scaled_var(coeff, bit);
         out
     }
-    R1cs {
-        a: convert_matrix(matrices.a),
-        b: convert_matrix(matrices.b),
-        c: convert_matrix(matrices.c),
+
+    fn sw_select_delta(bit: &Var, zero: &SwPoint, one: &SwPoint) -> SwPointLin {
+        SwPointLin {
+            x: Self::sw_delta_coordinate(bit, &zero.x, &one.x),
+            y: Self::sw_delta_coordinate(bit, &zero.y, &one.y),
+        }
     }
+
+    fn sw_select_delta_window(&mut self, bits: &[Var], points: &[SwPoint]) -> SwPointLin {
+        match bits.len() {
+            1 => {
+                debug_assert_eq!(points.len(), 2);
+                Self::sw_select_delta(&bits[0], &points[0], &points[1])
+            }
+            2 => {
+                debug_assert_eq!(points.len(), 4);
+                let both = self.mul(Lin::var(bits[0].clone()), Lin::var(bits[1].clone()));
+                let coordinate =
+                    |zero: &Scalar, one: &Scalar, two: &Scalar, three: &Scalar, both: &Var| {
+                        let mut out = Lin::constant(zero.clone());
+                        let mut b0_coeff = one.clone();
+                        b0_coeff -= zero;
+                        out.add_scaled_var(b0_coeff, &bits[0]);
+                        let mut b1_coeff = two.clone();
+                        b1_coeff -= zero;
+                        out.add_scaled_var(b1_coeff, &bits[1]);
+                        let mut both_coeff = three.clone();
+                        both_coeff -= two;
+                        both_coeff -= one;
+                        both_coeff += zero;
+                        out.add_scaled_var(both_coeff, both);
+                        out
+                    };
+                SwPointLin {
+                    x: coordinate(
+                        &points[0].x,
+                        &points[1].x,
+                        &points[2].x,
+                        &points[3].x,
+                        &both,
+                    ),
+                    y: coordinate(
+                        &points[0].y,
+                        &points[1].y,
+                        &points[2].y,
+                        &points[3].y,
+                        &both,
+                    ),
+                }
+            }
+            _ => panic!("unsupported SW fixed-base window size"),
+        }
+    }
+
+    fn sw_correction_base(base: &G) -> SWProjective {
+        G::hash_to_group(SW_CORRECTION_DST, &base.to_bytes()).sw_projective()
+    }
+
+    fn sw_correction_point(
+        correction_base: &SWProjective,
+        index: usize,
+        windows: usize,
+    ) -> SWProjective {
+        debug_assert!(index < windows);
+        let coeff = if index == 0 {
+            Fr::from(1u64)
+        } else if index + 1 == windows {
+            // The correction points must sum to the identity. With c_0 = 1
+            // and c_i = 2 for the middle windows, the final correction is
+            // -(1 + 2 * (windows - 2)).
+            -Fr::from((2 * windows - 3) as u64)
+        } else {
+            Fr::from(2u64)
+        };
+        *correction_base * coeff
+    }
+
+    fn sw_add_chord(&mut self, p: &SwPointLin, q: &SwPointLin) -> SwPointLin {
+        let mut x_diff = p.x.clone();
+        x_diff.add_scaled_lin(-Scalar::one(), &q.x);
+        let mut y_diff = p.y.clone();
+        y_diff.add_scaled_lin(-Scalar::one(), &q.y);
+
+        let slope_value = y_diff.value.clone() * &x_diff.value.inv();
+        let slope = self.mul_left_witness(slope_value, x_diff, y_diff);
+        let slope = Lin::var(slope);
+
+        let slope_squared = self.mul(slope.clone(), slope.clone());
+        let mut x = Lin::var(slope_squared);
+        x.add_scaled_lin(-Scalar::one(), &p.x);
+        x.add_scaled_lin(-Scalar::one(), &q.x);
+
+        let mut x_prev_minus_x = p.x.clone();
+        x_prev_minus_x.add_scaled_lin(-Scalar::one(), &x);
+        let y_sum = self.mul(slope, x_prev_minus_x);
+        let mut y = Lin::var(y_sum);
+        y.add_scaled_lin(-Scalar::one(), &p.y);
+
+        SwPointLin { x, y }
+    }
+
+    fn sw_fixed_base_mul(&mut self, base: &G, bits: &[Var]) -> SwPointLin {
+        assert!(
+            !bits.is_empty(),
+            "fixed-base scalar multiplication needs at least one bit"
+        );
+        let windows = bits.len().div_ceil(SW_WINDOW_BITS);
+        assert!(
+            windows > 1,
+            "correction-based fixed-base multiplication needs at least two windows"
+        );
+        let correction_base = Self::sw_correction_base(base);
+        let mut base_power = base.sw_projective();
+        let mut acc = None;
+        for (i, window_bits) in bits.chunks(SW_WINDOW_BITS).enumerate() {
+            let correction = Self::sw_correction_point(&correction_base, i, windows);
+            let points = (0..(1usize << window_bits.len()))
+                .map(|j| {
+                    let multiple = base_power * Fr::from(j as u64);
+                    SwPoint::from_affine((correction + multiple).into_affine())
+                })
+                .collect::<Vec<_>>();
+            let delta = self.sw_select_delta_window(window_bits, &points);
+            acc = Some(match acc {
+                None => delta,
+                Some(ref current) => self.sw_add_chord(current, &delta),
+            });
+            for _ in 0..SW_WINDOW_BITS {
+                base_power.double_in_place();
+            }
+        }
+        acc.expect("bits is not empty")
+    }
+
+    fn sw_fixed_base_muls_same_scalar(&mut self, bases: &[G], bits: &[Var]) -> Vec<SwPointLin> {
+        bases
+            .iter()
+            .map(|base| self.sw_fixed_base_mul(base, bits))
+            .collect()
+    }
+
+    fn sw_to_te_x(&mut self, point: &SwPointLin) -> Lin {
+        let b = fq_to_scalar(&montgomery_b());
+        let a_over_3 = fq_to_scalar(&montgomery_a_over_3());
+
+        let mut u = point.x.clone().scaled(b.clone());
+        u.add_scaled_lin(Scalar::one(), &Lin::constant(-a_over_3));
+        let v = point.y.clone().scaled(b);
+
+        let x = u.value.clone() * &v.value.inv();
+        Lin::var(self.mul_left_witness(x, v, u))
+    }
+
+    fn finish(self) -> (Circuit<Scalar>, Witness<Scalar>) {
+        let committed_vars = self.committed.len();
+        let internal_vars = self.left.len();
+        let mut weights = SparseMatrix::default();
+        weights.pad(
+            1 + committed_vars + 3 * internal_vars,
+            self.constraints.len(),
+        );
+        for (row, constraint) in self.constraints.into_iter().enumerate() {
+            if constraint.constant != Scalar::zero() {
+                weights[(row, 0)] += &constraint.constant;
+            }
+            for (coeff, slot) in constraint.terms {
+                let col = match slot {
+                    Slot::Committed(i) => 1 + i,
+                    Slot::Left(i) => 1 + committed_vars + i,
+                    Slot::Right(i) => 1 + committed_vars + internal_vars + i,
+                    Slot::Out(i) => 1 + committed_vars + 2 * internal_vars + i,
+                };
+                weights[(row, col)] += &coeff;
+            }
+        }
+        let circuit = Circuit::new(committed_vars, weights).expect("native circuit shape is valid");
+        let witness = Witness::new(
+            self.committed,
+            vec![Scalar::zero(); committed_vars],
+            self.left,
+            self.right,
+            self.out,
+        )
+        .expect("native witness shape is valid");
+        (circuit, witness)
+    }
+}
+
+fn scalar_bits_le(value: &Scalar, bits: usize) -> Vec<bool> {
+    let mut out = scalar_to_fq(value).into_bigint().to_bits_le();
+    out.resize(bits, false);
+    out.truncate(bits);
+    out
+}
+
+fn fq_modulus_bits_le() -> Vec<bool> {
+    let limbs = Fq::characteristic().to_vec();
+    let mut bits = Vec::with_capacity(limbs.len() * 64);
+    for limb in limbs {
+        for i in 0..64 {
+            bits.push(((limb >> i) & 1) == 1);
+        }
+    }
+    bits.truncate(Fq::MODULUS_BIT_SIZE as usize);
+    bits
 }
 
 fn vrf_batch_checked_inner(
@@ -519,55 +939,48 @@ fn vrf_batch_checked_inner(
     sender: G,
     receivers: &[G],
 ) -> (Circuit<Scalar>, Option<Witness<Scalar>>) {
-    let cs = ConstraintSystem::new_ref();
-    cs.set_optimization_goal(OptimizationGoal::Constraints);
-    if x.is_some() {
-        cs.set_mode(SynthesisMode::Prove {
-            construct_matrices: true,
-        });
-    } else {
-        cs.set_mode(SynthesisMode::Setup);
+    let x_bits = x.map(F::bits_le).unwrap_or_else(|| F::zero().bits_le());
+    let mut builder = NativeCircuitBuilder::new(receivers.len());
+    let x_bits = x_bits
+        .into_iter()
+        .map(|bit| builder.boolean(bit))
+        .collect::<Vec<_>>();
+
+    let x_bases = core::iter::once(G::generator())
+        .chain(receivers.iter().map(G::clear_cofactor))
+        .collect::<Vec<_>>();
+    let mut x_muls = builder.sw_fixed_base_muls_same_scalar(&x_bases, &x_bits);
+    let sender_check = x_muls.remove(0);
+    let sender_const = SwPointLin::constant(&sender);
+    builder.assert_equal(sender_check.x, sender_const.x);
+    builder.assert_equal(sender_check.y, sender_const.y);
+
+    for (i, (receiver, shared)) in receivers.iter().zip(x_muls).enumerate() {
+        let shared_x = builder.sw_to_te_x(&shared);
+        let k_bits = {
+            let bits = scalar_bits_le(&shared_x.value, Fq::MODULUS_BIT_SIZE as usize);
+            builder.bit_decompose(shared_x, &bits, true)
+        };
+        let (t0, t1) = point_hash(&sender, receiver, msg);
+        let mut evals = builder.sw_fixed_base_muls_same_scalar(&[t0, t1], &k_bits);
+        let t0_eval = evals.remove(0);
+        let t1_eval = evals.remove(0);
+        let t0_x = builder.sw_to_te_x(&t0_eval);
+        let t1_x = builder.sw_to_te_x(&t1_eval);
+        let output = t0_x.scaled(GOLDEN_BETA.clone()).plus(&t1_x);
+        builder.set_committed(i, output.value.clone());
+        builder.assert_equal(Lin::var(builder.committed(i)), output);
     }
-    let output_indices = vrf_batch_circuit(
-        msg,
-        cs.clone(),
-        &scalar_to_fq(&GOLDEN_BETA),
-        &sender,
-        receivers,
-        x,
-    )
-    .expect("constraint synthesization should not fail");
-    cs.finalize();
+
+    let (circuit, witness) = builder.finish();
     if x.is_some() {
         debug_assert!(
-            cs.is_satisfied().unwrap_or(false),
-            "arkworks constraint system unsatisfied"
+            witness.is_satisfied(&circuit),
+            "native eVRF witness does not satisfy circuit"
         );
-    }
-    let cs = cs
-        .into_inner()
-        .expect("constraint system should have only one ref");
-    let matrices = cs
-        .to_matrices()
-        .expect("constraint system should have generated matrices");
-    let r1cs = constraint_matrices_to_r1cs(matrices);
-    if x.is_some() {
-        // Concatenate instance and witness assignments so the resulting vector
-        // is column-aligned with the R1CS matrix
-        // (`[instance_assignment | witness_assignment]`). The first instance
-        // entry is the constant `1`.
-        let witness = cs
-            .instance_assignment
-            .into_iter()
-            .chain(cs.witness_assignment)
-            .map(|x| fq_to_scalar(&x))
-            .collect::<Vec<_>>();
-        let (c, w) =
-            r1cs_to_circuit_and_witness(None::<&mut StdRng>, r1cs, witness, &output_indices);
-        (c, Some(w))
+        (circuit, Some(witness))
     } else {
-        let c = r1cs_to_circuit(r1cs, &output_indices);
-        (c, None)
+        (circuit, None)
     }
 }
 
@@ -606,6 +1019,13 @@ mod tests {
     #[test]
     fn test_hash_to_group() {
         minifuzz::test(test_suites::fuzz_hash_to_group::<G>);
+    }
+
+    #[test]
+    fn test_small_scalar_vrf_witness_satisfies() {
+        let x = F(Fr::from(1u64));
+        let (circuit, witness) = vrf_batch_checked(b"small-scalar", &x, &[G::generator()]);
+        assert!(witness.is_satisfied(&circuit));
     }
 
     /// Diagnostic: print circuit `internal_vars` (and `padded = next_pow2`) as

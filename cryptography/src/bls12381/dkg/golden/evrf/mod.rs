@@ -41,11 +41,12 @@ const BULLETPROOFS_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BULLETPROO
 // (See `bandersnatch::tests::measure_circuit_size_per_receiver` for the
 // raw data this fit was derived from.)
 //
-// TODO: with a hand-tailored scalar-mul gadget the per-receiver constant
-// could drop to ~2.5k (Golden paper, eprint 2025/1924), letting us hit a much
-// larger receiver count with the same (or smaller) setup.
-const WIRES_PER_PLAYER: usize = 8664;
-const WIRES_BASE: usize = 3065;
+// The short-Weierstrass chord-rule exponentiation gadget uses 2-bit fixed-base
+// windows. It keeps the canonical range check for the shared-secret
+// x-coordinate, which is required because the circuit field equality alone
+// would otherwise allow non-canonical bit decompositions.
+const WIRES_PER_PLAYER: usize = 2037;
+const WIRES_BASE: usize = 765;
 
 /// `ceil(log2(WIRES_PER_PLAYER * num_players + WIRES_BASE))`.
 ///
