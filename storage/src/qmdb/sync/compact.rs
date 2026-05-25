@@ -365,40 +365,37 @@ where
     target
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
-    loop {
-        let FetchResult { state, success_tx } = config
-            .resolver
-            .get_compact_state(target.clone())
-            .await
-            .map_err(Error::Resolver)?;
-
-        let db = match try_build_compact_db::<DB>(
-            config.context.child("compact"),
-            config.db_config.clone(),
-            &target,
-            state,
-        )
+    let FetchResult { state, success_tx } = config
+        .resolver
+        .get_compact_state(target.clone())
         .await
-        {
-            Ok(db) => db,
-            Err(err) => {
-                if let Some(success_tx) = success_tx {
-                    let _ = success_tx.send(false);
-                    continue;
-                }
-                return Err(match err {
-                    BuildError::Database(err) => Error::Database(err),
-                    BuildError::Engine(err) => Error::Engine(err),
-                });
-            }
-        };
+        .map_err(Error::Resolver)?;
 
-        if let Some(success_tx) = success_tx {
-            let _ = success_tx.send(true);
+    let db = match try_build_compact_db::<DB>(
+        config.context.child("compact"),
+        config.db_config.clone(),
+        &target,
+        state,
+    )
+    .await
+    {
+        Ok(db) => db,
+        Err(BuildError::Engine(err)) => {
+            if let Some(success_tx) = success_tx {
+                let _ = success_tx.send(false);
+            }
+            return Err(Error::Engine(err));
         }
-        db.persist_compact_state().await?;
-        return Ok(db);
+        Err(BuildError::Database(err)) => {
+            return Err(Error::Database(err));
+        }
+    };
+
+    if let Some(success_tx) = success_tx {
+        let _ = success_tx.send(true);
     }
+    db.persist_compact_state().await?;
+    Ok(db)
 }
 
 async fn try_build_compact_db<DB>(
@@ -897,14 +894,26 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 
 #[cfg(test)]
 mod tests {
-    use super::Target;
-    use crate::merkle::mmr;
+    use super::{Config, Database, FetchResult, Resolver, State, Target};
+    use crate::{
+        merkle::{mmr, Location, Proof},
+        qmdb::{
+            self,
+            sync::{EngineError, Error},
+        },
+    };
     use commonware_codec::{DecodeExt as _, Encode as _, RangeCfg};
-    use commonware_cryptography::{sha256::Digest, Hasher as _};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_parallel::Rayon;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::sync::AsyncRwLock;
-    use std::sync::Arc;
+    use std::{
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     macro_rules! assert_resolver_variants {
         ($db:ty) => {
@@ -915,6 +924,71 @@ mod tests {
     }
 
     fn assert_resolver<R: super::Resolver>() {}
+
+    struct RetryGuardDb;
+
+    impl Database for RetryGuardDb {
+        type Family = mmr::Family;
+        type Op = u8;
+        type Config = ();
+        type Digest = Digest;
+        type Context = deterministic::Context;
+        type Hasher = Sha256;
+
+        async fn from_compact_state(
+            _context: Self::Context,
+            _config: Self::Config,
+            _state: State<Self::Family, Self::Op, Self::Digest>,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            panic!("leaf-count mismatch should fail before database construction");
+        }
+
+        fn root(&self) -> Self::Digest {
+            Sha256::hash(b"unused")
+        }
+
+        async fn persist_compact_state(&self) -> Result<(), qmdb::Error<Self::Family>> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct RetryGuardResolver {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl Resolver for RetryGuardResolver {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = u8;
+        type Error = Infallible;
+
+        async fn get_compact_state(
+            &self,
+            _target: Target<Self::Family, Self::Digest>,
+        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            let attempts = self.attempts.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                attempts, 0,
+                "compact sync retried invalid compact state after downstream rejected it"
+            );
+
+            let (success_tx, _success_rx) = commonware_utils::channel::oneshot::channel();
+            Ok(FetchResult {
+                state: State {
+                    leaf_count: Location::new(2),
+                    pinned_nodes: Vec::new(),
+                    last_commit_op: 0,
+                    last_commit_proof: Proof {
+                        leaves: Location::new(2),
+                        inactive_peaks: 0,
+                        digests: Vec::new(),
+                    },
+                },
+                success_tx: Some(success_tx),
+            })
+        }
+    }
 
     #[test]
     fn test_all_compact_qmdb_variants_implement_strategy_resolvers() {
@@ -967,6 +1041,37 @@ mod tests {
         .encode();
 
         assert!(Target::<mmr::Family, Digest>::decode(encoded).is_err());
+    }
+
+    #[test]
+    fn test_compact_sync_returns_error_after_callback_rejects_bad_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let target = Target::<mmr::Family, Digest> {
+                root: Sha256::hash(b"target"),
+                leaf_count: Location::new(1),
+            };
+
+            let result = super::sync::<RetryGuardDb, _>(Config {
+                context,
+                resolver: RetryGuardResolver {
+                    attempts: attempts.clone(),
+                },
+                target,
+                db_config: (),
+            })
+            .await;
+
+            match result {
+                Err(Error::Engine(EngineError::UnexpectedLeafCount { expected, actual })) => {
+                    assert_eq!(expected, Location::new(1));
+                    assert_eq!(actual, Location::new(2));
+                }
+                Err(err) => panic!("unexpected compact sync error: {err:?}"),
+                Ok(_) => panic!("bad compact state should not sync successfully"),
+            }
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        });
     }
 }
 

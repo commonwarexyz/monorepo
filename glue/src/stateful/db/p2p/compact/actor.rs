@@ -547,6 +547,33 @@ mod tests {
     }
 
     #[test]
+    fn dropped_downstream_feedback_does_not_mark_peer_invalid() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (target, fetch) = compact_state(context.child("state")).await;
+            let request = handler::Request::from_target(target);
+
+            let (subscriber_tx, subscriber_rx) = oneshot::channel();
+            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            futures::join!(
+                async {
+                    actor
+                        .handle_deliver(request, fetch.state.encode(), ack_tx)
+                        .await;
+                },
+                async {
+                    let fetch = subscriber_rx.await.unwrap().unwrap();
+                    drop(fetch);
+                }
+            );
+
+            assert!(ack_rx.await.unwrap());
+        });
+    }
+
+    #[test]
     fn cancel_state_cancels_last_subscriber() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
