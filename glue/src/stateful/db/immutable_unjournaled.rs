@@ -26,6 +26,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{channel::mpsc, sync::AsyncRwLock, Array};
+use futures::future::{pending, Either};
 use std::{ops::Deref, sync::Arc};
 
 type ImmutableUnjournaledDbHandle<F, E, K, V, H, C, S> =
@@ -351,26 +352,48 @@ where
         config: Self::Config,
         resolver: R,
         mut target: Self::SyncTarget,
-        mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
+        let mut tip_updates = Some(tip_updates);
         loop {
+            if let Some(tip_updates) = tip_updates.as_mut() {
+                if let Some(update) = drain_latest_target(tip_updates).await {
+                    target = update;
+                }
+            }
+
             let context = context.child("sync").with_attribute("attempt", attempt);
             attempt += 1;
-            let db = sync::compact::sync(sync::compact::Config::<Self, R> {
-                context,
-                resolver: resolver.clone(),
-                target: target.clone(),
-                db_config: config.clone(),
-            })
-            .await?;
+            let update_future = tip_updates.as_mut().map_or_else(
+                || Either::Right(pending()),
+                |updates| Either::Left(updates.recv()),
+            );
+            let db = select! {
+                update = update_future => {
+                    let Some(update) = update else {
+                        tip_updates = None;
+                        continue;
+                    };
+                    target = update;
+                    continue;
+                },
+                db = sync::compact::sync(sync::compact::Config::<Self, R> {
+                    context,
+                    resolver: resolver.clone(),
+                    target: target.clone(),
+                    db_config: config.clone(),
+                }) => db?,
+            };
 
-            if let Some(update) = drain_latest_target(&mut tip_updates).await {
-                target = update;
-                continue;
+            if let Some(tip_updates) = tip_updates.as_mut() {
+                if let Some(update) = drain_latest_target(tip_updates).await {
+                    target = update;
+                    continue;
+                }
             }
 
             if let Some(reached_target) = reached_target.as_ref() {
@@ -380,6 +403,9 @@ where
             }
 
             let Some(finish) = finish.as_mut() else {
+                return Ok(db);
+            };
+            let Some(tip_updates) = tip_updates.as_mut() else {
                 return Ok(db);
             };
             select! {
@@ -418,26 +444,48 @@ where
         config: Self::Config,
         resolver: R,
         mut target: Self::SyncTarget,
-        mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
+        let mut tip_updates = Some(tip_updates);
         loop {
+            if let Some(tip_updates) = tip_updates.as_mut() {
+                if let Some(update) = drain_latest_target(tip_updates).await {
+                    target = update;
+                }
+            }
+
             let context = context.child("sync").with_attribute("attempt", attempt);
             attempt += 1;
-            let db = sync::compact::sync(sync::compact::Config::<Self, R> {
-                context,
-                resolver: resolver.clone(),
-                target: target.clone(),
-                db_config: config.clone(),
-            })
-            .await?;
+            let update_future = tip_updates.as_mut().map_or_else(
+                || Either::Right(pending()),
+                |updates| Either::Left(updates.recv()),
+            );
+            let db = select! {
+                update = update_future => {
+                    let Some(update) = update else {
+                        tip_updates = None;
+                        continue;
+                    };
+                    target = update;
+                    continue;
+                },
+                db = sync::compact::sync(sync::compact::Config::<Self, R> {
+                    context,
+                    resolver: resolver.clone(),
+                    target: target.clone(),
+                    db_config: config.clone(),
+                }) => db?,
+            };
 
-            if let Some(update) = drain_latest_target(&mut tip_updates).await {
-                target = update;
-                continue;
+            if let Some(tip_updates) = tip_updates.as_mut() {
+                if let Some(update) = drain_latest_target(tip_updates).await {
+                    target = update;
+                    continue;
+                }
             }
 
             if let Some(reached_target) = reached_target.as_ref() {
@@ -447,6 +495,9 @@ where
             }
 
             let Some(finish) = finish.as_mut() else {
+                return Ok(db);
+            };
+            let Some(tip_updates) = tip_updates.as_mut() else {
                 return Ok(db);
             };
             select! {
@@ -467,9 +518,10 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{deterministic, Runner as _, Spawner as _, Supervisor as _};
     use commonware_storage::merkle::{compact::Config as MerkleConfig, mmr};
     use commonware_utils::{NZUsize, NZU64};
+    use std::time::Duration;
 
     type FixedDb =
         fixed::CompactDb<mmr::Family, deterministic::Context, Digest, Digest, Sha256, Sequential>;
@@ -482,6 +534,33 @@ mod tests {
         ((), (commonware_codec::RangeCfg<usize>, ())),
         Sequential,
     >;
+
+    #[derive(Clone)]
+    struct SupersedingCompactResolver {
+        source: Arc<FixedDb>,
+        stale_target: sync::compact::Target<mmr::Family, Digest>,
+        stale_request_tx: mpsc::Sender<()>,
+    }
+
+    impl sync::compact::Resolver for SupersedingCompactResolver {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = Operation<mmr::Family, Digest, FixedEncoding<Digest>>;
+        type Error = sync::compact::ServeError<mmr::Family, Digest>;
+
+        async fn get_compact_state(
+            &self,
+            target: sync::compact::Target<Self::Family, Self::Digest>,
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        {
+            if target == self.stale_target {
+                let _ = self.stale_request_tx.send(()).await;
+                return futures::future::pending().await;
+            }
+
+            sync::compact::Resolver::get_compact_state(&self.source, target).await
+        }
+    }
 
     fn fixed_config(suffix: &str) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
@@ -588,6 +667,74 @@ mod tests {
 
             assert_eq!(synced.current_target(), target);
             assert_eq!(synced.get_metadata(), Some(metadata));
+        });
+    }
+
+    #[test]
+    fn state_sync_supersedes_in_flight_stale_compact_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut source =
+                FixedDb::init(context.child("source"), fixed_config("supersede-source"))
+                    .await
+                    .unwrap();
+
+            let floor = source.inactivity_floor_loc();
+            let batch = source
+                .new_batch()
+                .set(Sha256::hash(&[1]), Sha256::hash(&[2]))
+                .merkleize(&source, Some(Sha256::hash(&[9])), floor);
+            source.apply_batch(batch).unwrap();
+            source.sync().await.unwrap();
+            let stale_target = source.current_target();
+
+            let floor = source.inactivity_floor_loc();
+            let batch = source
+                .new_batch()
+                .set(Sha256::hash(&[3]), Sha256::hash(&[4]))
+                .merkleize(&source, Some(Sha256::hash(&[10])), floor);
+            source.apply_batch(batch).unwrap();
+            source.sync().await.unwrap();
+            let latest_target = source.current_target();
+
+            let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
+            let resolver = SupersedingCompactResolver {
+                source: Arc::new(source),
+                stale_target: stale_target.clone(),
+                stale_request_tx,
+            };
+
+            let (update_tx, update_rx) = mpsc::channel(1);
+            let sync_handle = context.child("sync").spawn(move |context| async move {
+                <FixedDb as StateSyncDb<_, _>>::sync_db(
+                    context.child("target"),
+                    fixed_config("supersede-target"),
+                    resolver,
+                    stale_target,
+                    update_rx,
+                    None,
+                    None,
+                    sync_config(),
+                )
+                .await
+            });
+
+            context
+                .timeout(Duration::from_secs(1), async move {
+                    stale_request_rx.recv().await.unwrap();
+                })
+                .await
+                .expect("sync should request the stale target first");
+            update_tx.send(latest_target.clone()).await.unwrap();
+
+            let synced = context
+                .timeout(Duration::from_secs(1), sync_handle)
+                .await
+                .expect("sync should switch to the latest target")
+                .expect("spawned sync task should complete")
+                .unwrap();
+
+            assert_eq!(synced.current_target(), latest_target);
+            assert_eq!(synced.get_metadata(), Some(Sha256::hash(&[10])));
         });
     }
 
