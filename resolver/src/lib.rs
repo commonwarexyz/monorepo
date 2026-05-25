@@ -12,6 +12,7 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod delivery;
     pub mod ingress;
+    pub mod direct;
     pub mod p2p;
     pub mod subscribers;
 
