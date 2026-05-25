@@ -24,6 +24,7 @@ pub struct Completion<K, S, Context = ()> {
     pub valid: bool,
 }
 
+// Cached response that can be redelivered after the consumer accepts it.
 struct Response<Context, V> {
     context: Context,
     value: V,
@@ -42,6 +43,7 @@ struct PooledCompletion<K, S, Context> {
     completion: Completion<K, S, Context>,
 }
 
+// Per-key delivery state retained while a resolver fetch is active.
 struct Entry<Context, V, State> {
     delivery: Option<ActiveDelivery>,
     response: Option<Response<Context, V>>,
@@ -243,6 +245,7 @@ where
         Ok(completed.completion)
     }
 
+    // Start a consumer validation attempt and record its abort handle.
     fn push_delivery(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,

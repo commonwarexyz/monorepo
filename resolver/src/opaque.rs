@@ -497,10 +497,10 @@ where
         if valid {
             let remaining = self.subscribers.remove_delivered(&key, delivered);
 
+            // The first accepted response is reused for subscribers that joined
+            // while validation was pending, avoiding a duplicate source fetch
+            // for the same key.
             if let Some(subscribers) = remaining {
-                // The first accepted response is reused for subscribers that
-                // joined while validation was pending, avoiding a duplicate
-                // source fetch for the same key.
                 if !accepted {
                     self.deliveries.accept_response(&key);
                 }
@@ -513,10 +513,10 @@ where
             return;
         }
 
+        // A cached response already satisfied at least one subscriber. Treat a
+        // later rejection during redelivery as stale application feedback rather
+        // than re-fetching data that was accepted once.
         if accepted {
-            // A cached response already satisfied at least one subscriber.
-            // Treat a later rejection during redelivery as stale application
-            // feedback rather than re-fetching data that was accepted once.
             warn!(
                 ?key,
                 "previously accepted resolver response rejected during opaque redelivery"
