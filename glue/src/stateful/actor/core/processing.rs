@@ -6,9 +6,13 @@ use crate::stateful::{
     Application,
 };
 use commonware_actor::mailbox as actor_mailbox;
-use commonware_consensus::marshal::{
-    ancestry::BlockProvider,
-    core::{Mailbox as MarshalMailbox, Variant},
+use commonware_consensus::{
+    marshal::{
+        ancestry::BlockProvider,
+        core::{Mailbox as MarshalMailbox, Variant},
+    },
+    types::Height,
+    Heightable,
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
@@ -45,6 +49,10 @@ where
 
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
+
+    /// Finalized marshal blocks at or below this height were already reflected
+    /// in the database set selected at startup.
+    pub(super) skip_finalized_until: Option<Height>,
 }
 
 impl<E, A, S, V, R> Processing<E, A, S, V, R>
@@ -100,6 +108,10 @@ where
                     block,
                     acknowledgement,
                 } => {
+                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                        acknowledgement.acknowledge();
+                        continue;
+                    }
                     if let FinalizeStatus::Persisted { height } =
                         self.processor.finalize(&self.context, block).await
                     {
@@ -112,5 +124,44 @@ where
                 }
             },
         }
+    }
+}
+
+fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool {
+    let Some(target) = *skip_until else {
+        return false;
+    };
+    if height > target {
+        *skip_until = None;
+        return false;
+    }
+    if height == target {
+        *skip_until = None;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skip_finalized_block;
+    use commonware_consensus::types::Height;
+
+    #[test]
+    fn skip_finalized_block_skips_through_target_height() {
+        let mut skip_until = Some(Height::new(3));
+
+        assert!(skip_finalized_block(&mut skip_until, Height::new(1)));
+        assert_eq!(skip_until, Some(Height::new(3)));
+        assert!(skip_finalized_block(&mut skip_until, Height::new(3)));
+        assert_eq!(skip_until, None);
+        assert!(!skip_finalized_block(&mut skip_until, Height::new(4)));
+    }
+
+    #[test]
+    fn skip_finalized_block_clears_stale_target() {
+        let mut skip_until = Some(Height::new(3));
+
+        assert!(!skip_finalized_block(&mut skip_until, Height::new(4)));
+        assert_eq!(skip_until, None);
     }
 }

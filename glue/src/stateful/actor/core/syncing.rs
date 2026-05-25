@@ -211,8 +211,8 @@ where
         Some(Some((block, acknowledgement)))
     }
 
-    /// Transitions to [`Processing`] state following the alignment of marshal's processed height
-    /// on the converged database [`Anchor`].
+    /// Transitions to [`Processing`] state once the database set has converged
+    /// on the startup-sync [`Anchor`].
     async fn transition(mut self, handoff: Option<(A::Block, Exact)>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
@@ -238,15 +238,12 @@ where
             acknowledgement.acknowledge();
         }
 
-        let marshal = self.marshal.clone();
         let partition_prefix = self.partition_prefix.clone();
         self.context
             .as_present()
-            .child("state_sync_complete")
+            .child("state_sync_height")
             .spawn(move |context| async move {
-                if marshal.wait_processed_height(synced_height).await {
-                    syncer::set_sync_complete(&context, partition_prefix.as_str()).await;
-                }
+                syncer::set_sync_height(&context, partition_prefix.as_str(), synced_height).await;
             });
 
         // Attach the resolvers to the initialized databases before starting the processor,
@@ -280,6 +277,7 @@ where
             marshal: self.marshal,
             resolvers: self.resolvers,
             processor,
+            skip_finalized_until: None,
         }
         .start()
         .await

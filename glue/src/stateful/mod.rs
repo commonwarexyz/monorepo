@@ -31,22 +31,24 @@
 //! # Syncing
 //!
 //! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
-//! The plan reads the durable state-sync flag; callers gate floor selection
+//! The plan reads the durable startup-sync height; callers gate floor selection
 //! on [`SyncPlan::may_state_sync`] and, if state sync is desired, attach a finalized
 //! floor via [`SyncPlan::with_floor`]. The same plan then drives marshal (via
 //! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
-//! actors are guaranteed to agree on the startup decision. Once the durable flag
+//! actors are guaranteed to agree on the startup decision. Once the durable height
 //! is set, the node never performs peer state sync again and must recover from
-//! marshal's processed height on future startups.
+//! the later of the stored height and marshal's processed height on future startups.
 //!
 //! The actor supports two sync paths:
 //!
 //! - **Marshal sync** (no floor attached): [`Stateful::start`] prepares the
 //!   databases before the actor is spawned. Fresh nodes initialize from
-//!   genesis; restarted nodes reconcile the database set against marshal's
-//!   processed anchor, rewinding if needed. The actor then starts directly in
-//!   normal processing mode while marshal continues backfilling blocks from the
-//!   network.
+//!   genesis; restarted nodes reconcile the database set against the later of
+//!   marshal's processed anchor and the stored startup-sync height, rewinding if
+//!   needed. If marshal is behind that stored height, the actor acknowledges old
+//!   finalized blocks without applying them again until marshal catches up. The
+//!   actor then starts directly in normal processing mode while marshal continues
+//!   backfilling blocks from the network.
 //!
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
@@ -56,9 +58,9 @@
 //!   acknowledges it immediately. Once bootstrap freezes databases at
 //!   `database_anchor`, the actor enters normal processing. If a finalized block
 //!   above `database_anchor` arrives first, the actor processes it during handoff.
-//!   A durable metadata flag records that this one-time peer sync/bootstrap has
-//!   completed; subsequent restarts must take the marshal sync path to ensure a
-//!   contiguous stream.
+//!   Durable metadata records the anchor height reached by this one-time peer
+//!   sync/bootstrap; subsequent restarts must take the marshal sync path to
+//!   ensure a contiguous stream.
 //!
 //! # Lazy Recovery
 //!

@@ -57,13 +57,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the latest processed height.
         response: oneshot::Sender<Option<Height>>,
     },
-    /// A request to wait until the processed height is durable at or above `height`.
-    WaitProcessedHeight {
-        /// The processed height to wait for.
-        height: Height,
-        /// A channel signaled once the processed height is durable.
-        response: oneshot::Sender<()>,
-    },
     /// A hint that a finalized block may be available at a given height.
     ///
     /// This triggers a network fetch if the finalization is not available locally.
@@ -268,8 +261,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetProcessedHeight { .. }
-            | Self::WaitProcessedHeight { .. } => false,
+            | Self::GetProcessedHeight { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -290,7 +282,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessedHeight { response } => response.is_closed(),
-            Self::WaitProcessedHeight { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -612,15 +603,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .sender
             .enqueue(Message::GetProcessedHeight { response });
         receiver.await.ok().flatten()
-    }
-
-    /// Wait until the processed height is durably stored at or above `height`.
-    pub async fn wait_processed_height(&self, height: Height) -> bool {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::WaitProcessedHeight { height, response });
-        receiver.await.is_ok()
     }
 
     /// Hints that a finalized block may be available at the given height.
