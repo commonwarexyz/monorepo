@@ -18,7 +18,7 @@ use commonware_consensus::{
     },
     Epochable, Heightable, Viewable,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, Storage};
 use commonware_utils::{
@@ -147,10 +147,8 @@ where
                     block,
                     acknowledgement,
                 } => {
-                    if let Some((block, acknowledgement)) =
-                        self.process_finalized(block, acknowledgement).await
-                    {
-                        self.transition(Some((block, acknowledgement))).await;
+                    if let Some(handoff) = self.process_finalized(block, acknowledgement).await {
+                        self.transition(handoff).await;
                         return;
                     }
                 }
@@ -170,7 +168,7 @@ where
         &mut self,
         block: A::Block,
         acknowledgement: Exact,
-    ) -> Option<(A::Block, Exact)> {
+    ) -> Option<Option<(A::Block, Exact)>> {
         if self.artifact.is_none() {
             let anchor = Anchor::from(&block);
             let targets = A::sync_targets(&block);
@@ -195,17 +193,22 @@ where
             .as_ref()
             .expect("sync artifact must exist after sync handoff");
 
-        // The sync anchor can only advance from finalized blocks that this actor already
-        // forwarded through the observation barrier, and marshal reports finalized blocks
-        // in strict height order. By the time sync completes, the next finalized block we
-        // see must therefore be the first post-sync block.
+        if block.height() == artifact.anchor.height {
+            assert_eq!(
+                block.digest(),
+                artifact.anchor.digest,
+                "finalized block at sync anchor height must match sync anchor digest",
+            );
+            acknowledgement.acknowledge();
+            return Some(None);
+        }
+
         assert_eq!(
             block.height(),
             artifact.anchor.height.next(),
-            "marshal must deliver the first post-sync finalized block immediately after the sync anchor",
+            "finalized block after sync anchor must be the next finalized block",
         );
-
-        Some((block, acknowledgement))
+        Some(Some((block, acknowledgement)))
     }
 
     /// Transitions to [`Processing`] state following the alignment of marshal's processed height
@@ -280,5 +283,439 @@ where
         }
         .start()
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Syncing;
+    use crate::stateful::{
+        actor::syncer::{self, SyncResult},
+        db::{Anchor, AttachableResolver, ManagedDb, Merkleized, Unmerkleized},
+        Application, Proposed,
+    };
+    use commonware_actor::mailbox as actor_mailbox;
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+    use commonware_consensus::{
+        marshal::{self, core::Actor as MarshalActor, standard::Standard},
+        simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
+        types::{Epoch, FixedEpocher, Height, View, ViewDelta},
+        Block as ConsensusBlock, CertifiableBlock, Heightable,
+    };
+    use commonware_cryptography::{
+        certificate::ConstantProvider, ed25519, sha256::Digest as Sha256Digest, Digest as _,
+        Digestible, Signer as _,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Buf, BufMut, ContextCell, Runner as _,
+        Supervisor as _,
+    };
+    use commonware_storage::archive::immutable;
+    use commonware_utils::{
+        acknowledgement::Exact, channel::oneshot, sync::AsyncRwLock, Acknowledgement, NZUsize,
+        NZU16, NZU64,
+    };
+    use futures::{FutureExt, Stream};
+    use std::{convert::Infallible, sync::Arc};
+
+    type TestDatabases = Arc<AsyncRwLock<TestDb>>;
+    type TestVariant = Standard<TestBlock>;
+    type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
+
+    #[derive(Clone, Copy)]
+    struct TestUnmerkleized;
+
+    #[derive(Clone, Copy)]
+    struct TestMerkleized;
+
+    impl Unmerkleized for TestUnmerkleized {
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+
+        async fn merkleize(self) -> Result<Self::Merkleized, Self::Error> {
+            Ok(TestMerkleized)
+        }
+    }
+
+    impl Merkleized for TestMerkleized {
+        type Digest = Sha256Digest;
+        type Unmerkleized = TestUnmerkleized;
+
+        fn root(&self) -> Self::Digest {
+            Sha256Digest::from([0; 32])
+        }
+
+        fn new_batch(&self) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+    }
+
+    #[derive(Default)]
+    struct TestDb;
+
+    impl<E: Send> ManagedDb<E> for TestDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            Ok(Self)
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            0
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TestBlock {
+        context: SimplexContext<Sha256Digest, ed25519::PublicKey>,
+        height: Height,
+        digest: Sha256Digest,
+    }
+
+    impl TestBlock {
+        fn new(height: u64, digest_byte: u8) -> Self {
+            Self {
+                context: SimplexContext {
+                    round: commonware_consensus::types::Round::new(
+                        Epoch::zero(),
+                        View::new(height),
+                    ),
+                    leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                    parent: (View::zero(), Sha256Digest::EMPTY),
+                },
+                height: Height::new(height),
+                digest: Sha256Digest::from([digest_byte; 32]),
+            }
+        }
+    }
+
+    impl Write for TestBlock {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.context.write(buf);
+            buf.put_u64(self.height.get());
+            buf.put_slice(self.digest.as_ref());
+        }
+    }
+
+    impl EncodeSize for TestBlock {
+        fn encode_size(&self) -> usize {
+            self.context.encode_size() + 8 + 32
+        }
+    }
+
+    impl Read for TestBlock {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+            let context = SimplexContext::read(buf)?;
+            let height = Height::new(buf.get_u64());
+            let mut digest = [0u8; 32];
+            buf.copy_to_slice(&mut digest);
+            Ok(Self {
+                context,
+                height,
+                digest: Sha256Digest::from(digest),
+            })
+        }
+    }
+
+    impl Digestible for TestBlock {
+        type Digest = Sha256Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.digest
+        }
+    }
+
+    impl Heightable for TestBlock {
+        fn height(&self) -> Height {
+            self.height
+        }
+    }
+
+    impl ConsensusBlock for TestBlock {
+        fn parent(&self) -> Self::Digest {
+            Sha256Digest::EMPTY
+        }
+    }
+
+    impl CertifiableBlock for TestBlock {
+        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
+
+        fn context(&self) -> Self::Context {
+            self.context.clone()
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestApp;
+
+    impl Application<deterministic::Context> for TestApp {
+        type SigningScheme = TestScheme;
+        type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
+        type Block = TestBlock;
+        type Databases = TestDatabases;
+        type InputProvider = ();
+
+        fn sync_targets(
+            block: &Self::Block,
+        ) -> <Self::Databases as crate::stateful::db::DatabaseSet<deterministic::Context>>::SyncTargets{
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as crate::stateful::db::DatabaseSet<
+                deterministic::Context,
+            >>::Unmerkleized,
+            _input: &mut Self::InputProvider,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as crate::stateful::db::DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> Option<<Self::Databases as crate::stateful::db::DatabaseSet<deterministic::Context>>::Merkleized>{
+            None
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: <Self::Databases as crate::stateful::db::DatabaseSet<
+                deterministic::Context,
+            >>::Unmerkleized,
+        ) -> <Self::Databases as crate::stateful::db::DatabaseSet<deterministic::Context>>::Merkleized
+        {
+            TestMerkleized
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoopResolver;
+
+    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
+        async fn attach_database(&self, _db: Arc<AsyncRwLock<DB>>) {}
+    }
+
+    struct TestHarness {
+        syncing: Syncing<deterministic::Context, TestApp, TestScheme, TestVariant, NoopResolver>,
+    }
+
+    impl TestHarness {
+        async fn new(context: deterministic::Context, anchor: Anchor<Sha256Digest>) -> Self {
+            let (_mailbox_sender, mailbox) =
+                actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let (syncer_sender, _syncer_receiver) =
+                actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
+            let (_sync_complete, sync_completed) = oneshot::channel();
+
+            Self {
+                syncing: Syncing {
+                    context: ContextCell::new(context.child("syncing")),
+                    mailbox,
+                    application: TestApp,
+                    input_provider: (),
+                    marshal: init_marshal_mailbox(context.child("marshal")).await,
+                    partition_prefix: "syncing-test".to_string(),
+                    syncer: syncer::Mailbox::new(syncer_sender),
+                    held_verify_requests: Vec::new(),
+                    database_subscribers: Vec::new(),
+                    artifact: Some(SyncResult {
+                        databases: Arc::new(AsyncRwLock::new(TestDb)),
+                        anchor,
+                    }),
+                    resolvers: NoopResolver,
+                    sync_completed,
+                },
+            }
+        }
+    }
+
+    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
+        immutable::Config {
+            metadata_partition: format!("{partition}-metadata"),
+            freezer_table_partition: format!("{partition}-table"),
+            freezer_table_initial_size: 4,
+            freezer_table_resize_frequency: 2,
+            freezer_table_resize_chunk_size: 2,
+            freezer_key_partition: format!("{partition}-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{partition}-value"),
+            freezer_value_target_size: 128,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{partition}-ordinal"),
+            items_per_section: NZU64!(4),
+            codec_config: (),
+            replay_buffer: NZUsize!(64),
+            freezer_key_write_buffer: NZUsize!(64),
+            freezer_value_write_buffer: NZUsize!(64),
+            ordinal_write_buffer: NZUsize!(64),
+        }
+    }
+
+    async fn init_marshal_mailbox(
+        mut context: deterministic::Context,
+    ) -> commonware_consensus::marshal::core::Mailbox<TestScheme, TestVariant> {
+        let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(page_cache.clone(), "syncing-finalizations"),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), "syncing-blocks"),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+
+        let (_actor, mailbox, _height) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+            context.child("marshal_actor"),
+            finalizations_by_height,
+            finalized_blocks,
+            marshal::Config {
+                provider,
+                epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                partition_prefix: "syncing-harness".to_string(),
+                mailbox_size: NZUsize!(8),
+                view_retention_timeout: ViewDelta::new(1),
+                prunable_items_per_section: NZU64!(4),
+                page_cache,
+                replay_buffer: NZUsize!(64),
+                key_write_buffer: NZUsize!(64),
+                value_write_buffer: NZUsize!(64),
+                block_codec_config: (),
+                max_repair: NZUsize!(1),
+                max_pending_acks: NZUsize!(1),
+                strategy: Sequential,
+            },
+        )
+        .await;
+        mailbox
+    }
+
+    fn anchor(height: u64, digest_byte: u8) -> Anchor<Sha256Digest> {
+        Anchor {
+            height: Height::new(height),
+            round: commonware_consensus::types::Round::new(Epoch::zero(), View::new(height)),
+            digest: Sha256Digest::from([digest_byte; 32]),
+        }
+    }
+
+    #[test]
+    fn anchor_height_block_acknowledges_and_transitions_without_handoff() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let (acknowledgement, waiter) = Exact::handle();
+
+            let action = harness
+                .syncing
+                .process_finalized(TestBlock::new(7, 9), acknowledgement)
+                .await;
+
+            assert!(waiter.await.is_ok());
+            assert!(matches!(action, Some(None)));
+        });
+    }
+
+    #[test]
+    fn next_height_block_transitions_with_handoff_without_early_ack() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let (acknowledgement, waiter) = Exact::handle();
+
+            let action = harness
+                .syncing
+                .process_finalized(TestBlock::new(8, 10), acknowledgement)
+                .await;
+
+            assert!(waiter.now_or_never().is_none());
+
+            let Some(Some((block, acknowledgement))) = action else {
+                panic!("post-anchor block should be handed off to processor");
+            };
+            assert_eq!(block.height().get(), 8);
+            acknowledgement.acknowledge();
+        });
+    }
+
+    #[test]
+    fn anchor_height_block_with_conflicting_digest_panics() {
+        let panic = std::panic::catch_unwind(|| {
+            deterministic::Runner::default().start(|context| async move {
+                let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+                let (acknowledgement, _waiter) = Exact::handle();
+                let _ = harness
+                    .syncing
+                    .process_finalized(TestBlock::new(7, 10), acknowledgement)
+                    .await;
+            });
+        })
+        .expect_err("conflicting anchor digest should panic");
+
+        let panic = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&'static str>().copied())
+            .expect("panic should be a string");
+        assert!(panic.contains("sync anchor digest"));
+    }
+
+    #[test]
+    fn non_anchor_non_next_block_panics() {
+        let panic = std::panic::catch_unwind(|| {
+            deterministic::Runner::default().start(|context| async move {
+                let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+                let (acknowledgement, _waiter) = Exact::handle();
+                let _ = harness
+                    .syncing
+                    .process_finalized(TestBlock::new(9, 10), acknowledgement)
+                    .await;
+            });
+        })
+        .expect_err("unexpected finalized height should panic");
+
+        let panic = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&'static str>().copied())
+            .expect("panic should be a string");
+        assert!(panic.contains("next finalized block"));
     }
 }
