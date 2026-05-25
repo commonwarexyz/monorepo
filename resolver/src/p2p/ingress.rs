@@ -70,9 +70,7 @@ where
     {
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
-                .map(|key| {
-                    fetch_key(key.into(), None)
-                })
+                .map(|key| fetch_key(key.into(), None))
                 .collect(),
         ))
     }
@@ -133,9 +131,7 @@ where
     {
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
-                .map(|(key, targets)| {
-                    fetch_key(key.into(), Some(targets))
-                })
+                .map(|(key, targets)| fetch_key(key.into(), Some(targets)))
                 .collect(),
         ))
     }
