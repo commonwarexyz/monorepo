@@ -6,7 +6,7 @@
 
 use commonware_utils::vec::NonEmptyVec;
 use std::collections::{
-    btree_map::{Entry as BTreeMapEntry, Iter as BTreeMapIter},
+    btree_map::Entry as BTreeMapEntry,
     BTreeMap, BTreeSet,
 };
 
@@ -111,11 +111,6 @@ where
             return None;
         }
         self.pending(key)
-    }
-
-    /// Iterate over tracked keys and subscriber sets.
-    pub fn iter(&self) -> BTreeMapIter<'_, K, BTreeSet<S>> {
-        self.entries.iter()
     }
 
     fn non_empty(subscribers: &BTreeSet<S>) -> Option<NonEmptyVec<S>> {
