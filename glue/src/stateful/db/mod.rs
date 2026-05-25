@@ -1347,10 +1347,10 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         assert_rewind_window_safety, Anchor, AttachableResolver, AttachableResolverSet,
-        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, Merkleized, StateSyncDb,
-        StateSyncSet, SyncEngineConfig, TipUpdate, Unmerkleized, MAX_CHANNEL_DRAIN_PER_TICK,
+        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, StateSyncDb, StateSyncSet,
+        SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
     };
-    use commonware_consensus::types::{Epoch, Height, Round, View};
+    use crate::stateful::tests::mocks::{anchor as mock_anchor, TestMerkleized, TestUnmerkleized};
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
@@ -1370,33 +1370,6 @@ mod tests {
         },
         time::Duration,
     };
-
-    #[derive(Clone, Copy)]
-    struct TestUnmerkleized;
-
-    struct TestMerkleized;
-
-    impl Unmerkleized for TestUnmerkleized {
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-
-        async fn merkleize(self) -> Result<Self::Merkleized, Self::Error> {
-            Ok(TestMerkleized)
-        }
-    }
-
-    impl Merkleized for TestMerkleized {
-        type Digest = sha256::Digest;
-        type Unmerkleized = TestUnmerkleized;
-
-        fn root(&self) -> Self::Digest {
-            sha256::Digest::from([0; 32])
-        }
-
-        fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-    }
 
     #[derive(Default)]
     struct TestDb;
@@ -2563,11 +2536,7 @@ mod tests {
     type TestAnchor = Anchor<sha256::Digest>;
 
     fn anchor(n: u64) -> TestAnchor {
-        Anchor {
-            height: Height::new(n),
-            round: Round::new(Epoch::zero(), View::new(n)),
-            digest: sha256::Digest::from([n as u8; 32]),
-        }
+        mock_anchor(n, n as u8)
     }
 
     #[test]
