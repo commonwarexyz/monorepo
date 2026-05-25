@@ -25,7 +25,12 @@ use commonware_cryptography::{sha256, Sha256};
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    non_empty_range,
+    sync::Mutex,
+    test_rng_seeded, NZUsize, NZU16, NZU64,
+};
 use rand::RngCore as _;
 use std::{
     future::Future,
@@ -1028,6 +1033,8 @@ mod compact_variable_mmr {
         (commonware_codec::RangeCfg<usize>, ()),
         Sequential,
     >;
+    type CompactOp = variable::Operation<mmr::Family, Vec<u8>>;
+    type CompactState = sync::compact::State<mmr::Family, CompactOp, sha256::Digest>;
 
     fn source_config(
         suffix: &str,
@@ -1068,25 +1075,64 @@ mod compact_variable_mmr {
 
     #[derive(Clone)]
     struct StaticResolver {
-        state: sync::compact::State<
-            mmr::Family,
-            variable::Operation<mmr::Family, Vec<u8>>,
-            sha256::Digest,
-        >,
+        state: CompactState,
     }
 
     impl sync::compact::Resolver for StaticResolver {
         type Family = mmr::Family;
         type Digest = sha256::Digest;
-        type Op = variable::Operation<mmr::Family, Vec<u8>>;
+        type Op = CompactOp;
         type Error = qmdb::Error<mmr::Family>;
 
         async fn get_compact_state(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
         {
-            Ok(self.state.clone())
+            Ok(sync::compact::FetchResult::new(self.state.clone()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct RetryingResolver {
+        states: Arc<Mutex<std::collections::VecDeque<CompactState>>>,
+        feedback: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+    }
+
+    impl RetryingResolver {
+        fn new(states: Vec<CompactState>) -> Self {
+            Self {
+                states: Arc::new(Mutex::new(states.into())),
+                feedback: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn take_feedback(&self) -> Vec<oneshot::Receiver<bool>> {
+            std::mem::take(&mut *self.feedback.lock())
+        }
+    }
+
+    impl sync::compact::Resolver for RetryingResolver {
+        type Family = mmr::Family;
+        type Digest = sha256::Digest;
+        type Op = CompactOp;
+        type Error = qmdb::Error<mmr::Family>;
+
+        async fn get_compact_state(
+            &self,
+            _target: sync::compact::Target<Self::Family, Self::Digest>,
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        {
+            let state = self
+                .states
+                .lock()
+                .pop_front()
+                .expect("test resolver exhausted");
+            let (success_tx, success_rx) = oneshot::channel();
+            self.feedback.lock().push(success_rx);
+            Ok(sync::compact::FetchResult::with_success_tx(
+                state, success_tx,
+            ))
         }
     }
 
@@ -1175,7 +1221,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1216,7 +1263,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix);
@@ -1249,6 +1297,63 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
+    fn test_compact_sync_retries_feedback_rejected_pinned_nodes() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-keyless-retry-bad-pins-{}", context.next_u64());
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
+            let metadata = vec![7];
+            let batch = source
+                .new_batch()
+                .append(vec![1, 2, 3])
+                .append(vec![4, 5, 6])
+                .merkleize(&source, Some(metadata.clone()), Location::new(2));
+            source.apply_batch(batch).await.unwrap();
+            source.commit().await.unwrap();
+
+            let bounds = source.bounds().await;
+            let target = sync::compact::Target::new(source.root(), bounds.end);
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+            let mut bad_state = good_state.clone();
+            bad_state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
+            let resolver = RetryingResolver::new(vec![bad_state, good_state]);
+
+            let client_cfg = client_config(&suffix);
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver: resolver.clone(),
+                target: target.clone(),
+                db_config: client_cfg.clone(),
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(client.root(), target.root);
+            assert_eq!(client.get_metadata(), Some(metadata));
+            let mut feedback = resolver.take_feedback();
+            assert_eq!(feedback.len(), 2);
+            assert!(!feedback.remove(0).await.expect("first feedback"));
+            assert!(feedback.remove(0).await.expect("second feedback"));
+
+            drop(client);
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+                .await
+                .unwrap();
+            assert_eq!(reopened.root(), target.root);
+
+            reopened.destroy().await.unwrap();
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_compact_sync_rejects_leaf_count_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-bad-leaf-count-{}", context.next_u64());
@@ -1268,7 +1373,7 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap().state;
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1533,9 +1638,9 @@ mod compact_variable_mmb {
         async fn get_compact_state(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
         {
-            Ok(self.state.clone())
+            Ok(sync::compact::FetchResult::new(self.state.clone()))
         }
     }
 
@@ -1624,7 +1729,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1665,7 +1771,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix);
@@ -1717,7 +1824,7 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap().state;
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {

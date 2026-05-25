@@ -483,11 +483,38 @@ where
             let mut current_anchor = anchor;
             let mut tip_updates = Some(tip_updates);
             loop {
+                if !drain_single_tip_updates(
+                    &mut tip_updates,
+                    &mut current_anchor,
+                    &mut current_target,
+                    &target_tx,
+                )
+                .await
+                {
+                    return current_anchor;
+                }
+
                 let update_future = tip_updates.as_mut().map_or_else(
                     || Either::Right(pending()),
                     |updates| Either::Left(updates.recv()),
                 );
                 select! {
+                    update = update_future => {
+                        let Some(update) = update else {
+                            tip_updates = None;
+                            continue;
+                        };
+                        if !record_single_tip_update(
+                            update,
+                            &mut current_anchor,
+                            &mut current_target,
+                            &target_tx,
+                        )
+                        .await
+                        {
+                            return current_anchor;
+                        }
+                    },
                     reached = reached_rx.recv() => {
                         let Some(reached) = reached else {
                             return current_anchor;
@@ -495,23 +522,21 @@ where
                         if reached != current_target {
                             continue;
                         }
-                        let _ = finish_tx.send_lossy(()).await;
-                        return current_anchor;
-                    },
-                    update = update_future => {
-                        let Some(update) = update else {
-                            tip_updates = None;
-                            continue;
-                        };
-                        let (new_anchor, new_target) = update.record();
-                        if new_anchor.height <= current_anchor.height {
-                            continue;
-                        }
-                        current_anchor = new_anchor;
-                        current_target = new_target.clone();
-                        if !target_tx.send_lossy(new_target).await {
+                        if !drain_single_tip_updates(
+                            &mut tip_updates,
+                            &mut current_anchor,
+                            &mut current_target,
+                            &target_tx,
+                        )
+                        .await
+                        {
                             return current_anchor;
                         }
+                        if reached != current_target {
+                            continue;
+                        }
+                        let _ = finish_tx.send_lossy(()).await;
+                        return current_anchor;
                     },
                 }
             }
@@ -956,6 +981,68 @@ impl_state_sync_set!(
     DB7: R7: 6,
     DB8: R8: 7
 );
+
+async fn record_single_tip_update<D, T>(
+    update: TipUpdate<D, T>,
+    current_anchor: &mut Anchor<D>,
+    current_target: &mut T,
+    target_tx: &mpsc::Sender<T>,
+) -> bool
+where
+    D: Digest,
+    T: Clone + Send + Sync + 'static,
+{
+    let (new_anchor, new_target) = update.record();
+    if new_anchor.height <= current_anchor.height {
+        return true;
+    }
+    *current_anchor = new_anchor;
+    *current_target = new_target.clone();
+    target_tx.send_lossy(new_target).await
+}
+
+async fn drain_single_tip_updates<D, T>(
+    tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
+    current_anchor: &mut Anchor<D>,
+    current_target: &mut T,
+    target_tx: &mpsc::Sender<T>,
+) -> bool
+where
+    D: Digest,
+    T: Clone + Send + Sync + 'static,
+{
+    let Some(updates) = tip_updates.as_mut() else {
+        return true;
+    };
+
+    let mut disconnected = false;
+    let mut drained = 0usize;
+    loop {
+        match updates.try_recv() {
+            Ok(update) => {
+                if !record_single_tip_update(update, current_anchor, current_target, target_tx)
+                    .await
+                {
+                    return false;
+                }
+                drained += 1;
+                if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
+                    reschedule().await;
+                }
+            }
+            Err(ring::TryRecvError::Empty) => break,
+            Err(ring::TryRecvError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
+    }
+
+    if disconnected {
+        *tip_updates = None;
+    }
+    true
+}
 
 async fn drain_generation_updates<T>(
     generation_rx: &mut Option<mpsc::Receiver<(usize, T)>>,
@@ -2428,6 +2515,53 @@ mod tests {
 
             let (_database, converged_anchor) = sync.await.expect("sync task should complete");
             assert_eq!(converged_anchor, anchor(0));
+        });
+    }
+
+    #[test]
+    fn single_state_sync_records_ready_tip_before_converging() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let release = Arc::new(AtomicBool::new(true));
+
+            tip_tx
+                .send(TipUpdate::new(anchor(1), 1))
+                .await
+                .expect("tip update should enqueue");
+            drop(tip_tx);
+
+            let (database, converged_anchor) = <Arc<AsyncRwLock<SlowSyncDb>> as StateSyncSet<
+                deterministic::Context,
+                Arc<AtomicBool>,
+                sha256::Digest,
+            >>::sync(
+                context,
+                (),
+                release,
+                anchor(0),
+                0,
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 1,
+                    update_channel_size: NonZeroUsize::new(4).unwrap(),
+                    max_retained_roots: 0,
+                },
+            )
+            .await
+            .expect("single state sync should succeed");
+
+            assert_eq!(
+                database.read().await.final_target,
+                1,
+                "ready tip update must be recorded before convergence"
+            );
+            assert_eq!(
+                converged_anchor,
+                anchor(1),
+                "converged anchor must include the ready tip update"
+            );
         });
     }
 

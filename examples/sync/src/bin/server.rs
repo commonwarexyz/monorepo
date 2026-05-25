@@ -368,7 +368,7 @@ where
 
     Ok(wire::GetCompactStateResponse {
         request_id: request.request_id,
-        state: compact_state,
+        state: compact_state.state,
     })
 }
 

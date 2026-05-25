@@ -72,8 +72,12 @@ use commonware_codec::{
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage};
-use commonware_utils::{sync::AsyncRwLock, Array};
+use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    sync::AsyncRwLock,
+    Array,
+};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
@@ -163,6 +167,39 @@ pub struct State<F: Family, Op, D: Digest> {
     pub last_commit_proof: Proof<F, D>,
 }
 
+/// Compact state fetched from a resolver, with an optional validation callback.
+pub struct FetchResult<F: Family, Op, D: Digest> {
+    /// Authenticated compact state returned by the resolver.
+    pub state: State<F, Op, D>,
+
+    /// Channel used by compact sync to report whether the resolver response was valid.
+    ///
+    /// When absent, invalid state is returned to the caller as an error instead of
+    /// being reported to the resolver and retried.
+    pub success_tx: Option<oneshot::Sender<bool>>,
+}
+
+impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
+    /// Wrap state from a trusted/local resolver that does not need feedback.
+    pub const fn new(state: State<F, Op, D>) -> Self {
+        Self {
+            state,
+            success_tx: None,
+        }
+    }
+
+    /// Wrap state with an explicit validation callback.
+    pub const fn with_success_tx(
+        state: State<F, Op, D>,
+        success_tx: oneshot::Sender<bool>,
+    ) -> Self {
+        Self {
+            state,
+            success_tx: Some(success_tx),
+        }
+    }
+}
+
 impl<F: Family, Op, D: Digest> Write for State<F, Op, D>
 where
     Op: Write,
@@ -243,7 +280,9 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     fn get_compact_state<'a>(
         &'a self,
         target: Target<Self::Family, Self::Digest>,
-    ) -> impl Future<Output = Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
+    ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
+           + Send
+           + 'a;
 }
 
 /// Marker trait for resolvers whose associated types match a specific compact-sync database.
@@ -334,41 +373,73 @@ where
     target
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
-    let state = config
-        .resolver
-        .get_compact_state(target.clone())
+    loop {
+        let FetchResult { state, success_tx } = config
+            .resolver
+            .get_compact_state(target.clone())
+            .await
+            .map_err(Error::Resolver)?;
+
+        if state.leaf_count != target.leaf_count {
+            if let Some(success_tx) = success_tx {
+                success_tx.send_lossy(false);
+                continue;
+            }
+            return Err(Error::Engine(EngineError::UnexpectedLeafCount {
+                expected: target.leaf_count,
+                actual: state.leaf_count,
+            }));
+        }
+
+        let hasher = qmdb::hasher::<DB::Hasher>();
+        let last_commit_loc = Location::new(*state.leaf_count - 1);
+        if !verify_proof(
+            &hasher,
+            &state.last_commit_proof,
+            last_commit_loc,
+            std::slice::from_ref(&state.last_commit_op),
+            &target.root,
+        ) {
+            if let Some(success_tx) = success_tx {
+                success_tx.send_lossy(false);
+                continue;
+            }
+            return Err(Error::Engine(EngineError::InvalidProof));
+        }
+
+        let db = match DB::from_compact_state(
+            config.context.child("candidate"),
+            config.db_config.clone(),
+            state,
+        )
         .await
-        .map_err(Error::Resolver)?;
-
-    if state.leaf_count != target.leaf_count {
-        return Err(Error::Engine(EngineError::UnexpectedLeafCount {
-            expected: target.leaf_count,
-            actual: state.leaf_count,
-        }));
+        {
+            Ok(db) => db,
+            Err(err) => {
+                if let Some(success_tx) = success_tx {
+                    success_tx.send_lossy(false);
+                    continue;
+                }
+                return Err(Error::Database(err));
+            }
+        };
+        let actual = db.root();
+        if actual != target.root {
+            if let Some(success_tx) = success_tx {
+                success_tx.send_lossy(false);
+                continue;
+            }
+            return Err(Error::Engine(EngineError::RootMismatch {
+                expected: target.root,
+                actual,
+            }));
+        }
+        if let Some(success_tx) = success_tx {
+            success_tx.send_lossy(true);
+        }
+        db.persist_compact_state().await?;
+        return Ok(db);
     }
-
-    let hasher = qmdb::hasher::<DB::Hasher>();
-    let last_commit_loc = Location::new(*state.leaf_count - 1);
-    if !verify_proof(
-        &hasher,
-        &state.last_commit_proof,
-        last_commit_loc,
-        std::slice::from_ref(&state.last_commit_op),
-        &target.root,
-    ) {
-        return Err(Error::Engine(EngineError::InvalidProof));
-    }
-
-    let db = DB::from_compact_state(config.context, config.db_config, state).await?;
-    let actual = db.root();
-    if actual != target.root {
-        return Err(Error::Engine(EngineError::RootMismatch {
-            expected: target.root,
-            actual,
-        }));
-    }
-    db.persist_compact_state().await?;
-    Ok(db)
 }
 
 async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(
@@ -376,7 +447,7 @@ async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistF
     current_target: Current,
     historical_proof: Hist,
     pinned_nodes_at: Pins,
-) -> Result<State<F, Op, D>, ServeError<F, D>>
+) -> Result<FetchResult<F, Op, D>, ServeError<F, D>>
 where
     F: Family,
     D: Digest,
@@ -412,12 +483,12 @@ where
     let pinned_nodes = pinned_nodes_at(leaf_count)
         .await
         .map_err(ServeError::Database)?;
-    Ok(State {
+    Ok(FetchResult::new(State {
         leaf_count,
         pinned_nodes,
         last_commit_op,
         last_commit_proof,
-    })
+    }))
 }
 
 // Resolver impls for full keyless databases. These synthesize compact state by querying the
@@ -440,7 +511,7 @@ macro_rules! impl_compact_resolver_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
                     || async { Target::new(self.root(), self.bounds().await.end) },
@@ -473,7 +544,7 @@ macro_rules! impl_compact_resolver_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
@@ -507,7 +578,7 @@ macro_rules! impl_compact_resolver_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
@@ -551,7 +622,7 @@ macro_rules! impl_compact_resolver_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
                     || async { Target::new(self.root(), self.bounds().await.end) },
@@ -587,7 +658,7 @@ macro_rules! impl_compact_resolver_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
@@ -624,7 +695,7 @@ macro_rules! impl_compact_resolver_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
@@ -667,8 +738,8 @@ macro_rules! impl_compact_resolver_compact_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target)
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                self.compact_state(target).map(FetchResult::new)
             }
         }
 
@@ -690,9 +761,9 @@ macro_rules! impl_compact_resolver_compact_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target)
+                db.compact_state(target).map(FetchResult::new)
             }
         }
 
@@ -714,10 +785,10 @@ macro_rules! impl_compact_resolver_compact_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target)
+                db.compact_state(target).map(FetchResult::new)
             }
         }
     };
@@ -746,8 +817,8 @@ macro_rules! impl_compact_resolver_compact_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target)
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                self.compact_state(target).map(FetchResult::new)
             }
         }
 
@@ -770,9 +841,9 @@ macro_rules! impl_compact_resolver_compact_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target)
+                db.compact_state(target).map(FetchResult::new)
             }
         }
 
@@ -795,10 +866,10 @@ macro_rules! impl_compact_resolver_compact_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target)
+                db.compact_state(target).map(FetchResult::new)
             }
         }
     };
