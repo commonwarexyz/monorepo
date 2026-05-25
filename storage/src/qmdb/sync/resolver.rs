@@ -74,6 +74,27 @@ impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
     }
 }
 
+/// Operations fetched from a resolver before packaging as a [`FetchResult`].
+pub struct FetchedOperations<F: Family, Op, D: Digest> {
+    /// The proof for the operations
+    pub proof: Proof<F, D>,
+    /// The operations that were fetched
+    pub operations: Vec<Op>,
+    /// Pinned merkle nodes at the start location, if requested
+    pub pinned_nodes: Option<Vec<D>>,
+}
+
+impl<F: Family, Op, D: Digest> FetchedOperations<F, Op, D> {
+    /// Creates fetched operations with optional pinned nodes.
+    pub const fn new(proof: Proof<F, D>, operations: Vec<Op>, pinned_nodes: Option<Vec<D>>) -> Self {
+        Self {
+            proof,
+            operations,
+            pinned_nodes,
+        }
+    }
+}
+
 impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FetchResult")
@@ -83,6 +104,28 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
             .field("pinned_nodes", &self.pinned_nodes)
             .finish()
     }
+}
+
+/// Fetch an operation range with optional pinned nodes and package it as a [`FetchResult`].
+pub async fn fetch_operation_range<F, Op, D, Error, Fetch, FetchFuture>(
+    op_count: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+    include_pinned_nodes: bool,
+    fetch: Fetch,
+) -> Result<FetchResult<F, Op, D>, Error>
+where
+    F: Family,
+    D: Digest,
+    Fetch: FnOnce(Location<F>, Location<F>, NonZeroU64, bool) -> FetchFuture,
+    FetchFuture: Future<Output = Result<FetchedOperations<F, Op, D>, Error>>,
+{
+    let FetchedOperations {
+        proof,
+        operations,
+        pinned_nodes,
+    } = fetch(op_count, start_loc, max_ops, include_pinned_nodes).await?;
+    Ok(FetchResult::new(proof, operations, pinned_nodes))
 }
 
 /// Fetch an operation range and package it as a [`FetchResult`].
@@ -102,13 +145,22 @@ where
     Pins: FnOnce(Location<F>) -> PinsFuture,
     PinsFuture: Future<Output = Result<Vec<D>, Error>>,
 {
-    let (proof, operations) = historical_proof(op_count, start_loc, max_ops).await?;
-    let pinned_nodes = if include_pinned_nodes {
-        Some(pinned_nodes_at(start_loc).await?)
-    } else {
-        None
-    };
-    Ok(FetchResult::new(proof, operations, pinned_nodes))
+    fetch_operation_range(
+        op_count,
+        start_loc,
+        max_ops,
+        include_pinned_nodes,
+        |op_count, start_loc, max_ops, include_pinned_nodes| async move {
+            let (proof, operations) = historical_proof(op_count, start_loc, max_ops).await?;
+            let pinned_nodes = if include_pinned_nodes {
+                Some(pinned_nodes_at(start_loc).await?)
+            } else {
+                None
+            };
+            Ok(FetchedOperations::new(proof, operations, pinned_nodes))
+        },
+    )
+    .await
 }
 
 /// Trait for network communication with the sync server.
