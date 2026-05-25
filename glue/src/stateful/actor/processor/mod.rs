@@ -175,7 +175,7 @@ where
                     ?parent_digest,
                     "proposal request incomplete during prepare_batches"
                 );
-                wait_for_cancel(&mut response).await;
+                response.closed().await;
                 return;
             }
         };
@@ -276,7 +276,7 @@ where
                     ?block_digest,
                     "verification request incomplete during processed-block check"
                 );
-                wait_for_cancel(&mut response).await;
+                response.closed().await;
                 return;
             }
             Err(PrepareBatchesError::Invalid) => {
@@ -318,7 +318,7 @@ where
                     ?parent_digest,
                     "verification request incomplete during prepare_batches"
                 );
-                wait_for_cancel(&mut response).await;
+                response.closed().await;
                 return;
             }
         };
@@ -706,11 +706,6 @@ where
     }
 }
 
-/// Keep an incomplete request alive until its caller gives up.
-async fn wait_for_cancel<R>(response: &mut oneshot::Sender<R>) {
-    response.closed().await;
-}
-
 /// Wait for `future` unless the response receiver is dropped.
 pub(super) async fn await_or_cancel<R, T, F>(
     response: &mut oneshot::Sender<R>,
@@ -727,7 +722,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{await_or_cancel, wait_for_cancel, FinalizeStatus, PrepareBatchesError, Processor};
+    use super::{await_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
@@ -760,7 +755,7 @@ mod tests {
         sync::{AsyncRwLock, Mutex},
         NZUsize, NZU16, NZU64,
     };
-    use futures::{FutureExt, Stream, StreamExt};
+    use futures::{Stream, StreamExt};
     use std::{
         collections::BTreeMap,
         future::Future,
@@ -1467,30 +1462,6 @@ mod tests {
                 1,
                 "incomplete ancestry should not retry a closed provider"
             );
-        });
-    }
-
-    #[test]
-    fn wait_for_cancel_keeps_response_pending_until_receiver_drops() {
-        deterministic::Runner::default().start(|_| async move {
-            let (mut response, mut receiver) = oneshot::channel::<bool>();
-            let pending = wait_for_cancel(&mut response);
-
-            futures::pin_mut!(pending);
-            assert!(
-                pending.as_mut().now_or_never().is_none(),
-                "wait_for_cancel must not resolve while the caller still waits"
-            );
-            assert!(
-                matches!(
-                    receiver.try_recv(),
-                    Err(oneshot::error::TryRecvError::Empty)
-                ),
-                "response must stay pending while the caller still waits"
-            );
-
-            drop(receiver);
-            pending.await;
         });
     }
 
