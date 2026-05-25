@@ -425,6 +425,7 @@ impl EngineDefinition for SingleDbEngine {
 
         // Marshal actor
         let provider = ConstantProvider::new(scheme.clone());
+        let max_pending_acks = NZUsize!(1);
         let marshal_config = marshal::Config {
             provider,
             epocher: FixedEpocher::new(EPOCH_LENGTH),
@@ -439,7 +440,7 @@ impl EngineDefinition for SingleDbEngine {
             value_write_buffer: IO_BUFFER_SIZE,
             block_codec_config: (),
             max_repair: NZUsize!(10),
-            max_pending_acks: NZUsize!(1),
+            max_pending_acks,
             strategy: Sequential,
         };
         let (marshal_actor, marshal_mailbox, _last_height) =
@@ -483,6 +484,7 @@ impl EngineDefinition for SingleDbEngine {
                 db_config,
                 input_provider: (),
                 marshal: marshal_mailbox.clone(),
+                max_pending_acks,
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,

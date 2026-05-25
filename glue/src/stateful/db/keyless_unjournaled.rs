@@ -259,6 +259,10 @@ where
         );
         Ok(())
     }
+
+    fn max_rewind_depth() -> Option<usize> {
+        Some(1)
+    }
 }
 
 impl<F, E, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, V, H, C, S>
@@ -315,6 +319,10 @@ where
             "rewound database target mismatch after one-step rewind",
         );
         Ok(())
+    }
+
+    fn max_rewind_depth() -> Option<usize> {
+        Some(1)
     }
 }
 
