@@ -239,7 +239,8 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
+        let bounds = batch.bounds();
+        batch.root() == target.root && target.leaf_count == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -300,7 +301,8 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
+        let bounds = batch.bounds();
+        batch.root() == target.root && target.leaf_count == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -642,6 +644,18 @@ mod tests {
                 .await
                 .unwrap();
             let expected_root = merkleized.root();
+            let matching_target =
+                sync::compact::Target::new(expected_root, mmr::Location::new(3));
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &matching_target,
+            ));
+            let wrong_leaf_count =
+                sync::compact::Target::new(expected_root, mmr::Location::new(2));
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_leaf_count,
+            ));
 
             {
                 let mut guard = db.write().await;

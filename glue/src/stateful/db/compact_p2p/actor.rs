@@ -75,6 +75,7 @@ enum State<DB> {
 enum MailboxAction<F: Family, D: commonware_cryptography::Digest> {
     None,
     Fetch(handler::Request<F, D>),
+    Cancel(handler::Request<F, D>),
 }
 
 /// Runs a compact QMDB sync resolver service over P2P.
@@ -182,6 +183,9 @@ where
                     MailboxAction::Fetch(request) => {
                         resolver_mailbox.fetch(request);
                     }
+                    MailboxAction::Cancel(request) => {
+                        resolver_mailbox.retain(move |key, _| key != &request);
+                    }
                 }
             },
             Some(message) = handler_rx.recv() else {
@@ -222,6 +226,17 @@ where
                 }
                 self.pending.insert(request.clone(), vec![response]);
                 MailboxAction::Fetch(request)
+            }
+            mailbox::Message::CancelState { request } => {
+                let Some(subscribers) = self.pending.get_mut(&request) else {
+                    return MailboxAction::None;
+                };
+                subscribers.retain(|subscriber| !subscriber.is_closed());
+                if !subscribers.is_empty() {
+                    return MailboxAction::None;
+                }
+                self.pending.remove(&request);
+                MailboxAction::Cancel(request)
             }
         }
     }
@@ -476,6 +491,32 @@ mod tests {
             futures::join!(deliver, reject);
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
+        });
+    }
+
+    #[test]
+    fn canceled_state_request_prunes_pending_and_resolver_fetch() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let target = compact::Target {
+                root: sha256::Digest::from([8; 32]),
+                leaf_count: mmr::Location::new(2),
+            };
+            let request = handler::Request::from_target(target);
+            let (pending_tx, pending_rx) = oneshot::channel();
+            actor.pending.insert(request.clone(), vec![pending_tx]);
+
+            drop(pending_rx);
+
+            match actor.handle_mailbox_message(mailbox::Message::CancelState {
+                request: request.clone(),
+            }) {
+                MailboxAction::Cancel(cancelled) => assert_eq!(cancelled, request),
+                MailboxAction::None | MailboxAction::Fetch(_) => {
+                    panic!("last canceled subscriber should cancel resolver fetch")
+                }
+            }
+            assert!(!actor.pending.contains_key(&request));
         });
     }
 

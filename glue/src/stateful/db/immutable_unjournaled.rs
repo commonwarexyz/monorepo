@@ -250,7 +250,8 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
+        let bounds = batch.bounds();
+        batch.root() == target.root && target.leaf_count == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -312,7 +313,8 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
+        let bounds = batch.bounds();
+        batch.root() == target.root && target.leaf_count == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {

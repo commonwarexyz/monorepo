@@ -47,6 +47,56 @@ use std::{ops::Deref, sync::Arc};
 type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
     Arc<AsyncRwLock<Db<F, E, C, I, H, U, N, S>>>;
 
+fn current_sync_boundary<F: Graftable, const N: usize>(
+    inactivity_floor: Location<F>,
+    ops_leaves: u64,
+) -> Location<F> {
+    let chunk_bits = commonware_utils::bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
+    let mut pruned_chunks = *inactivity_floor / chunk_bits;
+    let grafting_height = commonware_storage::qmdb::current::grafting::height::<N>();
+
+    while pruned_chunks > 0 {
+        let required_ops =
+            current_pair_absorption_threshold::<F, N>(pruned_chunks).unwrap_or_else(|| {
+                let youngest_start = (pruned_chunks - 1) * chunk_bits;
+                let pos =
+                    F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
+                F::peak_birth_size(pos, grafting_height)
+            });
+
+        if ops_leaves >= required_ops {
+            break;
+        }
+        pruned_chunks -= 1;
+    }
+
+    Location::new(pruned_chunks * chunk_bits)
+}
+
+fn current_pair_absorption_threshold<F: Graftable, const N: usize>(
+    pruned_chunks: u64,
+) -> Option<u64> {
+    if pruned_chunks == 0 {
+        return None;
+    }
+
+    let grafting_height = commonware_storage::qmdb::current::grafting::height::<N>();
+    let youngest = pruned_chunks - 1;
+    let youngest_start = youngest << grafting_height;
+    let youngest_end = (youngest + 1) << grafting_height;
+    let youngest_pos =
+        F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
+
+    if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
+        return None;
+    }
+
+    let pair_chunk = youngest & !1;
+    let pair_start = pair_chunk << grafting_height;
+    let pair_pos = F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
+    Some(F::peak_birth_size(pair_pos, grafting_height + 1))
+}
+
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
 pub struct CurrentUnmerkleized<F, E, C, I, H, U, const N: usize, S>
@@ -105,6 +155,120 @@ where
     pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    };
+    use commonware_storage::{
+        journal::contiguous::fixed::Config as FixedJournalConfig,
+        merkle::{full::Config as MerkleConfig, mmr},
+        qmdb::current::unordered::fixed,
+        translator::TwoCap,
+    };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::{NonZeroU16, NonZeroUsize};
+
+    type FixedDb = fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        Sequential,
+    >;
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
+
+    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        FixedConfig {
+            merkle_config: MerkleConfig {
+                journal_partition: format!("current-journal-{suffix}"),
+                metadata_partition: format!("current-metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FixedJournalConfig {
+                partition: format!("current-log-{suffix}"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
+            grafted_metadata_partition: format!("current-grafted-{suffix}"),
+            translator: TwoCap,
+        }
+    }
+
+    fn digest(byte: u8) -> Digest {
+        Digest::from([byte; 32])
+    }
+
+    #[test]
+    fn current_matches_sync_target_authenticates_witness_and_range() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("matches-sync-target", &context);
+            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(digest(1), Some(digest(2)))
+                .with_metadata(digest(3));
+            let merkleized = UnmerkleizedTrait::merkleize(batch).await.unwrap();
+            let retained = CurrentMerkleized {
+                inner: merkleized.inner.clone(),
+                db: merkleized.db.clone(),
+            };
+
+            {
+                let mut guard = db.write().await;
+                <FixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                    .await
+                    .unwrap();
+            }
+
+            let target = {
+                let guard = db.read().await;
+                <FixedDb as ManagedDb<_>>::sync_target(&*guard).await
+            };
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &retained, &target,
+            ));
+
+            let wrong_ops_root = CurrentSyncTarget::new(
+                target.root,
+                digest(9),
+                target.witness.clone(),
+                target.range.clone(),
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &retained,
+                &wrong_ops_root,
+            ));
+
+            let wrong_range = CurrentSyncTarget::new(
+                target.root,
+                target.ops_root,
+                target.witness,
+                non_empty_range!(target.range.start(), target.range.end() + 1),
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &retained,
+                &wrong_range,
+            ));
+        });
     }
 }
 
@@ -376,7 +540,14 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        let bounds = batch.bounds();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         batch.root() == target.root
+            && batch.ops_root() == target.ops_root
+            && target.verify::<H>(&hasher)
+            && target.range.start()
+                == current_sync_boundary::<F, N>(bounds.inactivity_floor, bounds.total_size)
+            && target.range.end() == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -528,7 +699,14 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        let bounds = batch.bounds();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         batch.root() == target.root
+            && batch.ops_root() == target.ops_root
+            && target.verify::<H>(&hasher)
+            && target.range.start()
+                == current_sync_boundary::<F, N>(bounds.inactivity_floor, bounds.total_size)
+            && target.range.end() == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {

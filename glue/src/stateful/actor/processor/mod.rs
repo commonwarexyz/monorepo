@@ -145,7 +145,11 @@ where
         let timer = self.metrics.propose_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let Some(parent) = ancestry.next().await else {
+        let Some(parent) = next_or_cancel(&mut response, &mut ancestry).await else {
+            debug!("proposal request cancelled before parent ancestry arrived");
+            return;
+        };
+        let Some(parent) = parent else {
             response.send_lossy(None);
             return;
         };
@@ -225,7 +229,11 @@ where
         let timer = self.metrics.verify_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let Some(block) = ancestry.next().await else {
+        let Some(block) = next_or_cancel(&mut response, &mut ancestry).await else {
+            debug!("verification request cancelled before block ancestry arrived");
+            return;
+        };
+        let Some(block) = block else {
             response.send_lossy(false);
             return;
         };
@@ -283,7 +291,14 @@ where
         }
 
         let round = Round::new(consensus_context.epoch(), consensus_context.view());
-        let Some(parent) = ancestry.next().await else {
+        let Some(parent) = next_or_cancel(&mut response, &mut ancestry).await else {
+            debug!(
+                ?block_digest,
+                "verification request cancelled before parent ancestry arrived"
+            );
+            return;
+        };
+        let Some(parent) = parent else {
             response.send_lossy(false);
             return;
         };
@@ -728,9 +743,19 @@ where
     }
 }
 
+async fn next_or_cancel<R, T, S>(
+    response: &mut oneshot::Sender<R>,
+    stream: &mut S,
+) -> Option<Option<T>>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    await_or_cancel(response, stream.next()).await
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{await_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
+    use super::{await_or_cancel, next_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
@@ -763,7 +788,7 @@ mod tests {
         sync::{AsyncRwLock, Mutex},
         NZUsize, NZU16, NZU64,
     };
-    use futures::{Stream, StreamExt};
+    use futures::{stream, Stream, StreamExt};
     use std::{
         collections::BTreeMap,
         future::Future,
@@ -986,12 +1011,14 @@ mod tests {
             let view = context.round.view();
             let height = parent.height().next();
             let merkleized = Self::execute(height, view, batches).await;
+            let bounds = merkleized.bounds();
+            let range = non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size));
             let block = Block {
                 context,
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(Location::new(0), Location::new(1)),
+                range,
             };
             Some(Proposed { block, merkleized })
         }
@@ -1156,12 +1183,14 @@ mod tests {
                 .await
                 .expect("parent should be available");
             let merkleized = ExecutionApp::execute(height, view, batches).await;
+            let bounds = merkleized.bounds();
+            let range = non_empty_range!(bounds.inactivity_floor, Location::new(bounds.total_size));
             let block = Block {
                 context,
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(Location::new(0), Location::new(1)),
+                range,
             };
             let round = Round::new(Epoch::zero(), view);
             self.processor
@@ -1333,6 +1362,21 @@ mod tests {
             },
             translator: TwoCap,
         }
+    }
+
+    #[test]
+    fn initial_ancestry_read_cancels_when_response_dropped() {
+        deterministic::Runner::default().start(|_| async move {
+            let (mut response, receiver) = oneshot::channel::<bool>();
+            let mut ancestry = Box::pin(stream::pending::<Block>());
+
+            drop(receiver);
+
+            assert!(
+                next_or_cancel(&mut response, &mut ancestry).await.is_none(),
+                "initial ancestry reads must not pin the processor after caller cancellation",
+            );
+        });
     }
 
     #[test]

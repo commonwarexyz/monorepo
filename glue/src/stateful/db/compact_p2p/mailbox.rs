@@ -19,12 +19,16 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
         request: handler::Request<F, D>,
         response: oneshot::Sender<Result<compact::FetchResult<F, Op, D>, ResponseDropped>>,
     },
+    CancelState {
+        request: handler::Request<F, D>,
+    },
 }
 
 impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
     fn response_closed(&self) -> bool {
         match self {
             Self::AttachDatabase(_) => false,
+            Self::CancelState { .. } => false,
             Self::GetState { response, .. } => response.is_closed(),
         }
     }
@@ -110,6 +114,32 @@ impl<DB, F: Family, Op, H: Hasher> Mailbox<DB, F, Op, H> {
     }
 }
 
+struct CancelOnDrop<DB, F: Family, Op, D: Digest> {
+    sender: Sender<Message<DB, F, Op, D>>,
+    request: Option<handler::Request<F, D>>,
+}
+
+impl<DB, F: Family, Op, D: Digest> CancelOnDrop<DB, F, Op, D> {
+    const fn new(sender: Sender<Message<DB, F, Op, D>>, request: handler::Request<F, D>) -> Self {
+        Self {
+            sender,
+            request: Some(request),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.request = None;
+    }
+}
+
+impl<DB, F: Family, Op, D: Digest> Drop for CancelOnDrop<DB, F, Op, D> {
+    fn drop(&mut self) {
+        if let Some(request) = self.request.take() {
+            let _ = self.sender.enqueue(Message::CancelState { request });
+        }
+    }
+}
+
 impl<DB: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<DB, F, Op, H> {
     pub fn attach_database(&self, db: Arc<AsyncRwLock<DB>>) {
         let _ = self.sender.enqueue(Message::AttachDatabase(db));
@@ -134,8 +164,14 @@ where
     ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let request = handler::Request::from_target(target);
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::GetState { request, response });
-        receiver.await.map_err(|_| ResponseDropped)?
+        let _ = self.sender.enqueue(Message::GetState {
+            request: request.clone(),
+            response,
+        });
+        let mut cancel = CancelOnDrop::new(self.sender.clone(), request);
+        let result = receiver.await.map_err(|_| ResponseDropped)?;
+        cancel.disarm();
+        result
     }
 }
 
@@ -159,6 +195,7 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_storage::{mmr, qmdb::sync::compact::Resolver as _};
     use commonware_utils::NZUsize;
+    use futures::FutureExt as _;
 
     #[test]
     fn get_compact_state_sends_request() {
@@ -182,6 +219,36 @@ mod tests {
 
             let (result, _) = futures::join!(get, observe);
             assert!(matches!(result, Err(ResponseDropped)));
+        });
+    }
+
+    #[test]
+    fn dropped_compact_state_request_sends_cancel_message() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
+            let mailbox = Mailbox::<(), mmr::Family, u64, Sha256>::new(sender);
+            let target = compact::Target {
+                root: [2u8; 32].into(),
+                leaf_count: mmr::Location::new(9),
+            };
+
+            assert!(mailbox.get_compact_state(target.clone()).now_or_never().is_none());
+
+            match receiver.recv().await.expect("request should be queued") {
+                Message::GetState { request, .. } => {
+                    assert_eq!(request.to_target(), target);
+                }
+                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::CancelState { .. } => panic!("cancel should come after request"),
+            }
+
+            match receiver.recv().await.expect("cancel should be queued") {
+                Message::CancelState { request } => {
+                    assert_eq!(request.to_target(), target);
+                }
+                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::GetState { .. } => panic!("unexpected duplicate request"),
+            }
         });
     }
 }

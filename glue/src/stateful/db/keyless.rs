@@ -273,7 +273,10 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        let bounds = batch.bounds();
         batch.root() == target.root
+            && target.range.start() == bounds.inactivity_floor
+            && target.range.end() == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -346,7 +349,10 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        let bounds = batch.bounds();
         batch.root() == target.root
+            && target.range.start() == bounds.inactivity_floor
+            && target.range.end() == Location::new(bounds.total_size)
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
@@ -525,6 +531,30 @@ mod tests {
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
+            let matching_target = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(mmr::Location::new(1), mmr::Location::new(3)),
+            );
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &matching_target,
+            ));
+            let wrong_start = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(mmr::Location::new(0), mmr::Location::new(3)),
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_start,
+            ));
+            let wrong_end = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(mmr::Location::new(1), mmr::Location::new(4)),
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_end,
+            ));
 
             {
                 let mut guard = db.write().await;

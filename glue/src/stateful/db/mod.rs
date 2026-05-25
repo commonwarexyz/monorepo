@@ -478,7 +478,9 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
         let mut database = self.write().await;
-        rewind_or_panic(&mut *database, target, None).await;
+        if T::sync_target(&*database).await != target {
+            rewind_or_panic(&mut *database, target, None).await;
+        }
     }
 }
 
@@ -571,6 +573,7 @@ where
                         if reached != current_target {
                             continue;
                         }
+                        drop(tip_updates.take());
                         let _ = finish_tx.send_lossy(()).await;
                         return current_anchor;
                     },
@@ -655,7 +658,9 @@ macro_rules! impl_database_set {
                 join!($(
                     async {
                         let mut database = self.$idx.write().await;
-                        rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
+                        if $T::sync_target(&*database).await != targets.$idx {
+                            rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
+                        }
                     },
                 )+);
             }
@@ -759,6 +764,7 @@ macro_rules! impl_state_sync_set {
                     move |_context| async move {
                         let coordinator_owned_senders = coordinator_owned_senders;
                         let mut tip_updates = Some(tip_updates);
+                        let mut dispatched_targets = coordinator_targets.clone();
                         let mut state = CoordinatorState::new(db_count, anchor, coordinator_targets);
 
                         loop {
@@ -788,6 +794,7 @@ macro_rules! impl_state_sync_set {
 
                             match state.next_action() {
                                 CoordinatorAction::Converged(anchor) => {
+                                    drop(tip_updates.take());
                                     $(
                                         let _ = coordinator_senders.$idx.finish_tx.send_lossy(()).await;
                                     )+
@@ -807,12 +814,15 @@ macro_rules! impl_state_sync_set {
                                             {
                                                 return None;
                                             }
-                                            if !coordinator_senders.$idx
-                                                .target_tx
-                                                .send_lossy(dispatch_target)
-                                                .await
-                                            {
-                                                return None;
+                                            if dispatched_targets.$idx != dispatch_target {
+                                                if !coordinator_senders.$idx
+                                                    .target_tx
+                                                    .send_lossy(dispatch_target.clone())
+                                                    .await
+                                                {
+                                                    return None;
+                                                }
+                                                dispatched_targets.$idx = dispatch_target;
                                             }
                                         }
                                     )+
@@ -1030,13 +1040,16 @@ async fn record_single_tip_update<D, T>(
 ) -> bool
 where
     D: Digest,
-    T: Clone + Send + Sync + 'static,
+    T: Clone + PartialEq + Send + Sync + 'static,
 {
     let (new_anchor, new_target) = update.record();
     if new_anchor.height <= current_anchor.height {
         return true;
     }
     *current_anchor = new_anchor;
+    if new_target == *current_target {
+        return true;
+    }
     *current_target = new_target.clone();
     target_tx.send_lossy(new_target).await
 }
@@ -1049,7 +1062,7 @@ async fn drain_single_tip_updates<D, T>(
 ) -> bool
 where
     D: Digest,
-    T: Clone + Send + Sync + 'static,
+    T: Clone + PartialEq + Send + Sync + 'static,
 {
     let Some(updates) = tip_updates.as_mut() else {
         return true;
@@ -1486,6 +1499,11 @@ mod tests {
 
     struct OneStepRewindDb;
 
+    struct TrackingRewindDb {
+        target: u64,
+        rewinds: Arc<AtomicUsize>,
+    }
+
     impl<E: Send> ManagedDb<E> for TestDb {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
@@ -1551,6 +1569,43 @@ mod tests {
         }
     }
 
+    impl<E: Send> ManagedDb<E> for TrackingRewindDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("TrackingRewindDb is constructed directly in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.target
+        }
+
+        async fn rewind_to_target(
+            &mut self,
+            target: Self::SyncTarget,
+        ) -> Result<(), Self::Error> {
+            self.rewinds.fetch_add(1, Ordering::SeqCst);
+            self.target = target;
+            Ok(())
+        }
+    }
+
     struct BlockingFinalizeDb {
         started: Option<oneshot::Sender<()>>,
         release: Option<oneshot::Receiver<()>>,
@@ -1601,6 +1656,13 @@ mod tests {
     struct DistinctObservedFastSyncDb {
         final_target: u64,
     }
+
+    struct RejectDuplicateUpdateSyncDb {
+        final_target: u64,
+    }
+
+    #[derive(Debug)]
+    struct DuplicateTargetSyncError;
 
     #[derive(Clone)]
     struct SlowSyncController {
@@ -1937,6 +1999,38 @@ mod tests {
         }
     }
 
+    impl<E: Send> ManagedDb<E> for RejectDuplicateUpdateSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("RejectDuplicateUpdateSyncDb is only constructed through state sync tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
     impl<E> StateSyncDb<E, Arc<AtomicBool>> for SlowSyncDb
     where
         E: Send + Clock,
@@ -1997,6 +2091,50 @@ mod tests {
                         }
                     },
                 }
+            }
+
+            Ok(Self { final_target })
+        }
+    }
+
+    impl<E> StateSyncDb<E, Arc<AtomicBool>> for RejectDuplicateUpdateSyncDb
+    where
+        E: Send + Clock,
+    {
+        type SyncError = DuplicateTargetSyncError;
+
+        async fn sync_db(
+            context: E,
+            _config: Self::Config,
+            release: Arc<AtomicBool>,
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            let mut final_target = target;
+
+            while !release.load(Ordering::SeqCst) {
+                select! {
+                    update = tip_updates.recv() => {
+                        let Some(update) = update else {
+                            break;
+                        };
+                        if update == final_target {
+                            return Err(DuplicateTargetSyncError);
+                        }
+                        final_target = update;
+                    },
+                    _ = context.sleep(Duration::from_millis(1)) => {},
+                }
+            }
+
+            if let Some(reached_target) = reached_target.as_ref() {
+                let _ = reached_target.send(final_target).await;
+            }
+            if let Some(finish_rx) = finish.as_mut() {
+                let _ = finish_rx.recv().await;
             }
 
             Ok(Self { final_target })
@@ -2466,6 +2604,39 @@ mod tests {
     }
 
     #[test]
+    fn tuple_rewind_only_rewinds_mismatched_databases() {
+        deterministic::Runner::default().start(|_| async move {
+            let left_rewinds = Arc::new(AtomicUsize::new(0));
+            let right_rewinds = Arc::new(AtomicUsize::new(0));
+            let databases = (
+                Arc::new(AsyncRwLock::new(TrackingRewindDb {
+                    target: 2,
+                    rewinds: left_rewinds.clone(),
+                })),
+                Arc::new(AsyncRwLock::new(TrackingRewindDb {
+                    target: 1,
+                    rewinds: right_rewinds.clone(),
+                })),
+            );
+
+            <(
+                Arc<AsyncRwLock<TrackingRewindDb>>,
+                Arc<AsyncRwLock<TrackingRewindDb>>,
+            ) as DatabaseSet<deterministic::Context>>::rewind_to_targets(&databases, (1, 1))
+            .await;
+
+            assert_eq!(databases.0.read().await.target, 1);
+            assert_eq!(databases.1.read().await.target, 1);
+            assert_eq!(left_rewinds.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                right_rewinds.load(Ordering::SeqCst),
+                0,
+                "database already at the marshal target must not be rewound",
+            );
+        });
+    }
+
+    #[test]
     fn tuple_new_batches_queues_reads_concurrently() {
         deterministic::Runner::default().start(|_context| async move {
             let db1 = Arc::new(AsyncRwLock::new(TestDb));
@@ -2672,6 +2843,57 @@ mod tests {
                 converged_anchor,
                 anchor(1),
                 "converged anchor must include the ready tip update"
+            );
+        });
+    }
+
+    #[test]
+    fn single_state_sync_advances_anchor_without_duplicate_target_update() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let release = Arc::new(AtomicBool::new(false));
+            let release_for_sync = release.clone();
+
+            let sync = context
+                .child("single_state_sync_duplicate_target")
+                .spawn(move |context| async move {
+                    <Arc<AsyncRwLock<RejectDuplicateUpdateSyncDb>> as StateSyncSet<
+                        deterministic::Context,
+                        Arc<AtomicBool>,
+                        sha256::Digest,
+                    >>::sync(
+                        context,
+                        (),
+                        release_for_sync,
+                        anchor(0),
+                        7,
+                        tip_rx,
+                        SyncEngineConfig {
+                            fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                            apply_batch_size: 1,
+                            max_outstanding_requests: 1,
+                            update_channel_size: NonZeroUsize::new(4).unwrap(),
+                            max_retained_roots: 0,
+                        },
+                    )
+                    .await
+                    .expect("single state sync should ignore duplicate target updates")
+                });
+
+            tip_tx
+                .send(TipUpdate::new(anchor(1), 7))
+                .await
+                .expect("tip update should enqueue");
+            context.sleep(Duration::from_millis(10)).await;
+            release.store(true, Ordering::SeqCst);
+            drop(tip_tx);
+
+            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 7);
+            assert_eq!(
+                converged_anchor,
+                anchor(1),
+                "no-op target update should still advance the converged anchor"
             );
         });
     }
@@ -3176,6 +3398,64 @@ mod tests {
     }
 
     #[test]
+    fn tuple_state_sync_advances_generation_without_duplicate_target_update() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let unchanged_release = Arc::new(AtomicBool::new(false));
+            let changed_release = unchanged_release.clone();
+
+            let sync = context
+                .child("tuple_state_sync_duplicate_target")
+                .spawn({
+                    let unchanged_resolver = unchanged_release.clone();
+                    move |context| async move {
+                        <(
+                            Arc<AsyncRwLock<RejectDuplicateUpdateSyncDb>>,
+                            Arc<AsyncRwLock<SlowSyncDb>>,
+                        ) as StateSyncSet<
+                            deterministic::Context,
+                            (Arc<AtomicBool>, Arc<AtomicBool>),
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            ((), ()),
+                            (unchanged_resolver, changed_release),
+                            anchor(0),
+                            (7, 0),
+                            tip_rx,
+                            SyncEngineConfig {
+                                fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                                apply_batch_size: 1,
+                                max_outstanding_requests: 1,
+                                update_channel_size: NonZeroUsize::new(4).unwrap(),
+                                max_retained_roots: 0,
+                            },
+                        )
+                        .await
+                        .expect("tuple state sync should ignore per-db duplicate target updates")
+                    }
+                });
+
+            tip_tx
+                .send(TipUpdate::new(anchor(1), (7, 9)))
+                .await
+                .expect("tip update should enqueue");
+            context.sleep(Duration::from_millis(10)).await;
+            unchanged_release.store(true, Ordering::SeqCst);
+            drop(tip_tx);
+
+            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(synced.0.read().await.final_target, 7);
+            assert_eq!(synced.1.read().await.final_target, 9);
+            assert_eq!(
+                converged_anchor,
+                anchor(1),
+                "tuple sync should converge on the no-op anchor update"
+            );
+        });
+    }
+
+    #[test]
     fn tuple_state_sync_allows_noop_database_while_other_catches_up() {
         deterministic::Runner::default().start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
@@ -3302,8 +3582,8 @@ mod tests {
             assert_eq!(converged_anchor, anchor(9));
             assert_eq!(
                 fast_update_count.load(Ordering::SeqCst),
-                1,
-                "the unchanged-target database should receive the regroup retarget exactly once",
+                0,
+                "the unchanged-target database should not receive a duplicate regroup target",
             );
         });
     }
