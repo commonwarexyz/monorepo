@@ -32,7 +32,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{Delivery, Resolver};
+use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -300,7 +300,7 @@ where
         resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
-        R: Resolver<
+        R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
@@ -317,7 +317,7 @@ where
         resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
-        R: Resolver<
+        R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
@@ -337,7 +337,7 @@ where
         mut buffer: Buf,
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
-        R: Resolver<
+        R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
@@ -462,7 +462,6 @@ where
         R: Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     {
         // Start with the ack that woke this `select_loop!` arm.
@@ -514,7 +513,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
         Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
-        R: Resolver<
+        R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
@@ -790,7 +789,6 @@ where
         R: Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     {
         let mut needs_sync = false;
@@ -914,7 +912,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
@@ -1011,7 +1008,6 @@ where
         R: Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     {
         let round = finalization.round();
@@ -1076,7 +1072,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) -> bool {
         let commitment = V::commitment(block);
@@ -1195,7 +1190,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) -> bool {
         let ResolverDelivery {
@@ -1373,7 +1367,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) -> bool {
         delivers.retain(|item| !item.response_closed());
@@ -1911,7 +1904,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> bool {
@@ -2046,7 +2038,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
         self.stream.acknowledge(height);
@@ -2089,7 +2080,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
         let Some(finalization) = self.get_finalization_by_height(height).await else {
@@ -2107,7 +2097,6 @@ where
         resolver: &mut impl Resolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
     ) {
         if height > self.floor.processed_height() || round <= self.floor.processed_round() {

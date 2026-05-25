@@ -1,4 +1,4 @@
-use crate::{Fetch, Resolver};
+use crate::{Fetch, Resolver, TargetedResolver};
 use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
     Feedback,
@@ -196,7 +196,6 @@ where
 {
     type Key = K;
     type Subscriber = S;
-    type PublicKey = P;
 
     /// Send a fetch to the peer actor.
     ///
@@ -239,6 +238,27 @@ where
                 .collect(),
         ))
     }
+
+    /// Send a retain request to the peer actor.
+    ///
+    /// If the engine has shut down, this is a no-op.
+    fn retain(
+        &mut self,
+        predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Retain {
+            predicate: Box::new(predicate),
+        })
+    }
+}
+
+impl<K, P, S> TargetedResolver for Mailbox<K, P, S>
+where
+    K: Span,
+    P: PublicKey,
+    S: Clone + Eq + Send + 'static,
+{
+    type PublicKey = P;
 
     /// Send a targeted fetch to the peer actor.
     ///
@@ -295,17 +315,6 @@ where
         ))
     }
 
-    /// Send a retain request to the peer actor.
-    ///
-    /// If the engine has shut down, this is a no-op.
-    fn retain(
-        &mut self,
-        predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-    ) -> Feedback {
-        self.sender.enqueue(Message::Retain {
-            predicate: Box::new(predicate),
-        })
-    }
 }
 
 #[cfg(test)]

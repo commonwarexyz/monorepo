@@ -6,14 +6,14 @@
 //! pruning, retry scheduling, consumer delivery, and accepted-response
 //! redelivery.
 //!
-//! Target hints supplied through [`crate::Resolver::fetch_targeted`] and
-//! [`crate::Resolver::fetch_all_targeted`] are ignored because direct fetchers do
-//! not have peer-specific routing.
+//! Target hints supplied through [`crate::TargetedResolver::fetch_targeted`] and
+//! [`crate::TargetedResolver::fetch_all_targeted`] use the default untargeted
+//! behavior because direct fetchers do not have peer-specific routing.
 
 use crate::{
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
     ingress::{self, FetchKey, Message},
-    subscribers, Consumer, Delivery, Fetch,
+    subscribers, Consumer, Delivery, Fetch, TargetedResolver,
 };
 use commonware_actor::{mailbox, Feedback};
 use commonware_cryptography::PublicKey;
@@ -83,7 +83,6 @@ where
 {
     type Key = K;
     type Subscriber = S;
-    type PublicKey = P;
 
     fn fetch<F>(&mut self, fetch: F) -> Feedback
     where
@@ -104,29 +103,6 @@ where
         ))
     }
 
-    /// Fetch with target hints.
-    ///
-    /// Direct resolvers have no peer-specific routing, so target hints are
-    /// ignored and this is equivalent to [`fetch`](crate::Resolver::fetch).
-    fn fetch_targeted(
-        &mut self,
-        fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        _targets: NonEmptyVec<Self::PublicKey>,
-    ) -> Feedback {
-        self.fetch(fetch)
-    }
-
-    /// Fetch multiple keys with target hints.
-    ///
-    /// Direct resolvers have no peer-specific routing, so target hints are
-    /// ignored and this is equivalent to [`fetch_all`](crate::Resolver::fetch_all).
-    fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
-    where
-        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-    {
-        self.fetch_all(fetches.into_iter().map(|(fetch, _)| fetch).collect())
-    }
-
     fn retain(
         &mut self,
         predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
@@ -135,6 +111,15 @@ where
             predicate: Box::new(predicate),
         })
     }
+}
+
+impl<K, S, P> TargetedResolver for Resolver<K, S, P>
+where
+    K: Span,
+    S: Clone + Eq + Send + 'static,
+    P: PublicKey,
+{
+    type PublicKey = P;
 }
 
 impl<K, S, P> Resolver<K, S, P>

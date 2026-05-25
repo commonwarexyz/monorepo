@@ -2,6 +2,7 @@ use crate::{
     delivery::{Completion, Tracker},
     Consumer, Delivery,
 };
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::histogram, Clock};
 use futures::future::Aborted;
 
@@ -10,7 +11,7 @@ pub(super) struct Inflight<Con, P>
 where
     Con: Consumer,
     Con::Value: Clone + Send + 'static,
-    P: Clone + Send + 'static,
+    P: PublicKey,
 {
     /// Resolver-agnostic delivery state shared with non-P2P resolver implementations.
     deliveries: Tracker<Con, P, histogram::Timer>,
@@ -20,7 +21,7 @@ impl<Con, P> Inflight<Con, P>
 where
     Con: Consumer,
     Con::Value: Clone + Send + 'static,
-    P: Clone + Send + 'static,
+    P: PublicKey,
 {
     pub(super) fn new(consumer: Con) -> Self {
         Self {

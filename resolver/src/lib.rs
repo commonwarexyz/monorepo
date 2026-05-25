@@ -63,7 +63,7 @@ commonware_macros::stability_scope!(BETA {
         /// resolver discards the validation result.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
-        /// previously requested via [`Resolver::fetch`] (or its variants).
+        /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).
         ///
         /// `delivery` contains the peer-visible key and the retained subscribers
         /// for the fetch. Subscribers decide who should observe a valid response;
@@ -86,9 +86,6 @@ commonware_macros::stability_scope!(BETA {
         /// [`Consumer::deliver`] when a fetch resolves.
         type Subscriber: Clone + Eq + Send + 'static;
 
-        /// Type used to identify peers for targeted fetch hints.
-        type PublicKey: PublicKey;
-
         /// Initiate a fetch.
         ///
         /// The resolver fetches and delivers the key. The subscriber is
@@ -110,31 +107,6 @@ commonware_macros::stability_scope!(BETA {
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
-        /// Initiate a fetch with target peer hints.
-        ///
-        /// Target-aware resolvers may use these peers to prioritize or restrict
-        /// lookup. Targetless resolvers may ignore the hints and treat this as
-        /// [`fetch`](Self::fetch). Callers that require strict peer targeting
-        /// must rely on an implementation that documents that guarantee.
-        ///
-        /// Implementations define whether target hints persist through retries,
-        /// merge with existing in-progress fetches, or are discarded.
-        fn fetch_targeted(
-            &mut self,
-            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback;
-
-        /// Initiate fetches for multiple keys, each with their own target hints.
-        ///
-        /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
-        fn fetch_all_targeted<F>(
-            &mut self,
-            keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
-
         /// Retain only fetch subscribers satisfying the predicate.
         ///
         /// The predicate receives the peer-visible key and subscriber.
@@ -146,5 +118,42 @@ commonware_macros::stability_scope!(BETA {
             &mut self,
             predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback;
+    }
+
+    /// Extension for resolvers that accept target peer hints.
+    pub trait TargetedResolver: Resolver {
+        /// Type used to identify peers for targeted fetch hints.
+        type PublicKey: PublicKey;
+
+        /// Initiate a fetch with target peer hints.
+        ///
+        /// By default, target hints are ignored and this is equivalent to
+        /// [`Resolver::fetch`]. Target-aware resolvers may override this to
+        /// prioritize or restrict lookup. Callers that require strict peer
+        /// targeting must rely on an implementation that documents that
+        /// guarantee.
+        ///
+        /// Implementations define whether target hints persist through retries,
+        /// merge with existing in-progress fetches, or are discarded.
+        fn fetch_targeted(
+            &mut self,
+            key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            self.fetch(key)
+        }
+
+        /// Initiate fetches for multiple keys, each with their own target hints.
+        ///
+        /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
+        fn fetch_all_targeted<F>(
+            &mut self,
+            keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.fetch_all(keys.into_iter().map(|(key, _)| key).collect())
+        }
     }
 });

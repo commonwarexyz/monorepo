@@ -4,7 +4,7 @@ use crate::{
     types::{Height, Round},
 };
 use commonware_cryptography::{certificate::Scheme as CertificateScheme, Digest};
-use commonware_resolver::Resolver;
+use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::vec::NonEmptyVec;
 
 /// Durable processed floor used to admit or reject resolver fetches.
@@ -133,7 +133,7 @@ impl<S: CertificateScheme, C: Digest> Floor<S, C> {
         targets: NonEmptyVec<R::PublicKey>,
     ) -> FetchAdmission
     where
-        R: Resolver<Key = Key<C>, Subscriber = Annotation>,
+        R: TargetedResolver<Key = Key<C>, Subscriber = Annotation>,
     {
         if !self.processed.permits(&fetch) {
             return FetchAdmission::Denied;
@@ -202,7 +202,6 @@ mod tests {
     impl Resolver for TestResolver {
         type Key = Key<TestDigest>;
         type Subscriber = Annotation;
-        type PublicKey = crypto_ed25519::PublicKey;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
@@ -222,29 +221,23 @@ mod tests {
             Feedback::Ok
         }
 
+        fn retain(
+            &mut self,
+            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for TestResolver {
+        type PublicKey = crypto_ed25519::PublicKey;
+
         fn fetch_targeted(
             &mut self,
             fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             _targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
             self.targeted.lock().push(fetch.into().key);
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            _fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
             Feedback::Ok
         }
     }
