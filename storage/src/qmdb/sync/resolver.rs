@@ -41,6 +41,7 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     pub success_tx: oneshot::Sender<bool>,
     /// Pinned merkle nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
+    /// Keeps the acknowledgement channel open for callers that do not observe validation results.
     pub(super) success_rx: Option<oneshot::Receiver<bool>>,
 }
 
