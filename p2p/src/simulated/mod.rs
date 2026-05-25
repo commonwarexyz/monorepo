@@ -218,7 +218,7 @@ mod tests {
     {
         let mut manager = oracle.manager();
         manager.track(0, Set::from_iter_dedup(peers));
-        assert!(manager.peer_set(0).await.unwrap_or_default().is_some());
+        assert!(manager.peer_set(0).await.is_some());
     }
 
     async fn wait_for_task_count(
@@ -2359,14 +2359,14 @@ mod tests {
             network.start();
 
             let mut manager = oracle.manager();
-            assert_eq!(manager.peer_set(0).await.unwrap_or_default(), None);
+            assert_eq!(manager.peer_set(0).await, None);
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
             manager.track(0xFF, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
 
             assert_eq!(
-                manager.peer_set(0xFF).await.unwrap_or_default().unwrap(),
+                manager.peer_set(0xFF).await.unwrap(),
                 TrackedPeers::primary(Set::try_from([pk1, pk2]).unwrap())
             );
         });
@@ -2404,12 +2404,11 @@ mod tests {
             let peer_set = manager
                 .peer_set(1)
                 .await
-                .unwrap_or_default()
                 .expect("peer set missing");
             let keys: Vec<_> = Vec::from(peer_set.primary.clone());
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
-            let mut subscription = manager.subscribe().await.unwrap();
+            let mut subscription = manager.subscribe();
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 1);
             let latest_keys: Vec<_> = Vec::from(update.latest.primary.clone());
@@ -2462,7 +2461,7 @@ mod tests {
             );
 
             assert_eq!(
-                manager.peer_set(7).await.unwrap_or_default().unwrap(),
+                manager.peer_set(7).await.unwrap(),
                 TrackedPeers::new(
                     Set::try_from([pk1]).unwrap(),
                     Set::try_from([PrivateKey::from_seed(2).public_key()]).unwrap(),
@@ -2501,14 +2500,14 @@ mod tests {
             );
 
             assert_eq!(
-                manager.peer_set(9).await.unwrap_or_default().unwrap(),
+                manager.peer_set(9).await.unwrap(),
                 TrackedPeers::new(
                     Set::try_from([pk1.clone(), pk2.clone()]).unwrap(),
                     Set::try_from([pk3.clone()]).unwrap(),
                 )
             );
 
-            let mut subscription = manager.subscribe().await.unwrap();
+            let mut subscription = manager.subscribe();
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 9);
             assert!(update.latest.primary.position(&pk2).is_some());
@@ -2548,7 +2547,7 @@ mod tests {
             );
 
             assert_eq!(
-                manager.peer_set(7).await.unwrap_or_default().unwrap(),
+                manager.peer_set(7).await.unwrap(),
                 TrackedPeers::new(
                     Set::try_from([pk1]).unwrap(),
                     Set::try_from([PrivateKey::from_seed(2).public_key()]).unwrap(),
@@ -2576,7 +2575,7 @@ mod tests {
             let addr_primary: Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
             let addr_secondary: Address = SocketAddr::from(([127, 0, 0, 1], 5000)).into();
             let mut manager = oracle.socket_manager();
-            let mut subscription = manager.subscribe().await.unwrap();
+            let mut subscription = manager.subscribe();
 
             manager.track(
                 11,
@@ -2635,13 +2634,12 @@ mod tests {
             let peer_set = manager
                 .peer_set(1)
                 .await
-                .unwrap_or_default()
                 .expect("peer set missing");
             let keys: Vec<_> = Vec::from(peer_set.primary);
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
             // Verify subscription works
-            let mut subscription = manager.subscribe().await.unwrap();
+            let mut subscription = manager.subscribe();
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 1);
             let latest_keys: Vec<_> = Vec::from(update.latest.primary);
@@ -2723,7 +2721,7 @@ mod tests {
 
             // Register second peer set with pk2 and pk3
             manager.track(2, Set::try_from(vec![pk2.clone(), pk3.clone()]).unwrap());
-            assert!(manager.peer_set(2).await.unwrap_or_default().is_some());
+            assert!(manager.peer_set(2).await.is_some());
 
             // Now pk3 is in a peer set and pk1 can broadcast to it.
             let recipients = sender1.check(Recipients::All).unwrap().recipients();
@@ -2731,7 +2729,7 @@ mod tests {
 
             // Register third peer set with pk3 and pk4 (this will evict peer set 1)
             manager.track(3, Set::try_from(vec![pk3.clone(), pk4.clone()]).unwrap());
-            assert!(manager.peer_set(3).await.unwrap_or_default().is_some());
+            assert!(manager.peer_set(3).await.is_some());
 
             // pk1 should now be removed from all peer sets.
             let recipients = sender2.check(Recipients::All).unwrap().recipients();
@@ -2745,16 +2743,16 @@ mod tests {
             assert!(recipients.contains(&pk4));
 
             // Verify peer set contents
-            let peer_set_2 = manager.peer_set(2).await.unwrap_or_default().unwrap();
+            let peer_set_2 = manager.peer_set(2).await.unwrap();
             assert!(peer_set_2.primary.position(&pk2).is_some());
             assert!(peer_set_2.primary.position(&pk3).is_some());
 
-            let peer_set_3 = manager.peer_set(3).await.unwrap_or_default().unwrap();
+            let peer_set_3 = manager.peer_set(3).await.unwrap();
             assert!(peer_set_3.primary.position(&pk3).is_some());
             assert!(peer_set_3.primary.position(&pk4).is_some());
 
             // Peer set 1 should no longer exist
-            assert!(manager.peer_set(1).await.unwrap_or_default().is_none());
+            assert!(manager.peer_set(1).await.is_none());
         });
     }
 
@@ -2788,7 +2786,7 @@ mod tests {
 
             let mut manager = oracle.manager();
             manager.track(1, Set::try_from([pk1, pk2.clone()]).unwrap());
-            assert!(manager.peer_set(1).await.unwrap_or_default().is_some());
+            assert!(manager.peer_set(1).await.is_some());
 
             assert_eq!(
                 sender.check(Recipients::All).unwrap().recipients(),
@@ -2812,7 +2810,7 @@ mod tests {
             );
             network.start();
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe().await.unwrap();
+            let mut subscription = manager.subscribe();
 
             // Register a peer set
             let sender_pk = PrivateKey::from_seed(1).public_key();
@@ -2925,7 +2923,7 @@ mod tests {
 
             // Subscribe to peer set updates
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe().await.unwrap();
+            let mut subscription = manager.subscribe();
 
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
@@ -3022,9 +3020,9 @@ mod tests {
 
             // Create multiple subscriptions
             let mut manager = oracle.manager();
-            let mut subscription1 = manager.subscribe().await.unwrap();
-            let mut subscription2 = manager.subscribe().await.unwrap();
-            let mut subscription3 = manager.subscribe().await.unwrap();
+            let mut subscription1 = manager.subscribe();
+            let mut subscription2 = manager.subscribe();
+            let mut subscription3 = manager.subscribe();
 
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
@@ -3084,7 +3082,7 @@ mod tests {
 
             // Subscribe to peer set updates
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe().await.unwrap();
+            let mut subscription = manager.subscribe();
 
             // Register a peer set that does NOT include self
             manager.track(1, Set::try_from(vec![other_pk.clone()]).unwrap());
@@ -3268,8 +3266,8 @@ mod tests {
 
             // Manager operations should not panic
             manager.track(1, Set::try_from([pk1.clone()]).unwrap());
-            let _ = manager.peer_set(0).await.unwrap_or_default();
-            let _ = manager.subscribe().await;
+            let _ = manager.peer_set(0).await;
+            let _ = manager.subscribe();
 
             // Oracle operations should not panic
             let _ = oracle
@@ -3426,12 +3424,13 @@ mod tests {
             let mut manager = oracle.manager();
             Manager::track(&mut manager, 0, peers.clone());
 
-            // Subscribe after tracking. The current peer set should be
-            // available immediately on the subscription channel.
-            let mut subscription = Provider::subscribe(&mut manager).await.unwrap();
+            // Subscribe after tracking. The current peer set should be sent
+            // through the subscription channel.
+            let mut subscription = Provider::subscribe(&mut manager);
             let update = subscription
-                .try_recv()
-                .expect("current peer set should be available immediately after subscribe");
+                .recv()
+                .await
+                .expect("current peer set should be sent after subscribe");
             assert_eq!(update.index, 0);
             assert_eq!(update.latest.primary, peers);
             assert!(update.latest.secondary.is_empty());

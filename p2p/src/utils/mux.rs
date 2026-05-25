@@ -550,7 +550,6 @@ mod tests {
         let peers = manager
             .peer_set(0)
             .await
-            .unwrap_or_default()
             .unwrap_or_default();
         manager.track(
             0,

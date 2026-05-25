@@ -7,14 +7,14 @@ use crate::{
             types,
         },
     },
-    PeerSetSubscription, TrackedPeers,
+    PeerSetSubscription, PeerSetUpdate, TrackedPeers,
 };
 use commonware_actor::{
     mailbox::{self, Policy},
     Feedback,
 };
 use commonware_cryptography::PublicKey;
-use commonware_utils::channel::oneshot;
+use commonware_utils::channel::{mpsc, oneshot};
 use std::collections::VecDeque;
 
 /// Messages that can be sent to the tracker actor.
@@ -34,8 +34,8 @@ pub enum Message<C: PublicKey> {
     },
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
-        /// One-shot channel to send the subscription receiver.
-        responder: oneshot::Sender<PeerSetSubscription<C>>,
+        /// Sender to notify with peer set updates.
+        sender: mpsc::UnboundedSender<PeerSetUpdate<C>>,
     },
 
     // ---------- Used by blocker ----------
@@ -268,18 +268,18 @@ impl<C: PublicKey> Oracle<C> {
 impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
-    fn peer_set(&mut self, id: u64) -> oneshot::Receiver<Option<TrackedPeers<Self::PublicKey>>> {
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::PeerSet {
             index: id,
             responder,
         });
-        receiver
+        receiver.await.ok().flatten()
     }
 
-    fn subscribe(&mut self) -> oneshot::Receiver<PeerSetSubscription<Self::PublicKey>> {
-        let (responder, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Subscribe { responder });
+    fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let _ = self.sender.enqueue(Message::Subscribe { sender });
         receiver
     }
 }

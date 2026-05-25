@@ -654,10 +654,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_p2p::{utils::mocks::inert_channel, PeerSetSubscription, Provider};
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{
-        channel::{mpsc, oneshot},
-        N3f1, NZUsize, TryCollect, NZU32,
-    };
+    use commonware_utils::{channel::mpsc, N3f1, NZUsize, TryCollect, NZU32};
     use core::marker::PhantomData;
     use std::collections::BTreeMap;
 
@@ -673,17 +670,13 @@ mod tests {
     impl<P: PublicKey> Provider for NoopManager<P> {
         type PublicKey = P;
 
-        fn peer_set(&mut self, _: u64) -> oneshot::Receiver<Option<TrackedPeers<Self::PublicKey>>> {
-            let (sender, receiver) = oneshot::channel();
-            let _ = sender.send(None);
-            receiver
+        async fn peer_set(&mut self, _: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+            None
         }
 
-        fn subscribe(&mut self) -> oneshot::Receiver<PeerSetSubscription<Self::PublicKey>> {
+        fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
             let (_, rx) = mpsc::unbounded_channel();
-            let (sender, receiver) = oneshot::channel();
-            let _ = sender.send(rx);
-            receiver
+            rx
         }
     }
 

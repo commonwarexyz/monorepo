@@ -1,6 +1,7 @@
 use super::{Error, Receiver, Sender};
 use crate::{
-    Address, AddressableTrackedPeers, Channel, PeerSetSubscription, Recipients, TrackedPeers,
+    Address, AddressableTrackedPeers, Channel, PeerSetSubscription, PeerSetUpdate, Recipients,
+    TrackedPeers,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
@@ -36,7 +37,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         response: oneshot::Sender<Option<TrackedPeers<P>>>,
     },
     Subscribe {
-        response: oneshot::Sender<PeerSetSubscription<P>>,
+        sender: mpsc::UnboundedSender<PeerSetUpdate<P>>,
     },
     SubscribePeers {
         exclude: P,
@@ -277,16 +278,16 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Get the primary and secondary peers for a given ID.
-    fn peer_set(&self, id: u64) -> oneshot::Receiver<Option<TrackedPeers<P>>> {
+    async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.send_lossy(Message::PeerSet { id, response });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    fn subscribe(&self) -> oneshot::Receiver<PeerSetSubscription<P>> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send_lossy(Message::Subscribe { response });
+    fn subscribe(&self) -> PeerSetSubscription<P> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let _ = self.sender.send_lossy(Message::Subscribe { sender });
         receiver
     }
 }
@@ -316,11 +317,11 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     type PublicKey = P;
 
-    fn peer_set(&mut self, id: u64) -> oneshot::Receiver<Option<TrackedPeers<Self::PublicKey>>> {
-        self.oracle.peer_set(id)
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        self.oracle.peer_set(id).await
     }
 
-    fn subscribe(&mut self) -> oneshot::Receiver<PeerSetSubscription<Self::PublicKey>> {
+    fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
         self.oracle.subscribe()
     }
 }
@@ -365,11 +366,11 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
 impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
     type PublicKey = P;
 
-    fn peer_set(&mut self, id: u64) -> oneshot::Receiver<Option<TrackedPeers<Self::PublicKey>>> {
-        self.oracle.peer_set(id)
+    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
+        self.oracle.peer_set(id).await
     }
 
-    fn subscribe(&mut self) -> oneshot::Receiver<PeerSetSubscription<P>> {
+    fn subscribe(&mut self) -> PeerSetSubscription<P> {
         self.oracle.subscribe()
     }
 }

@@ -164,10 +164,7 @@ where
             network.0,
             network.1,
         );
-        let Ok(mut peer_set_subscription) = self.peer_provider.subscribe().await else {
-            debug!("peer set subscription failed");
-            return;
-        };
+        let mut peer_set_subscription = self.peer_provider.subscribe();
 
         select_loop! {
             self.context,
