@@ -662,7 +662,6 @@ where
             operations,
             success_tx,
             pinned_nodes,
-            success_rx: _success_rx,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -670,12 +669,16 @@ where
         if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
             // Invalid batch size - notify resolver of failure.
             // We will request these operations again when we scan for unfetched operations.
-            success_tx.send_lossy(false);
+            if let Some(success_tx) = success_tx {
+                success_tx.send_lossy(false);
+            }
             return Ok(());
         }
 
         if proof.leaves != request.target_size {
-            success_tx.send_lossy(false);
+            if let Some(success_tx) = success_tx {
+                success_tx.send_lossy(false);
+            }
             return Ok(());
         }
 
@@ -724,7 +727,9 @@ where
         };
 
         // Report success or failure to the resolver.
-        success_tx.send_lossy(valid);
+        if let Some(success_tx) = success_tx {
+            success_tx.send_lossy(valid);
+        }
 
         if !valid {
             if need_pinned {

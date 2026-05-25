@@ -37,24 +37,20 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     pub proof: Proof<F, D>,
     /// The operations that were fetched
     pub operations: Vec<Op>,
-    /// Channel to report success/failure back to resolver
-    pub success_tx: oneshot::Sender<bool>,
+    /// Optional channel to report validation success/failure back to the resolver.
+    pub success_tx: Option<oneshot::Sender<bool>>,
     /// Pinned merkle nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
-    /// Keeps the acknowledgement channel open for callers that do not observe validation results.
-    pub(super) success_rx: Option<oneshot::Receiver<bool>>,
 }
 
 impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
     /// Creates a fetch result that does not observe the validation acknowledgement.
     pub fn new(proof: Proof<F, D>, operations: Vec<Op>, pinned_nodes: Option<Vec<D>>) -> Self {
-        let (success_tx, success_rx) = oneshot::channel();
         Self {
             proof,
             operations,
-            success_tx,
+            success_tx: None,
             pinned_nodes,
-            success_rx: Some(success_rx),
         }
     }
 
@@ -68,9 +64,8 @@ impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
         Self {
             proof,
             operations,
-            success_tx,
+            success_tx: Some(success_tx),
             pinned_nodes,
-            success_rx: None,
         }
     }
 }
@@ -101,7 +96,7 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
         f.debug_struct("FetchResult")
             .field("proof", &self.proof)
             .field("operations", &self.operations)
-            .field("success_tx", &"<callback>")
+            .field("success_tx", &self.success_tx.as_ref().map(|_| "<callback>"))
             .field("pinned_nodes", &self.pinned_nodes)
             .finish()
     }
@@ -613,9 +608,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_fetch_result_new_keeps_success_receiver_open() {
+    fn test_fetch_result_new_has_no_success_acknowledgement() {
         let result = FetchResult::<mmr::Family, (), ShaDigest>::new(empty_proof(), vec![], None);
-        assert!(result.success_tx.send(true).is_ok());
+        assert!(result.success_tx.is_none());
     }
 
     #[test]
@@ -628,7 +623,7 @@ pub(crate) mod tests {
                 success_tx,
                 None,
             );
-        assert!(result.success_tx.send(true).is_ok());
+        assert!(result.success_tx.expect("success sender").send(true).is_ok());
         assert_eq!(success_rx.try_recv(), Ok(true));
     }
 
