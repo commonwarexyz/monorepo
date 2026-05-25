@@ -28,6 +28,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
+use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
@@ -68,6 +69,7 @@ pub struct Config {
 
 #[derive(Clone)]
 pub struct Storage {
+    lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
     io_handle: iouring::Handle,
     pool: BufferPool,
@@ -91,6 +93,7 @@ impl Storage {
         let (io_handle, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
 
         let storage = Self {
+            lock: Arc::new(Mutex::new(())),
             storage_directory,
             io_handle,
             pool,
@@ -111,6 +114,9 @@ impl crate::Storage for Storage {
         versions: RangeInclusive<u16>,
     ) -> Result<(Blob, u64, u16), Error> {
         super::validate_partition_name(partition)?;
+
+        // Acquire the filesystem lock
+        let _guard = self.lock.lock();
 
         // Construct the full path
         let path = self.storage_directory.join(partition).join(hex(name));
@@ -183,6 +189,9 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         super::validate_partition_name(partition)?;
 
+        // Acquire the filesystem lock
+        let _guard = self.lock.lock();
+
         let path = self.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
@@ -202,6 +211,9 @@ impl crate::Storage for Storage {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         super::validate_partition_name(partition)?;
+
+        // Acquire the filesystem lock
+        let _guard = self.lock.lock();
 
         let path = self.storage_directory.join(partition);
 
