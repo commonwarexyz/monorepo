@@ -30,8 +30,18 @@ struct Response<Context, V> {
     accepted: bool,
 }
 
+struct ActiveDelivery {
+    generation: u64,
+    _aborter: Aborter,
+}
+
+struct PooledCompletion<K, S, Context> {
+    generation: u64,
+    completion: Completion<K, S, Context>,
+}
+
 struct Entry<Context, V, State> {
-    delivery: Option<Aborter>,
+    delivery: Option<ActiveDelivery>,
     response: Option<Response<Context, V>>,
     state: Option<State>,
 }
@@ -60,7 +70,8 @@ where
     Context: Clone + Send + 'static,
 {
     entries: HashMap<Con::Key, Entry<Context, Con::Value, State>>,
-    deliveries: AbortablePool<Completion<Con::Key, Con::Subscriber, Context>>,
+    deliveries: AbortablePool<PooledCompletion<Con::Key, Con::Subscriber, Context>>,
+    next_generation: u64,
     consumer: Con,
 }
 
@@ -75,6 +86,7 @@ where
         Self {
             entries: HashMap::new(),
             deliveries: AbortablePool::default(),
+            next_generation: 0,
             consumer,
         }
     }
@@ -209,16 +221,24 @@ where
     ///
     /// Returns [`Aborted`] when the delivery was canceled before completion.
     /// Successful completions clear the active delivery slot for that key so it
-    /// can be retried or redelivered.
+    /// can be retried or redelivered. Completions for an older same-key delivery
+    /// are treated as aborted.
     pub async fn next_completion(
         &mut self,
     ) -> Result<Completion<Con::Key, Con::Subscriber, Context>, Aborted> {
         let completed = self.deliveries.next_completed().await?;
-        let Some(entry) = self.entries.get_mut(&completed.delivery.key) else {
+        let Some(entry) = self.entries.get_mut(&completed.completion.delivery.key) else {
             return Err(Aborted);
         };
+        if entry
+            .delivery
+            .as_ref()
+            .is_none_or(|delivery| delivery.generation != completed.generation)
+        {
+            return Err(Aborted);
+        }
         entry.delivery = None;
-        Ok(completed)
+        Ok(completed.completion)
     }
 
     fn push_delivery(
@@ -227,19 +247,33 @@ where
         context: Context,
         value: Con::Value,
     ) {
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("delivery generation overflow");
         let key = delivery.key.clone();
         let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
         let aborter = self.deliveries.push(async move {
-            Completion {
-                context,
-                delivery: completed,
-                valid: receiver.await.unwrap_or(false),
+            PooledCompletion {
+                generation,
+                completion: Completion {
+                    context,
+                    delivery: completed,
+                    valid: receiver.await.unwrap_or(false),
+                },
             }
         });
         let entry = self.entries.get_mut(&key).expect("delivery entry");
-        assert!(entry.delivery.replace(aborter).is_none());
+        assert!(entry
+            .delivery
+            .replace(ActiveDelivery {
+                generation,
+                _aborter: aborter,
+            })
+            .is_none());
     }
 }
 
@@ -264,7 +298,10 @@ mod tests {
     use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
     use bytes::Bytes;
     use commonware_runtime::{deterministic::Runner, Runner as _};
-    use commonware_utils::non_empty_vec;
+    use commonware_utils::{
+        channel::{fallible::FallibleExt, mpsc, oneshot},
+        non_empty_vec,
+    };
 
     type TestTracker = Tracker<MockConsumer<MockKey, Bytes>, u8>;
 
@@ -272,6 +309,34 @@ mod tests {
         Delivery {
             key,
             subscribers: non_empty_vec![()],
+        }
+    }
+
+    #[derive(Clone)]
+    struct PendingConsumer {
+        sender: mpsc::UnboundedSender<oneshot::Sender<bool>>,
+    }
+
+    impl PendingConsumer {
+        fn new() -> (Self, mpsc::UnboundedReceiver<oneshot::Sender<bool>>) {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            (Self { sender }, receiver)
+        }
+    }
+
+    impl Consumer for PendingConsumer {
+        type Key = MockKey;
+        type Value = Bytes;
+        type Subscriber = ();
+
+        fn deliver(
+            &mut self,
+            _delivery: Delivery<Self::Key, Self::Subscriber>,
+            _value: Self::Value,
+        ) -> oneshot::Receiver<bool> {
+            let (sender, receiver) = oneshot::channel();
+            self.sender.send_lossy(sender);
+            receiver
         }
     }
 
@@ -331,6 +396,39 @@ mod tests {
             assert!(tracker.remove(&key));
 
             assert!(matches!(tracker.next_completion().await, Err(Aborted)));
+        });
+    }
+
+    #[test]
+    fn test_stale_same_key_completion_does_not_clear_new_delivery() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            let (consumer, mut senders) = PendingConsumer::new();
+            let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
+            let key = MockKey(1);
+
+            tracker.insert(key.clone());
+            tracker.deliver(delivery(key.clone()), 1, Bytes::from("old"));
+            let old_sender = senders.recv().await.unwrap();
+            old_sender.send(true).unwrap();
+            let stale = tracker.deliveries.next_completed().await.unwrap();
+
+            assert!(tracker.remove(&key));
+            tracker.insert(key.clone());
+            tracker.deliver(delivery(key.clone()), 2, Bytes::from("new"));
+            let new_sender = senders.recv().await.unwrap();
+
+            let _stale_aborter = tracker.deliveries.push(async move { stale });
+            assert!(matches!(tracker.next_completion().await, Err(Aborted)));
+
+            new_sender.send(true).unwrap();
+            let completed = tracker
+                .next_completion()
+                .await
+                .expect("new delivery should complete");
+            assert_eq!(completed.context, 2);
+            assert_eq!(completed.delivery.key, key);
+            assert!(completed.valid);
         });
     }
 
