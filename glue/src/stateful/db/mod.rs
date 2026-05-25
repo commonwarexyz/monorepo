@@ -398,7 +398,7 @@ impl<D: Digest, T> TipUpdate<D, T> {
         )
     }
 
-    fn record(mut self) -> (Anchor<D>, T) {
+    pub(crate) fn record(mut self) -> (Anchor<D>, T) {
         if let Some(observed) = self.observed.take() {
             let _ = observed.send(());
         }
