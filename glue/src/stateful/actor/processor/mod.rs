@@ -137,8 +137,7 @@ where
         ancestry: impl Stream<Item = A::Block> + Send + 'static,
         input_provider: &mut A::InputProvider,
         mut response: oneshot::Sender<Option<A::Block>>,
-    )
-    where
+    ) where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
@@ -218,8 +217,7 @@ where
         (runtime_context, consensus_context): (E, A::Context),
         ancestry: impl Stream<Item = A::Block> + Send + 'static,
         mut response: oneshot::Sender<bool>,
-    )
-    where
+    ) where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
