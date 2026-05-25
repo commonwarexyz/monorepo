@@ -240,7 +240,7 @@ where
     async fn get_compact_state(
         &self,
         target: compact::Target<Self::Family, Self::Digest>,
-    ) -> Result<compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.get_compact_state(target).await
+    ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.get_compact_state(target).await.map(Into::into)
     }
 }

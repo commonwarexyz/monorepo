@@ -17,7 +17,7 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     AttachDatabase(Arc<AsyncRwLock<DB>>),
     GetState {
         request: handler::Request<F, D>,
-        response: oneshot::Sender<Result<compact::State<F, Op, D>, ResponseDropped>>,
+        response: oneshot::Sender<Result<compact::FetchResult<F, Op, D>, ResponseDropped>>,
     },
 }
 
@@ -131,7 +131,7 @@ where
     async fn get_compact_state(
         &self,
         target: compact::Target<Self::Family, Self::Digest>,
-    ) -> Result<compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+    ) -> Result<compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
         let request = handler::Request::from_target(target);
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetState { request, response });

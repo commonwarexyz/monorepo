@@ -28,6 +28,7 @@ use commonware_runtime::{
 use commonware_utils::{channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64};
 use rand::RngCore as _;
 use std::{
+    collections::VecDeque,
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -1075,6 +1076,17 @@ mod compact_variable_mmr {
         >,
     }
 
+    #[derive(Clone)]
+    struct SequenceResolver {
+        states: Arc<commonware_utils::sync::Mutex<VecDeque<CompactFetchResult>>>,
+    }
+
+    type CompactFetchResult = sync::compact::FetchResult<
+        mmr::Family,
+        variable::Operation<mmr::Family, Vec<u8>>,
+        sha256::Digest,
+    >;
+
     impl sync::compact::Resolver for StaticResolver {
         type Family = mmr::Family;
         type Digest = sha256::Digest;
@@ -1084,9 +1096,27 @@ mod compact_variable_mmr {
         async fn get_compact_state(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
         {
-            Ok(self.state.clone())
+            Ok(self.state.clone().into())
+        }
+    }
+
+    impl sync::compact::Resolver for SequenceResolver {
+        type Family = mmr::Family;
+        type Digest = sha256::Digest;
+        type Op = variable::Operation<mmr::Family, Vec<u8>>;
+        type Error = qmdb::Error<mmr::Family>;
+
+        async fn get_compact_state(
+            &self,
+            _target: sync::compact::Target<Self::Family, Self::Digest>,
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        {
+            self.states
+                .lock()
+                .pop_front()
+                .ok_or(qmdb::Error::DataCorrupted("missing compact fetch result"))
         }
     }
 
@@ -1175,7 +1205,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1216,7 +1247,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix);
@@ -1268,7 +1300,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1286,6 +1319,73 @@ mod compact_variable_mmr {
                 })) if expected == target.leaf_count && actual == Location::new(*target.leaf_count - 1)
             ));
 
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_compact_sync_retries_bad_pinned_nodes_with_feedback() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-keyless-feedback-{}", context.next_u64());
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
+            let batch = source
+                .new_batch()
+                .append(vec![1, 2, 3])
+                .append(vec![4, 5, 6])
+                .merkleize(&source, Some(vec![7]), Location::new(2));
+            source.apply_batch(batch).await.unwrap();
+            source.commit().await.unwrap();
+
+            let bounds = source.bounds().await;
+            let target = sync::compact::Target::new(source.root(), bounds.end);
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+            let mut bad_state = good_state.clone();
+            bad_state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
+
+            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
+            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
+            let resolver = SequenceResolver {
+                states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                    sync::compact::FetchResult {
+                        state: bad_state,
+                        success_tx: Some(bad_tx),
+                    },
+                    sync::compact::FetchResult {
+                        state: good_state,
+                        success_tx: Some(good_tx),
+                    },
+                ]))),
+            };
+
+            let client_cfg = client_config(&suffix);
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver,
+                target: target.clone(),
+                db_config: client_cfg.clone(),
+            })
+            .await
+            .unwrap();
+
+            assert!(!bad_rx.await.unwrap());
+            assert!(good_rx.await.unwrap());
+            assert_eq!(client.root(), target.root);
+
+            drop(client);
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+                .await
+                .unwrap();
+            assert_eq!(reopened.root(), target.root);
+
+            reopened.destroy().await.unwrap();
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
         });
@@ -1533,9 +1633,9 @@ mod compact_variable_mmb {
         async fn get_compact_state(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
         {
-            Ok(self.state.clone())
+            Ok(self.state.clone().into())
         }
     }
 
@@ -1624,7 +1724,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1665,7 +1766,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix);
@@ -1717,7 +1819,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {

@@ -548,7 +548,7 @@ mod tests {
         async fn get_compact_state(
             &self,
             target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
         {
             if target == self.stale_target {
                 let _ = self.stale_request_tx.send(()).await;

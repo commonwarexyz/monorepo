@@ -24,7 +24,7 @@ use tracing::info;
 type DbResolver<DB> = Arc<AsyncRwLock<DB>>;
 type DbOp<DB> = <DbResolver<DB> as compact::Resolver>::Op;
 type Pending<F, Op, D> =
-    oneshot::Sender<Result<compact::State<F, Op, D>, mailbox::ResponseDropped>>;
+    oneshot::Sender<Result<compact::FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<Pending<F, Op, D>>>;
 
 /// Configuration for [`Actor`].
@@ -190,7 +190,7 @@ where
                     value,
                     response,
                 } => {
-                    self.handle_deliver(key, value, response);
+                    self.handle_deliver(key, value, response).await;
                 }
                 handler::EngineMessage::Produce { key, response } => {
                     self.handle_produce(key, response).await;
@@ -224,7 +224,7 @@ where
         }
     }
 
-    fn handle_deliver(
+    async fn handle_deliver(
         &mut self,
         key: handler::Request<F, H::Digest>,
         value: bytes::Bytes,
@@ -255,10 +255,33 @@ where
             return;
         }
 
+        let mut approvals = Vec::new();
         for subscriber in subscribers {
-            let _ = subscriber.send(Ok(state.clone()));
+            let (success_tx, success_rx) = oneshot::channel();
+            if subscriber
+                .send(Ok(compact::FetchResult {
+                    state: state.clone(),
+                    success_tx: Some(success_tx),
+                }))
+                .is_err()
+            {
+                continue;
+            }
+            approvals.push(success_rx);
         }
-        response.send_lossy(true);
+
+        if approvals.is_empty() {
+            response.send_lossy(true);
+            return;
+        }
+
+        let mut peer_valid = true;
+        for approval in approvals {
+            if let Ok(approved) = approval.await {
+                peer_valid &= approved;
+            }
+        }
+        response.send_lossy(peer_valid);
     }
 
     fn valid_state_response(
@@ -288,11 +311,11 @@ where
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok(state) = compact::Resolver::get_compact_state(database, key.to_target()).await
+        let Ok(fetch) = compact::Resolver::get_compact_state(database, key.to_target()).await
         else {
             return;
         };
-        response.send_lossy(state.encode());
+        response.send_lossy(fetch.state.encode());
     }
 }
 
@@ -388,6 +411,28 @@ mod tests {
         .expect("db init should succeed")
     }
 
+    async fn compact_state(
+        context: deterministic::Context,
+    ) -> (
+        compact::Target<mmr::Family, sha256::Digest>,
+        compact::FetchResult<mmr::Family, TestOp, sha256::Digest>,
+    ) {
+        let mut db = init_db(context).await;
+        db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
+            &db,
+            None,
+            db.inactivity_floor_loc(),
+        ))
+        .unwrap();
+        db.commit().await.unwrap();
+
+        let target = db.current_target();
+        let fetch = compact::Resolver::get_compact_state(&Arc::new(AsyncRwLock::new(db)), target.clone())
+            .await
+            .expect("compact state should be available");
+        (target, fetch)
+    }
+
     #[test]
     fn invalid_proof_is_rejected() {
         deterministic::Runner::default().start(|context| async move {
@@ -412,7 +457,9 @@ mod tests {
             };
 
             let (valid_tx, valid_rx) = oneshot::channel();
-            actor.handle_deliver(request.clone(), bad_state.encode(), valid_tx);
+            actor
+                .handle_deliver(request.clone(), bad_state.encode(), valid_tx)
+                .await;
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
             assert!(actor.pending.contains_key(&request));
@@ -441,6 +488,35 @@ mod tests {
                 compact::State::<mmr::Family, TestOp, sha256::Digest>::decode_cfg(encoded, &cfg)
                     .expect("served state should decode");
             assert_eq!(state.leaf_count, target.leaf_count);
+        });
+    }
+
+    #[test]
+    fn downstream_rejection_marks_peer_invalid() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (target, fetch) = compact_state(context.child("state")).await;
+            let request = handler::Request::from_target(target);
+
+            let (subscriber_tx, subscriber_rx) = oneshot::channel();
+            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+
+            let (ack_tx, ack_rx) = oneshot::channel();
+            futures::join!(
+                async {
+                    actor.handle_deliver(request, fetch.state.encode(), ack_tx).await;
+                },
+                async {
+                    let fetch = subscriber_rx.await.unwrap().unwrap();
+                    fetch
+                        .success_tx
+                        .expect("compact deliveries should include feedback")
+                        .send(false)
+                        .unwrap();
+                }
+            );
+
+            assert!(!ack_rx.await.unwrap());
         });
     }
 }
