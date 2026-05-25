@@ -216,13 +216,11 @@ where
             }
             _ => return Err(crate::Error::UnexpectedResponse { request_id }),
         };
-        let (tx, _rx) = oneshot::channel();
-        Ok(sync::resolver::FetchResult {
+        Ok(sync::resolver::FetchResult::new(
             proof,
             operations,
-            success_tx: tx,
             pinned_nodes,
-        })
+        ))
     }
 }
 

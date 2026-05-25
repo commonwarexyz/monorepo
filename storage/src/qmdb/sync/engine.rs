@@ -662,6 +662,7 @@ where
             operations,
             success_tx,
             pinned_nodes,
+            success_rx: _success_rx,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -882,16 +883,15 @@ mod tests {
         Box::pin(async move {
             IndexedFetchResult {
                 id,
-                result: Ok(FetchResult {
-                    proof: Proof {
+                result: Ok(FetchResult::new(
+                    Proof {
                         leaves: Location::new(0),
                         inactive_peaks: 0,
                         digests: vec![],
                     },
-                    operations: vec![],
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes: None,
-                }),
+                    vec![],
+                    None,
+                )),
             }
         })
     }
