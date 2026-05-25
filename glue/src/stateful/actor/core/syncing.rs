@@ -20,7 +20,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, Storage};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
@@ -41,7 +41,7 @@ type HeldVerifyRequest<E, A> =
 
 pub(super) struct Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -61,6 +61,9 @@ where
 
     /// Marshal actor mailbox.
     pub(super) marshal: MarshalMailbox<S, V>,
+
+    /// Prefix for durable state-sync metadata.
+    pub(super) partition_prefix: String,
 
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
@@ -84,7 +87,7 @@ where
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -209,6 +212,7 @@ where
     /// on the converged database [`Anchor`].
     async fn transition(mut self, handoff: Option<(A::Block, Exact)>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
+        let synced_height = artifact.anchor.height;
 
         let metrics = ProcessorMetrics::new(self.context.child("processor_metrics"));
         let mut processor = Processor::new(
@@ -230,6 +234,17 @@ where
             }
             acknowledgement.acknowledge();
         }
+
+        let marshal = self.marshal.clone();
+        let partition_prefix = self.partition_prefix.clone();
+        self.context
+            .as_present()
+            .child("state_sync_complete")
+            .spawn(move |context| async move {
+                if marshal.wait_processed_height(synced_height).await {
+                    syncer::set_sync_complete(&context, partition_prefix.as_str()).await;
+                }
+            });
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs.

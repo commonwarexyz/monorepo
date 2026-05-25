@@ -234,6 +234,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_wait_processed_height_resolves_after_ack_sync() {
+        harness::wait_processed_height_resolves_after_ack_sync::<InlineHarness>();
+        harness::wait_processed_height_resolves_after_ack_sync::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_genesis_emitted_once() {
         harness::genesis_emitted_once::<InlineHarness>();
         harness::genesis_emitted_once::<DeferredHarness>();

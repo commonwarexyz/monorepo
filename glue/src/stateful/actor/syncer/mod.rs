@@ -122,10 +122,15 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    let marshal_floor = marshal
-        .get_processed_height()
-        .await
-        .unwrap_or_else(Height::zero);
+    let processed_height = marshal.get_processed_height().await;
+    if let Some(height) = processed_height {
+        assert!(
+            marshal.wait_processed_height(height).await,
+            "marshal stopped before processed height became durable"
+        );
+    }
+
+    let marshal_floor = processed_height.unwrap_or_else(Height::zero);
     let floor_block = {
         let marshal_block = marshal
             .get_block(Identifier::Height(marshal_floor))
