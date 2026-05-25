@@ -476,6 +476,19 @@ where
             };
 
             let cursor_height = cursor.height();
+            if parent.digest() != cursor.parent() || parent.height().next() != cursor_height {
+                warn!(
+                    ?target_digest,
+                    cursor = ?cursor.digest(),
+                    parent = ?parent.digest(),
+                    cursor_height = cursor_height.get(),
+                    parent_height = parent.height().get(),
+                    expected_parent = ?cursor.parent(),
+                    "rebuild_pending received non-contiguous ancestry"
+                );
+                return Err(PrepareBatchesError::Invalid);
+            }
+
             if cursor_height <= self.last_processed.height {
                 warn!(
                     ?target_digest,
@@ -1614,6 +1627,66 @@ mod tests {
             assert!(
                 !harness.processor.pending.contains_key(&block2.digest()),
                 "rejected replay must not be inserted into the pending cache",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_rejects_height_gap_to_processed_anchor() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let status = harness.finalize(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+
+            let gap_height = Height::new(3);
+            let gap_view = View::new(3);
+            let batches = harness
+                .processor
+                .fork_batches(&block1.digest())
+                .await
+                .expect("processed anchor should be available");
+            let merkleized = ExecutionApp::execute(gap_height, gap_view, batches).await;
+            let gap_block = Block {
+                context: consensus_context(block1.digest(), gap_view),
+                parent: block1.digest(),
+                height: gap_height,
+                state_root: merkleized.root(),
+                range: non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    Location::new(merkleized.bounds().total_size)
+                ),
+            };
+
+            let provider = ScriptedParentProvider::default();
+            provider.push(&gap_block, [Some(block1)]);
+
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider,
+                    gap_block.clone(),
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err(PrepareBatchesError::Invalid),
+                "rebuild must reject non-contiguous ancestry above the processed anchor",
+            );
+            assert!(
+                !harness.processor.pending.contains_key(&gap_block.digest()),
+                "height-gap block must not be cached as pending",
             );
         });
     }
