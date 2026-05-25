@@ -30,6 +30,11 @@ pub struct Disrupter<
     scheme: S,
     strategy: St,
     faulty_views: Option<Vec<View>>,
+    /// Epoch stamped on every proposal/nullify this disrupter emits. Defaults to
+    /// the harness-wide [`EPOCH`]; callers that run honest engines in a different
+    /// epoch (e.g. the marshal liveness target) pass their epoch so the byzantine
+    /// messages are admitted into the same consensus instance.
+    epoch: Epoch,
     last_vote_view: u64,
     last_finalized_view: u64,
     last_nullified_view: u64,
@@ -42,7 +47,25 @@ impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>, St: Strategy +
 where
     <S::Certificate as Read>::Cfg: Default,
 {
-    pub fn new(mut context: E, scheme: S, strategy: St, required_containers: u64) -> Self {
+    pub fn new(context: E, scheme: S, strategy: St, required_containers: u64) -> Self {
+        Self::new_with_epoch(
+            context,
+            scheme,
+            strategy,
+            required_containers,
+            Epoch::new(EPOCH),
+        )
+    }
+
+    /// Like [`Self::new`] but stamps emitted messages with `epoch` instead of the
+    /// harness-wide [`EPOCH`].
+    pub fn new_with_epoch(
+        mut context: E,
+        scheme: S,
+        strategy: St,
+        required_containers: u64,
+        epoch: Epoch,
+    ) -> Self {
         let faulty_views = strategy.disrupter_faults(required_containers, &mut context);
         Self {
             last_vote_view: 0,
@@ -54,7 +77,19 @@ where
             scheme,
             strategy,
             faulty_views,
+            epoch,
         }
+    }
+
+    /// Re-stamp a (possibly strategy-mutated) proposal with this disrupter's
+    /// epoch. `strategy.rs` hardcodes [`EPOCH`] when rebuilding rounds, so its
+    /// output is normalized here before signing/sending.
+    fn normalize_epoch(&self, proposal: Proposal<Sha256Digest>) -> Proposal<Sha256Digest> {
+        Proposal::new(
+            Round::new(self.epoch, proposal.view()),
+            proposal.parent,
+            proposal.payload,
+        )
     }
 
     fn message(&mut self) -> Message {
@@ -127,7 +162,7 @@ where
         );
 
         let proposal = Proposal::new(
-            Round::new(Epoch::new(EPOCH), View::new(view)),
+            Round::new(self.epoch, View::new(view)),
             View::new(parent_view),
             payload_source.payload,
         );
@@ -285,7 +320,7 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(v) = Notarize::sign(&self.scheme, proposal) {
+                if let Some(v) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(v).encode();
                     let _ = sender.send(Recipients::All, msg, true);
                 }
@@ -299,7 +334,7 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(v) = Finalize::sign(&self.scheme, proposal) {
+                if let Some(v) = Finalize::sign(&self.scheme, self.normalize_epoch(proposal)) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(v).encode();
                     let _ = sender.send(Recipients::All, msg, true);
                 }
@@ -312,7 +347,7 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                let round = Round::new(Epoch::new(EPOCH), View::new(v));
+                let round = Round::new(self.epoch, View::new(v));
                 if let Some(v) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
                     let msg = Vote::<S, Sha256Digest>::Nullify(v).encode();
                     let _ = sender.send(Recipients::All, msg, true);
@@ -406,7 +441,7 @@ where
                 self.last_notarized_view,
                 self.last_nullified_view,
             );
-            let msg = proposal.encode();
+            let msg = self.normalize_epoch(proposal).encode();
             let _ = sender.send(Recipients::One(victim.clone()), msg, true);
         }
     }
@@ -424,7 +459,7 @@ where
             self.last_notarized_view,
             self.last_nullified_view,
         );
-        let msg = proposal.encode();
+        let msg = self.normalize_epoch(proposal).encode();
         let _ = sender.send(Recipients::All, msg, true);
     }
 
@@ -460,7 +495,7 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(vote) = Notarize::sign(&self.scheme, proposal) {
+                if let Some(vote) = Notarize::sign(&self.scheme, self.normalize_epoch(proposal)) {
                     let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
                     let _ = sender.send(recipients, msg, true);
                 }
@@ -474,7 +509,7 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                if let Some(vote) = Finalize::sign(&self.scheme, proposal) {
+                if let Some(vote) = Finalize::sign(&self.scheme, self.normalize_epoch(proposal)) {
                     let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
                     let _ = sender.send(recipients, msg, true);
                 }
@@ -487,7 +522,7 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                let round = Round::new(Epoch::new(EPOCH), View::new(view));
+                let round = Round::new(self.epoch, View::new(view));
                 if let Some(vote) = Nullify::<S>::sign::<Sha256Digest>(&self.scheme, round) {
                     let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode();
                     let _ = sender.send(recipients, msg, true);

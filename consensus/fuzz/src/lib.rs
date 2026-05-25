@@ -425,7 +425,8 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
     (oracle, participants, schemes, registrations)
 }
 
-/// Start a Disrupter with the given strategy and network channels.
+/// Start a Disrupter with the given strategy and network channels, using the
+/// harness-wide [`EPOCH`] for emitted messages.
 fn start_disrupter<P: simplex::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
@@ -444,12 +445,48 @@ fn start_disrupter<P: simplex::Simplex>(
         impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) {
+    start_disrupter_with_epoch::<P>(
+        context,
+        scheme,
+        strategy,
+        required_containers,
+        Epoch::new(EPOCH),
+        vote_network,
+        certificate_network,
+        resolver_network,
+    );
+}
+
+/// Like [`start_disrupter`] but stamps emitted byzantine messages with `epoch`.
+/// The marshal liveness target passes `Epoch::zero()` so the disrupter shares
+/// the epoch its honest engines run in (making it an in-epoch adversary rather
+/// than wrong-epoch noise).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    strategy: &StrategyChoice,
+    required_containers: u64,
+    epoch: Epoch,
+    vote_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+) {
     match *strategy {
         StrategyChoice::SmallScope {
             fault_rounds,
             fault_rounds_bound,
         } => {
-            let disrupter = Disrupter::new(
+            let disrupter = Disrupter::new_with_epoch(
                 context,
                 scheme,
                 SmallScope {
@@ -457,18 +494,20 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds_bound,
                 },
                 required_containers,
+                epoch,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::AnyScope => {
-            let disrupter = Disrupter::new(context, scheme, AnyScope, required_containers);
+            let disrupter =
+                Disrupter::new_with_epoch(context, scheme, AnyScope, required_containers, epoch);
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::FutureScope {
             fault_rounds,
             fault_rounds_bound,
         } => {
-            let disrupter = Disrupter::new(
+            let disrupter = Disrupter::new_with_epoch(
                 context,
                 scheme,
                 FutureScope {
@@ -476,6 +515,7 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds_bound,
                 },
                 required_containers,
+                epoch,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }

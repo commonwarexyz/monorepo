@@ -93,9 +93,11 @@
 
 mod input;
 pub mod invariant;
+pub mod liveness;
 mod runner;
 mod variant;
 
 pub use input::{MarshalEvent, MarshalFuzzInput};
+pub use liveness::fuzz_marshal_liveness;
 pub use runner::fuzz_marshal;
 pub use variant::VariantPublish;

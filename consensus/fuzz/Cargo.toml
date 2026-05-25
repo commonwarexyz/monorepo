@@ -378,3 +378,17 @@ path = "fuzz_targets/marshal_coding.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "marshal_liveness_standard"
+path = "fuzz_targets/marshal_liveness_standard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_liveness_coding"
+path = "fuzz_targets/marshal_liveness_coding.rs"
+test = false
+doc = false
+bench = false
