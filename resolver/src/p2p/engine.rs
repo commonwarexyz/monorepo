@@ -228,7 +228,7 @@ where
                         for FetchKey {
                             key,
                             subscribers,
-                            targets,
+                            metadata: targets,
                         } in keys
                         {
                             trace!(?key, "mailbox: fetch");

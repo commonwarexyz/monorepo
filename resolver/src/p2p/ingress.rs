@@ -1,176 +1,19 @@
-use crate::{Fetch, Resolver, TargetedResolver};
-use commonware_actor::{
-    mailbox::{Overflow, Policy, Sender},
-    Feedback,
-};
+use crate::{ingress, Fetch, Resolver, TargetedResolver};
+use commonware_actor::{mailbox::Sender, Feedback};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{vec::NonEmptyVec, Span};
-use std::collections::VecDeque;
-
-type Predicate<K, S> = Box<dyn Fn(&K, &S) -> bool + Send>;
 
 /// A key to fetch data for, optionally with target peers.
-pub struct FetchKey<K, P, S> {
-    /// The key to fetch.
-    pub key: K,
-    /// The subscribers used to decide whether the fetch should be retained.
-    pub subscribers: NonEmptyVec<S>,
-    /// Target peers to restrict the fetch to.
-    ///
-    /// - `None`: No targeting (or clear existing targeting), try any available peer
-    /// - `Some(peers)`: Only try the specified peers
-    pub targets: Option<NonEmptyVec<P>>,
-}
+pub type FetchKey<K, P, S> = ingress::FetchKey<K, S, Option<NonEmptyVec<P>>>;
 
 /// Messages that can be sent to the peer actor.
-pub enum Message<K, P, S> {
-    /// Initiate fetches.
-    Fetch(Vec<FetchKey<K, P, S>>),
+pub type Message<K, P, S> = ingress::Message<K, S, Option<NonEmptyVec<P>>>;
 
-    /// Retain only fetch subscribers that satisfy the predicate.
-    Retain { predicate: Predicate<K, S> },
-}
-
-/// Pending resolver messages retained after the mailbox fills.
-pub struct Pending<K, P, S> {
-    modifications: VecDeque<Predicate<K, S>>,
-    fetches: Vec<FetchKey<K, P, S>>,
-}
-
-impl<K, P, S> Default for Pending<K, P, S> {
-    fn default() -> Self {
-        Self {
-            modifications: VecDeque::new(),
-            fetches: Vec::new(),
-        }
-    }
-}
-
-impl<K, P, S> Overflow<Message<K, P, S>> for Pending<K, P, S> {
-    fn is_empty(&self) -> bool {
-        self.modifications.is_empty() && self.fetches.is_empty()
-    }
-
-    fn drain<F>(&mut self, mut push: F)
-    where
-        F: FnMut(Message<K, P, S>) -> Option<Message<K, P, S>>,
-    {
-        // Drain retains in the order they were received.
-        while let Some(predicate) = self.modifications.pop_front() {
-            let message = Message::Retain { predicate };
-            if let Some(message) = push(message) {
-                self.push_front(message);
-                return;
-            }
-        }
-
-        // Fetches are deduplicated and drained as one batch.
-        if !self.fetches.is_empty() {
-            let fetches = std::mem::take(&mut self.fetches);
-            if let Some(message) = push(Message::Fetch(fetches)) {
-                self.push_front(message);
-            }
-        }
-    }
-}
-
-impl<K, P, S> Pending<K, P, S> {
-    fn push_front(&mut self, message: Message<K, P, S>) {
-        match message {
-            Message::Retain { predicate } => {
-                self.modifications.push_front(predicate);
-            }
-            Message::Fetch(fetches) => {
-                self.fetches.splice(0..0, fetches);
-            }
-        }
-    }
-}
-
-fn retain_fetch<K, P, S>(
-    mut fetch: FetchKey<K, P, S>,
-    predicate: &(dyn Fn(&K, &S) -> bool + Send),
-) -> Option<FetchKey<K, P, S>> {
-    let mut subscribers = fetch.subscribers.into_vec();
-    subscribers.retain(|subscriber| predicate(&fetch.key, subscriber));
-    fetch.subscribers = NonEmptyVec::try_from(subscribers).ok()?;
-    Some(fetch)
-}
-
-// Merge subscribers for duplicate pending fetches without duplicating them.
-fn merge_subscribers<S: Eq>(existing: &mut NonEmptyVec<S>, incoming: NonEmptyVec<S>) {
-    for subscriber in incoming {
-        if !existing.contains(&subscriber) {
-            existing.push(subscriber);
-        }
-    }
-}
-
-// Merge target metadata for duplicate pending fetches.
-fn merge_targets<P: Eq>(existing: &mut Option<NonEmptyVec<P>>, incoming: Option<NonEmptyVec<P>>) {
-    // An unrestricted fetch clears existing targets.
-    let Some(incoming) = incoming else {
-        *existing = None;
-        return;
-    };
-
-    // Existing unrestricted fetch already covers all targets.
-    let Some(existing) = existing else {
-        return;
-    };
-
-    // Merge target sets without duplicating peers.
-    for target in incoming {
-        if !existing.contains(&target) {
-            existing.push(target);
-        }
-    }
-}
-
-impl<K, P, S> Policy for Message<K, P, S>
-where
-    K: Clone + Eq,
-    P: Eq,
-    S: Eq,
-{
-    type Overflow = Pending<K, P, S>;
-
-    fn handle(overflow: &mut Pending<K, P, S>, message: Self) {
-        match message {
-            Self::Fetch(keys) => {
-                for key in keys {
-                    let FetchKey {
-                        key,
-                        subscribers,
-                        targets,
-                    } = key;
-
-                    // Merge duplicate fetches for the same key.
-                    if let Some(existing) = overflow
-                        .fetches
-                        .iter_mut()
-                        .find(|existing| existing.key == key)
-                    {
-                        merge_subscribers(&mut existing.subscribers, subscribers);
-                        merge_targets(&mut existing.targets, targets);
-                    } else {
-                        overflow.fetches.push(FetchKey {
-                            key,
-                            subscribers,
-                            targets,
-                        });
-                    }
-                }
-            }
-            Self::Retain { predicate } => {
-                // Retain prunes pending fetch subscribers before queued fetches drain.
-                overflow.fetches = std::mem::take(&mut overflow.fetches)
-                    .into_iter()
-                    .filter_map(|fetch| retain_fetch(fetch, predicate.as_ref()))
-                    .collect();
-                overflow.modifications.push_back(predicate);
-            }
-        }
+fn fetch_key<K, P, S>(fetch: Fetch<K, S>, targets: Option<NonEmptyVec<P>>) -> FetchKey<K, P, S> {
+    FetchKey {
+        key: fetch.key,
+        subscribers: NonEmptyVec::new(fetch.subscriber),
+        metadata: targets,
     }
 }
 
@@ -211,7 +54,7 @@ where
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
-            targets: None,
+            metadata: None,
         }]))
     }
 
@@ -228,12 +71,7 @@ where
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
                 .map(|key| {
-                    let Fetch { key, subscriber } = key.into();
-                    FetchKey {
-                        key,
-                        subscribers: NonEmptyVec::new(subscriber),
-                        targets: None,
-                    }
+                    fetch_key(key.into(), None)
                 })
                 .collect(),
         ))
@@ -282,7 +120,7 @@ where
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
-            targets: Some(targets),
+            metadata: Some(targets),
         }]))
     }
 
@@ -296,12 +134,7 @@ where
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
                 .map(|(key, targets)| {
-                    let Fetch { key, subscriber } = key.into();
-                    FetchKey {
-                        key,
-                        subscribers: NonEmptyVec::new(subscriber),
-                        targets: Some(targets),
-                    }
+                    fetch_key(key.into(), Some(targets))
                 })
                 .collect(),
         ))
@@ -311,15 +144,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_actor::mailbox::{Overflow, Policy};
 
     type TestMessage = Message<u8, u8, u16>;
-    type TestPending = Pending<u8, u8, u16>;
+    type TestPending = ingress::Pending<u8, u16, Option<NonEmptyVec<u8>>>;
 
     fn fetch(key: u8, subscriber: u16, targets: Option<NonEmptyVec<u8>>) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
-            targets,
+            metadata: targets,
         }])
     }
 
@@ -331,7 +165,7 @@ mod tests {
         Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::from_unchecked(subscribers),
-            targets,
+            metadata: targets,
         }])
     }
 
@@ -358,7 +192,7 @@ mod tests {
         };
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].key, expected_key);
-        match (&keys[0].targets, expected_targets) {
+        match (&keys[0].metadata, expected_targets) {
             (None, None) => {}
             (Some(actual), Some(expected)) => assert_eq!(&actual[..], expected),
             _ => panic!("unexpected targets"),

@@ -11,13 +11,47 @@ use std::collections::VecDeque;
 /// Predicate used to retain subscribers for resolver keys.
 pub type Predicate<K, S> = Box<dyn Fn(&K, &S) -> bool + Send>;
 
+/// Metadata carried by a coalesced fetch.
+pub(crate) trait Metadata {
+    /// Merge metadata from a duplicate fetch into the retained fetch.
+    fn merge(&mut self, incoming: Self);
+}
+
+impl Metadata for () {
+    fn merge(&mut self, _incoming: Self) {}
+}
+
+impl<T: Eq> Metadata for Option<NonEmptyVec<T>> {
+    fn merge(&mut self, incoming: Self) {
+        // `None` means unrestricted. It dominates targeted metadata because a
+        // non-targeted fetch should clear existing target restrictions.
+        let Some(incoming) = incoming else {
+            *self = None;
+            return;
+        };
+
+        let Some(existing) = self else {
+            return;
+        };
+
+        for item in incoming {
+            if !existing.contains(&item) {
+                existing.push(item);
+            }
+        }
+    }
+}
+
 /// A peer-visible key plus local subscribers waiting on it.
-pub struct FetchKey<K, S> {
+pub struct FetchKey<K, S, M = ()> {
     /// The key to fetch.
     pub key: K,
 
     /// Subscribers used to decide whether the fetch should be retained.
     pub subscribers: NonEmptyVec<S>,
+
+    /// Fetch metadata merged when duplicate fetches are coalesced.
+    pub metadata: M,
 }
 
 impl<K, S> From<Fetch<K, S>> for FetchKey<K, S> {
@@ -25,14 +59,15 @@ impl<K, S> From<Fetch<K, S>> for FetchKey<K, S> {
         Self {
             key: fetch.key,
             subscribers: NonEmptyVec::new(fetch.subscriber),
+            metadata: (),
         }
     }
 }
 
 /// Actor message for fetch and retain ingress.
-pub enum Message<K, S> {
+pub enum Message<K, S, M = ()> {
     /// Initiate fetches.
-    Fetch(Vec<FetchKey<K, S>>),
+    Fetch(Vec<FetchKey<K, S, M>>),
 
     /// Retain only fetch subscribers that satisfy the predicate.
     Retain {
@@ -42,15 +77,15 @@ pub enum Message<K, S> {
 }
 
 /// Pending resolver messages retained after a mailbox fills.
-pub struct Pending<K, S> {
+pub struct Pending<K, S, M = ()> {
     /// Retain predicates waiting to run before fetches are admitted.
     modifications: VecDeque<Predicate<K, S>>,
 
     /// Coalesced fetches that could not fit in the ready queue.
-    fetches: Vec<FetchKey<K, S>>,
+    fetches: Vec<FetchKey<K, S, M>>,
 }
 
-impl<K, S> Default for Pending<K, S> {
+impl<K, S, M> Default for Pending<K, S, M> {
     fn default() -> Self {
         Self {
             modifications: VecDeque::new(),
@@ -59,14 +94,14 @@ impl<K, S> Default for Pending<K, S> {
     }
 }
 
-impl<K, S> Overflow<Message<K, S>> for Pending<K, S> {
+impl<K, S, M> Overflow<Message<K, S, M>> for Pending<K, S, M> {
     fn is_empty(&self) -> bool {
         self.modifications.is_empty() && self.fetches.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
-        F: FnMut(Message<K, S>) -> Option<Message<K, S>>,
+        F: FnMut(Message<K, S, M>) -> Option<Message<K, S, M>>,
     {
         // Retain predicates must run before pending fetches so the actor never
         // starts work for subscribers already pruned by an older retain.
@@ -88,9 +123,9 @@ impl<K, S> Overflow<Message<K, S>> for Pending<K, S> {
     }
 }
 
-impl<K, S> Pending<K, S> {
+impl<K, S, M> Pending<K, S, M> {
     /// Restore a message that could not be pushed into the ready queue.
-    fn push_front(&mut self, message: Message<K, S>) {
+    fn push_front(&mut self, message: Message<K, S, M>) {
         match message {
             Message::Fetch(fetches) => {
                 self.fetches.splice(0..0, fetches);
@@ -103,10 +138,10 @@ impl<K, S> Pending<K, S> {
 }
 
 /// Apply a retain predicate to one pending fetch.
-fn retain_fetch<K, S>(
-    mut fetch: FetchKey<K, S>,
+fn retain_fetch<K, S, M>(
+    mut fetch: FetchKey<K, S, M>,
     predicate: &(dyn Fn(&K, &S) -> bool + Send),
-) -> Option<FetchKey<K, S>> {
+) -> Option<FetchKey<K, S, M>> {
     let mut subscribers = fetch.subscribers.into_vec();
     subscribers.retain(|subscriber| predicate(&fetch.key, subscriber));
     fetch.subscribers = NonEmptyVec::try_from(subscribers).ok()?;
@@ -122,14 +157,15 @@ fn merge_subscribers<S: Eq>(existing: &mut NonEmptyVec<S>, incoming: NonEmptyVec
     }
 }
 
-impl<K, S> Policy for Message<K, S>
+impl<K, S, M> Policy for Message<K, S, M>
 where
     K: Clone + Eq,
     S: Eq,
+    M: Metadata,
 {
-    type Overflow = Pending<K, S>;
+    type Overflow = Pending<K, S, M>;
 
-    fn handle(overflow: &mut Pending<K, S>, message: Self) {
+    fn handle(overflow: &mut Pending<K, S, M>, message: Self) {
         match message {
             Self::Fetch(fetches) => {
                 // Backpressure should not multiply work for the same key.
@@ -141,6 +177,7 @@ where
                         .find(|existing| existing.key == fetch.key)
                     {
                         merge_subscribers(&mut existing.subscribers, fetch.subscribers);
+                        existing.metadata.merge(fetch.metadata);
                     } else {
                         overflow.fetches.push(fetch);
                     }
@@ -171,6 +208,7 @@ mod tests {
         Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
+            metadata: (),
         }])
     }
 
@@ -178,6 +216,19 @@ mod tests {
         Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::from_unchecked(subscribers),
+            metadata: (),
+        }])
+    }
+
+    fn fetch_with_metadata(
+        key: u8,
+        subscriber: u16,
+        metadata: Option<NonEmptyVec<u8>>,
+    ) -> Message<u8, u16, Option<NonEmptyVec<u8>>> {
+        Message::Fetch(vec![FetchKey {
+            key,
+            subscribers: NonEmptyVec::new(subscriber),
+            metadata,
         }])
     }
 
@@ -282,5 +333,60 @@ mod tests {
 
         assert_eq!(key.key, 7);
         assert_eq!(key.subscribers, non_empty_vec![8]);
+    }
+
+    #[test]
+    fn duplicate_fetches_merge_metadata() {
+        let mut pending = Pending::default();
+
+        Policy::handle(
+            &mut pending,
+            fetch_with_metadata(1, 10, Some(non_empty_vec![2, 3])),
+        );
+        Policy::handle(
+            &mut pending,
+            fetch_with_metadata(1, 11, Some(non_empty_vec![3, 4])),
+        );
+
+        let mut messages = Vec::new();
+        Overflow::drain(&mut pending, |message| {
+            messages.push(message);
+            None
+        });
+
+        assert_eq!(messages.len(), 1);
+        let Message::Fetch(fetches) = messages.pop().unwrap() else {
+            panic!("expected fetch");
+        };
+        assert_eq!(fetches.len(), 1);
+        assert_eq!(fetches[0].metadata, Some(non_empty_vec![2, 3, 4]));
+    }
+
+    #[test]
+    fn unrestricted_metadata_dominates_duplicate_fetches() {
+        let mut pending = Pending::default();
+
+        Policy::handle(
+            &mut pending,
+            fetch_with_metadata(1, 10, Some(non_empty_vec![2])),
+        );
+        Policy::handle(&mut pending, fetch_with_metadata(1, 11, None));
+        Policy::handle(
+            &mut pending,
+            fetch_with_metadata(1, 12, Some(non_empty_vec![3])),
+        );
+
+        let mut messages = Vec::new();
+        Overflow::drain(&mut pending, |message| {
+            messages.push(message);
+            None
+        });
+
+        assert_eq!(messages.len(), 1);
+        let Message::Fetch(fetches) = messages.pop().unwrap() else {
+            panic!("expected fetch");
+        };
+        assert_eq!(fetches.len(), 1);
+        assert!(fetches[0].metadata.is_none());
     }
 }

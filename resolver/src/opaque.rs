@@ -297,7 +297,9 @@ where
 
     /// Add subscribers for a key and start the first fetch if needed.
     fn add_fetch(&mut self, fetch: FetchKey<F::Key, Con::Subscriber>) {
-        let FetchKey { key, subscribers } = fetch;
+        let FetchKey {
+            key, subscribers, ..
+        } = fetch;
         let is_new = self.subscribers.insert(key.clone(), subscribers);
 
         if is_new {
