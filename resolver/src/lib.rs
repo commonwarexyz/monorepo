@@ -11,7 +11,9 @@ commonware_macros::stability_scope!(BETA {
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
 
     pub mod delivery;
+    pub mod ingress;
     pub mod p2p;
+    pub mod subscribers;
 
     /// A key to fetch data for a subscriber.
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
