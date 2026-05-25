@@ -2,10 +2,7 @@
 
 use crate::{
     application::{genesis, Block, EpochProvider, Provider},
-    orchestrator::{
-        ingress::{EpochTransition, Message},
-        Mailbox,
-    },
+    orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
 use commonware_actor::mailbox;
@@ -30,12 +27,10 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{futures::Pool, vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
-
-type PendingFloor<D, V, P> = (u64, EpochTransition<V, P>, Result<D, Height>);
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S, L, T>
@@ -202,9 +197,6 @@ where
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
-        let mut pending_epochs = BTreeMap::new();
-        let mut next_pending_epoch_id = 0u64;
-        let mut pending_floors: Pool<PendingFloor<H::Digest, V, C::PublicKey>> = Pool::default();
 
         select_loop! {
             self.context,
@@ -248,39 +240,51 @@ where
                 break;
             } => match transition {
                 Message::Enter(transition) => {
-                    if engines.contains_key(&transition.epoch)
-                        || pending_epochs.contains_key(&transition.epoch)
-                    {
+                    // If the epoch is already in the map, ignore.
+                    if engines.contains_key(&transition.epoch) {
                         warn!(epoch = %transition.epoch, "entered existing epoch");
                         continue;
                     }
 
                     // DKG state does not persist the consensus floor; derive it from marshal's
                     // finalized boundary block when entering each epoch.
-                    let boundary = Self::floor_boundary(&epocher, transition.epoch);
-                    let marshal = self.marshal.clone();
-                    let pending_epoch_id = next_pending_epoch_id;
-                    next_pending_epoch_id = next_pending_epoch_id.wrapping_add(1);
-                    pending_epochs.insert(transition.epoch, pending_epoch_id);
-                    pending_floors.push(async move {
-                        let floor = match boundary {
-                            Some(boundary_height) => marshal
-                                .get_block(boundary_height)
-                                .await
-                                .unwrap_or_default()
-                                .map(|block| block.digest())
-                                .ok_or(boundary_height),
-                            None => Ok(genesis::<H, C, V>().digest()),
-                        };
-                        (pending_epoch_id, transition, floor)
-                    });
+                    let floor = match Self::floor_boundary(&epocher, transition.epoch) {
+                        Some(boundary_height) => self
+                            .marshal
+                            .get_block(boundary_height)
+                            .await
+                            .unwrap_or_default()
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "missing finalized boundary block at height {} for epoch {}",
+                                    boundary_height, transition.epoch
+                                )
+                            })
+                            .digest(),
+                        None => genesis::<H, C, V>().digest(),
+                    };
+
+                    // Register the new signing scheme with the scheme provider.
+                    let scheme = self.provider.scheme_for_epoch(&transition);
+                    assert!(self.provider.register(transition.epoch, scheme.clone()));
+
+                    // Enter the new epoch.
+                    let handle = self
+                        .enter_epoch(
+                            transition.epoch,
+                            floor,
+                            scheme,
+                            &mut vote_mux,
+                            &mut certificate_mux,
+                            &mut resolver_mux,
+                        )
+                        .await;
+                    engines.insert(transition.epoch, handle);
+                    let _ = self.latest_epoch.try_set(transition.epoch.get());
+
+                    info!(epoch = %transition.epoch, "entered epoch");
                 }
                 Message::Exit(epoch) => {
-                    if pending_epochs.remove(&epoch).is_some() {
-                        info!(%epoch, "exited pending epoch");
-                        continue;
-                    }
-
                     // Remove the engine and abort it.
                     let Some(handle) = engines.remove(&epoch) else {
                         warn!(%epoch, "exited non-existent epoch");
@@ -293,44 +297,6 @@ where
 
                     info!(%epoch, "exited epoch");
                 }
-            },
-            (pending_epoch_id, transition, floor) = pending_floors.next_completed() => {
-                if pending_epochs.get(&transition.epoch).copied() != Some(pending_epoch_id) {
-                    debug!(epoch = %transition.epoch, "ignoring canceled epoch");
-                    continue;
-                }
-                pending_epochs.remove(&transition.epoch);
-
-                if engines.contains_key(&transition.epoch) {
-                    warn!(epoch = %transition.epoch, "entered existing epoch");
-                    continue;
-                }
-                let floor = floor.unwrap_or_else(|boundary_height| {
-                    panic!(
-                        "missing finalized boundary block at height {} for epoch {}",
-                        boundary_height, transition.epoch
-                    )
-                });
-
-                // Register the new signing scheme with the scheme provider.
-                let scheme = self.provider.scheme_for_epoch(&transition);
-                assert!(self.provider.register(transition.epoch, scheme.clone()));
-
-                // Enter the new epoch.
-                let handle = self
-                    .enter_epoch(
-                        transition.epoch,
-                        floor,
-                        scheme,
-                        &mut vote_mux,
-                        &mut certificate_mux,
-                        &mut resolver_mux,
-                    )
-                    .await;
-                engines.insert(transition.epoch, handle);
-                let _ = self.latest_epoch.try_set(transition.epoch.get());
-
-                info!(epoch = %transition.epoch, "entered epoch");
             },
         }
     }

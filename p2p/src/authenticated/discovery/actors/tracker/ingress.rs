@@ -159,15 +159,16 @@ impl<C: PublicKey> Mailbox<C> {
 
     /// Send a `Connect` message to the tracker and receive the greeting info.
     ///
-    /// The returned receiver is closed if the peer is not eligible or the tracker is shut down.
-    pub(crate) fn connect(&self, public_key: C, dialer: bool) -> oneshot::Receiver<types::Info<C>> {
+    /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
+    /// dropped (peer not eligible or tracker shut down).
+    pub(crate) async fn connect(&self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Connect {
             public_key,
             dialer,
             responder,
         });
-        receiver
+        receiver.await.ok()
     }
 
     /// Send a `Construct` message to the tracker.
@@ -187,47 +188,47 @@ impl<C: PublicKey> Mailbox<C> {
 
     /// Request dialable peers from the tracker.
     ///
-    /// The returned receiver is closed if the tracker is shut down.
-    pub(crate) fn dialable(&self) -> oneshot::Receiver<Dialable<C>> {
+    /// Returns an empty response if the tracker is shut down.
+    pub(crate) async fn dialable(&self) -> Dialable<C> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dialable { responder });
-        receiver
+        receiver.await.unwrap_or_default()
     }
 
     /// Send a `Dial` message to the tracker.
     ///
-    /// The returned receiver is closed if the tracker is shut down.
-    pub(crate) fn dial(&self, public_key: C) -> oneshot::Receiver<Option<Reservation<C>>> {
+    /// Returns `None` if the tracker is shut down.
+    pub(crate) async fn dial(&self, public_key: C) -> Option<Reservation<C>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dial {
             public_key,
             reservation,
         });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// Send an `Acceptable` message to the tracker.
     ///
-    /// The returned receiver is closed if the tracker is shut down.
-    pub(crate) fn acceptable(&self, public_key: C) -> oneshot::Receiver<bool> {
+    /// Returns `false` if the tracker is shut down.
+    pub(crate) async fn acceptable(&self, public_key: C) -> bool {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Acceptable {
             public_key,
             responder,
         });
-        receiver
+        receiver.await.unwrap_or(false)
     }
 
     /// Send a `Listen` message to the tracker.
     ///
-    /// The returned receiver is closed if the tracker is shut down.
-    pub(crate) fn listen(&self, public_key: C) -> oneshot::Receiver<Option<Reservation<C>>> {
+    /// Returns `None` if the tracker is shut down.
+    pub(crate) async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,
             reservation,
         });
-        receiver
+        receiver.await.ok().flatten()
     }
 }
 

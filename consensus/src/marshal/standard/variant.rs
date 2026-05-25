@@ -68,7 +68,7 @@ where
     type PublicKey = K;
 
     async fn find_by_digest(&self, digest: B::Digest) -> Option<B> {
-        self.get(digest).await.unwrap_or_default()
+        self.get(digest).await
     }
 
     async fn find_by_commitment(&self, commitment: B::Digest) -> Option<B> {

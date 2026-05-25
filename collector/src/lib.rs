@@ -52,11 +52,9 @@ commonware_macros::stability_scope!(ALPHA {
             + Digestible<Digest = <Self::Request as Digestible>::Digest>
             + Codec;
 
-        /// Processes a `request` from an [Originator] and (optionally) sends a response.
+        /// Processes a `request` from an [Originator] and (optionally) send a response.
         ///
-        /// Implementations should return promptly. If processing requires async work,
-        /// enqueue it and use `response` to send the result later. If no response is
-        /// needed, the `response` should be dropped.
+        /// If no response is needed, the `responder` should be dropped.
         fn process(
             &mut self,
             origin: Self::PublicKey,
@@ -75,9 +73,6 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// Called for each response collected with the number of responses collected so far for
         /// the same commitment.
-        ///
-        /// Implementations should return promptly. If observing a collection event
-        /// requires async work, enqueue it before returning.
         ///
         /// [Monitor::collected] is only called once per `handler`.
         fn collected(

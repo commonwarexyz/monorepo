@@ -95,10 +95,9 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        let bouncer = tracker.clone();
         let (peer, send, recv) = match listen(
             context,
-            |peer| async move { bouncer.acceptable(peer).await.unwrap_or(false) },
+            |peer| tracker.acceptable(peer),
             stream_cfg,
             stream,
             sink,
@@ -114,7 +113,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "completed handshake");
 
         // Attempt to claim the connection
-        let Some(reservation) = tracker.listen(peer.clone()).await.unwrap_or_default() else {
+        let Some(reservation) = tracker.listen(peer.clone()).await else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
             return;
         };
@@ -291,6 +290,9 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
+                        tracker::Message::Acceptable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }
@@ -434,6 +436,9 @@ mod tests {
             let tracker_task = context.child("tracker").spawn(|_| async move {
                 while let Some(message) = tracker_rx.recv().await {
                     match message {
+                        tracker::Message::Acceptable { responder, .. } => {
+                            let _ = responder.send(true);
+                        }
                         tracker::Message::Listen { reservation, .. } => {
                             let _ = reservation.send(None);
                         }

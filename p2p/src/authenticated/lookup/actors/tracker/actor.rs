@@ -98,7 +98,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    self.update_listener();
+                    let _ = self.listener.set(self.directory.listenable());
                 }
             },
             Some(msg) = self.receiver.recv() else {
@@ -127,7 +127,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                 }
 
-                self.update_listener();
+                // Send the updated listenable IPs to the listener.
+                let _ = self.listener.set(self.directory.listenable());
 
                 // Notify all subscribers about the new peer set
                 let update = self
@@ -152,8 +153,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                 }
 
+                // Send the updated listenable IPs to the listener (if any changes occurred).
                 if any_changed {
-                    self.update_listener();
+                    let _ = self.listener.set(self.directory.listenable());
                 }
             }
             Message::PeerSet { index, responder } => {
@@ -182,7 +184,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Mark the record as connected
                 self.directory.connect(&public_key);
                 self.mailboxes.insert(public_key, peer);
-                self.update_listener();
             }
             Message::Dialable { responder } => {
                 let _ = responder.send(self.directory.dialable());
@@ -191,11 +192,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 public_key,
                 reservation,
             } => {
-                let result = self.directory.dial(&public_key);
-                if result.is_some() {
-                    self.update_listener();
-                }
-                let _ = reservation.send(result);
+                let _ = reservation.send(self.directory.dial(&public_key));
             }
             Message::Acceptable {
                 public_key,
@@ -209,11 +206,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 source_ip,
                 reservation,
             } => {
-                let result = self.directory.listen(&public_key, source_ip);
-                if result.is_some() {
-                    self.update_listener();
-                }
-                let _ = reservation.send(result);
+                let _ = reservation.send(self.directory.listen(&public_key, source_ip));
             }
             Message::Block { public_key } => {
                 // Block the peer
@@ -224,7 +217,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     peer.kill();
                 }
 
-                self.update_listener();
+                // Send the updated listenable IPs to the listener.
+                let _ = self.listener.set(self.directory.listenable());
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -232,13 +226,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Release the peer
                 self.directory.release(metadata);
-                self.update_listener();
             }
         }
-    }
-
-    fn update_listener(&mut self) {
-        let _ = self.listener.set(self.directory.listenable());
     }
 }
 
@@ -344,13 +333,13 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable = mailbox.dialable().await.unwrap_or_default();
+            let dialable = mailbox.dialable().await;
             assert!(dialable.peers.iter().any(|peer| peer == &pk));
 
             crate::block_peer(&mut oracle, pk.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable = mailbox.dialable().await.unwrap_or_default();
+            let dialable = mailbox.dialable().await;
             assert!(!dialable.peers.iter().any(|peer| peer == &pk));
         });
     }
@@ -377,13 +366,13 @@ mod tests {
             crate::block_peer(&mut oracle, pk1.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable = mailbox.dialable().await.unwrap_or_default();
+            let dialable = mailbox.dialable().await;
             assert!(!dialable.peers.iter().any(|peer| peer == &pk1));
 
             crate::block_peer(&mut oracle, pk1.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            let dialable = mailbox.dialable().await.unwrap_or_default();
+            let dialable = mailbox.dialable().await;
             assert!(!dialable.peers.iter().any(|peer| peer == &pk1));
         });
     }
@@ -420,18 +409,9 @@ mod tests {
             } = setup_actor(context.child("actor"), cfg_initial);
 
             // None acceptable because not registered
-            assert!(!mailbox
-                .acceptable(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or(false));
-            assert!(!mailbox
-                .acceptable(peer_pk2.clone(), peer_addr2.ip())
-                .await
-                .unwrap_or(false));
-            assert!(!mailbox
-                .acceptable(peer_pk3.clone(), peer_addr3.ip())
-                .await
-                .unwrap_or(false));
+            assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
+            assert!(!mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await);
+            assert!(!mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await);
 
             oracle.track(
                 0,
@@ -444,25 +424,13 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Not acceptable because self
-            assert!(!mailbox
-                .acceptable(peer_pk, peer_addr.ip())
-                .await
-                .unwrap_or(false));
+            assert!(!mailbox.acceptable(peer_pk, peer_addr.ip()).await);
             // Acceptable because registered with correct IP
-            assert!(mailbox
-                .acceptable(peer_pk2.clone(), peer_addr2.ip())
-                .await
-                .unwrap_or(false));
+            assert!(mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await);
             // Not acceptable with wrong IP
-            assert!(!mailbox
-                .acceptable(peer_pk2, peer_addr.ip())
-                .await
-                .unwrap_or(false));
+            assert!(!mailbox.acceptable(peer_pk2, peer_addr.ip()).await);
             // Not acceptable because not registered
-            assert!(!mailbox
-                .acceptable(peer_pk3, peer_addr3.ip())
-                .await
-                .unwrap_or(false));
+            assert!(!mailbox.acceptable(peer_pk3, peer_addr3.ip()).await);
         });
     }
 
@@ -487,10 +455,7 @@ mod tests {
 
             // Unknown peer is NOT acceptable (bypass_ip_check only skips IP check)
             assert!(
-                !mailbox
-                    .acceptable(peer_pk3.clone(), peer_addr3.ip())
-                    .await
-                    .unwrap_or(false),
+                !mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await,
                 "Unknown peer should not be acceptable"
             );
 
@@ -506,19 +471,13 @@ mod tests {
 
             // With bypass_ip_check=true, tracked peer with wrong IP is acceptable
             assert!(
-                mailbox
-                    .acceptable(peer_pk2.clone(), peer_addr.ip())
-                    .await
-                    .unwrap_or(false),
+                mailbox.acceptable(peer_pk2.clone(), peer_addr.ip()).await,
                 "Registered peer with wrong IP should be acceptable with bypass_ip_check=true"
             );
 
             // Self is still not acceptable
             assert!(
-                !mailbox
-                    .acceptable(peer_pk.clone(), peer_addr.ip())
-                    .await
-                    .unwrap_or(false),
+                !mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await,
                 "Self should not be acceptable"
             );
 
@@ -527,10 +486,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
-                !mailbox
-                    .acceptable(peer_pk2.clone(), peer_addr2.ip())
-                    .await
-                    .unwrap_or(false),
+                !mailbox.acceptable(peer_pk2.clone(), peer_addr2.ip()).await,
                 "Blocked peer should not be acceptable"
             );
         });
@@ -550,10 +506,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080);
 
-            let reservation = mailbox
-                .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or_default();
+            let reservation = mailbox.listen(peer_pk.clone(), peer_addr.ip()).await;
             assert!(reservation.is_none());
 
             oracle.track(
@@ -562,35 +515,20 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
-            assert!(mailbox
-                .acceptable(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or(false));
+            assert!(mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
 
-            let reservation = mailbox
-                .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or_default();
+            let reservation = mailbox.listen(peer_pk.clone(), peer_addr.ip()).await;
             assert!(reservation.is_some());
 
-            assert!(!mailbox
-                .acceptable(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or(false));
+            assert!(!mailbox.acceptable(peer_pk.clone(), peer_addr.ip()).await);
 
-            let failed_reservation = mailbox
-                .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or_default();
+            let failed_reservation = mailbox.listen(peer_pk.clone(), peer_addr.ip()).await;
             assert!(failed_reservation.is_none());
 
             drop(reservation.unwrap());
             context.sleep(Duration::from_millis(1_010)).await; // Allow release and rate limit to pass
 
-            let reservation_after_release = mailbox
-                .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or_default();
+            let reservation_after_release = mailbox.listen(peer_pk.clone(), peer_addr.ip()).await;
             assert!(reservation_after_release.is_some());
         });
     }
@@ -612,7 +550,7 @@ mod tests {
                 Map::<_, crate::Address>::try_from([(boot_pk.clone(), boot_addr.into())]).unwrap(),
             );
 
-            let dialable = mailbox.dialable().await.unwrap_or_default();
+            let dialable = mailbox.dialable().await;
             assert_eq!(dialable.peers.len(), 1);
             assert_eq!(dialable.peers[0], boot_pk);
         });
@@ -637,7 +575,7 @@ mod tests {
                 Map::<_, crate::Address>::try_from([(boot_pk.clone(), boot_addr.into())]).unwrap(),
             );
 
-            let result = mailbox.dial(boot_pk.clone()).await.unwrap_or_default();
+            let result = mailbox.dial(boot_pk.clone()).await;
             assert!(result.is_some());
             if let Some((res, ingress)) = result {
                 match res.metadata() {
@@ -650,7 +588,7 @@ mod tests {
             }
 
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
-            let no_reservation = mailbox.dial(unknown_pk).await.unwrap_or_default();
+            let no_reservation = mailbox.dial(unknown_pk).await;
             assert!(no_reservation.is_none());
         });
     }
@@ -701,18 +639,11 @@ mod tests {
                 Set::try_from([secondary_pk.clone()]).unwrap()
             );
 
-            let dialable = mailbox.dialable().await.unwrap_or_default();
+            let dialable = mailbox.dialable().await;
             assert!(dialable.peers.iter().any(|peer| peer == &primary_pk));
             assert!(!dialable.peers.iter().any(|peer| peer == &secondary_pk));
-            assert!(mailbox
-                .dial(secondary_pk.clone())
-                .await
-                .unwrap_or_default()
-                .is_none());
-            assert!(mailbox
-                .acceptable(secondary_pk, secondary_addr.ip())
-                .await
-                .unwrap_or(false));
+            assert!(mailbox.dial(secondary_pk.clone()).await.is_none());
+            assert!(mailbox.acceptable(secondary_pk, secondary_addr.ip()).await);
         });
     }
 
@@ -754,9 +685,9 @@ mod tests {
                 "aggregate secondary excludes keys that are primary"
             );
 
-            let dialable = mailbox.dialable().await.unwrap_or_default();
+            let dialable = mailbox.dialable().await;
             assert!(dialable.peers.iter().any(|peer| peer == &pk));
-            assert!(mailbox.acceptable(pk, addr.ip()).await.unwrap_or(false));
+            assert!(mailbox.acceptable(pk, addr.ip()).await);
         });
     }
 
@@ -782,10 +713,7 @@ mod tests {
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
 
-            let reservation = mailbox
-                .listen(peer_pk.clone(), peer_addr.ip())
-                .await
-                .unwrap_or_default();
+            let reservation = mailbox.listen(peer_pk.clone(), peer_addr.ip()).await;
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -852,10 +780,7 @@ mod tests {
             assert!(!acceptable.contains(&addr_2.ip()));
 
             // Mark peer as connected
-            let reservation = mailbox
-                .listen(pk_1.clone(), addr_1.ip())
-                .await
-                .unwrap_or_default();
+            let reservation = mailbox.listen(pk_1.clone(), addr_1.ip()).await;
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -935,7 +860,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let result = mailbox.dial(pk.clone()).await.unwrap_or_default();
+            let result = mailbox.dial(pk.clone()).await;
             assert!(result.is_some());
             let (_, ingress) = result.unwrap();
             assert_eq!(ingress, Ingress::Socket(addr_1));
@@ -944,7 +869,7 @@ mod tests {
 
             context.sleep(Duration::from_millis(1010)).await;
 
-            let result = mailbox.dial(pk.clone()).await.unwrap_or_default();
+            let result = mailbox.dial(pk.clone()).await;
             assert!(result.is_some());
             let (_, ingress) = result.unwrap();
             assert_eq!(ingress, Ingress::Socket(addr_2));
@@ -1025,25 +950,13 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(mailbox
-                .acceptable(pk_1.clone(), addr_1.ip())
-                .await
-                .unwrap_or(false));
-            assert!(!mailbox
-                .acceptable(pk_1.clone(), addr_2.ip())
-                .await
-                .unwrap_or(false));
+            assert!(mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
+            assert!(!mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
 
             oracle.overwrite([(pk_1.clone(), addr_2.into())].try_into().unwrap());
 
-            assert!(!mailbox
-                .acceptable(pk_1.clone(), addr_1.ip())
-                .await
-                .unwrap_or(false));
-            assert!(mailbox
-                .acceptable(pk_1.clone(), addr_2.ip())
-                .await
-                .unwrap_or(false));
+            assert!(!mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
+            assert!(mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
         });
     }
 
@@ -1069,10 +982,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Establish connection
-            let reservation = mailbox
-                .listen(pk.clone(), addr_1.ip())
-                .await
-                .unwrap_or_default();
+            let reservation = mailbox.listen(pk.clone(), addr_1.ip()).await;
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -1110,10 +1020,9 @@ mod tests {
             assert!(registered_ips.contains(&addr_a.ip()));
 
             // Establish connection to peer
-            let reservation = mailbox
+            let _reservation = mailbox
                 .listen(pk.clone(), addr_a.ip())
                 .await
-                .unwrap_or_default()
                 .expect("reservation failed");
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
@@ -1128,13 +1037,7 @@ mod tests {
             // Peer should receive Kill message (connection severed due to address change)
             assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)));
 
-            // The listener IP filter should move to the new address. The tracker still rejects
-            // this peer as unacceptable until the old reservation is released.
-            let registered_ips = listener_receiver.next().await.unwrap();
-            assert!(!registered_ips.contains(&addr_a.ip()));
-            assert!(registered_ips.contains(&addr_b.ip()));
-
-            drop(reservation);
+            // The listener IP filter should move to the new address.
             let registered_ips = listener_receiver.next().await.unwrap();
             assert!(!registered_ips.contains(&addr_a.ip()));
             assert!(registered_ips.contains(&addr_b.ip()));
@@ -1172,10 +1075,7 @@ mod tests {
             let _ = listener_receiver.next().await.unwrap();
 
             // Establish connection to pk_tracked
-            let reservation = mailbox
-                .listen(pk_tracked.clone(), addr_1.ip())
-                .await
-                .unwrap_or_default();
+            let reservation = mailbox.listen(pk_tracked.clone(), addr_1.ip()).await;
             assert!(reservation.is_some());
             let (tracked_mailbox, mut tracked_rx) = peer::Mailbox::new(NZUsize!(1));
             mailbox.connect(pk_tracked.clone(), tracked_mailbox);
@@ -1183,8 +1083,7 @@ mod tests {
             // Establish connection to pk_unchanged
             let reservation = mailbox
                 .listen(pk_unchanged.clone(), addr_unchanged.ip())
-                .await
-                .unwrap_or_default();
+                .await;
             assert!(reservation.is_some());
             let (unchanged_mailbox, mut unchanged_rx) = peer::Mailbox::new(NZUsize!(1));
             mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);

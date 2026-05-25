@@ -169,7 +169,7 @@ impl<
                 let now = self.context.current();
                 let mut next_query_at = None;
                 if self.queue.is_empty() {
-                    let dialable = tracker.dialable().await.unwrap_or_default();
+                    let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
                     self.queue.shuffle(self.context.as_mut());
                     next_query_at = dialable.next_query_at;
@@ -186,9 +186,7 @@ impl<
 
                 // Pop through peers until we can reserve and dial one.
                 while let Some(peer) = self.queue.pop() {
-                    if let Some((reservation, ingress)) =
-                        tracker.dial(peer).await.unwrap_or_default()
-                    {
+                    if let Some((reservation, ingress)) = tracker.dial(peer).await {
                         self.dial_peer(reservation, ingress, &mut supervisor);
                         break;
                     }

@@ -2130,7 +2130,7 @@ mod tests {
             let (slow_relay, _slow_receivers) =
                 Relay::new(context.child("slow_relay"), NZUsize!(10));
             assert!(
-                mailbox.ready(slow_peer, slow_relay).await.ok().is_some(),
+                mailbox.ready(slow_peer, slow_relay).await.is_some(),
                 "Failed to register slow peer"
             );
 
@@ -2138,7 +2138,7 @@ mod tests {
             let (fast_relay, mut fast_receivers) =
                 Relay::new(context.child("fast_relay"), NZUsize!(100));
             assert!(
-                mailbox.ready(fast_peer, fast_relay).await.ok().is_some(),
+                mailbox.ready(fast_peer, fast_relay).await.is_some(),
                 "Failed to register fast peer"
             );
 

@@ -123,7 +123,7 @@ where
             responses.1,
         );
 
-        // Create futures pools
+        // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
         select_loop! {
             self.context,
@@ -185,9 +185,7 @@ where
                 // Handle the request
                 let (tx, rx) = oneshot::channel();
                 self.handler.process(peer.clone(), msg, tx);
-                processed.push(async move {
-                    Ok((peer, rx.await?))
-                });
+                processed.push(async move { Ok((peer, rx.await?)) });
             },
 
             // Response from a handler
@@ -224,8 +222,7 @@ where
                 }
 
                 // Send the response to the monitor
-                let count = responses.1.len();
-                self.monitor.collected(peer, msg, count);
+                self.monitor.collected(peer, msg, responses.1.len());
             },
         }
     }
