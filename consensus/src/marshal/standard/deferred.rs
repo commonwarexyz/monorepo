@@ -483,11 +483,7 @@ where
             // cached block was built against a different parent and cannot be
             // broadcast under the current header, so drop the receiver
             // and let the voter nullify the view via timeout.
-            if let Some(block) = marshal
-                .get_verified(consensus_context.round)
-                .await
-                .unwrap_or_default()
-            {
+            if let Some(block) = marshal.get_verified(consensus_context.round).await {
                 let block_context = block.context();
                 if block_context != consensus_context {
                     debug!(

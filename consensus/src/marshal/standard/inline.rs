@@ -262,7 +262,6 @@ where
             if marshal
                 .get_verified(consensus_context.round)
                 .await
-                .unwrap_or_default()
                 .is_some()
             {
                 debug!(
@@ -991,7 +990,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            let post_restart = marshal2.get_block(&child_digest).await.unwrap_or_default();
+            let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
                 "verify resolved true so block must be durably persisted (seed={seed})"
@@ -1100,7 +1099,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            let post_restart = marshal2.get_block(&child_digest).await.unwrap_or_default();
+            let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
                 "certify resolved true so block must be durably persisted (seed={seed})"
@@ -1223,7 +1222,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            let post_restart = marshal2.get_block(&child_digest).await.unwrap_or_default();
+            let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_none(),
                 "failed marshal.verified ack must not leave a durably recoverable block"

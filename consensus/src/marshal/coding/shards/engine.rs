@@ -2078,7 +2078,6 @@ mod tests {
                         .mailbox
                         .get(commitment)
                         .await
-                        .unwrap_or_default()
                         .expect("block should be reconstructed");
                     assert_eq!(reconstructed.commitment(), commitment);
                     assert_eq!(reconstructed.height(), coded_block.height());
@@ -2127,7 +2126,6 @@ mod tests {
                         .mailbox
                         .get(commitment)
                         .await
-                        .unwrap_or_default()
                         .expect("block should be reconstructed");
                     assert_eq!(reconstructed.commitment(), commitment);
                     assert_eq!(reconstructed.height(), coded_block.height());
@@ -2339,27 +2337,15 @@ mod tests {
 
             // Verify all blocks are in the cache.
             assert!(
-                peer.mailbox
-                    .get(commitment1)
-                    .await
-                    .unwrap_or_default()
-                    .is_some(),
+                peer.mailbox.get(commitment1).await.is_some(),
                 "block1 should be cached"
             );
             assert!(
-                peer.mailbox
-                    .get(commitment2)
-                    .await
-                    .unwrap_or_default()
-                    .is_some(),
+                peer.mailbox.get(commitment2).await.is_some(),
                 "block2 should be cached"
             );
             assert!(
-                peer.mailbox
-                    .get(commitment3)
-                    .await
-                    .unwrap_or_default()
-                    .is_some(),
+                peer.mailbox.get(commitment3).await.is_some(),
                 "block3 should be cached"
             );
 
@@ -2369,29 +2355,17 @@ mod tests {
 
             // Blocks at heights 1 and 2 should be pruned.
             assert!(
-                peer.mailbox
-                    .get(commitment1)
-                    .await
-                    .unwrap_or_default()
-                    .is_none(),
+                peer.mailbox.get(commitment1).await.is_none(),
                 "block1 should be pruned"
             );
             assert!(
-                peer.mailbox
-                    .get(commitment2)
-                    .await
-                    .unwrap_or_default()
-                    .is_none(),
+                peer.mailbox.get(commitment2).await.is_none(),
                 "block2 should be pruned"
             );
 
             // Block at height 3 should still be cached.
             assert!(
-                peer.mailbox
-                    .get(commitment3)
-                    .await
-                    .unwrap_or_default()
-                    .is_some(),
+                peer.mailbox.get(commitment3).await.is_some(),
                 "block3 should still be cached"
             );
         });
@@ -3058,7 +3032,6 @@ mod tests {
                     .mailbox
                     .get(commitment_b)
                     .await
-                    .unwrap_or_default()
                     .expect("block B should reconstruct");
                 assert_eq!(reconstructed.commitment(), commitment_b);
 
@@ -3132,12 +3105,7 @@ mod tests {
 
                 peers[2].mailbox.proposed(round_b, block_b);
                 assert!(
-                    peers[2]
-                        .mailbox
-                        .get(commitment_b)
-                        .await
-                        .unwrap_or_default()
-                        .is_some(),
+                    peers[2].mailbox.get(commitment_b).await.is_some(),
                     "local proposal should be cached before pruning"
                 );
                 peers[2].mailbox.prune(commitment_b);
@@ -3219,7 +3187,7 @@ mod tests {
                 context.sleep(config.link.latency * 2).await;
 
                 // Block should not be reconstructed yet (no leader shard verified).
-                let block = peers[3].mailbox.get(commitment).await.unwrap_or_default();
+                let block = peers[3].mailbox.get(commitment).await;
                 assert!(block.is_none(), "block should not be reconstructed yet");
 
                 // Now the leader (peer 0) sends peer 3's own-index shard.
@@ -3242,7 +3210,7 @@ mod tests {
                 );
 
                 // Block should now be reconstructed (4 checked shards >= minimum_shards).
-                let block = peers[3].mailbox.get(commitment).await.unwrap_or_default();
+                let block = peers[3].mailbox.get(commitment).await;
                 assert!(
                     block.is_some(),
                     "block should be reconstructed after batch validation"
@@ -3311,12 +3279,7 @@ mod tests {
                     "shard subscription should not resolve before leader announcement"
                 );
                 assert!(
-                    peers[receiver_idx]
-                        .mailbox
-                        .get(commitment)
-                        .await
-                        .unwrap_or_default()
-                        .is_none(),
+                    peers[receiver_idx].mailbox.get(commitment).await.is_none(),
                     "block should not reconstruct before leader announcement"
                 );
 
@@ -3336,12 +3299,7 @@ mod tests {
 
                 context.sleep(config.link.latency * 2).await;
                 assert!(
-                    peers[receiver_idx]
-                        .mailbox
-                        .get(commitment)
-                        .await
-                        .unwrap_or_default()
-                        .is_some(),
+                    peers[receiver_idx].mailbox.get(commitment).await.is_some(),
                     "block should reconstruct after buffered shards are ingested"
                 );
 
@@ -3389,7 +3347,7 @@ mod tests {
                 context.sleep(config.link.latency * 2).await;
 
                 assert!(
-                    peers[receiver_idx].mailbox.get(commitment).await.unwrap_or_default().is_none(),
+                    peers[receiver_idx].mailbox.get(commitment).await.is_none(),
                     "block should not reconstruct before the commitment is notarized"
                 );
 
@@ -3405,7 +3363,7 @@ mod tests {
                 let reconstructed = peers[receiver_idx]
                     .mailbox
                     .get(commitment)
-                    .await.unwrap_or_default().expect("block should reconstruct from buffered peer shards");
+                    .await.expect("block should reconstruct from buffered peer shards");
                 assert_eq!(reconstructed.commitment(), commitment);
 
                 let mut assigned = peers[receiver_idx]
@@ -3554,7 +3512,6 @@ mod tests {
                     .mailbox
                     .get(commitment)
                     .await
-                    .unwrap_or_default()
                     .expect("block should reconstruct from post-leader shards");
                 assert_eq!(reconstructed.commitment(), commitment);
 
@@ -3884,12 +3841,7 @@ mod tests {
                 )
                 .await;
                 assert!(
-                    peers[receiver_idx]
-                        .mailbox
-                        .get(commitment1)
-                        .await
-                        .unwrap_or_default()
-                        .is_none(),
+                    peers[receiver_idx].mailbox.get(commitment1).await.is_none(),
                     "block should not reconstruct with only 3 checked shards"
                 );
 
@@ -3908,7 +3860,6 @@ mod tests {
                     .mailbox
                     .get(commitment1)
                     .await
-                    .unwrap_or_default()
                     .expect("block should reconstruct after additional valid shard");
                 assert_eq!(reconstructed.commitment(), commitment1);
             },
@@ -4262,7 +4213,7 @@ mod tests {
 
             context.sleep(DEFAULT_LINK.latency * 3).await;
 
-            let reconstructed = receiver_mailbox.get(commitment).await.unwrap_or_default();
+            let reconstructed = receiver_mailbox.get(commitment).await;
             assert!(
                 reconstructed.is_some(),
                 "receiver should reconstruct after broadcaster validates and broadcasts shard"
@@ -4354,7 +4305,6 @@ mod tests {
                         .mailbox
                         .get(fake_commitment)
                         .await
-                        .unwrap_or_default()
                         .is_none(),
                     "block should not be available after DigestMismatch"
                 );
@@ -4402,7 +4352,6 @@ mod tests {
                     .mailbox
                     .get(real_commitment1)
                     .await
-                    .unwrap_or_default()
                     .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
             },
@@ -4477,7 +4426,6 @@ mod tests {
                         .mailbox
                         .get(fake_commitment)
                         .await
-                        .unwrap_or_default()
                         .is_none(),
                     "block should not be available after ContextMismatch"
                 );
@@ -4517,7 +4465,6 @@ mod tests {
                     .mailbox
                     .get(real_commitment)
                     .await
-                    .unwrap_or_default()
                     .expect("valid block should reconstruct after prior context mismatch");
                 assert_eq!(reconstructed.commitment(), real_commitment);
             },
@@ -4600,7 +4547,7 @@ mod tests {
                 let reconstructed_a = peers[receiver_idx]
                     .mailbox
                     .get(commitment_a)
-                    .await.unwrap_or_default().expect("conflicting commitment should reconstruct first");
+                    .await.expect("conflicting commitment should reconstruct first");
                 assert_eq!(reconstructed_a.commitment(), commitment_a);
 
                 // Commitment B should still be recoverable after A reconstructed.
@@ -4748,7 +4695,6 @@ mod tests {
                         .mailbox
                         .get(commitment)
                         .await
-                        .unwrap_or_default()
                         .expect("block should be reconstructed");
                     assert_eq!(reconstructed.commitment(), commitment);
                 }
@@ -4872,7 +4818,6 @@ mod tests {
                         .mailbox
                         .get(commitment)
                         .await
-                        .unwrap_or_default()
                         .expect("non-participant should reconstruct block");
                     assert_eq!(reconstructed.commitment(), commitment);
                 }
@@ -5063,7 +5008,7 @@ mod tests {
                 "shard subscription should not resolve after evicted leader's buffer"
             );
             assert!(
-                mailbox.get(commitment).await.unwrap_or_default().is_none(),
+                mailbox.get(commitment).await.is_none(),
                 "block should not reconstruct from evicted buffers"
             );
         });
@@ -5270,7 +5215,7 @@ mod tests {
                 "old-epoch shard subscription should stay pending after cutover"
             );
             assert!(
-                mailbox.get(commitment).await.unwrap_or_default().is_none(),
+                mailbox.get(commitment).await.is_none(),
                 "old-epoch commitment should not reconstruct from overlap-only buffered shards"
             );
         });
@@ -5451,7 +5396,7 @@ mod tests {
             }
 
             context.sleep(DEFAULT_LINK.latency * 2).await;
-            let block = mailbox.get(commitment).await.unwrap_or_default();
+            let block = mailbox.get(commitment).await;
             assert!(
                 block.is_some(),
                 "evicted node should reconstruct from buffered shards sent by remaining latest.primary peers"

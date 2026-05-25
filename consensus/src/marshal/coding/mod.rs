@@ -1058,21 +1058,11 @@ mod tests {
             // Wait until the descendant is archived: that proves finalization processing
             // has completed, at which point the parent must already have been repaired
             // from the shard buffer.
-            while handle
-                .mailbox
-                .get_block(Height::new(2))
-                .await
-                .unwrap_or_default()
-                .is_none()
-            {
+            while handle.mailbox.get_block(Height::new(2)).await.is_none() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            let parent = handle
-                .mailbox
-                .get_block(Height::new(1))
-                .await
-                .unwrap_or_default();
+            let parent = handle.mailbox.get_block(Height::new(1)).await;
             assert!(
                 parent.is_some(),
                 "parent must be archived from shard buffer before height-prune evicts it"
@@ -2401,20 +2391,14 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
 
             // The mismatched block must not be stored.
-            let stored = v0_mailbox
-                .get_block(Height::new(1))
-                .await
-                .unwrap_or_default();
+            let stored = v0_mailbox.get_block(Height::new(1)).await;
             assert!(
                 stored.is_none(),
                 "v0 should reject backfilled block with mismatched commitment"
             );
 
             // Without the block, finalization should not be persisted by height yet.
-            let stored_finalization = v0_mailbox
-                .get_finalization(Height::new(1))
-                .await
-                .unwrap_or_default();
+            let stored_finalization = v0_mailbox.get_finalization(Height::new(1)).await;
             assert!(
                 stored_finalization.is_none(),
                 "finalization should not be archived until matching block is available"
@@ -2663,7 +2647,7 @@ mod tests {
             .await;
             let marshal2 = setup2.mailbox;
 
-            let post_restart = marshal2.get_block(&child_digest).await.unwrap_or_default();
+            let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
                 "certify resolved true ⟹ block must be durably persisted"
@@ -2779,7 +2763,7 @@ mod tests {
             // The proposer must recover its own block after restart. Without
             // the broadcast-path persistence fix, the block lived only in the
             // shards engine's in-memory cache and is now gone.
-            let post_restart = marshal2.get_block(&block_digest).await.unwrap_or_default();
+            let post_restart = marshal2.get_block(&block_digest).await;
             assert!(
                 post_restart.is_some(),
                 "proposer should recover its own block after restart"

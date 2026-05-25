@@ -775,29 +775,17 @@ mod tests {
 
             // The tip tracks the highest finalization, not the highest block.
             assert_eq!(
-                recovering
-                    .mailbox
-                    .get_info(Identifier::Latest)
-                    .await
-                    .unwrap_or_default(),
+                recovering.mailbox.get_info(Identifier::Latest).await,
                 Some((Height::new(1), block_one.digest())),
                 "latest tip should be derived from the highest stored finalization"
             );
             assert_eq!(
-                recovering
-                    .mailbox
-                    .get_block(Height::new(2))
-                    .await
-                    .unwrap_or_default(),
+                recovering.mailbox.get_block(Height::new(2)).await,
                 Some(block_two.clone()),
                 "block without a finalization row should still be queryable by height"
             );
             assert_eq!(
-                recovering
-                    .mailbox
-                    .get_info(Height::new(2))
-                    .await
-                    .unwrap_or_default(),
+                recovering.mailbox.get_info(Height::new(2)).await,
                 Some((Height::new(2), block_two.digest())),
                 "block info should fall back to the finalized-block archive"
             );
@@ -1036,7 +1024,6 @@ mod tests {
                     .mailbox
                     .get_block(Height::new(height))
                     .await
-                    .unwrap_or_default()
                     .unwrap_or_else(|| panic!("block {height} should be recoverable"));
                 assert_eq!(block.digest(), blocks[(height - 1) as usize].digest());
             }
@@ -1939,7 +1926,7 @@ mod tests {
                 assert!(honest_mailbox.verified(parent_round, parent.clone()).await.is_ok());
                 StandardHarness::report_notarization(&mut honest_mailbox, parent_notarization)
                     .await;
-                assert!(honest_mailbox.get_block(&parent_digest).await.unwrap_or_default().is_some());
+                assert!(honest_mailbox.get_block(&parent_digest).await.is_some());
 
                 let malicious_backfill = oracle
                     .control(malicious.clone())
@@ -2983,7 +2970,6 @@ mod tests {
             let stored_genesis = mailbox
                 .get_block(Identifier::Height(Height::zero()))
                 .await
-                .unwrap_or_default()
                 .expect("genesis should be available without a buffer");
             assert_eq!(stored_genesis.digest(), genesis.digest());
 
@@ -2999,7 +2985,6 @@ mod tests {
             let verified = mailbox
                 .get_verified(round)
                 .await
-                .unwrap_or_default()
                 .expect("verified block should remain available without a buffer");
             assert_eq!(verified.digest(), digest);
         });
@@ -3198,12 +3183,7 @@ mod tests {
                 "local startup floor anchor must not be fetched"
             );
             assert_eq!(
-                mailbox
-                    .get_block(Height::new(5))
-                    .await
-                    .unwrap_or_default()
-                    .unwrap()
-                    .digest(),
+                mailbox.get_block(Height::new(5)).await.unwrap().digest(),
                 floor_block.digest()
             );
 
@@ -3449,7 +3429,6 @@ mod tests {
                 mailbox
                     .get_block(Height::new(5))
                     .await
-                    .unwrap_or_default()
                     .expect("floor block missing")
                     .digest(),
                 floor_block.digest()
@@ -3467,7 +3446,7 @@ mod tests {
                     height: Height::new(2),
                 },
             );
-            let _ = mailbox.get_block(Height::new(5)).await.unwrap_or_default();
+            let _ = mailbox.get_block(Height::new(5)).await;
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_after_floor,
@@ -3539,7 +3518,6 @@ mod tests {
                 mailbox
                     .get_block(Height::new(5))
                     .await
-                    .unwrap_or_default()
                     .expect("floor block missing")
                     .digest(),
                 floor_block.digest()
@@ -3561,7 +3539,7 @@ mod tests {
                     height: Height::new(2),
                 },
             );
-            let _ = mailbox.get_block(Height::new(5)).await.unwrap_or_default();
+            let _ = mailbox.get_block(Height::new(5)).await;
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_after_floor,
@@ -3631,11 +3609,7 @@ mod tests {
                 QUORUM,
             );
             StandardHarness::report_finalization(&mut mailbox, later_finalization).await;
-            assert!(mailbox
-                .get_finalization(Height::new(7))
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_finalization(Height::new(7)).await.is_some());
             assert!(
                 resolver.fetches().iter().all(|fetch| {
                     !matches!(
@@ -3851,11 +3825,7 @@ mod tests {
                 QUORUM,
             );
             StandardHarness::report_finalization(&mut mailbox, old_next_finalization).await;
-            assert!(mailbox
-                .get_finalization(Height::new(6))
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_finalization(Height::new(6)).await.is_some());
 
             let new_next_round = Round::new(Epoch::zero(), View::new(8));
             let new_next = make_raw_block(new_floor_block.digest(), Height::new(8), 800);
@@ -3873,11 +3843,7 @@ mod tests {
                 QUORUM,
             );
             StandardHarness::report_finalization(&mut mailbox, new_next_finalization).await;
-            assert!(mailbox
-                .get_finalization(Height::new(8))
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_finalization(Height::new(8)).await.is_some());
 
             let old_floor_fetch = resolver
                 .fetches()
@@ -4095,11 +4061,7 @@ mod tests {
             );
             assert!(mailbox.verified(block2_round, block2).await.is_ok());
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
-            assert!(mailbox
-                .get_finalization(Height::new(2))
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
 
@@ -4183,11 +4145,7 @@ mod tests {
             // The genesis anchor is already local and below the in-flight
             // height 1 ack, so applying it must not touch pending acks.
             mailbox.set_floor(floor_finalization);
-            assert!(mailbox
-                .get_block(Height::zero())
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_block(Height::zero()).await.is_some());
 
             assert_eq!(
                 application.pending_ack_heights(),
@@ -4319,11 +4277,7 @@ mod tests {
             // This lower local anchor is already behind processed height. It
             // may advance the round floor, but must leave height 2 in flight.
             mailbox.set_floor(stale_floor_finalization);
-            assert!(mailbox
-                .get_block(Height::zero())
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_block(Height::zero()).await.is_some());
 
             assert_eq!(
                 application.pending_ack_heights(),
@@ -4430,11 +4384,7 @@ mod tests {
                 QUORUM,
             );
             mailbox.set_floor(same_height_finalization);
-            assert!(mailbox
-                .get_block(Height::new(1))
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_block(Height::new(1)).await.is_some());
 
             assert_eq!(
                 application.pending_ack_heights(),
@@ -4611,19 +4561,11 @@ mod tests {
             );
 
             assert!(
-                mailbox
-                    .get_block(Height::new(2))
-                    .await
-                    .unwrap_or_default()
-                    .is_some(),
+                mailbox.get_block(Height::new(2)).await.is_some(),
                 "standard floor anchor should be archived using its parent digest"
             );
             assert!(
-                mailbox
-                    .get_finalization(Height::new(2))
-                    .await
-                    .unwrap_or_default()
-                    .is_some(),
+                mailbox.get_finalization(Height::new(2)).await.is_some(),
                 "standard floor finalization should be archived by height"
             );
         });
@@ -4870,12 +4812,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                mailbox
-                    .get_block(Height::zero())
-                    .await
-                    .unwrap_or_default()
-                    .unwrap()
-                    .digest(),
+                mailbox.get_block(Height::zero()).await.unwrap().digest(),
                 original_genesis.digest()
             );
 
@@ -4942,10 +4879,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                mailbox
-                    .get_info(Identifier::Latest)
-                    .await
-                    .unwrap_or_default(),
+                mailbox.get_info(Identifier::Latest).await,
                 Some((Height::new(1), block.digest()))
             );
 
@@ -5485,7 +5419,6 @@ mod tests {
             let recovered = mailbox
                 .get_block(Height::new(1))
                 .await
-                .unwrap_or_default()
                 .expect("finalized block must be durable before delivery");
             assert_eq!(
                 recovered.digest(),
@@ -5496,7 +5429,6 @@ mod tests {
                 mailbox
                     .get_finalization(Height::new(1))
                     .await
-                    .unwrap_or_default()
                     .expect("finalization must be durable before delivery")
                     .round(),
                 round,
@@ -5891,12 +5823,7 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             // Wait until marshal has durably stored the finalization.
-            while mailbox
-                .get_finalization(Height::new(1))
-                .await
-                .unwrap_or_default()
-                .is_none()
-            {
+            while mailbox.get_finalization(Height::new(1)).await.is_none() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -5986,12 +5913,7 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await.is_ok());
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            while mailbox
-                .get_finalization(Height::new(1))
-                .await
-                .unwrap_or_default()
-                .is_none()
-            {
+            while mailbox.get_finalization(Height::new(1)).await.is_none() {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -6000,16 +5922,8 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // The finalized block and its finalization must still be retrievable.
-            assert!(mailbox
-                .get_block(Height::new(1))
-                .await
-                .unwrap_or_default()
-                .is_some());
-            assert!(mailbox
-                .get_finalization(Height::new(1))
-                .await
-                .unwrap_or_default()
-                .is_some());
+            assert!(mailbox.get_block(Height::new(1)).await.is_some());
+            assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
         });
     }
 }

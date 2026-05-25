@@ -253,7 +253,6 @@ where
                             .marshal
                             .get_block(boundary_height)
                             .await
-                            .unwrap_or_default()
                             .unwrap_or_else(|| {
                                 panic!(
                                     "missing finalized boundary block at height {} for epoch {}",

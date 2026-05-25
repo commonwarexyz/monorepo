@@ -558,54 +558,51 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
-    pub fn get_info(
+    pub async fn get_info(
         &self,
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
-    ) -> oneshot::Receiver<Option<(Height, <V::Block as Digestible>::Digest)>> {
+    ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetInfo {
             identifier,
             response,
         });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// A best-effort attempt to retrieve a given block from local
     /// storage. It is not an indication to go fetch the block from the network.
-    pub fn get_block(
+    pub async fn get_block(
         &self,
         identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
-    ) -> oneshot::Receiver<Option<V::Block>> {
+    ) -> Option<V::Block> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetBlock {
             identifier,
             response,
         });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
-    pub fn get_finalization(
-        &self,
-        height: Height,
-    ) -> oneshot::Receiver<Option<Finalization<S, V::Commitment>>> {
+    pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
             .enqueue(Message::GetFinalization { height, response });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// Retrieve the latest processed height.
-    pub fn get_processed_height(&self) -> oneshot::Receiver<Option<Height>> {
+    pub async fn get_processed_height(&self) -> Option<Height> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
             .enqueue(Message::GetProcessedHeight { response });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -723,12 +720,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Returns the verified block previously persisted for `round`, if any.
-    pub fn get_verified(&self, round: Round) -> oneshot::Receiver<Option<V::Block>> {
+    pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
             .enqueue(Message::GetVerified { round, response });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// Notifies the actor that a block has been locally proposed.

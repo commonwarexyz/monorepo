@@ -242,25 +242,22 @@ where
     }
 
     /// Request a reconstructed block by its [`Commitment`].
-    pub fn get(&self, commitment: Commitment) -> oneshot::Receiver<Option<CodedBlock<B, C, H>>> {
+    pub async fn get(&self, commitment: Commitment) -> Option<CodedBlock<B, C, H>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetByCommitment {
             commitment,
             response,
         });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// Request a reconstructed block by its digest.
-    pub fn get_by_digest(
-        &self,
-        digest: B::Digest,
-    ) -> oneshot::Receiver<Option<CodedBlock<B, C, H>>> {
+    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<CodedBlock<B, C, H>> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender
             .enqueue(Message::GetByDigest { digest, response });
-        receiver
+        receiver.await.ok().flatten()
     }
 
     /// Subscribe to assigned shard verification for a commitment.

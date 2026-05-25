@@ -303,12 +303,12 @@ mod tests {
                         loop {
                             let (height, epoch) = mailbox
                                 .get_tip(sequencer.clone())
-                                .await.unwrap_or_default()
+                                .await
                                 .unwrap_or((Height::zero(), Epoch::zero()));
                             debug!(height = %height, epoch = %epoch, ?sequencer, ?reporter, "reporter");
                             let contiguous_height = mailbox
                                 .get_contiguous_tip(sequencer.clone())
-                                .await.unwrap_or_default()
+                                .await
                                 .unwrap_or(Height::zero());
                             if height >= threshold_height
                                 && epoch >= threshold_epoch
@@ -342,7 +342,6 @@ mod tests {
             let (height, _) = mailbox
                 .get_tip(sequencer.clone())
                 .await
-                .unwrap_or_default()
                 .unwrap_or((Height::zero(), Epoch::zero()));
             if height > max_height {
                 max_height = height;
