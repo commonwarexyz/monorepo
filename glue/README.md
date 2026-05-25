@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-glue.svg)](https://crates.io/crates/commonware-glue)
 
-Bootstrap applications with commonware primitive compositions.
+Compose distributed system constructions.
 
 ## Status
 
