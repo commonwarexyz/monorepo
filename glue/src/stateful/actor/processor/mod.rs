@@ -208,6 +208,10 @@ where
             response.send_lossy(None);
             return;
         };
+        assert!(
+            A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)),
+            "proposed state must match block commitments",
+        );
         self.cache_pending(block.digest(), parent_digest, round, merkleized);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
         timer.observe(context);
@@ -378,6 +382,15 @@ where
             response.send_lossy(false);
             return;
         };
+        if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
+            warn!(
+                ?parent_digest,
+                ?block_digest,
+                "verification rejected: verified state must match block commitments"
+            );
+            response.send_lossy(false);
+            return;
+        }
         self.cache_pending(block_digest, parent_digest, round, merkleized);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
         timer.observe(context);

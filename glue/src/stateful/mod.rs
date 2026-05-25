@@ -161,6 +161,11 @@ where
     ///
     /// Returns [`None`] if the build fails.
     ///
+    /// The wrapper checks that the returned merkleized state matches
+    /// [`sync_targets`](Self::sync_targets) for the returned block before the
+    /// result is cached as pending state. If the implementor produces a
+    /// block with mismatched targets, this function will panic.
+    ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
@@ -190,6 +195,10 @@ where
     ///
     /// Verification must reject any block whose execution result does not
     /// match the block's committed state (for example, a state root mismatch).
+    /// Implementations do not need to re-check [`sync_targets`](Self::sync_targets)
+    /// against the produced batches themselves: the wrapper enforces
+    /// this by checking that any returned merkleized state matches the block
+    /// before it is cached as pending state.
     ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
