@@ -5,6 +5,10 @@
 //! provide [`Fetcher::fetch`]; this module handles request coalescing, retain
 //! pruning, retry scheduling, consumer delivery, and accepted-response
 //! redelivery.
+//!
+//! Target hints supplied through [`crate::Resolver::fetch_targeted`] and
+//! [`crate::Resolver::fetch_all_targeted`] are ignored because direct fetchers do
+//! not have peer-specific routing.
 
 use crate::{
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
@@ -101,6 +105,10 @@ where
         ))
     }
 
+    /// Fetch with target hints.
+    ///
+    /// Direct resolvers have no peer-specific routing, so target hints are
+    /// ignored and this is equivalent to [`fetch`](crate::Resolver::fetch).
     fn fetch_targeted(
         &mut self,
         fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
@@ -109,6 +117,10 @@ where
         self.fetch(fetch)
     }
 
+    /// Fetch multiple keys with target hints.
+    ///
+    /// Direct resolvers have no peer-specific routing, so target hints are
+    /// ignored and this is equivalent to [`fetch_all`](crate::Resolver::fetch_all).
     fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,

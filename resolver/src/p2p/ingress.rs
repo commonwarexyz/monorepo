@@ -242,6 +242,21 @@ where
 
     /// Send a targeted fetch to the peer actor.
     ///
+    /// The P2P resolver interprets target hints strictly: only target peers are
+    /// tried, with no fallback to other peers. Targets persist through transient
+    /// failures (timeout, "no data" response, send failure) since the peer might
+    /// be slow or receive the data later.
+    ///
+    /// If a fetch is already in progress for this key:
+    /// - If the existing fetch has targets, the new targets are added to the set.
+    /// - If the existing fetch has no targets, it remains unrestricted.
+    ///
+    /// To clear targeting and fall back to any peer, call [`fetch`](Self::fetch).
+    ///
+    /// Targets are automatically cleared when the fetch succeeds or is canceled.
+    /// When a peer is blocked for invalid data, only that peer is removed from
+    /// the target set.
+    ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(
         &mut self,
@@ -257,6 +272,9 @@ where
     }
 
     /// Send targeted fetches to the peer actor for a batch of keys.
+    ///
+    /// See [`fetch_targeted`](Self::fetch_targeted) for the P2P resolver's
+    /// strict target behavior.
     ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_all_targeted<D>(&mut self, keys: Vec<(D, NonEmptyVec<Self::PublicKey>)>) -> Feedback
