@@ -435,7 +435,12 @@ where
                 false
             }
             Attempt::Scheduled(deadline) => {
-                trace!(?key, id, ?deadline, "ignoring scheduled delivery completion");
+                trace!(
+                    ?key,
+                    id,
+                    ?deadline,
+                    "ignoring scheduled delivery completion"
+                );
                 false
             }
         }
@@ -487,7 +492,10 @@ where
             // A cached response already satisfied at least one subscriber.
             // Treat a later rejection during redelivery as stale application
             // feedback rather than re-fetching data that was accepted once.
-            warn!(?key, "previously accepted resolver response rejected during direct redelivery");
+            warn!(
+                ?key,
+                "previously accepted resolver response rejected during direct redelivery"
+            );
             self.requests.remove(&key);
             self.subscribers.remove(&key);
             self.deliveries.remove(&key);
@@ -710,13 +718,24 @@ mod tests {
             let fetcher = MockFetcher::default();
             fetcher.push(1, Some(Bytes::from_static(b"value")));
             let consumer = MockConsumer::default();
-            let mut resolver = start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(resolver.fetch(Fetch { key: 1, subscriber: 10 }).accepted());
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 10
+                })
+                .accepted());
             let first = wait_for_delivery(&context, &consumer).await;
             assert_eq!(first.value, Bytes::from_static(b"value"));
 
-            assert!(resolver.fetch(Fetch { key: 1, subscriber: 11 }).accepted());
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 11
+                })
+                .accepted());
             context.sleep(Duration::from_millis(10)).await;
             first.response.send(true).expect("response dropped");
 
@@ -737,10 +756,18 @@ mod tests {
             fetcher.push(1, None);
             fetcher.push(1, Some(Bytes::from_static(b"value")));
             let consumer = MockConsumer::default();
-            let mut resolver = start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(resolver.fetch(Fetch { key: 1, subscriber: 10 }).accepted());
-            context.sleep(RETRY_TIMEOUT + Duration::from_millis(10)).await;
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 10
+                })
+                .accepted());
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
 
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
@@ -755,19 +782,32 @@ mod tests {
             let fetcher = MockFetcher::default();
             fetcher.push(1, Some(Bytes::from_static(b"value")));
             let consumer = MockConsumer::default();
-            let mut resolver = start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
 
-            assert!(resolver.fetch(Fetch { key: 1, subscriber: 10 }).accepted());
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 10
+                })
+                .accepted());
             let first = wait_for_delivery(&context, &consumer).await;
 
-            assert!(resolver.fetch(Fetch { key: 1, subscriber: 11 }).accepted());
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 11
+                })
+                .accepted());
             context.sleep(Duration::from_millis(10)).await;
             first.response.send(true).expect("response dropped");
 
             let second = wait_for_delivery(&context, &consumer).await;
             second.response.send(false).expect("response dropped");
 
-            context.sleep(RETRY_TIMEOUT + Duration::from_millis(10)).await;
+            context
+                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .await;
             assert_eq!(fetcher.calls(), 1);
             assert_eq!(consumer.len(), 0);
         });
@@ -780,10 +820,22 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver = start_resolver(context.child("resolver"), fetcher, consumer.clone());
 
-            assert!(resolver.fetch(Fetch { key: 1, subscriber: 10 }).accepted());
-            assert!(resolver.fetch(Fetch { key: 1, subscriber: 11 }).accepted());
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 10
+                })
+                .accepted());
+            assert!(resolver
+                .fetch(Fetch {
+                    key: 1,
+                    subscriber: 11
+                })
+                .accepted());
             started.await.expect("fetch did not start");
-            assert!(resolver.retain(|_, subscriber| *subscriber == 11).accepted());
+            assert!(resolver
+                .retain(|_, subscriber| *subscriber == 11)
+                .accepted());
             context.sleep(Duration::from_millis(10)).await;
             response
                 .send(Some(Bytes::from_static(b"value")))
@@ -801,11 +853,18 @@ mod tests {
             let fetcher = MockFetcher::default();
             fetcher.push(1, Some(Bytes::from_static(b"value")));
             let consumer = MockConsumer::default();
-            let mut resolver = start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let mut resolver =
+                start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
             let target = PrivateKey::from_seed(0).public_key();
 
             assert!(resolver
-                .fetch_targeted(Fetch { key: 1, subscriber: 10 }, non_empty_vec![target])
+                .fetch_targeted(
+                    Fetch {
+                        key: 1,
+                        subscriber: 10
+                    },
+                    non_empty_vec![target]
+                )
                 .accepted());
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"value"));

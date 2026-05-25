@@ -5,10 +5,7 @@
 //! resolver decides how keys are fetched, retried, and delivered.
 
 use commonware_utils::vec::NonEmptyVec;
-use std::collections::{
-    btree_map::Entry as BTreeMapEntry,
-    BTreeMap, BTreeSet,
-};
+use std::collections::{btree_map::Entry as BTreeMapEntry, BTreeMap, BTreeSet};
 
 /// Tracks retained subscribers by resolver key.
 #[derive(Clone, Debug, Eq, PartialEq)]
