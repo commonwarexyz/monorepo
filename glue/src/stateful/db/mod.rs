@@ -539,6 +539,9 @@ where
                             continue;
                         }
                         current_anchor = new_anchor;
+                        if new_target == current_target {
+                            continue;
+                        }
                         current_target = new_target.clone();
                         if !target_tx.send_lossy(new_target).await {
                             return current_anchor;
@@ -732,6 +735,7 @@ macro_rules! impl_state_sync_set {
                 let (completion_tx, mut completion_rx) = mpsc::channel(1);
                 let db_count = [$($idx,)+].len();
                 let coordinator_targets = targets.clone();
+                let initial_targets = targets.clone();
                 let first_db_error: Arc<commonware_utils::sync::Mutex<Option<String>>> =
                     Arc::new(commonware_utils::sync::Mutex::new(None));
                 let coordinator_handle = context.child("coordinator").spawn({
@@ -739,6 +743,7 @@ macro_rules! impl_state_sync_set {
                         let coordinator_owned_senders = coordinator_owned_senders;
                         let mut tip_updates = Some(tip_updates);
                         let mut state = CoordinatorState::new(db_count, anchor, coordinator_targets);
+                        let mut last_dispatched_targets = initial_targets;
 
                         loop {
                             loop {
@@ -777,22 +782,27 @@ macro_rules! impl_state_sync_set {
                                     targets: dispatch_targets,
                                 } => {
                                     $(
+                                        let dispatch_target = dispatch_targets.$idx.clone();
+                                        if !coordinator_senders.$idx
+                                            .generation_tx
+                                            .send_lossy((generation, dispatch_target.clone()))
+                                            .await
+                                        {
+                                            return None;
+                                        }
                                         if state.should_dispatch($idx) {
-                                            let dispatch_target = dispatch_targets.$idx.clone();
-                                            if !coordinator_senders.$idx
-                                                .generation_tx
-                                                .send_lossy((generation, dispatch_target.clone()))
-                                                .await
-                                            {
-                                                return None;
+                                            if dispatch_target != last_dispatched_targets.$idx {
+                                                if !coordinator_senders.$idx
+                                                    .target_tx
+                                                    .send_lossy(dispatch_target.clone())
+                                                    .await
+                                                {
+                                                    return None;
+                                                }
+                                                last_dispatched_targets.$idx = dispatch_target;
                                             }
-                                            if !coordinator_senders.$idx
-                                                .target_tx
-                                                .send_lossy(dispatch_target)
-                                                .await
-                                            {
-                                                return None;
-                                            }
+                                        } else if dispatch_target == last_dispatched_targets.$idx {
+                                            state.mark_reached_same_target($idx, generation);
                                         }
                                     )+
                                     continue;
@@ -1224,6 +1234,14 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     fn should_dispatch(&self, idx: usize) -> bool {
         !self.dbs[idx].is_reached()
     }
+
+    /// Advance a reached database to `generation` when its target is unchanged.
+    fn mark_reached_same_target(&mut self, idx: usize, generation: usize) {
+        if !self.dbs[idx].is_reached() {
+            return;
+        }
+        self.dbs[idx] = DbSyncState::Reached { generation };
+    }
 }
 
 async fn finalize_or_panic<E, T: ManagedDb<E>>(
@@ -1502,6 +1520,10 @@ mod tests {
         final_target: u64,
     }
 
+    struct RejectDuplicateTargetSyncDb {
+        final_target: u64,
+    }
+
     struct StaleReachedSyncDb {
         final_target: u64,
     }
@@ -1679,6 +1701,40 @@ mod tests {
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for RejectDuplicateTargetSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!(
+                "RejectDuplicateTargetSyncDb is only constructed through state sync in tests"
+            )
         }
 
         async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
@@ -1988,6 +2044,49 @@ mod tests {
                         }
                     },
                 }
+            }
+
+            Ok(Self { final_target })
+        }
+    }
+
+    impl<E> StateSyncDb<E, Arc<AtomicBool>> for RejectDuplicateTargetSyncDb
+    where
+        E: Send + Clock,
+    {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            context: E,
+            _config: Self::Config,
+            release: Arc<AtomicBool>,
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            let mut final_target = target;
+            while !release.load(Ordering::SeqCst) {
+                match tip_updates.try_recv() {
+                    Ok(update) => {
+                        assert_ne!(
+                            update, final_target,
+                            "state sync must not send duplicate target updates"
+                        );
+                        final_target = update;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            if let Some(reached_target) = reached_target.as_ref() {
+                let _ = reached_target.send(final_target).await;
+            }
+            if let Some(finish_rx) = finish.as_mut() {
+                let _ = finish_rx.recv().await;
             }
 
             Ok(Self { final_target })
@@ -2635,6 +2734,53 @@ mod tests {
     }
 
     #[test]
+    fn single_state_sync_advances_anchor_without_duplicate_target_update() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let release = Arc::new(AtomicBool::new(false));
+            let release_for_sync = release.clone();
+
+            let sync = context.child("single_state_sync_noop_target_update").spawn(
+                move |context| async move {
+                    <Arc<AsyncRwLock<RejectDuplicateTargetSyncDb>> as StateSyncSet<
+                        deterministic::Context,
+                        Arc<AtomicBool>,
+                        sha256::Digest,
+                    >>::sync(
+                        context,
+                        (),
+                        release_for_sync,
+                        anchor(7),
+                        7,
+                        tip_rx,
+                        SyncEngineConfig {
+                            fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                            apply_batch_size: 1,
+                            max_outstanding_requests: 1,
+                            update_channel_size: NonZeroUsize::new(4).unwrap(),
+                            max_retained_roots: 0,
+                        },
+                    )
+                    .await
+                    .expect("single state sync should succeed")
+                },
+            );
+
+            let (update, observed) = TipUpdate::with_observation(anchor(9), 7);
+            let _ = tip_tx.send(update).await;
+            observed
+                .await
+                .expect("single-db coordinator should record noop target update");
+            release.store(true, Ordering::SeqCst);
+            drop(tip_tx);
+
+            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 7);
+            assert_eq!(converged_anchor, anchor(9));
+        });
+    }
+
+    #[test]
     fn single_state_sync_ignores_stale_reached_after_forwarded_tip() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
@@ -3207,8 +3353,8 @@ mod tests {
             assert_eq!(converged_anchor, anchor(9));
             assert_eq!(
                 fast_update_count.load(Ordering::SeqCst),
-                1,
-                "the unchanged-target database should receive the regroup retarget exactly once",
+                0,
+                "the unchanged-target database should not receive duplicate target updates",
             );
         });
     }
