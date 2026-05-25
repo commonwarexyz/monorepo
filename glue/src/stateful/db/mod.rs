@@ -469,6 +469,9 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
         let mut database = self.write().await;
+        if T::sync_target(&*database).await == target {
+            return;
+        }
         rewind_or_panic(&mut *database, target, None).await;
     }
 
@@ -624,6 +627,9 @@ macro_rules! impl_database_set {
                 join!($(
                     async {
                         let mut database = self.$idx.write().await;
+                        if $T::sync_target(&*database).await == targets.$idx {
+                            return;
+                        }
                         rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
                     },
                 )+);
@@ -1398,6 +1404,11 @@ mod tests {
     #[derive(Default)]
     struct ThreeStepRewindDb;
 
+    struct CountingRewindDb {
+        current_target: u64,
+        rewind_count: usize,
+    }
+
     impl<E: Send> ManagedDb<E> for TestDb {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
@@ -1494,6 +1505,40 @@ mod tests {
 
         fn max_rewind_depth() -> Option<usize> {
             Some(3)
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for CountingRewindDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("CountingRewindDb is constructed directly in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.current_target
+        }
+
+        async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Self::Error> {
+            self.current_target = target;
+            self.rewind_count += 1;
+            Ok(())
         }
     }
 
@@ -1654,6 +1699,37 @@ mod tests {
             panic.contains("max_rewind_depth=1"),
             "panic should report max_rewind_depth: {panic}"
         );
+    }
+
+    #[test]
+    fn tuple_rewind_to_targets_skips_already_aligned_databases() {
+        deterministic::Runner::default().start(|_context| async move {
+            type DbSet = (
+                Arc<AsyncRwLock<CountingRewindDb>>,
+                Arc<AsyncRwLock<CountingRewindDb>>,
+            );
+
+            let left = Arc::new(AsyncRwLock::new(CountingRewindDb {
+                current_target: 2,
+                rewind_count: 0,
+            }));
+            let right = Arc::new(AsyncRwLock::new(CountingRewindDb {
+                current_target: 1,
+                rewind_count: 0,
+            }));
+            let databases: DbSet = (left.clone(), right.clone());
+
+            <DbSet as DatabaseSet<deterministic::Context>>::rewind_to_targets(&databases, (1, 1))
+                .await;
+
+            let left = left.read().await;
+            assert_eq!(left.current_target, 1);
+            assert_eq!(left.rewind_count, 1);
+
+            let right = right.read().await;
+            assert_eq!(right.current_target, 1);
+            assert_eq!(right.rewind_count, 0);
+        });
     }
 
     impl<E: Send> ManagedDb<E> for BlockingFinalizeDb {
