@@ -30,11 +30,13 @@ struct Response<Context, V> {
     accepted: bool,
 }
 
+// Active validation attempt for a key.
 struct ActiveDelivery {
     generation: u64,
     _aborter: Aborter,
 }
 
+// Pooled validation result tagged with the attempt that produced it.
 struct PooledCompletion<K, S, Context> {
     generation: u64,
     completion: Completion<K, S, Context>,
