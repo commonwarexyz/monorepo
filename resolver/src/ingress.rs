@@ -261,7 +261,10 @@ mod tests {
 
     #[test]
     fn from_fetch_creates_single_subscriber_fetch_key() {
-        let fetch = Fetch { key: 7, subscriber: 8 };
+        let fetch = Fetch {
+            key: 7,
+            subscriber: 8,
+        };
         let key = FetchKey::from(fetch);
 
         assert_eq!(key.key, 7);

@@ -97,7 +97,11 @@ where
     ///
     /// Returns remaining subscribers for the key, or `None` if the key is now
     /// complete or was not tracked.
-    pub fn remove_delivered(&mut self, key: &K, delivered: NonEmptyVec<S>) -> Option<NonEmptyVec<S>> {
+    pub fn remove_delivered(
+        &mut self,
+        key: &K,
+        delivered: NonEmptyVec<S>,
+    ) -> Option<NonEmptyVec<S>> {
         let subscribers = self.entries.get_mut(key)?;
         for subscriber in delivered {
             subscribers.remove(&subscriber);
@@ -169,7 +173,9 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.insert(1, non_empty_vec![10, 11]);
 
-        assert!(tracker.remove_delivered(&1, non_empty_vec![10, 11]).is_none());
+        assert!(tracker
+            .remove_delivered(&1, non_empty_vec![10, 11])
+            .is_none());
         assert!(!tracker.contains(&1));
     }
 }

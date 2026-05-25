@@ -9,9 +9,7 @@
 use crate::{Consumer, Delivery};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
-use std::{
-    collections::{hash_map::Entry as HashMapEntry, HashMap},
-};
+use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
 
 /// Completed consumer validation for a delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,10 +107,7 @@ where
     /// Dropped entries abort in-progress deliveries. Returns the number of
     /// removed entries.
     pub fn retain<F: FnMut(&Con::Key) -> bool>(&mut self, mut predicate: F) -> usize {
-        let removed: Vec<_> = self
-            .entries
-            .extract_if(|key, _| !predicate(key))
-            .collect();
+        let removed: Vec<_> = self.entries.extract_if(|key, _| !predicate(key)).collect();
         removed.len()
     }
 
