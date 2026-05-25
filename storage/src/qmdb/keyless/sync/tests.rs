@@ -1325,7 +1325,7 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_sync_retries_bad_pinned_nodes_with_feedback() {
+    fn test_compact_sync_returns_error_for_bad_pinned_nodes_with_feedback() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-feedback-{}", context.next_u64());
             let mut source =
@@ -1366,24 +1366,28 @@ mod compact_variable_mmr {
             };
 
             let client_cfg = client_config(&suffix);
-            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+            let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver,
                 target: target.clone(),
                 db_config: client_cfg.clone(),
             })
-            .await
-            .unwrap();
+            .await;
 
             assert!(!bad_rx.await.unwrap());
-            assert!(good_rx.await.unwrap());
-            assert_eq!(client.root(), target.root);
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+            assert!(good_rx.await.is_err());
 
-            drop(client);
             let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();
-            assert_eq!(reopened.root(), target.root);
+            assert_eq!(reopened.last_commit_loc(), Location::new(0));
+            assert_eq!(reopened.get_metadata(), None);
+            assert_eq!(reopened.inactivity_floor_loc(), Location::new(0));
+            assert_ne!(reopened.root(), target.root);
 
             reopened.destroy().await.unwrap();
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
