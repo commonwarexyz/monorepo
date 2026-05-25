@@ -231,6 +231,10 @@ where
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::compact::Target<F, H::Digest>;
 
+    fn max_rewind_depth() -> Option<usize> {
+        Some(1)
+    }
+
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
     }
@@ -288,6 +292,10 @@ where
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::compact::Target<F, H::Digest>;
+
+    fn max_rewind_depth() -> Option<usize> {
+        Some(1)
+    }
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -596,6 +604,14 @@ mod tests {
         assert_managed_db::<VariableDb>();
         assert_state_sync_db::<FixedDb, Arc<FixedDb>>();
         assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
+        assert_eq!(
+            <FixedDb as ManagedDb<deterministic::Context>>::max_rewind_depth(),
+            Some(1),
+        );
+        assert_eq!(
+            <VariableDb as ManagedDb<deterministic::Context>>::max_rewind_depth(),
+            Some(1),
+        );
     }
 
     #[test]

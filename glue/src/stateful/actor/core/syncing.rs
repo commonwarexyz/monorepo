@@ -18,7 +18,7 @@ use commonware_consensus::{
     },
     Epochable, Heightable, Viewable,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, Storage};
 use commonware_utils::{
@@ -38,6 +38,11 @@ pub(super) struct HeldVerify<C, B> {
 
 type HeldVerifyRequest<E, A> =
     HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
+
+enum FinalizedAction<B> {
+    Continue,
+    Transition(Option<(B, Exact)>),
+}
 
 pub(super) struct Syncing<E, A, S, V, R>
 where
@@ -146,14 +151,13 @@ where
                 Message::Finalized {
                     block,
                     acknowledgement,
-                } => {
-                    if let Some((block, acknowledgement)) =
-                        self.process_finalized(block, acknowledgement).await
-                    {
-                        self.transition(Some((block, acknowledgement))).await;
+                } => match self.process_finalized(block, acknowledgement).await {
+                    FinalizedAction::Continue => {}
+                    FinalizedAction::Transition(handoff) => {
+                        self.transition(handoff).await;
                         return;
                     }
-                }
+                },
                 Message::SubscribeDatabases { response } => {
                     self.database_subscribers
                         .retain(|subscriber| !subscriber.is_closed());
@@ -170,7 +174,7 @@ where
         &mut self,
         block: A::Block,
         acknowledgement: Exact,
-    ) -> Option<(A::Block, Exact)> {
+    ) -> FinalizedAction<A::Block> {
         if self.artifact.is_none() {
             let anchor = Anchor::from(&block);
             let targets = A::sync_targets(&block);
@@ -185,7 +189,7 @@ where
                 }
                 None => {
                     acknowledgement.acknowledge();
-                    return None;
+                    return FinalizedAction::Continue;
                 }
             }
         }
@@ -195,17 +199,7 @@ where
             .as_ref()
             .expect("sync artifact must exist after sync handoff");
 
-        // The sync anchor can only advance from finalized blocks that this actor already
-        // forwarded through the observation barrier, and marshal reports finalized blocks
-        // in strict height order. By the time sync completes, the next finalized block we
-        // see must therefore be the first post-sync block.
-        assert_eq!(
-            block.height(),
-            artifact.anchor.height.next(),
-            "marshal must deliver the first post-sync finalized block immediately after the sync anchor",
-        );
-
-        Some((block, acknowledgement))
+        finalized_action_for_anchor(artifact.anchor, block, acknowledgement)
     }
 
     /// Transitions to [`Processing`] state following the alignment of marshal's processed height
@@ -280,5 +274,116 @@ where
         }
         .start()
         .await
+    }
+}
+
+fn finalized_action_for_anchor<B>(
+    anchor: Anchor<B::Digest>,
+    block: B,
+    acknowledgement: Exact,
+) -> FinalizedAction<B>
+where
+    B: Heightable + Digestible,
+{
+    if block.height() == anchor.height {
+        assert!(
+            block.digest() == anchor.digest,
+            "marshal delivered a conflicting finalized block at the sync anchor height",
+        );
+        acknowledgement.acknowledge();
+        return FinalizedAction::Transition(None);
+    }
+
+    // The sync anchor can only advance from finalized blocks that this actor already
+    // forwarded through the observation barrier, and marshal reports finalized blocks
+    // in strict height order. By the time sync completes, any non-anchor finalized block
+    // we see must therefore be the first post-sync block.
+    assert_eq!(
+        block.height(),
+        anchor.height.next(),
+        "marshal must deliver the first post-sync finalized block immediately after the sync anchor",
+    );
+
+    FinalizedAction::Transition(Some((block, acknowledgement)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{finalized_action_for_anchor, FinalizedAction};
+    use crate::stateful::db::Anchor;
+    use commonware_consensus::{
+        types::{Epoch, Height, Round, View},
+        Heightable,
+    };
+    use commonware_cryptography::{sha256, Digestible};
+    use commonware_utils::{acknowledgement::Exact, Acknowledgement};
+    use futures::FutureExt as _;
+
+    #[derive(Clone)]
+    struct TestBlock {
+        height: Height,
+        digest: sha256::Digest,
+    }
+
+    impl Digestible for TestBlock {
+        type Digest = sha256::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.digest
+        }
+    }
+
+    impl Heightable for TestBlock {
+        fn height(&self) -> Height {
+            self.height
+        }
+    }
+
+    fn test_anchor(height: Height, digest: sha256::Digest) -> Anchor<sha256::Digest> {
+        Anchor {
+            height,
+            round: Round::new(Epoch::zero(), View::zero()),
+            digest,
+        }
+    }
+
+    #[test]
+    fn finalized_anchor_block_acknowledges_without_handoff() {
+        let digest = sha256::Digest::from([1; 32]);
+        let anchor = test_anchor(Height::new(7), digest);
+        let block = TestBlock {
+            height: anchor.height,
+            digest,
+        };
+        let (acknowledgement, waiter) = <Exact as Acknowledgement>::handle();
+
+        match finalized_action_for_anchor(anchor, block, acknowledgement) {
+            FinalizedAction::Transition(None) => {}
+            FinalizedAction::Transition(Some(_)) => panic!("anchor block should not be handed off"),
+            FinalizedAction::Continue => panic!("anchor block should transition"),
+        }
+        assert!(matches!(waiter.now_or_never(), Some(Ok(()))));
+    }
+
+    #[test]
+    fn finalized_next_block_is_handed_off() {
+        let digest = sha256::Digest::from([1; 32]);
+        let next_digest = sha256::Digest::from([2; 32]);
+        let anchor = test_anchor(Height::new(7), digest);
+        let block = TestBlock {
+            height: anchor.height.next(),
+            digest: next_digest,
+        };
+        let (acknowledgement, waiter) = <Exact as Acknowledgement>::handle();
+
+        match finalized_action_for_anchor(anchor, block, acknowledgement) {
+            FinalizedAction::Transition(Some((block, acknowledgement))) => {
+                assert_eq!(block.height(), Height::new(8));
+                assert!(waiter.now_or_never().is_none());
+                acknowledgement.acknowledge();
+            }
+            FinalizedAction::Transition(None) => panic!("post-anchor block should be handed off"),
+            FinalizedAction::Continue => panic!("post-anchor block should transition"),
+        }
     }
 }

@@ -10,7 +10,9 @@ use crate::stateful::{
         processor::{Processor, ProcessorMetrics},
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{
+        self, AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig,
+    },
     Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
@@ -58,6 +60,12 @@ where
 
     /// Capacity of the stateful actor mailbox channel.
     pub mailbox_size: NonZeroUsize,
+
+    /// Marshal's maximum number of finalized blocks that can be pending
+    /// stateful acknowledgement.
+    ///
+    /// Must match the marshal configuration used to create [`marshal`](Self::marshal).
+    pub max_pending_acks: NonZeroUsize,
 
     /// Startup plan loaded via [`SyncPlan::init`], optionally augmented with
     /// a finalized floor via [`SyncPlan::with_floor`]. Carries the durable
@@ -124,6 +132,8 @@ where
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
     pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+        db::assert_rewind_window::<E, A::Databases>(config.max_pending_acks);
+
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {

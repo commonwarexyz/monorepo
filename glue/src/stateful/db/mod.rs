@@ -177,6 +177,15 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Typically a database-specific state commitment plus the operation range needed to reach it.
     type SyncTarget: Clone + PartialEq + Send + Sync;
 
+    /// Maximum number of finalized commits this database can rewind across
+    /// after a crash.
+    ///
+    /// `None` means the database has no finite rewind depth relevant to
+    /// stateful startup recovery.
+    fn max_rewind_depth() -> Option<usize> {
+        None
+    }
+
     /// Construct a new database from its configuration.
     fn init(
         context: E,
@@ -243,6 +252,12 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// targets, one per database.
     type SyncTargets: Clone + PartialEq + Send + Sync;
 
+    /// Maximum number of finalized commits this database set can rewind across
+    /// after a crash.
+    ///
+    /// `None` means no database in the set reports a finite rewind depth.
+    fn max_rewind_depth() -> Option<usize>;
+
     /// Construct the database set from its configuration.
     fn init(context: E, config: Self::Config) -> impl Future<Output = Self> + Send;
 
@@ -291,6 +306,23 @@ pub struct SyncEngineConfig {
     /// Number of historical roots to retain for proof verification across
     /// target updates.
     pub max_retained_roots: usize,
+}
+
+/// Ensure marshal never persists more finalized-but-unacknowledged blocks than
+/// the database set can rewind after a crash.
+pub(crate) fn assert_rewind_window<E, DBs>(max_pending_acks: NonZeroUsize)
+where
+    DBs: DatabaseSet<E>,
+{
+    let Some(max_rewind_depth) = DBs::max_rewind_depth() else {
+        return;
+    };
+
+    assert!(
+        max_pending_acks.get() <= max_rewind_depth,
+        "database rewind depth ({max_rewind_depth}) is smaller than marshal max_pending_acks ({})",
+        max_pending_acks.get(),
+    );
 }
 
 /// A [`ManagedDb`] with a startup state-sync entrypoint.
@@ -410,6 +442,10 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
     type Merkleized = T::Merkleized;
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
+
+    fn max_rewind_depth() -> Option<usize> {
+        T::max_rewind_depth()
+    }
 
     async fn init(context: E, config: Self::Config) -> Self {
         let db = T::init(context, config)
@@ -559,6 +595,10 @@ macro_rules! impl_database_set {
             type Merkleized = ($($T::Merkleized,)+);
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
+
+            fn max_rewind_depth() -> Option<usize> {
+                [$($T::max_rewind_depth(),)+].into_iter().flatten().min()
+            }
 
             async fn init(context: E, config: Self::Config) -> Self {
                 let result = join!($(
@@ -1389,9 +1429,9 @@ impl_attachable_resolver_set!(
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, AttachableResolver, AttachableResolverSet, CoordinatorAction, CoordinatorState,
-        DatabaseSet, ManagedDb, Merkleized, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
-        Unmerkleized, MAX_CHANNEL_DRAIN_PER_TICK,
+        assert_rewind_window, Anchor, AttachableResolver, AttachableResolverSet,
+        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, Merkleized, StateSyncDb,
+        StateSyncSet, SyncEngineConfig, TipUpdate, Unmerkleized, MAX_CHANNEL_DRAIN_PER_TICK,
     };
     use commonware_consensus::types::{Epoch, Height, Round, View};
     use commonware_cryptography::sha256;
@@ -1444,6 +1484,8 @@ mod tests {
     #[derive(Default)]
     struct TestDb;
 
+    struct OneStepRewindDb;
+
     impl<E: Send> ManagedDb<E> for TestDb {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
@@ -1457,6 +1499,40 @@ mod tests {
 
         async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
             let _guard = db.read().await;
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for OneStepRewindDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = ();
+
+        fn max_rewind_depth() -> Option<usize> {
+            Some(1)
+        }
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            Ok(Self)
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2352,6 +2428,41 @@ mod tests {
 
             Ok(Self { final_target })
         }
+    }
+
+    #[test]
+    fn database_set_rewind_depth_uses_most_restrictive_database() {
+        type Unbounded = Arc<AsyncRwLock<TestDb>>;
+        type OneStep = Arc<AsyncRwLock<OneStepRewindDb>>;
+        type Mixed = (Unbounded, OneStep);
+
+        assert_eq!(
+            <Unbounded as DatabaseSet<deterministic::Context>>::max_rewind_depth(),
+            None,
+        );
+        assert_eq!(
+            <OneStep as DatabaseSet<deterministic::Context>>::max_rewind_depth(),
+            Some(1),
+        );
+        assert_eq!(
+            <Mixed as DatabaseSet<deterministic::Context>>::max_rewind_depth(),
+            Some(1),
+        );
+    }
+
+    #[test]
+    fn rewind_window_accepts_matching_depth() {
+        assert_rewind_window::<deterministic::Context, Arc<AsyncRwLock<OneStepRewindDb>>>(
+            NonZeroUsize::new(1).unwrap(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "database rewind depth (1) is smaller than marshal max_pending_acks")]
+    fn rewind_window_rejects_excess_pending_acks() {
+        assert_rewind_window::<deterministic::Context, Arc<AsyncRwLock<OneStepRewindDb>>>(
+            NonZeroUsize::new(2).unwrap(),
+        );
     }
 
     #[test]
