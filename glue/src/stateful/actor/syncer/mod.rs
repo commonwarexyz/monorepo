@@ -7,8 +7,8 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant},
         Identifier,
     },
-    types::{Height, Round},
-    CertifiableBlock, Epochable, Heightable, Viewable,
+    types::Height,
+    CertifiableBlock, Heightable, Roundable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner, Storage, Supervisor};
@@ -157,7 +157,7 @@ where
 
     let anchor = Anchor {
         height: floor_block.height(),
-        round: Round::new(floor_block.context().epoch(), floor_block.context().view()),
+        round: floor_block.context().round(),
         digest: floor_block.digest(),
     };
     SyncResult { databases, anchor }

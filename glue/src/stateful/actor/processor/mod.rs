@@ -32,7 +32,7 @@ use commonware_consensus::{
         core::{DigestFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
     types::{Height, Round},
-    Block, CertifiableBlock, Epochable, Heightable, Viewable,
+    Block, CertifiableBlock, Heightable, Roundable,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
@@ -150,7 +150,7 @@ where
         let parent_digest = parent.digest();
         let ancestry = stream::once(std::future::ready(parent.clone())).chain(ancestry);
 
-        let round = Round::new(consensus_context.epoch(), consensus_context.view());
+        let round = consensus_context.round();
         let batches = match self
             .prepare_batches(context, marshal, parent, &mut response)
             .await
@@ -264,7 +264,7 @@ where
             }
         }
 
-        let round = Round::new(consensus_context.epoch(), consensus_context.view());
+        let round = consensus_context.round();
         let Some(parent) = ancestry.next().await else {
             response.send_lossy(false);
             return;
@@ -450,7 +450,7 @@ where
         for block in replay_path.into_iter().rev() {
             let (digest, parent_digest) = (block.digest(), block.parent());
             let consensus_context = block.context();
-            let round = Round::new(consensus_context.epoch(), consensus_context.view());
+            let round = consensus_context.round();
 
             let Some(batches) = await_or_cancel(response, self.fork_batches(&parent_digest)).await
             else {
@@ -500,7 +500,7 @@ where
 
         let timer = self.metrics.finalize_duration.timer(context);
         let block_context = block.context();
-        let round = Round::new(block_context.epoch(), block_context.view());
+        let round = block_context.round();
 
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
@@ -713,7 +713,7 @@ mod tests {
         marshal::ancestry::BlockProvider,
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
-        Block as ConsensusBlock, CertifiableBlock, Epochable, Heightable, Viewable,
+        Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
     };
     use commonware_cryptography::{
         ed25519, sha256::Digest, Digest as _, Digestible, Hasher, Sha256, Signer as _,
@@ -1175,7 +1175,7 @@ mod tests {
             for block in replay_path.into_iter().rev() {
                 let (digest, parent_digest) = (block.digest(), block.parent());
                 let consensus_context = block.context();
-                let round = Round::new(consensus_context.epoch(), consensus_context.view());
+                let round = consensus_context.round();
                 let batches = self
                     .processor
                     .fork_batches(&parent_digest)

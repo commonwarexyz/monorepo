@@ -75,7 +75,7 @@
 
 use commonware_consensus::{
     types::{Height, Round},
-    CertifiableBlock, Epochable, Viewable,
+    CertifiableBlock, Epochable, Roundable, Viewable,
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
@@ -333,7 +333,7 @@ where
     fn from(block: &B) -> Self {
         Self {
             height: block.height(),
-            round: Round::new(block.context().epoch(), block.context().view()),
+            round: block.context().round(),
             digest: block.digest(),
         }
     }

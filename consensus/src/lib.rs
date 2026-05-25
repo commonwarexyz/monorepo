@@ -41,6 +41,18 @@ stability_scope!(BETA {
         fn view(&self) -> View;
     }
 
+    /// Roundable is a trait that provides access to the [`Round`] number.
+    /// Any consensus message or object that implements [`Epochable`] and [`Viewable`] automatically
+    /// implements this trait.
+    pub trait Roundable: Epochable + Viewable {
+        /// Returns the round associated with this object, derived from its epoch and view.
+        fn round(&self) -> Round {
+            Round::new(self.epoch(), self.view())
+        }
+    }
+
+    impl<T: Epochable + Viewable> Roundable for T {}
+
     /// Block is the interface for a block in the blockchain.
     ///
     /// Blocks are used to track the progress of the consensus engine.
