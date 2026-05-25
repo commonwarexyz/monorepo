@@ -171,15 +171,15 @@ where
                         // finished. Treat that close as "wait for the in-flight sync task to
                         // publish its artifact", not as a hard failure.
                         match (&mut state_sync_task).await {
-	                            Ok((databases, anchor)) => {
-	                                Self::publish_artifact(
-	                                    &mut self.artifact,
-	                                    &mut self.sync_complete,
-	                                    databases,
-	                                    anchor,
-	                                );
-	                                state_sync_task = None.into();
-	                            }
+                            Ok((databases, anchor)) => {
+                                Self::publish_artifact(
+                                    &mut self.artifact,
+                                    &mut self.sync_complete,
+                                    databases,
+                                    anchor,
+                                );
+                                state_sync_task = None.into();
+                            }
                             Err(_) => {
                                 error!("critical: state sync task failed");
                                 panic!("state sync task failed");

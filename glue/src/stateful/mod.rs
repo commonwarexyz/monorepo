@@ -197,9 +197,9 @@ where
     /// should unconditionally execute the block's state transitions.
     ///
     /// The returned merkleized state must match what
-    /// [`verify`](Self::verify) accepted for `block`. The wrapper commits this
-    /// replay result during finalization and cannot re-check block-specific
-    /// commitments generically.
+    /// [`verify`](Self::verify) accepted for `block`. The wrapper checks generic
+    /// sync targets before committing replayed state, but application-specific
+    /// commitments remain the implementation's responsibility.
     ///
     /// This future may be cancelled if the originating propose/verify request
     /// is dropped. Implementations should be cancellation-safe: dropping and

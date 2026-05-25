@@ -489,6 +489,16 @@ where
                 return Err(PrepareBatchesError::Cancelled);
             };
 
+            let targets = A::sync_targets(&block);
+            if !A::Databases::matches_sync_targets(&merkleized, &targets) {
+                warn!(
+                    ?target_digest,
+                    block = ?digest,
+                    "rebuild replay state root does not match block commitments"
+                );
+                return Err(PrepareBatchesError::Invalid);
+            }
+
             self.cache_pending(digest, parent_digest, round, merkleized);
         }
 
@@ -1213,6 +1223,10 @@ mod tests {
                         batches,
                     )
                     .await;
+                let targets = ExecutionApp::sync_targets(&block);
+                if !DbSet::<deterministic::Context>::matches_sync_targets(&merkleized, &targets) {
+                    return Err(PrepareBatchesError::Invalid);
+                }
                 self.processor
                     .cache_pending(digest, parent_digest, round, merkleized);
             }
@@ -1421,6 +1435,41 @@ mod tests {
             assert!(
                 harness.processor.pending.contains_key(&block3.digest()),
                 "target block should be reconstructed",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_rejects_state_root_mismatch_before_cache() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            harness.provider.insert(genesis.clone());
+
+            let mut block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            harness.processor.pending.clear();
+            block1.state_root = u64_to_digest(999);
+            let corrupted_digest = block1.digest();
+
+            let (mut response, _rx) = oneshot::channel::<bool>();
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    harness.provider.clone(),
+                    block1,
+                    &mut response,
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err(PrepareBatchesError::Invalid),
+                "lazy rebuild should reject replayed state that misses the block target",
+            );
+            assert!(
+                !harness.processor.pending.contains_key(&corrupted_digest),
+                "invalid replay must not enter the pending cache",
             );
         });
     }
