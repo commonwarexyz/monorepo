@@ -119,6 +119,8 @@ where
     stream: Stream<E>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<V, A>,
+    // Waiters for durable processed-height progress
+    processed_height_waiters: Vec<(Height, oneshot::Sender<()>)>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -230,6 +232,7 @@ where
                 floor,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
+                processed_height_waiters: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 cache,
@@ -495,6 +498,7 @@ where
             .sync()
             .await
             .expect("failed to sync application progress");
+        self.notify_processed_height_waiters();
 
         // Anything below the last acknowledged commitment is safe for the
         // buffer to prune.
@@ -702,6 +706,9 @@ where
             }
             Message::GetProcessedHeight { response } => {
                 response.send_lossy(self.stream.processed_height());
+            }
+            Message::WaitProcessedHeight { height, response } => {
+                self.wait_processed_height(height, response);
             }
             Message::HintFinalized { height, targets } => {
                 // Skip if finalization is already available locally.
@@ -1162,6 +1169,7 @@ where
             .sync()
             .await
             .expect("failed to sync floor metadata");
+        self.notify_processed_height_waiters();
 
         // Drop all pending acknowledgement waiters so any in-flight application
         // acks for blocks below the new floor cannot rewrite the processed floor.
@@ -2057,6 +2065,34 @@ where
 
         // Prune any existing requests below the new floor.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+    }
+
+    fn wait_processed_height(&mut self, height: Height, response: oneshot::Sender<()>) {
+        if self
+            .stream
+            .processed_height()
+            .is_some_and(|processed| processed >= height)
+        {
+            response.send_lossy(());
+            return;
+        }
+        self.processed_height_waiters.push((height, response));
+    }
+
+    fn notify_processed_height_waiters(&mut self) {
+        let Some(processed) = self.stream.processed_height() else {
+            return;
+        };
+
+        let mut waiters = Vec::new();
+        for (height, response) in self.processed_height_waiters.drain(..) {
+            if height <= processed {
+                response.send_lossy(());
+            } else if !response.is_closed() {
+                waiters.push((height, response));
+            }
+        }
+        self.processed_height_waiters = waiters;
     }
 
     /// Returns the latest known finalization round at or below the processed height.

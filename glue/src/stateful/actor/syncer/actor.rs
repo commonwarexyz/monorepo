@@ -38,9 +38,6 @@ where
     /// Database configuration for the managed set.
     pub db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// The partition prefix used for sync metadata storage.
-    pub partition_prefix: String,
-
     /// Per-database sync engine parameters.
     pub sync_config: SyncEngineConfig,
 
@@ -77,9 +74,6 @@ where
     /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// The partition prefix used for sync metadata storage.
-    partition_prefix: String,
-
     /// Per-database sync engine parameters.
     sync_config: SyncEngineConfig,
 
@@ -114,7 +108,6 @@ where
                 mailbox: receiver,
                 artifact: None,
                 db_config: config.db_config,
-                partition_prefix: config.partition_prefix,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
                 finalization: config.finalization,
@@ -153,14 +146,11 @@ where
                 panic!("state sync task failed");
             } => {
                 Self::publish_artifact(
-                    &self.context,
-                    self.partition_prefix.as_str(),
                     &mut self.artifact,
                     &mut self.sync_complete,
                     databases,
                     anchor,
-                )
-                .await;
+                );
                 state_sync_task = None.into();
             },
             Some(message) = self.mailbox.recv() else {
@@ -181,18 +171,15 @@ where
                         // finished. Treat that close as "wait for the in-flight sync task to
                         // publish its artifact", not as a hard failure.
                         match (&mut state_sync_task).await {
-                            Ok((databases, anchor)) => {
-                                Self::publish_artifact(
-                                    &self.context,
-                                    self.partition_prefix.as_str(),
-                                    &mut self.artifact,
-                                    &mut self.sync_complete,
-                                    databases,
-                                    anchor,
-                                )
-                                .await;
-                                state_sync_task = None.into();
-                            }
+	                            Ok((databases, anchor)) => {
+	                                Self::publish_artifact(
+	                                    &mut self.artifact,
+	                                    &mut self.sync_complete,
+	                                    databases,
+	                                    anchor,
+	                                );
+	                                state_sync_task = None.into();
+	                            }
                             Err(_) => {
                                 error!("critical: state sync task failed");
                                 panic!("state sync task failed");
@@ -207,9 +194,7 @@ where
         }
     }
 
-    async fn publish_artifact(
-        context: &ContextCell<E>,
-        partition_prefix: &str,
+    fn publish_artifact(
         artifact: &mut Option<SyncResult<E, A>>,
         sync_complete: &mut Option<oneshot::Sender<SyncResult<E, A>>>,
         databases: A::Databases,
@@ -217,7 +202,6 @@ where
     ) {
         let sync_result = SyncResult { databases, anchor };
         *artifact = Some(sync_result.clone());
-        super::set_sync_complete(context.as_present(), partition_prefix).await;
         if let Some(sync_complete) = sync_complete.take() {
             sync_complete.send_lossy(sync_result);
         }

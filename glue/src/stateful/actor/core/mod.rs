@@ -160,7 +160,6 @@ where
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
-            partition_prefix: self.plan.partition_prefix().to_string(),
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
             finalization: floor,
@@ -173,6 +172,7 @@ where
             application: self.application,
             input_provider: self.input_provider,
             marshal: self.marshal,
+            partition_prefix: self.plan.partition_prefix().to_string(),
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
             database_subscribers: Vec::new(),
