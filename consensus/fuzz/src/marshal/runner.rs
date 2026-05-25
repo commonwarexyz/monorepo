@@ -149,14 +149,14 @@ where
         // marshal's `store_finalization` floor check: a finalization
         // at or below this height is stale and does not trigger
         // repair.
-        let mut processed_height: u64 = setup.height.get();
+        let mut processed_height: u64 = setup.height.map_or(0, |h| h.get());
         let mut delivery_log: Vec<Height> = Vec::new();
         // segment_bounds[i]..segment_bounds[i+1] is the i-th segment of
         // delivery_log. segment_starts[i] is the height the i-th actor
         // instance is expected to begin delivery at (its restored
         // processed height + 1).
         let mut segment_bounds: Vec<usize> = vec![0];
-        let mut segment_starts: Vec<u64> = vec![setup.height.get() + 1];
+        let mut segment_starts: Vec<u64> = vec![setup.height.map_or(0, |h| h.get()) + 1];
         // For each restart, the heights pending ack at the moment of
         // restart. The next actor instance must redeliver each one.
         let mut expected_redeliveries: Vec<Vec<Height>> = Vec::new();
@@ -331,7 +331,7 @@ where
                     actor_handle = setup.actor_handle;
                     handle.mailbox = setup.mailbox;
                     handle.extra = setup.extra;
-                    segment_starts.push(setup.height.get() + 1);
+                    segment_starts.push(setup.height.map_or(0, |h| h.get()) + 1);
                     // The new buffered / shards engine starts with an
                     // empty cache, so anything that was only available
                     // via the prior variant publish is no longer
@@ -341,7 +341,7 @@ where
                     // comes from its persistent metadata, which
                     // setup.height reflects. Pending deliveries that
                     // never got acked do NOT advance this floor.
-                    processed_height = setup.height.get();
+                    processed_height = setup.height.map_or(0, |h| h.get());
                 }
                 MarshalEvent::Idle => {}
             }
