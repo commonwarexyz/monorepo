@@ -2,92 +2,72 @@ use crate::{
     delivery::{Completion, Tracker},
     Consumer, Delivery,
 };
-use commonware_cryptography::PublicKey;
 use commonware_runtime::{telemetry::metrics::histogram, Clock};
-use commonware_utils::Span;
 use futures::future::Aborted;
-use std::{collections::HashMap, marker::PhantomData};
 
 /// Tracks all in-flight fetch state.
-pub(super) struct Inflight<E, Con, P, Key>
+pub(super) struct Inflight<Con, P>
 where
-    E: Clock,
-    Con: Consumer<Key = Key>,
-    P: PublicKey,
-    Key: Span,
+    Con: Consumer,
     Con::Value: Clone + Send + 'static,
+    P: Clone + Send + 'static,
 {
-    /// Fetch duration timers for keys that have not yet accepted a response.
-    timers: HashMap<Key, histogram::Timer>,
-
     /// Resolver-agnostic delivery state shared with non-P2P resolver implementations.
-    deliveries: Tracker<Con, P>,
-
-    /// Clock type used to observe timers on completion.
-    _clock: PhantomData<E>,
+    deliveries: Tracker<Con, P, histogram::Timer>,
 }
 
-impl<E, Con, P, Key> Inflight<E, Con, P, Key>
+impl<Con, P> Inflight<Con, P>
 where
-    E: Clock,
-    Con: Consumer<Key = Key>,
-    P: PublicKey,
-    Key: Span,
+    Con: Consumer,
     Con::Value: Clone + Send + 'static,
+    P: Clone + Send + 'static,
 {
     pub(super) fn new(consumer: Con) -> Self {
         Self {
-            timers: HashMap::new(),
             deliveries: Tracker::new(consumer),
-            _clock: PhantomData,
         }
     }
 
     /// Returns true if there is an in-flight entry for the key.
-    pub(super) fn contains(&self, key: &Key) -> bool {
+    pub(super) fn contains(&self, key: &Con::Key) -> bool {
         self.deliveries.contains(key)
     }
 
     /// Insert a new in-flight entry for the key.
-    pub(super) fn insert(&mut self, key: Key, timer: histogram::Timer) {
-        assert!(self.deliveries.insert(key.clone()), "inflight entry");
-        self.timers.insert(key, timer);
+    pub(super) fn insert(&mut self, key: Con::Key, timer: histogram::Timer) {
+        assert!(
+            self.deliveries.insert_with_state(key, timer),
+            "inflight entry"
+        );
     }
 
     /// Remove the in-flight entry for the key and cancel its duration timer (suppressing
     /// the recording). If delivery validation was in progress, it is aborted and any
     /// invalid result is discarded. Returns true if an entry was present.
-    pub(super) fn cancel(&mut self, key: &Key) -> bool {
-        let removed = self.deliveries.remove(key);
-        if removed {
-            // Dropping the timer without observing suppresses duration recording.
-            self.timers.remove(key);
-        }
-        removed
+    pub(super) fn cancel(&mut self, key: &Con::Key) -> bool {
+        self.deliveries.remove(key)
     }
 
     /// Mark the in-flight entry for the key as complete, recording its duration.
     /// Panics if no entry exists for the key.
-    pub(super) fn complete(&mut self, key: &Key, clock: &E) {
-        assert!(self.deliveries.remove(key), "inflight entry");
-        if let Some(timer) = self.timers.remove(key) {
+    pub(super) fn complete<E: Clock>(&mut self, key: &Con::Key, clock: &E) {
+        if let Some(timer) = self
+            .deliveries
+            .remove_with_state(key)
+            .expect("inflight entry")
+        {
             timer.observe(clock);
         }
     }
 
     /// Drop entries for which the predicate returns false. Returns the count of dropped entries.
-    pub(super) fn retain<F: FnMut(&Key) -> bool>(&mut self, mut predicate: F) -> usize {
-        let removed = self.deliveries.retain(|key| predicate(key));
-        let deliveries = &self.deliveries;
-        self.timers.retain(|key, _| deliveries.contains(key));
-        removed
+    pub(super) fn retain<F: FnMut(&Con::Key) -> bool>(&mut self, predicate: F) -> usize {
+        self.deliveries.retain(predicate)
     }
 
     /// Drop all entries. Returns the count of dropped entries.
     pub(super) fn drain(&mut self) -> usize {
-        let count = self.deliveries.drain();
-        self.timers.clear();
-        count
+        self.deliveries.drain()
     }
 
     /// Begin a consumer delivery for a network response, attaching the abort handle.
@@ -95,7 +75,7 @@ where
     /// the response so later subscribers can be delivered the same accepted bytes.
     pub(super) fn deliver(
         &mut self,
-        delivery: Delivery<Key, Con::Subscriber>,
+        delivery: Delivery<Con::Key, Con::Subscriber>,
         peer: P,
         value: Con::Value,
     ) {
@@ -103,25 +83,25 @@ where
     }
 
     /// Begin another consumer delivery for an already received response.
-    pub(super) fn redeliver(&mut self, delivery: Delivery<Key, Con::Subscriber>) {
+    pub(super) fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
         self.deliveries.redeliver(delivery);
     }
 
     /// Returns whether the current response has already been accepted by the consumer.
-    pub(super) fn response_accepted(&self, key: &Key) -> bool {
+    pub(super) fn response_accepted(&self, key: &Con::Key) -> bool {
         self.deliveries.response_accepted(key)
     }
 
     /// Mark the current response accepted and record the fetch duration.
-    pub(super) fn accept_response(&mut self, key: &Key, clock: &E) {
+    pub(super) fn accept_response<E: Clock>(&mut self, key: &Con::Key, clock: &E) {
         self.deliveries.accept_response(key);
-        if let Some(timer) = self.timers.remove(key) {
+        if let Some(timer) = self.deliveries.take_state(key) {
             timer.observe(clock);
         }
     }
 
     /// Drop the current response without completing the fetch.
-    pub(super) fn discard_response(&mut self, key: &Key) {
+    pub(super) fn discard_response(&mut self, key: &Con::Key) {
         self.deliveries.discard_response(key);
     }
 
@@ -130,7 +110,7 @@ where
     /// for a retry.
     pub(super) async fn next_delivery(
         &mut self,
-    ) -> Result<(P, Delivery<Key, Con::Subscriber>, bool), Aborted> {
+    ) -> Result<(P, Delivery<Con::Key, Con::Subscriber>, bool), Aborted> {
         let Completion {
             context,
             delivery,
@@ -156,7 +136,7 @@ mod tests {
     };
     use commonware_utils::non_empty_vec;
 
-    type TestInflight = Inflight<Context, MockConsumer<MockKey, Bytes>, PublicKey, MockKey>;
+    type TestInflight = Inflight<MockConsumer<MockKey, Bytes>, PublicKey>;
 
     fn dummy_inflight() -> TestInflight {
         Inflight::new(MockConsumer::dummy())

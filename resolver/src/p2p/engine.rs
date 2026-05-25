@@ -69,7 +69,7 @@ where
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Tracks all in-flight fetch state
-    inflight: Inflight<E, Con, P, Key>,
+    inflight: Inflight<Con, P>,
 
     /// Subscribers that keep each fetch alive.
     subscribers: subscribers::Tracker<Key, Con::Subscriber>,

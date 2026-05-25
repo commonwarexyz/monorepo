@@ -30,16 +30,18 @@ struct Response<Context, V> {
     accepted: bool,
 }
 
-struct Entry<Context, V> {
+struct Entry<Context, V, State> {
     delivery: Option<Aborter>,
     response: Option<Response<Context, V>>,
+    state: Option<State>,
 }
 
-impl<Context, V> Entry<Context, V> {
-    const fn new() -> Self {
+impl<Context, V, State> Entry<Context, V, State> {
+    const fn new(state: State) -> Self {
         Self {
             delivery: None,
             response: None,
+            state: Some(state),
         }
     }
 }
@@ -49,18 +51,21 @@ impl<Context, V> Entry<Context, V> {
 /// `Context` carries resolver-specific metadata back to the caller when
 /// validation completes. A P2P resolver can use it for the peer that sent the
 /// response; another resolver can use it for a local attempt identifier.
-pub struct Tracker<Con, Context = ()>
+///
+/// `State` holds per-key resolver state that should be dropped when the key is
+/// pruned, or explicitly taken when the resolver completes the fetch.
+pub struct Tracker<Con, Context = (), State = ()>
 where
     Con: Consumer,
     Con::Value: Clone + Send + 'static,
     Context: Clone + Send + 'static,
 {
-    entries: HashMap<Con::Key, Entry<Context, Con::Value>>,
+    entries: HashMap<Con::Key, Entry<Context, Con::Value, State>>,
     deliveries: AbortablePool<Completion<Con::Key, Con::Subscriber, Context>>,
     consumer: Con,
 }
 
-impl<Con, Context> Tracker<Con, Context>
+impl<Con, Context, State> Tracker<Con, Context, State>
 where
     Con: Consumer,
     Con::Value: Clone + Send + 'static,
@@ -84,10 +89,10 @@ where
     ///
     /// Returns `true` when the key was inserted. If the key is already tracked,
     /// this leaves the existing entry untouched and returns `false`.
-    pub fn insert(&mut self, key: Con::Key) -> bool {
+    pub(crate) fn insert_with_state(&mut self, key: Con::Key, state: State) -> bool {
         match self.entries.entry(key) {
             HashMapEntry::Vacant(entry) => {
-                entry.insert(Entry::new());
+                entry.insert(Entry::new(state));
                 true
             }
             HashMapEntry::Occupied(_) => false,
@@ -100,6 +105,23 @@ where
     /// aborted delivery is discarded by [`next_completion`](Self::next_completion).
     pub fn remove(&mut self, key: &Con::Key) -> bool {
         self.entries.remove(key).is_some()
+    }
+
+    /// Remove a key, aborting any in-progress delivery, and return its state.
+    ///
+    /// Returns `None` if the key was absent. The inner `Option` is `None` if the
+    /// state was already taken while the key stayed active.
+    pub(crate) fn remove_with_state(&mut self, key: &Con::Key) -> Option<Option<State>> {
+        self.entries.remove(key).map(|entry| entry.state)
+    }
+
+    /// Take the key's state without removing the tracked key.
+    ///
+    /// Returns `None` when the key is absent or the state was already taken.
+    pub(crate) fn take_state(&mut self, key: &Con::Key) -> Option<State> {
+        self.entries
+            .get_mut(key)
+            .and_then(|entry| entry.state.take())
     }
 
     /// Retain only entries for which the predicate returns true.
@@ -219,6 +241,21 @@ where
         });
         let entry = self.entries.get_mut(&key).expect("delivery entry");
         assert!(entry.delivery.replace(aborter).is_none());
+    }
+}
+
+impl<Con, Context> Tracker<Con, Context>
+where
+    Con: Consumer,
+    Con::Value: Clone + Send + 'static,
+    Context: Clone + Send + 'static,
+{
+    /// Start tracking a key without any resolver-specific state.
+    ///
+    /// Returns `true` when the key was inserted. If the key is already tracked,
+    /// this leaves the existing entry untouched and returns `false`.
+    pub fn insert(&mut self, key: Con::Key) -> bool {
+        self.insert_with_state(key, ())
     }
 }
 

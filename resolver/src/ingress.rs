@@ -43,7 +43,10 @@ pub enum Message<K, S> {
 
 /// Pending resolver messages retained after a mailbox fills.
 pub struct Pending<K, S> {
+    /// Retain predicates waiting to run before fetches are admitted.
     modifications: VecDeque<Predicate<K, S>>,
+
+    /// Coalesced fetches that could not fit in the ready queue.
     fetches: Vec<FetchKey<K, S>>,
 }
 
@@ -65,6 +68,8 @@ impl<K, S> Overflow<Message<K, S>> for Pending<K, S> {
     where
         F: FnMut(Message<K, S>) -> Option<Message<K, S>>,
     {
+        // Retain predicates must run before pending fetches so the actor never
+        // starts work for subscribers already pruned by an older retain.
         while let Some(predicate) = self.modifications.pop_front() {
             let message = Message::Retain { predicate };
             if let Some(message) = push(message) {
@@ -74,6 +79,7 @@ impl<K, S> Overflow<Message<K, S>> for Pending<K, S> {
         }
 
         if !self.fetches.is_empty() {
+            // Fetches are coalesced while pending and drained as one batch.
             let fetches = std::mem::take(&mut self.fetches);
             if let Some(message) = push(Message::Fetch(fetches)) {
                 self.push_front(message);
@@ -83,6 +89,7 @@ impl<K, S> Overflow<Message<K, S>> for Pending<K, S> {
 }
 
 impl<K, S> Pending<K, S> {
+    /// Restore a message that could not be pushed into the ready queue.
     fn push_front(&mut self, message: Message<K, S>) {
         match message {
             Message::Fetch(fetches) => {
@@ -95,6 +102,7 @@ impl<K, S> Pending<K, S> {
     }
 }
 
+/// Apply a retain predicate to one pending fetch.
 fn retain_fetch<K, S>(
     mut fetch: FetchKey<K, S>,
     predicate: &(dyn Fn(&K, &S) -> bool + Send),
@@ -105,6 +113,7 @@ fn retain_fetch<K, S>(
     Some(fetch)
 }
 
+/// Add incoming subscribers that are not already attached to the pending fetch.
 fn merge_subscribers<S: Eq>(existing: &mut NonEmptyVec<S>, incoming: NonEmptyVec<S>) {
     for subscriber in incoming {
         if !existing.contains(&subscriber) {
@@ -124,6 +133,8 @@ where
         match message {
             Self::Fetch(fetches) => {
                 for fetch in fetches {
+                    // Backpressure should not multiply work for the same key.
+                    // Merge subscribers into the retained fetch instead.
                     if let Some(existing) = overflow
                         .fetches
                         .iter_mut()
@@ -136,6 +147,8 @@ where
                 }
             }
             Self::Retain { predicate } => {
+                // Retain applies immediately to queued fetch subscribers, then
+                // the predicate is kept so the actor prunes active work too.
                 overflow.fetches = std::mem::take(&mut overflow.fetches)
                     .into_iter()
                     .filter_map(|fetch| retain_fetch(fetch, predicate.as_ref()))

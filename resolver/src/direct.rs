@@ -35,12 +35,12 @@ use std::{
 use tracing::{debug, trace, warn};
 
 /// Fetches raw values for resolver keys.
-pub trait Fetcher: Clone + Send + 'static {
+pub trait Fetcher {
     /// Key requested by the resolver.
     type Key: Span;
 
     /// Raw value delivered to the consumer for validation.
-    type Value: Clone + Send + 'static;
+    type Value;
 
     /// Fetch the value for `key`.
     ///
@@ -54,7 +54,7 @@ pub trait Fetcher: Clone + Send + 'static {
 pub struct Resolver<K, S, P>
 where
     K: Span,
-    S: Clone + Ord + Send + 'static,
+    S: Clone + Eq + Send + 'static,
     P: PublicKey,
 {
     mailbox: mailbox::Sender<Message<K, S>>,
@@ -64,7 +64,7 @@ where
 impl<K, S, P> Clone for Resolver<K, S, P>
 where
     K: Span,
-    S: Clone + Ord + Send + 'static,
+    S: Clone + Eq + Send + 'static,
     P: PublicKey,
 {
     fn clone(&self) -> Self {
@@ -78,7 +78,7 @@ where
 impl<K, S, P> crate::Resolver for Resolver<K, S, P>
 where
     K: Span,
-    S: Clone + Ord + Send + 'static,
+    S: Clone + Eq + Send + 'static,
     P: PublicKey,
 {
     type Key = K;
@@ -140,7 +140,7 @@ where
 impl<K, S, P> Resolver<K, S, P>
 where
     K: Span,
-    S: Clone + Ord + Send + 'static,
+    S: Clone + Eq + Send + 'static,
     P: PublicKey,
 {
     const fn new(mailbox: mailbox::Sender<Message<K, S>>) -> Self {
@@ -165,7 +165,8 @@ pub fn init<E, F, Con, P>(
 ) -> Resolver<F::Key, Con::Subscriber, P>
 where
     E: Clock + Spawner + Metrics,
-    F: Fetcher,
+    F: Fetcher + Clone + Send + 'static,
+    F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
     Con::Subscriber: Ord,
     P: PublicKey,
@@ -182,10 +183,12 @@ where
     Resolver::new(mailbox_tx)
 }
 
+/// Actor that coalesces direct fetches, retries failures, and delivers accepted values.
 struct Actor<E, F, Con>
 where
     E: Clock + Spawner,
     F: Fetcher,
+    F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
     Con::Subscriber: Ord,
 {
@@ -202,8 +205,13 @@ where
 }
 
 enum Attempt {
+    /// Fetch future is active for this key.
     Fetching { id: u64, _aborter: Aborter },
+
+    /// Consumer validation is active for this key.
     Delivering { id: u64 },
+
+    /// Fetch is sleeping until the retry deadline.
     Scheduled(SystemTime),
 }
 
@@ -216,7 +224,8 @@ struct FetchCompletion<K, V> {
 impl<E, F, Con> Actor<E, F, Con>
 where
     E: Clock + Spawner,
-    F: Fetcher,
+    F: Fetcher + Clone + Send + 'static,
+    F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
     Con::Subscriber: Ord,
 {
@@ -271,6 +280,7 @@ where
         }
     }
 
+    /// Apply a mailbox message to active resolver state.
     fn handle_message(&mut self, message: Message<F::Key, Con::Subscriber>) {
         match message {
             Message::Fetch(fetches) => {
@@ -282,6 +292,7 @@ where
         }
     }
 
+    /// Add subscribers for a key and start the first fetch if needed.
     fn add_fetch(&mut self, fetch: FetchKey<F::Key, Con::Subscriber>) {
         let FetchKey { key, subscribers } = fetch;
         let is_new = self.subscribers.insert(key.clone(), subscribers);
@@ -294,6 +305,7 @@ where
         }
     }
 
+    /// Prune subscribers, deliveries, active fetches, and scheduled retries.
     fn retain(&mut self, predicate: ingress::Predicate<F::Key, Con::Subscriber>) {
         for key in self
             .subscribers
@@ -309,6 +321,7 @@ where
         }
     }
 
+    /// Spawn one fetch attempt for `key`.
     fn start_fetch(&mut self, key: F::Key) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -323,6 +336,7 @@ where
         );
     }
 
+    /// Deliver a fetched value to currently retained subscribers.
     fn start_delivery(
         &mut self,
         key: F::Key,
@@ -342,6 +356,7 @@ where
         self.requests.insert(key, Attempt::Delivering { id });
     }
 
+    /// Deliver an already accepted response to subscribers that arrived later.
     fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<Con::Subscriber>) {
         self.deliveries.redeliver(Delivery {
             key,
@@ -349,6 +364,7 @@ where
         });
     }
 
+    /// Handle a completed fetch future if it is still the active attempt.
     fn handle_fetch_completed(&mut self, completion: FetchCompletion<F::Key, F::Value>) {
         let FetchCompletion { key, id, value } = completion;
         if !self.current_fetch(&key, id) {
@@ -357,6 +373,7 @@ where
         self.handle_fetched(key, value);
     }
 
+    /// Handle a completed consumer delivery if it is still the active attempt.
     fn handle_delivery_completed(
         &mut self,
         completion: DeliveryCompletion<F::Key, Con::Subscriber, u64>,
@@ -376,6 +393,7 @@ where
         self.handle_delivered(key, delivered, valid);
     }
 
+    /// Return whether a fetch completion matches the current attempt id.
     fn current_fetch(&self, key: &F::Key, id: u64) -> bool {
         let Some(attempt) = self.requests.get(key) else {
             trace!(?key, id, "ignoring stale fetch completion");
@@ -408,6 +426,7 @@ where
         }
     }
 
+    /// Return whether a delivery completion matches the current attempt id.
     fn current_delivery(&self, key: &F::Key, id: u64) -> bool {
         let Some(attempt) = self.requests.get(key) else {
             trace!(?key, id, "ignoring stale delivery completion");
@@ -445,6 +464,7 @@ where
         }
     }
 
+    /// Deliver fetched values or schedule a retry when the source had no data.
     fn handle_fetched(&mut self, key: F::Key, value: Option<F::Value>) {
         match value {
             None => self.schedule_retry(key),
@@ -460,6 +480,7 @@ where
         }
     }
 
+    /// Complete, redeliver, or retry a key after consumer validation.
     fn handle_delivered(
         &mut self,
         key: F::Key,
@@ -506,6 +527,7 @@ where
         self.schedule_retry(key);
     }
 
+    /// Schedule the next fetch attempt for `key`.
     fn schedule_retry(&mut self, key: F::Key) {
         let deadline = self.context.current() + self.fetch_retry_timeout;
         let Some(attempt) = self.requests.get_mut(&key) else {
@@ -516,6 +538,7 @@ where
         self.retry_schedule.insert((deadline, key));
     }
 
+    /// Start all retry attempts whose deadlines have passed.
     fn process_retries(&mut self) {
         let now = self.context.current();
         while let Some((deadline, key)) = self.retry_schedule.pop_first() {
@@ -537,6 +560,7 @@ where
         }
     }
 
+    /// Run the user-supplied fetcher and preserve the attempt id.
     async fn fetch(key: F::Key, id: u64, fetcher: F) -> FetchCompletion<F::Key, F::Value> {
         let value = fetcher.fetch(key.clone()).await;
         FetchCompletion { key, id, value }
@@ -687,7 +711,7 @@ mod tests {
         consumer: MockConsumer,
     ) -> Resolver<u8, u16, PublicKey>
     where
-        F: Fetcher<Key = u8, Value = Bytes>,
+        F: Fetcher<Key = u8, Value = Bytes> + Clone + Send + 'static,
     {
         init(
             context,
