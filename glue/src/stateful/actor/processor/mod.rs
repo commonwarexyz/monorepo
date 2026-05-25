@@ -29,7 +29,8 @@ use crate::stateful::{
 use commonware_consensus::{
     marshal::{
         ancestry::BlockProvider,
-        core::{DigestFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        Identifier,
     },
     types::{Height, Round},
     Block, CertifiableBlock, Heightable, Roundable,
@@ -708,7 +709,6 @@ where
     S: Scheme,
     V: MarshalVariant,
     V::ApplicationBlock: Block + Clone,
-    MarshalMailbox<S, V>: BlockProvider<Block = V::ApplicationBlock>,
 {
     let target_height = block.height();
     if target_height > last_processed.height {
@@ -718,55 +718,24 @@ where
         return Ok(block.digest() == last_processed.digest);
     }
 
-    let Some(fetched) = await_or_cancel(
+    let Some(canonical) = await_or_cancel(
         response,
-        marshal.clone().subscribe_by_digest(
-            last_processed.digest,
-            DigestFallback::FetchByRound {
-                round: last_processed.round,
-            },
-        ),
+        marshal.get_block(Identifier::Height(target_height)),
     )
     .await
     else {
         return Err(PrepareBatchesError::Cancelled);
     };
-    let Ok(mut cursor) = fetched.map(V::into_inner) else {
+    let Some(canonical) = canonical else {
         warn!(
-            last_processed = ?last_processed.digest,
             target_height = target_height.get(),
             processed_height = last_processed.height.get(),
-            "failed to fetch canonical processed ancestry for stale-block check"
+            "failed to fetch canonical processed block for stale-block check"
         );
         return Err(PrepareBatchesError::Incomplete);
     };
 
-    loop {
-        let cursor_height = cursor.height();
-        if cursor_height == target_height {
-            return Ok(cursor.digest() == block.digest());
-        }
-        if cursor_height < target_height {
-            return Ok(false);
-        }
-
-        let Some(canonical) =
-            await_or_cancel(response, marshal.clone().subscribe_parent(&cursor)).await
-        else {
-            return Err(PrepareBatchesError::Cancelled);
-        };
-        let Some(canonical) = canonical else {
-            warn!(
-                cursor = ?cursor.digest(),
-                target_height = target_height.get(),
-                processed_height = last_processed.height.get(),
-                "failed to fetch canonical processed ancestry for stale-block check"
-            );
-            return Err(PrepareBatchesError::Incomplete);
-        };
-
-        cursor = canonical;
-    }
+    Ok(canonical.digest() == block.digest())
 }
 
 /// Read the next ancestry item unless the response receiver is dropped.
