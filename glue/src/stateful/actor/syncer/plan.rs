@@ -98,3 +98,28 @@ where
             .map_or_else(|| Start::Genesis(genesis), Start::Floor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SyncPlan;
+    use commonware_consensus::types::Height;
+    use commonware_runtime::{deterministic, Runner as _};
+
+    #[test]
+    fn stored_sync_height_disables_state_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "stored_sync_height";
+
+            let plan = SyncPlan::<()>::init(&context, partition_prefix).await;
+            assert!(plan.may_state_sync());
+            assert_eq!(plan.sync_height(), None);
+
+            super::super::set_sync_height(&context, partition_prefix, Height::new(7)).await;
+
+            let plan = SyncPlan::<()>::init(&context, partition_prefix).await;
+            assert!(!plan.may_state_sync());
+            assert_eq!(plan.sync_height(), Some(Height::new(7)));
+            assert!(plan.with_floor(()).floor().is_none());
+        });
+    }
+}
