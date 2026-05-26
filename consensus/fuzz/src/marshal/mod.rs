@@ -12,6 +12,19 @@
 //!   checks marshal liveness (every honest node delivers a target number of
 //!   ordered finalized blocks, derived from `required_containers` clamped to a
 //!   single-epoch bound) plus cross-node agreement.
+//!
+//! # Goals, pros, and cons
+//!
+//! - [`single_node`] -- fuzz the core actor's state machine.
+//!   - Pro: adversarial/out-of-order inputs, crash-restart recovery,
+//!     durability-ack contracts, precise gap-repair; cheap and deterministic.
+//!   - Con: single validator, so coding's peer-shard dissemination,
+//!     reconstruction, and validation are unreachable.
+//! - [`multi_node`] -- fuzz the live integration with one byzantine node.
+//!   - Pro: real consensus plus shard dissemination/reconstruction/validation,
+//!     cross-node agreement, and liveness (covers coding's multi-validator paths).
+//!   - Con: no node restarts; heavier (fewer iterations) and only valid
+//!     consensus orderings.
 
 pub mod multi_node;
 pub mod single_node;
