@@ -515,6 +515,17 @@ where
             let mut current_anchor = anchor;
             let mut tip_updates = Some(tip_updates);
             loop {
+                if !drain_single_tip_updates(
+                    &mut tip_updates,
+                    &target_tx,
+                    &mut current_anchor,
+                    &mut current_target,
+                )
+                .await
+                {
+                    return (current_anchor, current_target);
+                }
+
                 let update_future = tip_updates.as_mut().map_or_else(
                     || Either::Right(pending()),
                     |updates| Either::Left(updates.recv()),
@@ -522,13 +533,23 @@ where
                 select! {
                     reached = reached_rx.recv() => {
                         let Some(reached) = reached else {
-                            return current_anchor;
+                            return (current_anchor, current_target);
+                        };
+                        if !drain_single_tip_updates(
+                            &mut tip_updates,
+                            &target_tx,
+                            &mut current_anchor,
+                            &mut current_target,
+                        )
+                        .await
+                        {
+                            return (current_anchor, current_target);
                         };
                         if reached != current_target {
                             continue;
                         }
                         let _ = finish_tx.send_lossy(()).await;
-                        return current_anchor;
+                        return (current_anchor, current_target);
                     },
                     update = update_future => {
                         let Some(update) = update else {
@@ -545,17 +566,72 @@ where
                         }
                         current_target = new_target.clone();
                         if !target_tx.send_lossy(new_target).await {
-                            return current_anchor;
+                            return (current_anchor, current_target);
                         }
                     },
                 }
             }
         };
 
-        let (db_result, converged_anchor) = join!(sync, coordinator);
+        let (db_result, (converged_anchor, converged_target)) = join!(sync, coordinator);
         let database = db_result?;
+        assert!(
+            T::sync_target(&database).await == converged_target,
+            "state sync database target does not match the coordinator target",
+        );
         Ok((Self::new(AsyncRwLock::new(database)), converged_anchor))
     }
+}
+
+async fn drain_single_tip_updates<D, T>(
+    tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
+    target_tx: &mpsc::Sender<T>,
+    current_anchor: &mut Anchor<D>,
+    current_target: &mut T,
+) -> bool
+where
+    D: Digest,
+    T: Clone + PartialEq + Send + Sync,
+{
+    let mut drained = 0usize;
+    let mut latest = None;
+    loop {
+        let update = match tip_updates.as_mut().map(ring::Receiver::try_recv) {
+            Some(Ok(update)) => update,
+            Some(Err(ring::TryRecvError::Empty)) => break,
+            Some(Err(ring::TryRecvError::Disconnected)) => {
+                *tip_updates = None;
+                break;
+            }
+            None => break,
+        };
+        drained += 1;
+
+        let (new_anchor, new_target) = update.record();
+        if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
+            reschedule().await;
+        }
+
+        let latest_height = latest
+            .as_ref()
+            .map_or(current_anchor.height, |(anchor, _): &(Anchor<D>, T)| {
+                anchor.height
+            });
+        if new_anchor.height <= latest_height {
+            continue;
+        }
+        latest = Some((new_anchor, new_target));
+    }
+
+    let Some((new_anchor, new_target)) = latest else {
+        return true;
+    };
+    *current_anchor = new_anchor;
+    if new_target == *current_target {
+        return true;
+    }
+    *current_target = new_target.clone();
+    target_tx.send_lossy(new_target).await
 }
 
 /// Implement [`DatabaseSet`] for a tuple of individually-locked
@@ -775,11 +851,11 @@ macro_rules! impl_state_sync_set {
                             }
 
                             match state.next_action() {
-                                CoordinatorAction::Converged(anchor) => {
+                                CoordinatorAction::Converged { anchor, targets } => {
                                     $(
                                         let _ = coordinator_senders.$idx.finish_tx.send_lossy(()).await;
                                     )+
-                                    return Some(anchor);
+                                    return Some((anchor, targets));
                                 }
                                 CoordinatorAction::Dispatch {
                                     generation,
@@ -980,9 +1056,15 @@ macro_rules! impl_state_sync_set {
                 }
 
                 let synced = ($(synced.$idx?,)+);
-                let Some(converged_anchor) = converged_anchor else {
+                let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
+                if <Self as DatabaseSet<E>>::committed_targets(&synced).await != converged_targets {
+                    return Err(
+                        "state sync database targets do not match the coordinator target set"
+                            .into(),
+                    );
+                }
 
                 Ok((synced, converged_anchor))
             }
@@ -1088,7 +1170,7 @@ enum CoordinatorAction<D: Digest, T> {
     /// Dispatch targets to non-reached databases for `generation`.
     Dispatch { generation: usize, targets: T },
     /// All databases converged on the same generation.
-    Converged(Anchor<D>),
+    Converged { anchor: Anchor<D>, targets: T },
 }
 
 /// Pure state machine for multi-database sync convergence.
@@ -1177,12 +1259,12 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
                     };
                 }
 
-                let (anchor, _) = self
+                let (anchor, targets) = self
                     .generation_state
                     .get(&min_gen)
                     .expect("missing state for converged generation")
                     .clone();
-                return CoordinatorAction::Converged(anchor);
+                return CoordinatorAction::Converged { anchor, targets };
             }
 
             // Regroup: reset behind databases to seek the highest generation.
@@ -1368,9 +1450,9 @@ impl_attachable_resolver_set!(
 #[cfg(test)]
 mod tests {
     use super::{
-        assert_rewind_window_safety, Anchor, AttachableResolver, AttachableResolverSet,
-        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, StateSyncDb, StateSyncSet,
-        SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
+        assert_rewind_window_safety, drain_single_tip_updates, Anchor, AttachableResolver,
+        AttachableResolverSet, CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb,
+        StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
     };
     use crate::stateful::tests::mocks::{anchor as mock_anchor, TestMerkleized, TestUnmerkleized};
     use commonware_cryptography::sha256;
@@ -1578,6 +1660,10 @@ mod tests {
     struct ImmediateStateSyncDb;
 
     struct FailingStateSyncDb;
+
+    struct MismatchedTargetSyncDb {
+        final_target: u64,
+    }
 
     struct FinishClosedSyncDb {
         final_target: u64,
@@ -1889,6 +1975,38 @@ mod tests {
 
         async fn sync_target(&self) -> Self::SyncTarget {
             0
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for MismatchedTargetSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -2342,6 +2460,31 @@ mod tests {
         }
     }
 
+    impl<E: Send> StateSyncDb<E, ()> for MismatchedTargetSyncDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            _resolver: (),
+            target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            if let Some(reached_target) = reached_target.as_ref() {
+                let _ = reached_target.send(target).await;
+            }
+            if let Some(finish_rx) = finish.as_mut() {
+                let _ = finish_rx.recv().await;
+            }
+            Ok(Self {
+                final_target: target + 1,
+            })
+        }
+    }
+
     impl<E: Send> StateSyncDb<E, ()> for FinishClosedSyncDb {
         type SyncError = FinishClosedSyncError;
 
@@ -2713,6 +2856,78 @@ mod tests {
     }
 
     #[test]
+    fn single_tip_update_drain_keeps_highest_recorded_target() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (target_tx, mut target_rx) = mpsc::channel(4);
+            let (newer_update, newer_observed) = TipUpdate::with_observation(anchor(2), 2u64);
+            let (older_update, older_observed) = TipUpdate::with_observation(anchor(1), 1u64);
+
+            let _ = tip_tx.send(newer_update).await;
+            let _ = tip_tx.send(older_update).await;
+
+            let mut tip_updates = Some(tip_rx);
+            let mut current_anchor = anchor(0);
+            let mut current_target = 0u64;
+            assert!(
+                drain_single_tip_updates(
+                    &mut tip_updates,
+                    &target_tx,
+                    &mut current_anchor,
+                    &mut current_target,
+                )
+                .await
+            );
+
+            newer_observed
+                .await
+                .expect("newer update should be observed");
+            older_observed
+                .await
+                .expect("older update should also be observed");
+            assert_eq!(current_anchor, anchor(2));
+            assert_eq!(current_target, 2);
+            assert_eq!(target_rx.recv().await, Some(2));
+            assert!(matches!(
+                target_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test]
+    fn single_tip_update_drain_advances_anchor_without_duplicate_target() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
+            let (target_tx, mut target_rx) = mpsc::channel(1);
+            let (update, observed) = TipUpdate::with_observation(anchor(3), 7u64);
+
+            let _ = tip_tx.send(update).await;
+
+            let mut tip_updates = Some(tip_rx);
+            let mut current_anchor = anchor(2);
+            let mut current_target = 7u64;
+            assert!(
+                drain_single_tip_updates(
+                    &mut tip_updates,
+                    &target_tx,
+                    &mut current_anchor,
+                    &mut current_target,
+                )
+                .await
+            );
+
+            observed.await.expect("update should be observed");
+            assert_eq!(current_anchor, anchor(3));
+            assert_eq!(current_target, 7);
+            assert!(matches!(
+                target_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test]
     fn single_state_sync_handles_closed_tip_updates_channel() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
@@ -2751,6 +2966,37 @@ mod tests {
 
             let (_database, converged_anchor) = sync.await.expect("sync task should complete");
             assert_eq!(converged_anchor, anchor(0));
+        });
+    }
+
+    #[test]
+    fn single_state_sync_preserves_db_error_when_target_channel_closes() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
+            let _ = tip_tx.send(TipUpdate::new(anchor(1), 1u64)).await;
+
+            let result = <Arc<AsyncRwLock<FailingStateSyncDb>> as StateSyncSet<
+                deterministic::Context,
+                (),
+                sha256::Digest,
+            >>::sync(
+                context,
+                (),
+                (),
+                anchor(0),
+                0,
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 1,
+                    update_channel_size: NonZeroUsize::new(1).unwrap(),
+                    max_retained_roots: 0,
+                },
+            )
+            .await;
+
+            assert!(matches!(result, Err(TestSyncError)));
         });
     }
 
@@ -3026,6 +3272,47 @@ mod tests {
     }
 
     #[test]
+    fn tuple_state_sync_rejects_database_target_mismatch() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
+            let fast_done = Arc::new(AtomicBool::new(false));
+
+            let result = <(
+                Arc<AsyncRwLock<MismatchedTargetSyncDb>>,
+                Arc<AsyncRwLock<FastSyncDb>>,
+            ) as StateSyncSet<
+                deterministic::Context,
+                ((), Arc<AtomicBool>),
+                sha256::Digest,
+            >>::sync(
+                context,
+                ((), ()),
+                ((), fast_done),
+                anchor(7),
+                (7, 7),
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 1,
+                    update_channel_size: NonZeroUsize::new(1).unwrap(),
+                    max_retained_roots: 0,
+                },
+            )
+            .await;
+
+            let err = match result {
+                Ok(_) => panic!("tuple state sync should reject a mismatched database target"),
+                Err(err) => err,
+            };
+            assert!(
+                err.contains("database targets do not match"),
+                "error should identify the target mismatch, got: {err}"
+            );
+        });
+    }
+
+    #[test]
     fn tuple_state_sync_returns_db_error_instead_of_panicking_when_anchor_missing() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
@@ -3164,7 +3451,7 @@ mod tests {
                 assert_eq!((left, right), (1, 1));
             }
             CoordinatorAction::Wait => panic!("coordinator should dispatch the newer tip"),
-            CoordinatorAction::Converged(anchor) => {
+            CoordinatorAction::Converged { anchor, .. } => {
                 panic!("coordinator converged too early at {anchor:?}")
             }
         }
@@ -3183,7 +3470,7 @@ mod tests {
                     "coordinator should wait for a fresh reached event, got dispatch {targets:?}"
                 )
             }
-            CoordinatorAction::Converged(anchor) => {
+            CoordinatorAction::Converged { anchor, .. } => {
                 panic!("stale reached event must not allow convergence at {anchor:?}")
             }
         }
@@ -3203,7 +3490,7 @@ mod tests {
                 assert_eq!((left, right), (1, 1));
             }
             CoordinatorAction::Wait => panic!("coordinator should dispatch the newer tip"),
-            CoordinatorAction::Converged(anchor) => {
+            CoordinatorAction::Converged { anchor, .. } => {
                 panic!("coordinator converged too early at {anchor:?}")
             }
         }
@@ -3221,7 +3508,7 @@ mod tests {
                 assert_eq!((left, right), (2, 2));
             }
             CoordinatorAction::Wait => panic!("coordinator should dispatch the pending tip"),
-            CoordinatorAction::Converged(anchor) => {
+            CoordinatorAction::Converged { anchor, .. } => {
                 panic!("coordinator should not converge with a pending tip: {anchor:?}")
             }
         }
