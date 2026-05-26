@@ -266,25 +266,25 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         );
 
         // Remove oldest tracked peer sets if necessary.
-        let mut reset_peers = Vec::new();
+        let mut kill_peers = Vec::new();
         while self.peer_sets.len() > self.max_sets.get() {
             let (index, sets) = self.peer_sets.pop_first().unwrap();
             debug!(index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(primary).unwrap().decrement_primary();
-                if self.delete_and_reset(primary) {
-                    reset_peers.push(primary.clone());
+                if self.delete_if_needed(primary) {
+                    kill_peers.push(primary.clone());
                 }
             });
             sets.secondary.iter().for_each(|secondary| {
                 self.peers.get_mut(secondary).unwrap().decrement_secondary();
-                if self.delete_and_reset(secondary) {
-                    reset_peers.push(secondary.clone());
+                if self.delete_if_needed(secondary) {
+                    kill_peers.push(secondary.clone());
                 }
             });
         }
 
-        Some(OrderedSet::from_iter_dedup(reset_peers))
+        Some(OrderedSet::from_iter_dedup(kill_peers))
     }
 
     /// Gets the peer set (primary and secondary) at the given index.
@@ -539,15 +539,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Attempt to delete a record.
+    /// Attempt to delete a record and return whether caller-owned connection state should be
+    /// killed.
     ///
-    /// Returns `true` if the record was deleted, `false` otherwise.
+    /// Returns `true` if the record was deleted or if the peer is no longer eligible while a
+    /// connection is still reserved or active.
     fn delete_if_needed(&mut self, peer: &C) -> bool {
         let Some(record) = self.peers.get(peer) else {
             return false;
         };
+        let should_kill = record.killable();
         if !record.deletable() {
-            return false;
+            return should_kill;
         }
 
         // We don't decrement the blocked metric here because the block
@@ -556,16 +559,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true
-    }
-
-    /// Attempt to delete a record and return whether the peer's connection should be reset.
-    fn delete_and_reset(&mut self, peer: &C) -> bool {
-        let should_reset = self
-            .peers
-            .get(peer)
-            .is_some_and(|record| record.is_blockable() && !record.eligible());
-        let deleted = self.delete_if_needed(peer);
-        should_reset || deleted
     }
 }
 
@@ -611,6 +604,51 @@ mod tests {
     ) -> Releaser<C> {
         let (tx, _rx) = mailbox::new(metrics, NZUsize!(1024));
         Releaser::new(tx)
+    }
+
+    #[test]
+    fn test_track_kills_connected_peer_removed_from_sets() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: NZUsize!(1),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let peer_1 = PrivateKey::from_seed(1).public_key();
+        let peer_2 = PrivateKey::from_seed(2).public_key();
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
+
+            let set_0: OrderedSet<_> = [peer_1.clone()].into_iter().try_collect().unwrap();
+            directory.track(0, TrackedPeers::from(set_0)).unwrap();
+            let reservation = directory.listen(&peer_1).expect("peer should reserve");
+            directory.connect(&peer_1, false);
+
+            let set_1: OrderedSet<_> = [peer_2.clone()].into_iter().try_collect().unwrap();
+            let kill_peers = directory.track(1, TrackedPeers::from(set_1)).unwrap();
+
+            let expected: OrderedSet<_> = [peer_1.clone()].into_iter().try_collect().unwrap();
+            assert_eq!(kill_peers, expected);
+            let record = directory.peers.get(&peer_1).unwrap();
+            assert!(!record.deletable());
+            directory.release(reservation.metadata().clone());
+            assert!(!directory.peers.contains_key(&peer_1));
+            assert_eq!(reservation.metadata().public_key(), &peer_1);
+        });
     }
 
     #[test]

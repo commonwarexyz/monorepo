@@ -332,6 +332,11 @@ impl<C: PublicKey> Record<C> {
             && matches!(self.status, Status::Inert)
     }
 
+    /// Returns `true` if a caller-owned connection should be killed.
+    pub const fn killable(&self) -> bool {
+        !matches!(self.status, Status::Inert) && self.is_blockable() && !self.eligible()
+    }
+
     /// Returns `true` if this peer is eligible for connection.
     ///
     /// A peer is eligible if:
@@ -889,12 +894,39 @@ mod tests {
 
             record.connect(); // status = Active
             assert!(!record.deletable()); // status != Inert
+            assert!(!record.killable());
 
             record.release(); // status = Inert
             assert!(!record.deletable()); // primary_sets != 0
 
             record.decrement_primary(); // primary_sets = 0
             assert!(record.deletable()); // primary_sets = 0, !persistent, Inert
+            assert!(!record.killable());
+        });
+    }
+
+    #[test]
+    fn test_killable_logic() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::<PublicKey>::unknown();
+            assert!(!record.killable());
+
+            record.increment_primary();
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+            assert!(!record.killable());
+
+            record.decrement_primary();
+            assert!(record.killable());
+
+            record.connect();
+            assert!(record.killable());
+
+            record.release();
+            assert!(!record.killable());
+            assert!(record.deletable());
         });
     }
 

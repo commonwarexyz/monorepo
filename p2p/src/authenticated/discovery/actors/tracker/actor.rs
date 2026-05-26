@@ -166,12 +166,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 );
 
                 // Attempt to update peer set membership.
-                let Some(reset_peers) = self.directory.track(index, peers) else {
+                let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
                 };
 
                 // Kill known peers no longer in any tracked peer set.
-                for peer in reset_peers {
+                for peer in kill_peers {
                     if let Some(mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill();
                     }

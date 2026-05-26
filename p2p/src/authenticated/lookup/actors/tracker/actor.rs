@@ -115,12 +115,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         match msg {
             Message::Register { index, peers } => {
                 // Identify peers whose existing connection state should be reset.
-                let Some(reset_peers) = self.directory.track(index, peers) else {
+                let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
                 };
 
-                // Kill connections whose addresses changed and clear any deleted peers.
-                for peer in reset_peers {
+                // Kill connections for peers no longer in any tracked peer set
+                // or whose addresses changed.
+                for peer in kill_peers {
                     if let Some(mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill();
                     }
@@ -743,7 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn test_register_keeps_connected_removed_peers() {
+    fn test_register_disconnects_removed_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, my_pk) = new_signer_and_pk(0);
@@ -800,13 +801,7 @@ mod tests {
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
 
-            assert!(
-                !matches!(
-                    peer_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
-                "connected peer should not be killed solely for losing tracked-set membership"
-            );
+            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
         });
     }
 
