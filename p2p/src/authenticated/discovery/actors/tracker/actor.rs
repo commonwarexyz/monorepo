@@ -280,7 +280,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Block the peer
                 self.directory.block(&public_key);
 
-                // Kill the peer if it has already sent a keep-alive.
+                // Kill the peer if we're connected to it.
                 if let Some(peer) = self.mailboxes.remove(&public_key) {
                     peer.kill();
                 }
@@ -697,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_disconnects_peer_with_known_mailbox() {
+    fn test_block_clears_peer_mailbox_and_only_kills_once() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
@@ -718,12 +718,7 @@ mod tests {
             let (peer_mailbox, mut peer_receiver) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let reservation =
-                connect_to_peer_with_mailbox(&mailbox, &peer_pk, peer_mailbox.clone()).await;
-            mailbox.construct(peer_pk.clone(), peer_mailbox);
-            assert!(matches!(
-                peer_receiver.recv().await,
-                Some(peer::Message::BitVec(_))
-            ));
+                connect_to_peer_with_mailbox(&mailbox, &peer_pk, peer_mailbox).await;
 
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
@@ -734,6 +729,16 @@ mod tests {
                     Some(Some(peer::Message::Kill))
                 ),
                 "connected peer should be killed when blocked"
+            );
+
+            crate::block_peer(&mut oracle, peer_pk.clone());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                !matches!(
+                    peer_receiver.recv().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "no kill after handle has been cleared"
             );
             assert_eq!(reservation.metadata().public_key(), &peer_pk);
         });
