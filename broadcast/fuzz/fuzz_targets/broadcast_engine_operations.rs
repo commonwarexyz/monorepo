@@ -13,15 +13,11 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, NZUsize};
+use commonware_utils::{channel::oneshot, futures::Pool, vec::Bounded, NZUsize};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
-use std::{
-    collections::{BTreeMap, VecDeque},
-    num::NonZeroU32,
-    time::Duration,
-};
+use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -38,6 +34,7 @@ const MAX_SLEEP_DURATION_MS: u64 = 1000;
 /// unreachable via `Source::Recent`.
 const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
+/// Subscription result paired with the digest requested so completions can be validated.
 type Subscription = (Digest, Result<FuzzMessage, oneshot::error::RecvError>);
 
 #[derive(Clone, Debug, Arbitrary)]
@@ -97,11 +94,11 @@ enum Source {
 impl Source {
     /// Resolve to a concrete digest. Returns `None` when `Recent` is selected
     /// before any messages have been broadcast.
-    fn resolve(self, recent: &VecDeque<Digest>) -> Option<Digest> {
+    fn resolve(self, recent: &Bounded<Digest>) -> Option<Digest> {
         match self {
             Source::Random(message) => Some(message.digest()),
             Source::Recent(_) if recent.is_empty() => None,
-            Source::Recent(idx) => Some(recent[(idx as usize) % recent.len()]),
+            Source::Recent(idx) => recent.get((idx as usize) % recent.len()).cloned(),
         }
     }
 }
@@ -206,7 +203,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 
 // Keep subscriptions alive without spawning one task per receiver. Ready
 // subscriptions are validated, while unresolved ones remain pending.
-fn drain_ready_subscriptions(pending: &mut FuturesPool<Subscription>) {
+fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
     while let Some((digest, result)) = pending.next_completed().now_or_never() {
         match result {
             Ok(message) => {
@@ -284,8 +281,8 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Execute fuzzed actions
-        let mut recent_digests: VecDeque<Digest> = VecDeque::with_capacity(MAX_RECENT_DIGESTS);
-        let mut pending_subscriptions = FuturesPool::default();
+        let mut recent_digests = Bounded::new(NZUsize!(MAX_RECENT_DIGESTS));
+        let mut pending_subscriptions = Pool::default();
         for action in input.actions {
             match action {
                 BroadcastAction::SendMessage {
@@ -298,10 +295,7 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
-                        if recent_digests.len() == MAX_RECENT_DIGESTS {
-                            recent_digests.pop_front();
-                        }
-                        recent_digests.push_back(message.digest());
+                        recent_digests.push(message.digest());
                         let _ = mailbox.broadcast(resolved_recipients, message);
                     }
                 }
