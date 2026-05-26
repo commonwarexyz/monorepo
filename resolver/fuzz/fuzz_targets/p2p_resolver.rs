@@ -15,7 +15,7 @@ use commonware_resolver::{
         mocks::{Consumer, Key, Producer},
         Config, Engine,
     },
-    Resolver,
+    Resolver, TargetedResolver,
 };
 use commonware_runtime::{
     deterministic, telemetry::metrics::count_running_tasks, Clock, Quota, Runner, Supervisor as _,
