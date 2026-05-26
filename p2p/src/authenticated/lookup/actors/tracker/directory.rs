@@ -145,8 +145,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Track new primary and secondary peer sets for the given index.
     ///
-    /// Returns the peers whose connections should be reset because they were
-    /// removed from all tracked peer sets or had their address changed.
+    /// Returns the peers whose caller state should be reset because their
+    /// address changed or because their record was deleted.
     ///
     /// Returns `None` if the index is invalid.
     pub fn track(&mut self, index: u64, peers: AddressableTrackedPeers<C>) -> Option<Set<C>> {
@@ -229,7 +229,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(index = removed_index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(&primary).unwrap().decrement_primary();
-                if self.delete_and_reset(&primary) {
+                if self.delete_if_needed(&primary) {
                     reset_peers.push(primary);
                 }
             });
@@ -238,7 +238,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                     .get_mut(&secondary)
                     .unwrap()
                     .decrement_secondary();
-                if self.delete_and_reset(&secondary) {
+                if self.delete_if_needed(&secondary) {
                     reset_peers.push(secondary);
                 }
             });
@@ -505,15 +505,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         true
     }
 
-    /// Attempt to delete a record and return whether the peer's connection should be reset.
-    fn delete_and_reset(&mut self, peer: &C) -> bool {
-        let should_reset = self
-            .peers
-            .get(peer)
-            .is_some_and(|record| record.is_blockable() && !record.eligible());
-        let deleted = self.delete_if_needed(peer);
-        should_reset || deleted
-    }
 }
 
 #[cfg(test)]
@@ -638,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn test_track_resets_connected_peer_removed_from_sets() {
+    fn test_track_does_not_reset_connected_peer_removed_from_sets() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let config = super::Config {
@@ -675,7 +666,9 @@ mod tests {
                 )
                 .unwrap();
 
-            assert_eq!(reset_peers, Set::try_from([pk_1.clone()]).unwrap());
+            assert!(reset_peers.is_empty());
+            let record = directory.peers.get(&pk_1).unwrap();
+            assert!(!record.deletable());
             assert_eq!(reservation.metadata().public_key(), &pk_1);
         });
     }
