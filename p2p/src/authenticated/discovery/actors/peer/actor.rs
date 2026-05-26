@@ -33,7 +33,6 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_bit_vec: u64,
     max_peers: usize,
 
-    mailbox: Mailbox<C>,
     control: mailbox::UnreliableReceiver<Message<C>>,
     high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
     low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
@@ -48,11 +47,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let (control_sender, control_receiver) =
             Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
-        let mailbox = control_sender.clone();
         (
             Self {
                 context,
-                mailbox: control_sender,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 info_verifier: cfg.info_verifier,
@@ -65,7 +62,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
             },
-            mailbox,
+            control_sender,
             relay,
         )
     }
@@ -191,7 +188,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
             let peer = peer.clone();
             let tracker = tracker.clone();
-            let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
                 // Set the initial deadline to now to start gossiping immediately
@@ -205,7 +201,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     on_stopped => {},
                     _ = context.sleep_until(deadline) => {
                         // Get latest bitset from tracker (also used as ping)
-                        tracker.construct(peer.clone(), mailbox.clone());
+                        tracker.construct(peer.clone());
 
                         // Reset ticker
                         deadline = context.current() + self.gossip_bit_vec_frequency;
@@ -370,7 +366,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone());
+                            tracker.bit_vec(peer.clone(), bit_vec);
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid
