@@ -220,6 +220,9 @@ debug = true
 # Although overflow checks are enabled by default in "test", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+# Keep line tables for file:line in panics and backtraces, but skip variable-level
+# debuginfo to speed up codegen and linking. Use `debug = 2` for debugger sessions.
+debug = "line-tables-only"
 
 [profile.test.package.curve25519-dalek]
 opt-level = 3
