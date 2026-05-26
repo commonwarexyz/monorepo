@@ -7,7 +7,7 @@ use commonware_storage::{
     mmr::{self, Location},
     qmdb::{
         any::sync::Target,
-        current::sync::Target as CurrentTarget,
+        current::sync::{self as current_sync, Target as CurrentTarget},
         sync::{self, compact},
     },
 };
@@ -75,13 +75,26 @@ where
         }
     }
 
-    /// Returns the current-database sync target (database root + witness).
-    pub async fn get_current_sync_target(
+    /// Ask the server for a current-database sync target whose canonical root matches one of
+    /// `trusted_roots`. Returns `None` if the server has no cached witness for any of them.
+    ///
+    /// If `trusted_roots.len() > wire::MAX_TRUSTED_ROOTS`, only the first
+    /// `MAX_TRUSTED_ROOTS` entries are sent over the wire. Callers should pass roots in
+    /// most-recent-first order so the freshest candidates are always queried.
+    pub async fn get_current_target_for_roots(
         &self,
-    ) -> Result<CurrentTarget<mmr::Family, D>, crate::Error> {
+        trusted_roots: &[D],
+    ) -> Result<Option<CurrentTarget<mmr::Family, D>>, crate::Error> {
         let request_id = self.request_id_generator.next();
+        // Clamp the request payload to the wire-format limit. The server would reject any
+        // larger payload at decode time; we honor the cap here so a misconfigured local
+        // trusted-root buffer doesn't break sync.
+        let send_count = trusted_roots.len().min(wire::MAX_TRUSTED_ROOTS);
         let request =
-            wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id });
+            wire::Message::GetCurrentTargetForRootsRequest(wire::GetCurrentTargetForRootsRequest {
+                request_id,
+                trusted_roots: trusted_roots[..send_count].to_vec(),
+            });
         let (tx, rx) = oneshot::channel();
         self.request_tx
             .clone()
@@ -95,7 +108,7 @@ where
             .await
             .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
         match response {
-            wire::Message::GetCurrentSyncTargetResponse(r) => Ok(r.target),
+            wire::Message::GetCurrentTargetForRootsResponse(r) => Ok(r.target),
             wire::Message::Error(err) => Err(crate::Error::Server {
                 code: err.error_code,
                 message: err.message,
@@ -223,6 +236,20 @@ where
             success_tx: tx,
             pinned_nodes,
         })
+    }
+}
+
+impl<Op, D> current_sync::CurrentResolver for Resolver<Op, D>
+where
+    Op: Clone + Read + EncodeShared,
+    Op::Cfg: IsUnit,
+    D: Digest,
+{
+    async fn target_for_roots(
+        &self,
+        trusted_roots: &[D],
+    ) -> Result<Option<CurrentTarget<mmr::Family, D>>, Self::Error> {
+        self.get_current_target_for_roots(trusted_roots).await
     }
 }
 

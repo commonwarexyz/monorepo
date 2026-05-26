@@ -156,6 +156,7 @@ pub fn cur_fix_cfg_with(
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
+        witness_cache_size: 32,
     }
 }
 
@@ -193,6 +194,7 @@ pub fn cur_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
+        witness_cache_size: 32,
     }
 }
 
@@ -243,6 +245,7 @@ pub fn cur_var_vec_cfg_with(
         ),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
+        witness_cache_size: 32,
     }
 }
 

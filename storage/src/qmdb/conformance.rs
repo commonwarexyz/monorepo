@@ -212,6 +212,7 @@ fn current_fixed_config(
         journal_config: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
+        witness_cache_size: 32,
     }
 }
 
@@ -225,6 +226,7 @@ fn current_variable_config(
         journal_config: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
+        witness_cache_size: 32,
     }
 }
 

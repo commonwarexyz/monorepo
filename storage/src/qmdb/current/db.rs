@@ -41,12 +41,16 @@ use commonware_runtime::telemetry::metrics::{
 };
 use commonware_utils::{
     bitmap::{self, Readable as _},
+    range::NonEmptyRange,
     sequence::prefixed_u64::U64,
     sync::AsyncMutex,
 };
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::Arc,
+};
 use tracing::{error, warn};
 
 /// Prefix used for the metadata key for grafted tree pinned nodes.
@@ -128,6 +132,93 @@ impl<E: Context> Metrics<E> {
     }
 }
 
+/// A recent committed target: the four pieces a sync client needs to bridge a trusted
+/// canonical root to a verified ops root. Constructed at commit time when the witness
+/// components are already computed for the canonical root.
+#[derive(Clone, Debug)]
+pub struct CachedTarget<F: merkle::Graftable, D: Digest> {
+    /// The canonical database root.
+    pub root: D,
+    /// The ops-tree root committed by `root`.
+    pub ops_root: D,
+    /// Witness binding `ops_root` to `root`.
+    pub witness: OpsRootWitness<F, D>,
+    /// Range of operation locations a sync client should request to reach this target.
+    pub range: NonEmptyRange<Location<F>>,
+}
+
+/// Bounded ring buffer mapping canonical roots to their authenticated sync targets.
+///
+/// Populated at every commit so a sync server can answer "do you have a witness for any
+/// of these trusted roots?" without recomputing historical state. The cache is a liveness
+/// optimization, not a trust anchor: clients verify each target's witness against their
+/// own trusted root before using it.
+#[derive(Debug)]
+pub(crate) struct WitnessCache<F: merkle::Graftable, D: Digest> {
+    by_root: HashMap<D, CachedTarget<F, D>>,
+    order: VecDeque<D>,
+    capacity: usize,
+}
+
+impl<F: merkle::Graftable, D: Digest> WitnessCache<F, D> {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            by_root: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Insert (or refresh) a target. No-op when capacity is zero.
+    pub(crate) fn insert(&mut self, target: CachedTarget<F, D>) {
+        if self.capacity == 0 {
+            return;
+        }
+        let root = target.root;
+        if self.by_root.insert(root, target).is_none() {
+            self.order.push_back(root);
+        }
+        while self.order.len() > self.capacity {
+            if let Some(evicted) = self.order.pop_front() {
+                self.by_root.remove(&evicted);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Return the first cached target whose root appears in `roots`, if any.
+    pub(crate) fn lookup(&self, roots: &[D]) -> Option<CachedTarget<F, D>> {
+        roots.iter().find_map(|r| self.by_root.get(r).cloned())
+    }
+
+    /// Drop every cached entry. Called on rewind: the chain forked, so older targets
+    /// describe a state that is no longer reachable on this branch.
+    pub(crate) fn clear(&mut self) {
+        self.by_root.clear();
+        self.order.clear();
+    }
+
+    /// Drop every cached entry whose `range.start` is below `boundary`. Called after pruning:
+    /// the server can no longer serve operations below `boundary`, so any cached target
+    /// pointing at a `start` below it is unservable.
+    pub(crate) fn evict_before(&mut self, boundary: Location<F>) {
+        let stale: Vec<D> = self
+            .by_root
+            .iter()
+            .filter(|(_, t)| t.range.start() < boundary)
+            .map(|(root, _)| *root)
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for root in &stale {
+            self.by_root.remove(root);
+        }
+        self.order.retain(|root| self.by_root.contains_key(root));
+    }
+}
+
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
     F: merkle::Graftable,
@@ -163,6 +254,10 @@ pub struct Db<
     /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
+
+    /// Bounded cache of `(canonical_root, ops_root, witness, range)` entries, populated at
+    /// every commit and at init. Sync clients query this cache via [`Db::cached_target`].
+    pub(super) witness_cache: WitnessCache<F, H::Digest>,
 
     /// Metrics for the Current layer.
     pub(super) metrics: Metrics<E>,
@@ -250,6 +345,17 @@ where
     /// Return a reference to the merkleization strategy.
     pub const fn strategy(&self) -> &S {
         &self.strategy
+    }
+
+    /// Return the first cached sync target whose canonical root appears in `trusted_roots`,
+    /// or `None` if no cached entry matches.
+    ///
+    /// This is the server-side entrypoint for sync clients that hold trusted canonical roots
+    /// from consensus. The cache holds the last `witness_cache_size` committed targets, plus
+    /// the current target seeded at init. Callers must still verify each returned target's
+    /// witness against the trusted root before driving sync.
+    pub fn cached_target(&self, trusted_roots: &[H::Digest]) -> Option<CachedTarget<F, H::Digest>> {
+        self.witness_cache.lookup(trusted_roots)
     }
 
     /// Returns the ops tree root.
@@ -460,6 +566,30 @@ where
         Location::new(pruned_chunks * chunk_bits)
     }
 
+    /// Insert the current `(root, ops_root, witness)` triple into the witness cache, using
+    /// the database's current `[sync_boundary, bounds.end)` as the target range.
+    ///
+    /// No-op when the cache capacity is zero or the range would be empty (e.g. an empty
+    /// database before any commits).
+    pub(crate) async fn cache_current_target(
+        &mut self,
+        ops_root: H::Digest,
+        witness: OpsRootWitness<F, H::Digest>,
+    ) {
+        let lower = self.sync_boundary();
+        let upper = self.bounds().await.end;
+        let Ok(range) = NonEmptyRange::new(lower..upper) else {
+            return;
+        };
+        let target = CachedTarget {
+            root: self.root,
+            ops_root,
+            witness,
+            range,
+        };
+        self.witness_cache.insert(target);
+    }
+
     /// Update Current-specific state gauges.
     pub(super) fn update_metrics(&self) {
         self.metrics.update(
@@ -572,6 +702,11 @@ where
         // Prune the bitmap to the sync boundary (most aggressive safe location).
         self.any.prune_bitmap(sync_boundary);
         self.prune_grafted_tree_to_bitmap()?;
+
+        // Drop cached sync targets that point at operations below the new prune boundary.
+        // The server can no longer serve those ranges, so handing them to a sync client
+        // would set up a `target_for_roots` hit that the engine immediately fails on.
+        self.witness_cache.evict_before(prune_loc);
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
         // `any.prune_log` fails, the metadata is ahead of the log, which is safe: on recovery,
@@ -691,7 +826,7 @@ where
         );
         let partial_chunk = partial_chunk(self.any.bitmap.as_ref());
         let ops_root = self.any.root();
-        let root = compute_db_root(
+        let ComputedRoot { root, witness } = compute_db_root(
             &hasher,
             self.any.bitmap.as_ref(),
             &storage,
@@ -704,6 +839,11 @@ where
 
         self.grafted_tree = grafted_tree;
         self.root = root;
+        // Rewind discards forward-of-rewind state: cached targets newer than the rewound
+        // size now describe a fork the server can no longer reach. Drop all of them; the
+        // call below re-seeds with the post-rewind current target.
+        self.witness_cache.clear();
+        self.cache_current_target(ops_root, witness).await;
         self.update_metrics();
 
         Ok(())
@@ -805,6 +945,9 @@ where
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
         self.grafted_tree.apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
+        if let Some((ops_root, witness)) = batch.ops_root_witness.clone() {
+            self.cache_current_target(ops_root, witness).await;
+        }
         self.update_metrics();
         Ok(range)
     }
@@ -944,7 +1087,14 @@ pub(super) fn combine_roots<H: Hasher>(
     }
 }
 
-/// Compute the canonical root digest of a [Db].
+/// The canonical root of a [Db], plus the witness binding it to the ops root.
+pub(super) struct ComputedRoot<F: merkle::Graftable, D: Digest> {
+    pub root: D,
+    pub witness: OpsRootWitness<F, D>,
+}
+
+/// Compute the canonical root digest of a [Db], along with the witness that authenticates
+/// `ops_root` against that root.
 ///
 /// See the [Root structure](super) section in the module documentation.
 ///
@@ -968,7 +1118,7 @@ pub(super) async fn compute_db_root<
     partial_chunk: Option<([u8; N], u64)>,
     inactivity_floor: Location<F>,
     ops_root: &H::Digest,
-) -> Result<H::Digest, Error<F>> {
+) -> Result<ComputedRoot<F, H::Digest>, Error<F>> {
     let grafted_root =
         compute_grafted_root(hasher, status, storage, ops_leaves, inactivity_floor).await?;
     let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
@@ -977,13 +1127,22 @@ pub(super) async fn compute_db_root<
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
-    Ok(combine_roots(
+    let root = combine_roots(
         hasher,
         ops_root,
         &grafted_root,
         pending.as_ref(),
         partial.as_ref().map(|(nb, d)| (*nb, d)),
-    ))
+    );
+    let pending_chunk_digest: F::PendingChunk<H::Digest> = pending
+        .try_into()
+        .expect("pending_chunk must be consistent with family");
+    let witness = OpsRootWitness {
+        grafted_root,
+        pending_chunk_digest,
+        partial_chunk: partial,
+    };
+    Ok(ComputedRoot { root, witness })
 }
 
 /// Compute the root of the grafted structure represented by `storage`.

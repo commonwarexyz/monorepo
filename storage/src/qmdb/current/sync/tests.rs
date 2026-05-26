@@ -904,23 +904,27 @@ mod root_sync {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let target_db = build_target_db(&mut context).await;
-            let target = make_current_target(&target_db).await;
-            let root = target.root;
+            let root = target_db.root();
 
             let client_suffix = context.next_u64().to_string();
             let client_config =
                 variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
 
             let target_db = std::sync::Arc::new(target_db);
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(4);
+            trusted_tx.send(root).await.unwrap();
+            drop(trusted_tx);
+
             let synced_db: Db = current_sync::sync(current_sync::Config {
                 context: context.child("client"),
                 resolver: target_db.clone(),
-                target,
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
                 max_outstanding_requests: 4,
                 fetch_batch_size: NZU64!(64),
                 apply_batch_size: 1024,
                 db_config: client_config,
-                update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
@@ -941,20 +945,20 @@ mod root_sync {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let mut target_db = build_target_db(&mut context).await;
-            let initial_target = make_current_target(&target_db).await;
+            let initial_root = target_db.root();
 
             let key = Digest::from([7u8; 32]);
             for round in 10..20u64 {
                 apply_round(&mut target_db, key, round).await;
             }
             target_db.sync().await.unwrap();
-            let updated_target = make_current_target(&target_db).await;
-            let expected_root = updated_target.root;
+            let updated_root = target_db.root();
 
-            let (update_sender, update_receiver) = commonware_utils::channel::mpsc::channel(1);
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(4);
             let (finish_sender, finish_receiver) = commonware_utils::channel::mpsc::channel(1);
-            update_sender.send(updated_target).await.unwrap();
-            drop(update_sender);
+            trusted_tx.send(initial_root).await.unwrap();
+            trusted_tx.send(updated_root).await.unwrap();
+            drop(trusted_tx);
             context.child("finish").spawn(move |context| async move {
                 context.sleep(std::time::Duration::from_millis(1)).await;
                 finish_sender.send(()).await.unwrap();
@@ -968,12 +972,13 @@ mod root_sync {
             let synced_db: Db = current_sync::sync(current_sync::Config {
                 context: context.child("client"),
                 resolver: target_db.clone(),
-                target: initial_target,
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
                 max_outstanding_requests: 1,
                 fetch_batch_size: NZU64!(1),
                 apply_batch_size: 1024,
                 db_config: client_config,
-                update_rx: Some(update_receiver),
                 finish_rx: Some(finish_receiver),
                 reached_target_tx: None,
                 max_retained_roots: 8,
@@ -981,12 +986,133 @@ mod root_sync {
             .await
             .unwrap();
 
-            assert_eq!(synced_db.root(), expected_root);
+            assert_eq!(synced_db.root(), updated_root);
 
             synced_db.destroy().await.unwrap();
             let target_db = std::sync::Arc::into_inner(target_db).unwrap();
             target_db.destroy().await.unwrap();
         });
+    }
+
+    /// A resolver wrapper that delegates `get_operations` to an inner `Arc<Db>` but lets the
+    /// test inject a custom `target_for_roots` response. Useful for testing the wrapper's
+    /// trust gates (membership + witness checks) against malicious resolver behavior.
+    #[derive(Clone)]
+    struct AdversarialResolver {
+        inner: std::sync::Arc<Db>,
+        /// What to return from `target_for_roots`. `None` reflects a real cache miss; `Some`
+        /// is what the adversary serves regardless of the trusted roots passed in.
+        served: std::sync::Arc<
+            commonware_utils::sync::AsyncMutex<
+                Option<crate::qmdb::current::sync::Target<mmr::Family, Digest>>,
+            >,
+        >,
+    }
+
+    impl crate::qmdb::sync::Resolver for AdversarialResolver {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = <std::sync::Arc<Db> as crate::qmdb::sync::Resolver>::Op;
+        type Error = qmdb::Error<mmr::Family>;
+
+        async fn get_operations(
+            &self,
+            op_count: crate::merkle::Location<mmr::Family>,
+            start_loc: crate::merkle::Location<mmr::Family>,
+            max_ops: std::num::NonZeroU64,
+            include_pinned_nodes: bool,
+            cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
+        ) -> Result<crate::qmdb::sync::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        {
+            crate::qmdb::sync::Resolver::get_operations(
+                &self.inner,
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
+            .await
+        }
+    }
+
+    impl current_sync::CurrentResolver for AdversarialResolver {
+        async fn target_for_roots(
+            &self,
+            _trusted_roots: &[Digest],
+        ) -> Result<Option<crate::qmdb::current::sync::Target<mmr::Family, Digest>>, Self::Error>
+        {
+            let guard = self.served.lock().await;
+            Ok(guard.clone())
+        }
+    }
+
+    /// Resolver that returns `None` from `target_for_roots` for the first `lag` calls,
+    /// then delegates to the inner `Arc<Db>`'s real cache. Simulates a resolver whose
+    /// commit cache is behind the client's trusted-root buffer — exactly what
+    /// `target_poll_interval` is meant to handle.
+    #[derive(Clone)]
+    struct LaggingResolver {
+        inner: std::sync::Arc<Db>,
+        remaining_lag: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LaggingResolver {
+        fn new(inner: std::sync::Arc<Db>, lag: usize) -> Self {
+            Self {
+                inner,
+                remaining_lag: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(lag)),
+            }
+        }
+    }
+
+    impl crate::qmdb::sync::Resolver for LaggingResolver {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = <std::sync::Arc<Db> as crate::qmdb::sync::Resolver>::Op;
+        type Error = qmdb::Error<mmr::Family>;
+
+        async fn get_operations(
+            &self,
+            op_count: crate::merkle::Location<mmr::Family>,
+            start_loc: crate::merkle::Location<mmr::Family>,
+            max_ops: std::num::NonZeroU64,
+            include_pinned_nodes: bool,
+            cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
+        ) -> Result<crate::qmdb::sync::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        {
+            crate::qmdb::sync::Resolver::get_operations(
+                &self.inner,
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
+            .await
+        }
+    }
+
+    impl current_sync::CurrentResolver for LaggingResolver {
+        async fn target_for_roots(
+            &self,
+            trusted_roots: &[Digest],
+        ) -> Result<Option<crate::qmdb::current::sync::Target<mmr::Family, Digest>>, Self::Error>
+        {
+            // Decrement and probe atomically; non-zero means we're still lagging.
+            let prev = self
+                .remaining_lag
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |v| if v > 0 { Some(v - 1) } else { Some(0) },
+                )
+                .unwrap_or(0);
+            if prev > 0 {
+                return Ok(None);
+            }
+            Ok(self.inner.cached_target(trusted_roots).map(Into::into))
+        }
     }
 
     #[test_traced("INFO")]
@@ -1005,16 +1131,29 @@ mod root_sync {
             let client_config =
                 variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
 
-            let target_db = std::sync::Arc::new(target_db);
+            let target_db_arc = std::sync::Arc::new(target_db);
+            // Trust the (tampered) target's root: the witness check should still reject the
+            // returned target because the witness no longer hashes to that root.
+            let trusted_root = target.root;
+            let resolver = AdversarialResolver {
+                inner: target_db_arc.clone(),
+                served: std::sync::Arc::new(commonware_utils::sync::AsyncMutex::new(Some(target))),
+            };
+
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(4);
+            trusted_tx.send(trusted_root).await.unwrap();
+            drop(trusted_tx);
+
             let result: Result<Db, _> = current_sync::sync(current_sync::Config {
                 context: context.child("client"),
-                resolver: target_db.clone(),
-                target,
+                resolver,
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
                 max_outstanding_requests: 4,
                 fetch_batch_size: NZU64!(64),
                 apply_batch_size: 1024,
                 db_config: client_config,
-                update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
@@ -1028,49 +1167,52 @@ mod root_sync {
                 ))
             ));
 
-            let target_db = std::sync::Arc::into_inner(target_db).unwrap();
+            let target_db = std::sync::Arc::into_inner(target_db_arc).unwrap();
             target_db.destroy().await.unwrap();
         });
     }
 
     #[test_traced("INFO")]
-    fn test_root_sync_rejects_invalid_update_witness() {
+    fn test_root_sync_rejects_untrusted_root() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
-            let mut target_db = build_target_db(&mut context).await;
-            let initial_target = make_current_target(&target_db).await;
-
-            let key = Digest::from([7u8; 32]);
-            for round in 10..20u64 {
-                apply_round(&mut target_db, key, round).await;
-            }
-            target_db.sync().await.unwrap();
-            let mut updated_target = make_current_target(&target_db).await;
-            updated_target.witness = OpsRootWitness {
-                grafted_root: Digest::from([0xFFu8; 32]),
-                ..updated_target.witness
-            };
-
-            let (update_sender, update_receiver) = commonware_utils::channel::mpsc::channel(1);
-            let (_finish_sender, finish_receiver) = commonware_utils::channel::mpsc::channel(1);
-            update_sender.send(updated_target).await.unwrap();
-            drop(update_sender);
+            let target_db = build_target_db(&mut context).await;
+            let real_target = make_current_target(&target_db).await;
 
             let client_suffix = context.next_u64().to_string();
             let client_config =
                 variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
-            let target_db = std::sync::Arc::new(target_db);
+
+            let target_db_arc = std::sync::Arc::new(target_db);
+
+            // Adversary returns a self-consistent target (witness valid against its own root),
+            // but the root is NOT in the client's trusted set. The wrapper must reject this
+            // via the membership check; the engine's end-of-sync `RootMismatch` check is too
+            // late to catch it (the engine would happily sync to the resolver's root).
+            let resolver = AdversarialResolver {
+                inner: target_db_arc.clone(),
+                served: std::sync::Arc::new(commonware_utils::sync::AsyncMutex::new(Some(
+                    real_target.clone(),
+                ))),
+            };
+
+            // Trust a completely different root.
+            let trusted_root = Digest::from([0xAAu8; 32]);
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(4);
+            trusted_tx.send(trusted_root).await.unwrap();
+            drop(trusted_tx);
 
             let result: Result<Db, _> = current_sync::sync(current_sync::Config {
                 context: context.child("client"),
-                resolver: target_db.clone(),
-                target: initial_target,
-                max_outstanding_requests: 1,
-                fetch_batch_size: NZU64!(1),
+                resolver,
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(64),
                 apply_batch_size: 1024,
                 db_config: client_config,
-                update_rx: Some(update_receiver),
-                finish_rx: Some(finish_receiver),
+                finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
             })
@@ -1082,19 +1224,121 @@ mod root_sync {
                     crate::qmdb::sync::EngineError::OpsRootWitnessInvalid
                 ))
             ));
+            assert_ne!(real_target.root, trusted_root);
+
+            let target_db = std::sync::Arc::into_inner(target_db_arc).unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// `target_poll_interval = 0` must be rejected at sync entry rather than busy-looping.
+    #[test_traced("INFO")]
+    fn test_sync_rejects_zero_poll_interval() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let target_db = std::sync::Arc::new(target_db);
+            let (_trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(1);
+            let client_suffix = context.next_u64().to_string();
+            let client_config =
+                variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+
+            let result: Result<Db, _> = current_sync::sync(current_sync::Config {
+                context: context.child("client"),
+                resolver: target_db.clone(),
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::ZERO,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(64),
+                apply_batch_size: 1024,
+                db_config: client_config,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            })
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(crate::qmdb::sync::Error::Engine(
+                    crate::qmdb::sync::EngineError::InvalidConfig(_)
+                ))
+            ));
 
             let target_db = std::sync::Arc::into_inner(target_db).unwrap();
             target_db.destroy().await.unwrap();
         });
     }
 
-    /// Verify that closing the caller's update channel while the engine is waiting
-    /// for updates (with finish_rx) allows the engine to eventually complete.
-    /// This exercises the Either::Right path in the forwarding select: the forward
-    /// future exits, update_tx must be dropped so the engine sees
-    /// UpdateChannelClosed, and then finish completes sync.
+    /// Closing the trusted-root stream before any match yields `TrustedStreamClosed`,
+    /// not the previous (misleading) `OpsRootWitnessInvalid`.
     #[test_traced("INFO")]
-    fn test_root_sync_update_channel_close_unblocks_engine() {
+    fn test_sync_closed_trusted_stream_returns_dedicated_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let target_db = std::sync::Arc::new(target_db);
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(1);
+            drop(trusted_tx); // close immediately
+
+            let client_suffix = context.next_u64().to_string();
+            let client_config =
+                variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+
+            let result: Result<Db, _> = current_sync::sync(current_sync::Config {
+                context: context.child("client"),
+                resolver: target_db.clone(),
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(64),
+                apply_batch_size: 1024,
+                db_config: client_config,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            })
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(crate::qmdb::sync::Error::Engine(
+                    crate::qmdb::sync::EngineError::TrustedStreamClosed
+                ))
+            ));
+
+            let target_db = std::sync::Arc::into_inner(target_db).unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Init seeding: a freshly opened DB exposes its current root via `cached_target`
+    /// without any subsequent commits. Restart liveness: closing and reopening the DB
+    /// re-seeds the cache so the current root remains answerable.
+    #[test_traced("INFO")]
+    fn test_witness_cache_seeded_at_init() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let root = target_db.root();
+            let cached = target_db.cached_target(&[root]);
+            assert!(cached.is_some(), "init should seed the current target");
+            let cached = cached.unwrap();
+            assert_eq!(cached.root, root);
+            assert_eq!(cached.ops_root, target_db.ops_root());
+
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify that closing the trusted-root channel while the engine is waiting allows the
+    /// engine to eventually complete via `finish_rx`. The wrapper's forward task exits when
+    /// the channel closes, the engine sees `UpdateChannelClosed`, and `finish_rx` lets it
+    /// complete.
+    #[test_traced("INFO")]
+    fn test_root_sync_trusted_channel_close_unblocks_engine() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context: Context| async move {
             let target_db = build_target_db(&mut context).await;
@@ -1107,31 +1351,299 @@ mod root_sync {
 
             let target_db = std::sync::Arc::new(target_db);
 
-            let (update_tx, update_rx) = commonware_utils::channel::mpsc::channel(1);
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(4);
             let (finish_tx, finish_rx) = commonware_utils::channel::mpsc::channel(1);
+
+            // Send the initial trusted root, then close the channel. The engine then waits
+            // on finish_rx; sending the finish signal lets it complete.
+            trusted_tx.send(root).await.unwrap();
+            drop(trusted_tx);
 
             let sync_fut = current_sync::sync(current_sync::Config {
                 context: context.child("client"),
                 resolver: target_db.clone(),
-                target,
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
                 max_outstanding_requests: 4,
                 fetch_batch_size: NZU64!(64),
                 apply_batch_size: 1024,
                 db_config: client_config,
-                update_rx: Some(update_rx),
                 finish_rx: Some(finish_rx),
                 reached_target_tx: None,
                 max_retained_roots: 8,
             });
 
-            // Drop the update sender to close the channel while the engine is
-            // waiting for updates or a finish signal.
-            drop(update_tx);
-
-            // Send the finish signal so the engine can complete.
             finish_tx.send(()).await.unwrap();
 
             let synced_db: Db = sync_fut.await.unwrap();
+            assert_eq!(synced_db.root(), root);
+
+            synced_db.destroy().await.unwrap();
+            let target_db = std::sync::Arc::into_inner(target_db).unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verify cache grows across commits up to capacity, evicts FIFO, and serves any
+    /// retained root.
+    #[test_traced("INFO")]
+    fn test_witness_cache_fifo_eviction() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            // Build a DB with witness_cache_size = 3.
+            let suffix = context.next_u64().to_string();
+            let mut cfg = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+            cfg.witness_cache_size = 3;
+            let mut db: Db = Db::init(context.child("cache"), cfg).await.unwrap();
+
+            let key = Digest::from([1u8; 32]);
+            let mut roots = Vec::new();
+            roots.push(db.root());
+            // Five commits produce five new roots; only the most recent 3 should remain
+            // (plus the init-seeded entry, which gets evicted by the 3rd commit).
+            for round in 0..5u64 {
+                apply_round(&mut db, key, round).await;
+                roots.push(db.root());
+            }
+
+            // Oldest roots: evicted.
+            for old_root in &roots[..roots.len() - 3] {
+                assert!(
+                    db.cached_target(&[*old_root]).is_none(),
+                    "old root should be evicted"
+                );
+            }
+            // Newest 3 roots: retained.
+            for recent_root in &roots[roots.len() - 3..] {
+                assert!(
+                    db.cached_target(&[*recent_root]).is_some(),
+                    "recent root should be cached"
+                );
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// `witness_cache_size = 0` disables the cache entirely. All lookups return `None`.
+    #[test_traced("INFO")]
+    fn test_witness_cache_disabled() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let suffix = context.next_u64().to_string();
+            let mut cfg = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+            cfg.witness_cache_size = 0;
+            let mut db: Db = Db::init(context.child("cache"), cfg).await.unwrap();
+
+            let initial_root = db.root();
+            assert!(db.cached_target(&[initial_root]).is_none());
+
+            let key = Digest::from([1u8; 32]);
+            apply_round(&mut db, key, 0).await;
+            assert!(db.cached_target(&[db.root()]).is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Pruning the DB evicts cache entries whose `range.start` is below the new boundary.
+    /// Newer entries (range.start >= boundary) stay.
+    #[test_traced("INFO")]
+    fn test_witness_cache_evicted_by_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            // Larger cache so early roots aren't evicted by FIFO before we prune.
+            let suffix = context.next_u64().to_string();
+            let mut cfg = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+            cfg.witness_cache_size = 1024;
+            let mut target_db: Db = Db::init(context.child("target"), cfg).await.unwrap();
+
+            // The init-seed entry has range.start = 0 (empty DB).
+            let init_root = target_db.root();
+            assert!(target_db.cached_target(&[init_root]).is_some());
+
+            // Apply enough distinct writes so multiple chunks complete and sync_boundary > 0.
+            // CHUNK_SIZE_BITS is N * 8 = 256 here.
+            for round in 0..400u64 {
+                let key = Digest::from([(round & 0xFF) as u8; 32]);
+                apply_round(&mut target_db, key, round).await;
+            }
+            target_db.sync().await.unwrap();
+
+            let prune_loc = target_db.sync_boundary();
+            assert!(*prune_loc > 0, "test relies on a non-zero prune boundary");
+            // init_root's entry has range.start = 0, which is below prune_loc.
+            assert!(target_db.cached_target(&[init_root]).is_some());
+
+            target_db.prune(prune_loc).await.unwrap();
+
+            // The init-seed entry (range.start = 0 < prune_loc) is evicted.
+            assert!(
+                target_db.cached_target(&[init_root]).is_none(),
+                "entry with range.start below prune boundary should be evicted"
+            );
+            // The current target entry (range.start = sync_boundary = prune_loc) survives.
+            let current_root = target_db.root();
+            let post = target_db.cached_target(&[current_root]).unwrap();
+            assert!(
+                post.range.start() >= prune_loc,
+                "surviving entries must have range.start >= prune boundary"
+            );
+
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding the DB drops every previously cached target (fork happened), and the
+    /// post-rewind seed re-seeds with the rewound state's target.
+    #[test_traced("INFO")]
+    fn test_witness_cache_cleared_by_rewind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let mut target_db = build_target_db(&mut context).await;
+            let pre_rewind_size = target_db.bounds().await.end;
+            let pre_rewind_root = target_db.root();
+
+            // Advance further, then rewind back to the pre-rewind size. The post-rewind
+            // root will match `pre_rewind_root` (deterministic), but cache entries from
+            // the discarded-after-rewind branch should be gone.
+            let key = Digest::from([3u8; 32]);
+            for round in 200..210u64 {
+                apply_round(&mut target_db, key, round).await;
+            }
+            target_db.sync().await.unwrap();
+            let advanced_root = target_db.root();
+            assert_ne!(advanced_root, pre_rewind_root);
+            assert!(target_db.cached_target(&[advanced_root]).is_some());
+
+            target_db.rewind(pre_rewind_size).await.unwrap();
+
+            // After rewind: the advanced-branch entry is gone, only the (re-seeded)
+            // current target remains.
+            assert!(target_db.cached_target(&[advanced_root]).is_none());
+            assert!(target_db.cached_target(&[target_db.root()]).is_some());
+
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// `cached_target` honors the order of the caller's slice — first matching root wins.
+    #[test_traced("INFO")]
+    fn test_witness_cache_lookup_multiple_roots() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let real_root = target_db.root();
+            let unknown_root = Digest::from([0xCDu8; 32]);
+
+            // Real root present in [unknown, unknown, real]: returns the real one.
+            let hit = target_db.cached_target(&[unknown_root, unknown_root, real_root]);
+            assert!(hit.is_some());
+            assert_eq!(hit.unwrap().root, real_root);
+
+            // All roots unknown: None.
+            assert!(target_db
+                .cached_target(&[unknown_root, Digest::from([0xEFu8; 32])])
+                .is_none());
+
+            // Empty slice: None.
+            assert!(target_db.cached_target(&[]).is_none());
+
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// The resolver returns `None` for the first few `target_for_roots` calls (its commit
+    /// cache lags the client's trusted-root buffer), then catches up. The wrapper must keep
+    /// polling on the `target_poll_interval` cadence and succeed once the resolver returns
+    /// a matching target. This is the primary liveness guarantee of `target_poll_interval`.
+    #[test_traced("INFO")]
+    fn test_sync_polls_resolver_until_match() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let root = target_db.root();
+            let target_db = std::sync::Arc::new(target_db);
+
+            // Resolver returns None for the first 3 queries, then serves the real target.
+            let resolver = LaggingResolver::new(target_db.clone(), 3);
+
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(4);
+            trusted_tx.send(root).await.unwrap();
+            // Keep the channel open: progress must come from polling, not from new roots.
+
+            let client_suffix = context.next_u64().to_string();
+            let client_config =
+                variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+
+            let synced_db: Db = current_sync::sync(current_sync::Config {
+                context: context.child("client"),
+                resolver,
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(64),
+                apply_batch_size: 1024,
+                db_config: client_config,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(synced_db.root(), root);
+            drop(trusted_tx);
+
+            synced_db.destroy().await.unwrap();
+            let target_db = std::sync::Arc::into_inner(target_db).unwrap();
+            target_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Closing the trusted-root channel while the buffer already holds roots must NOT
+    /// abort sync. The wrapper switches to poll-only mode and keeps querying the resolver
+    /// until a buffered root produces a match.
+    #[test_traced("INFO")]
+    fn test_sync_continues_polling_after_stream_close_with_buffered_roots() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context: Context| async move {
+            let target_db = build_target_db(&mut context).await;
+            let root = target_db.root();
+            let target_db = std::sync::Arc::new(target_db);
+
+            // Resolver lags by 5 calls. The trusted-root channel is closed immediately
+            // after the first send — so all subsequent polling must happen against an
+            // already-closed channel.
+            let resolver = LaggingResolver::new(target_db.clone(), 5);
+
+            let (trusted_tx, trusted_rx) = commonware_utils::channel::mpsc::channel(4);
+            trusted_tx.send(root).await.unwrap();
+            drop(trusted_tx);
+
+            let client_suffix = context.next_u64().to_string();
+            let client_config =
+                variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+
+            let synced_db: Db = current_sync::sync(current_sync::Config {
+                context: context.child("client"),
+                resolver,
+                trusted_root_rx: trusted_rx,
+                trusted_root_buffer: std::num::NonZeroUsize::new(8).unwrap(),
+                target_poll_interval: std::time::Duration::from_millis(1),
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(64),
+                apply_batch_size: 1024,
+                db_config: client_config,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            })
+            .await
+            .unwrap();
+
             assert_eq!(synced_db.root(), root);
 
             synced_db.destroy().await.unwrap();

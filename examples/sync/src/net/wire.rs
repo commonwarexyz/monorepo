@@ -58,15 +58,30 @@ where
     pub target: Target<mmr::Family, D>,
 }
 
-/// Response with current-database sync target (database root + witness).
+/// Request a current-database sync target whose canonical root matches one of the trusted
+/// roots the client received from consensus.
 #[derive(Debug)]
-pub struct GetCurrentSyncTargetResponse<D>
+pub struct GetCurrentTargetForRootsRequest<D>
 where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub target: CurrentTarget<mmr::Family, D>,
+    pub trusted_roots: Vec<D>,
 }
+
+/// Response with a matching current-database sync target, or `None` if the server has no
+/// cached witness for any of the requested roots.
+#[derive(Debug)]
+pub struct GetCurrentTargetForRootsResponse<D>
+where
+    D: Digest,
+{
+    pub request_id: RequestId,
+    pub target: Option<CurrentTarget<mmr::Family, D>>,
+}
+
+/// Maximum trusted roots accepted per request.
+pub const MAX_TRUSTED_ROOTS: usize = 256;
 
 /// Request for compact authenticated state.
 #[derive(Debug)]
@@ -118,7 +133,8 @@ where
     GetCompactTargetResponse(GetCompactTargetResponse<D>),
     GetCompactStateRequest(GetCompactStateRequest<D>),
     GetCompactStateResponse(GetCompactStateResponse<Op, D>),
-    GetCurrentSyncTargetResponse(GetCurrentSyncTargetResponse<D>),
+    GetCurrentTargetForRootsRequest(GetCurrentTargetForRootsRequest<D>),
+    GetCurrentTargetForRootsResponse(GetCurrentTargetForRootsResponse<D>),
     Error(ErrorResponse),
 }
 
@@ -136,7 +152,8 @@ where
             Self::GetCompactTargetResponse(r) => r.request_id,
             Self::GetCompactStateRequest(r) => r.request_id,
             Self::GetCompactStateResponse(r) => r.request_id,
-            Self::GetCurrentSyncTargetResponse(r) => r.request_id,
+            Self::GetCurrentTargetForRootsRequest(r) => r.request_id,
+            Self::GetCurrentTargetForRootsResponse(r) => r.request_id,
             Self::Error(e) => e.request_id,
         }
     }
@@ -192,8 +209,12 @@ where
                 7u8.write(buf);
                 resp.write(buf);
             }
-            Self::GetCurrentSyncTargetResponse(resp) => {
+            Self::GetCurrentTargetForRootsRequest(req) => {
                 9u8.write(buf);
+                req.write(buf);
+            }
+            Self::GetCurrentTargetForRootsResponse(resp) => {
+                10u8.write(buf);
                 resp.write(buf);
             }
             Self::Error(err) => {
@@ -219,7 +240,8 @@ where
             Self::GetCompactTargetResponse(resp) => resp.encode_size(),
             Self::GetCompactStateRequest(req) => req.encode_size(),
             Self::GetCompactStateResponse(resp) => resp.encode_size(),
-            Self::GetCurrentSyncTargetResponse(resp) => resp.encode_size(),
+            Self::GetCurrentTargetForRootsRequest(req) => req.encode_size(),
+            Self::GetCurrentTargetForRootsResponse(resp) => resp.encode_size(),
             Self::Error(err) => err.encode_size(),
         }
     }
@@ -256,8 +278,11 @@ where
                 GetCompactStateResponse::read(buf)?,
             )),
             8 => Ok(Self::Error(ErrorResponse::read(buf)?)),
-            9 => Ok(Self::GetCurrentSyncTargetResponse(
-                GetCurrentSyncTargetResponse::read(buf)?,
+            9 => Ok(Self::GetCurrentTargetForRootsRequest(
+                GetCurrentTargetForRootsRequest::read(buf)?,
+            )),
+            10 => Ok(Self::GetCurrentTargetForRootsResponse(
+                GetCurrentTargetForRootsResponse::read(buf)?,
             )),
             d => Err(CodecError::InvalidEnum(d)),
         }
@@ -439,24 +464,71 @@ where
     }
 }
 
-impl<D: Digest> Write for GetCurrentSyncTargetResponse<D> {
+impl<D: Digest> Write for GetCurrentTargetForRootsRequest<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.request_id.write(buf);
-        self.target.write(buf);
+        self.trusted_roots.write(buf);
     }
 }
 
-impl<D: Digest> EncodeSize for GetCurrentSyncTargetResponse<D> {
+impl<D: Digest> EncodeSize for GetCurrentTargetForRootsRequest<D> {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.target.encode_size()
+        self.request_id.encode_size() + self.trusted_roots.encode_size()
     }
 }
 
-impl<D: Digest> Read for GetCurrentSyncTargetResponse<D> {
+impl<D: Digest> Read for GetCurrentTargetForRootsRequest<D> {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = CurrentTarget::<mmr::Family, D>::read_cfg(buf, &())?;
+        let trusted_roots = Vec::<D>::read_cfg(buf, &(RangeCfg::from(0..=MAX_TRUSTED_ROOTS), ()))?;
+        Ok(Self {
+            request_id,
+            trusted_roots,
+        })
+    }
+}
+
+impl<D: Digest> Write for GetCurrentTargetForRootsResponse<D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.request_id.write(buf);
+        match &self.target {
+            Some(t) => {
+                1u8.write(buf);
+                t.write(buf);
+            }
+            None => {
+                0u8.write(buf);
+            }
+        }
+    }
+}
+
+impl<D: Digest> EncodeSize for GetCurrentTargetForRootsResponse<D> {
+    fn encode_size(&self) -> usize {
+        self.request_id.encode_size()
+            + 1u8.encode_size()
+            + self.target.as_ref().map_or(0, |t| t.encode_size())
+    }
+}
+
+impl<D: Digest> Read for GetCurrentTargetForRootsResponse<D> {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let request_id = RequestId::read_cfg(buf, &())?;
+        // Strict: accept only the canonical encoding (0 = None, 1 = Some). Other bytes
+        // could be interpreted as Some by a lax decoder and cause cross-instance
+        // ambiguity on bytes-to-value mappings.
+        let target = match u8::read(buf)? {
+            0 => None,
+            1 => Some(CurrentTarget::<mmr::Family, D>::read_cfg(buf, &())?),
+            _ => {
+                return Err(CodecError::Invalid(
+                    "GetCurrentTargetForRootsResponse",
+                    "Option discriminant must be 0 or 1",
+                ));
+            }
+        };
         Ok(Self { request_id, target })
     }
 }

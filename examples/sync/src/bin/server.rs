@@ -219,8 +219,11 @@ where
 {
     state.request_counter.inc();
 
-    // Get the current database state
-    let (ops_root, sync_boundary, size) = {
+    // `Syncable::root()` returns the engine-facing root for this database type:
+    // - `any`: ops root (engine verifies directly against this)
+    // - `current`: canonical root (the value the chain commits to; the engine target
+    //   is derived separately via `GetCurrentTargetForRootsRequest`)
+    let (root, sync_boundary, size) = {
         let database = state.database.read().await;
         (
             database.root(),
@@ -230,7 +233,7 @@ where
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
-        target: Target::new(ops_root, non_empty_range!(sync_boundary, size)),
+        target: Target::new(root, non_empty_range!(sync_boundary, size)),
     };
 
     debug!(?response, "serving target update");
@@ -426,21 +429,27 @@ where
                 wire::Message::GetOperationsResponse,
                 handle_get_operations::<current::Database<E>>(state, request)
             ),
-            wire::Message::GetSyncTargetRequest(request) => {
+            // For `current`, `Syncable::root()` returns the canonical root. The example
+            // client uses this endpoint to obtain its trusted canonical root in place of
+            // a real consensus stream.
+            wire::Message::GetSyncTargetRequest(request) => dispatch_message!(
+                state,
+                request_id,
+                wire::Message::GetSyncTargetResponse,
+                handle_get_sync_target::<current::Database<E>>(state, request)
+            ),
+            wire::Message::GetCurrentTargetForRootsRequest(request) => {
                 state.request_counter.inc();
                 let database = state.database.read().await;
-                match current::current_sync_target(&*database).await {
-                    Ok(target) => {
-                        debug!(?target, "serving current sync target");
-                        wire::Message::GetCurrentSyncTargetResponse(
-                            wire::GetCurrentSyncTargetResponse {
-                                request_id: request.request_id,
-                                target,
-                            },
-                        )
-                    }
-                    Err(err) => error_message(state, request_id, err.into()),
-                }
+                let target = current::current_target_for_roots(&*database, &request.trusted_roots)
+                    .map(Into::into);
+                debug!(?target, "serving current target lookup");
+                wire::Message::GetCurrentTargetForRootsResponse(
+                    wire::GetCurrentTargetForRootsResponse {
+                        request_id: request.request_id,
+                        target,
+                    },
+                )
             }
             _ => unexpected_message(state, request_id),
         }

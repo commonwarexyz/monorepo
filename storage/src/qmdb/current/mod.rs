@@ -375,6 +375,12 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Number of recent `(canonical_root, target)` entries to retain in memory so a sync
+    /// server can answer queries against a trusted root the client received from consensus.
+    ///
+    /// Set to `0` to disable. Default `32`.
+    pub witness_cache_size: usize,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -425,6 +431,7 @@ where
 
     let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
+    let witness_cache_size = config.witness_cache_size;
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
     let (metadata, pruned_chunks, pinned_nodes) =
@@ -462,7 +469,7 @@ where
     );
     let partial_chunk = db::partial_chunk(any.bitmap.as_ref());
     let ops_root = any.root();
-    let root = db::compute_db_root(
+    let db::ComputedRoot { root, witness } = db::compute_db_root(
         &hasher,
         any.bitmap.as_ref(),
         &storage,
@@ -474,14 +481,17 @@ where
     .await?;
 
     let metrics = Metrics::new(context);
-    let db = db::Db {
+    let witness_cache = db::WitnessCache::new(witness_cache_size);
+    let mut db = db::Db {
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
         root,
+        witness_cache,
         metrics,
     };
+    db.cache_current_target(ops_root, witness).await;
     db.update_metrics();
     Ok(db)
 }
@@ -563,6 +573,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            witness_cache_size: 32,
         }
     }
 
@@ -591,6 +602,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            witness_cache_size: 32,
         }
     }
 

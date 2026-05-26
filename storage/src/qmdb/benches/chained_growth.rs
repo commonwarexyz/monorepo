@@ -86,6 +86,7 @@ fn cur_fix_cfg(
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
+        witness_cache_size: 32,
     }
 }
 

@@ -54,6 +54,13 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Witness for the `ops_root` failed verification against the root commitment.
     #[error("ops root witness failed verification")]
     OpsRootWitnessInvalid,
+    /// The trusted-root stream supplying canonical roots was closed before the resolver
+    /// produced a matching target.
+    #[error("trusted-root stream closed before any cached target matched")]
+    TrustedStreamClosed,
+    /// A user-provided sync configuration value was invalid.
+    #[error("invalid sync configuration: {0}")]
+    InvalidConfig(&'static str),
 }
 
 /// Errors that can occur during database synchronization.

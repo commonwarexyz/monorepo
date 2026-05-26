@@ -235,42 +235,48 @@ where
             Resolver::<current::Operation, Key>::connect(context.child("resolver"), config.server)
                 .await?;
 
-        let initial_target = resolver.get_current_sync_target().await?;
+        // Simulate a consensus stream by polling the server's `GetSyncTargetRequest`
+        // endpoint, which for a `current` database returns the current canonical root via
+        // `Syncable::root()`. In a real deployment this stream would be driven by consensus
+        // finalization, not by polling the server.
+        let initial_canonical_target = resolver.get_sync_target().await?;
         info!(
-            root = %initial_target.root,
-            ops_root = %initial_target.ops_root,
-            range = ?initial_target.range,
-            "received current sync target"
+            root = %initial_canonical_target.root,
+            "received initial trusted canonical root (simulated consensus)"
         );
 
-        let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
+        let (trusted_root_tx, trusted_root_rx) = mpsc::channel(UPDATE_CHANNEL_SIZE);
+        trusted_root_tx
+            .clone()
+            .send(initial_canonical_target.root)
+            .await
+            .map_err(|err| Error::TargetUpdateChannel {
+                reason: err.to_string(),
+            })?;
 
         let target_update_handle = {
             let resolver = resolver.clone();
-            let mut current_target_root = initial_target.root;
             let target_update_interval = config.target_update_interval;
+            let mut last_root = initial_canonical_target.root;
             context
                 .child("target_update")
                 .spawn(move |context| async move {
                     loop {
                         context.sleep(target_update_interval).await;
-                        match resolver.get_current_sync_target().await {
+                        match resolver.get_sync_target().await {
                             Ok(new_target) => {
-                                if current_target_root != new_target.root {
+                                if new_target.root != last_root {
                                     let new_root = new_target.root;
-                                    match update_sender.clone().try_send(new_target) {
-                                        Ok(()) => {
-                                            info!("target updated");
-                                            current_target_root = new_root;
+                                    if let Err(err) = trusted_root_tx.clone().try_send(new_root) {
+                                        if matches!(err, mpsc::error::TrySendError::Closed(_)) {
+                                            return Ok(());
                                         }
-                                        Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
-                                        Err(err) => {
-                                            warn!(?err, "failed to send target update");
-                                            return Err(Error::TargetUpdateChannel {
-                                                reason: err.to_string(),
-                                            });
-                                        }
+                                        warn!(?err, "failed to send trusted root");
+                                        return Err(Error::TargetUpdateChannel {
+                                            reason: err.to_string(),
+                                        });
                                     }
+                                    last_root = new_root;
                                 }
                             }
                             Err(err) => {
@@ -285,12 +291,13 @@ where
         let database: current::Database<_> = current_qmdb::sync::sync(current_qmdb::sync::Config {
             context: context.child("sync"),
             resolver,
-            target: initial_target,
+            trusted_root_rx,
+            trusted_root_buffer: std::num::NonZeroUsize::new(32).unwrap(),
+            target_poll_interval: std::time::Duration::from_millis(100),
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.batch_size,
             apply_batch_size: 1024,
             db_config,
-            update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
             max_retained_roots: 8,

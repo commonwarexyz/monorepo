@@ -971,7 +971,8 @@ mod tests {
             &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
 
         let loc = mmb::Location::new(BitMap::<N>::CHUNK_SIZE_BITS + 4);
         let proof = RangeProof::new(
@@ -1075,7 +1076,8 @@ mod tests {
             &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
         let proof = RangeProof::new(
             &hasher,
             &status,
@@ -1184,7 +1186,8 @@ mod tests {
             &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
 
         let leaves_loc = mmb::Location::new(leaf_count);
         let proof = RangeProof::new(
@@ -1282,7 +1285,8 @@ mod tests {
             &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
 
         let loc = mmb::Location::new(0);
         let mut proof = RangeProof::new(
@@ -1378,7 +1382,8 @@ mod tests {
             &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
 
         let proof = RangeProof::new(
             &hasher,
@@ -1765,7 +1770,8 @@ mod tests {
             &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
         let proof = RangeProof::new(
             &hasher,
             &status,
@@ -1906,7 +1912,8 @@ mod tests {
                 &ops_root,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .root;
 
             // OpsRootWitness round-trip
             let pending_chunk_digest =
@@ -2073,7 +2080,8 @@ mod tests {
             &ops_root_pre,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
 
         // Post-state canonical root.
         let mut status_post = BitMap::<N>::new();
@@ -2119,7 +2127,8 @@ mod tests {
             &ops_root_post,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
 
         assert_ne!(
             canonical_pre, canonical_post,
@@ -2204,7 +2213,8 @@ mod tests {
             &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root;
 
         let loc = mmb::Location::new(chunk_bits - 1);
         let proof = RangeProof::new(

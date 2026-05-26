@@ -27,11 +27,11 @@ use commonware_storage::{
     qmdb::{
         self,
         any::unordered::{fixed::Operation as FixedOperation, Update},
-        current::{self, sync::Target as CurrentTarget, FixedConfig as Config},
+        current::{self, FixedConfig as Config},
         operation::Committable,
     },
 };
-use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
@@ -73,6 +73,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
         },
         grafted_metadata_partition: "grafted-mmr-metadata".into(),
         translator: Translator::default(),
+        witness_cache_size: 32,
     }
 }
 
@@ -186,19 +187,14 @@ where
     }
 }
 
-pub async fn current_sync_target<E: Storage + Clock + Metrics>(
+/// Return the first cached current target whose canonical root matches one of `trusted_roots`.
+/// The `current::Db` populates this cache at every commit and at init, so any recent root
+/// (up to `witness_cache_size`) is answerable.
+pub fn current_target_for_roots<E: Storage + Clock + Metrics>(
     db: &Database<E>,
-) -> Result<CurrentTarget<mmr::Family, Key>, qmdb::Error<mmr::Family>> {
-    let hasher = qmdb::hasher::<Hasher>();
-    let witness = db.ops_root_witness(&hasher).await?;
-    let sync_boundary = db.sync_boundary();
-    let size = db.bounds().await.end;
-    Ok(CurrentTarget::new(
-        db.root(),
-        db.ops_root(),
-        witness,
-        non_empty_range!(sync_boundary, size),
-    ))
+    trusted_roots: &[Key],
+) -> Option<commonware_storage::qmdb::current::db::CachedTarget<mmr::Family, Key>> {
+    db.cached_target(trusted_roots)
 }
 
 #[cfg(test)]

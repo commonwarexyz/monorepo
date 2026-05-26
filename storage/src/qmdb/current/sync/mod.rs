@@ -1,32 +1,54 @@
 //! Synchronization logic for [crate::qmdb::current] databases.
 //!
-//! Contains implementation of the sync `Database` trait for all
+//! Contains the sync `Database` and `Resolver` trait implementations for all
 //! [Db](crate::qmdb::current::db::Db) variants (ordered/unordered, fixed/variable), plus a
-//! [sync()] wrapper for targets anchored by trusted database roots.
+//! [sync()] wrapper that drives the shared sync engine from a stream of trusted canonical
+//! roots.
 //!
-//! The database root of a `current` database combines the ops root, grafted root, and optional
-//! pending and partial chunk digests into a single hash (see the [Root structure](super) section in
-//! the module documentation). The shared sync engine operates on the **ops root** internally,
-//! downloading operations and verifying each batch against the ops root using ops-tree range proofs
-//! (identical to `any` sync).
+//! # Why this wrapper exists
 //!
-//! Callers that only trust a database root (e.g., from consensus) should use [sync()] with a
-//! [Target] that includes an [OpsRootWitness]. The wrapper verifies each target's witness before
-//! forwarding its ops root to the shared sync engine, then checks the reconstructed database root
-//! for the target the engine finishes on.
+//! A `current` database's canonical root commits to the ops root, the grafted root, and
+//! optional pending/partial chunk digests (see the [Root structure](super) section in the
+//! module documentation). The shared sync engine, however, verifies each operation batch
+//! against the **ops root** alone — not the canonical root — because the ops-tree range
+//! proof format is shared with `any` sync.
 //!
-//! After all operations are synced, the bitmap and grafted tree are reconstructed deterministically
-//! from the operations. The database root is then computed from the ops root, the reconstructed
-//! grafted root, and any pending or partial chunk digests.
+//! That leaves a gap: a client that only trusts a canonical root from consensus cannot
+//! drive the engine directly. It needs the ops root that the trusted canonical root
+//! commits to, plus an [`OpsRootWitness`] proving the binding. Only a node holding the
+//! live database state can produce that witness, and only for states it has committed.
 //!
-//! `Database::ops_root()` returns the ops root because that is what the sync engine verifies
-//! against. `Database::root()` returns the full database root.
+//! # API shape
 //!
-//! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
-//! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
-//! all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals the ops subtree
-//! root, making the grafted tree structurally identical to the ops tree at and above the grafting
-//! height.
+//! - [`CurrentResolver`] extends [`qmdb_sync::Resolver`] with `target_for_roots`: the
+//!   client passes a set of trusted canonical roots and the server answers from a small
+//!   per-commit cache populated at [`Db::cache_current_target`](crate::qmdb::current::db::Db).
+//! - [`sync()`] takes a `trusted_root_rx: mpsc::Receiver<Digest>` (e.g., a stream of
+//!   finalized roots from consensus) and a `CurrentResolver`. It buffers recent trusted
+//!   roots and polls the resolver until a verified target is returned, then drives the
+//!   shared engine and continues forwarding matching updates as the chain advances.
+//! - Every returned target passes two gates before reaching the engine: **membership**
+//!   (target root is in the trusted buffer) and **witness verification**
+//!   (witness commits `ops_root` to `target.root`).
+//!
+//! # Liveness model
+//!
+//! Discovery and forward loops wake on either a new trusted root or a `target_poll_interval`
+//! tick. Polling guarantees progress under a quiet trusted-root stream: if the resolver's
+//! cache lags behind a buffered root, the wrapper retries on each tick. Closing the
+//! trusted-root stream while the buffer is non-empty switches the wrapper to poll-only
+//! mode; closing while the buffer is empty returns `TrustedStreamClosed`.
+//!
+//! # Engine completion
+//!
+//! After the engine downloads all operations, the bitmap and grafted tree are reconstructed
+//! deterministically. The wrapper recomputes the canonical root and rejects with
+//! `RootMismatch` if it differs from the latest accepted target's `root`.
+//!
+//! For pruned targets (`range.start > 0`), grafted pinned nodes for the pruned region are
+//! read directly from the ops tree via the zero-chunk identity: all-zero bitmap chunks
+//! produce a grafted leaf equal to the ops subtree root, making the grafted tree
+//! structurally identical to the ops tree at and above the grafting height.
 
 use crate::{
     index::Factory as IndexFactory,
@@ -69,7 +91,7 @@ use crate::{
         operation::{Committable, Key, Operation as _},
         sync::{
             self as qmdb_sync, engine::Config as EngineConfig, Database, DatabaseConfig,
-            DbResolver, EngineError,
+            EngineError,
         },
     },
     translator::Translator,
@@ -78,6 +100,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Encode, Read as CodecRead, ReadExt as _};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::{Clock, Supervisor};
 use commonware_utils::{
     bitmap::Prunable as BitMap,
     channel::{mpsc, oneshot},
@@ -86,10 +109,43 @@ use commonware_utils::{
     Array,
 };
 use futures::future::{select, Either};
-use std::{num::NonZeroU64, sync::Arc};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+impl<F: Graftable, D: Digest> From<db::CachedTarget<F, D>> for Target<F, D> {
+    fn from(t: db::CachedTarget<F, D>) -> Self {
+        Self::new(t.root, t.ops_root, t.witness, t.range)
+    }
+}
+
+/// Resolver extension for `current` databases: query the server for a sync target whose
+/// canonical root appears in a set of trusted roots.
+///
+/// The server's witness cache holds the last `witness_cache_size` committed targets plus
+/// the current target seeded at init. The client passes its recent trusted-root buffer
+/// (e.g., from consensus) and the server returns the first match, if any. Callers must
+/// still verify each returned target's witness against the trusted root before driving
+/// sync; the helper [`sync()`] in this module performs both checks.
+pub trait CurrentResolver: qmdb_sync::Resolver
+where
+    Self::Family: Graftable,
+{
+    /// Return the first cached target whose canonical root appears in `trusted_roots`,
+    /// or `None` if no entry matches. A cache miss is not an error.
+    #[allow(clippy::type_complexity)]
+    fn target_for_roots<'a>(
+        &'a self,
+        trusted_roots: &'a [Self::Digest],
+    ) -> impl Future<Output = Result<Option<Target<Self::Family, Self::Digest>>, Self::Error>> + Send + 'a;
+}
 
 /// Sync target for `current` databases, anchored by a trusted database root.
 ///
@@ -203,18 +259,41 @@ impl<F: Graftable, D: Digest> commonware_codec::Read for Target<F, D> {
     }
 }
 
-/// Configuration for syncing a `current` database from trusted database-root targets.
-pub struct Config<DB: Database, R: DbResolver<DB>>
-where
+/// Configuration for syncing a `current` database from trusted canonical roots.
+///
+/// The caller feeds a stream of canonical roots from consensus (or another trust source) via
+/// [`Config::trusted_root_rx`]. The wrapper buffers the most recent
+/// [`Config::trusted_root_buffer`] roots and queries `resolver` for a matching target on
+/// every new trusted root **and** on every `target_poll_interval` tick. The first match
+/// starts the engine; subsequent matches are forwarded as in-flight target updates.
+///
+/// Polling on a fixed interval guarantees progress even when the trusted-root stream goes
+/// silent (e.g., consensus is finalized but no new roots arrive) — without it, a resolver
+/// that lags behind the client's trusted set could stall sync indefinitely.
+pub struct Config<
+    DB: Database,
+    R: CurrentResolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
+> where
     DB::Family: Graftable,
     DB::Op: Encode,
 {
     /// Runtime context.
     pub context: DB::Context,
-    /// Resolver for fetching operations and proofs.
+    /// Resolver for fetching operations, proofs, and sync targets.
     pub resolver: R,
-    /// Sync target with trusted database root and witness.
-    pub target: Target<DB::Family, DB::Digest>,
+    /// Stream of trusted canonical roots (e.g., from consensus finalization).
+    pub trusted_root_rx: mpsc::Receiver<DB::Digest>,
+    /// Number of recent trusted roots to retry against on each resolver query. Must be > 0.
+    ///
+    /// Network resolvers silently cap the per-request payload at the wire-format limit
+    /// (typically 256). Setting this larger than the wire cap still works for local
+    /// resolvers but only the most-recent wire-cap entries are sent over the network on
+    /// each query.
+    pub trusted_root_buffer: NonZeroUsize,
+    /// Backoff between resolver queries when the trusted-root stream is idle. Queries are
+    /// also triggered immediately on every new trusted root. Must be > 0 to avoid a
+    /// busy-loop. Very small values may be quantized by the runtime scheduler.
+    pub target_poll_interval: Duration,
     /// Maximum parallel outstanding requests.
     pub max_outstanding_requests: usize,
     /// Maximum operations per fetch batch.
@@ -223,10 +302,6 @@ where
     pub apply_batch_size: usize,
     /// Database-specific configuration.
     pub db_config: DB::Config,
-    /// Channel for receiving target updates during sync.
-    ///
-    /// Each update must include a witness authenticating its ops root against its trusted root.
-    pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     pub finish_rx: Option<mpsc::Receiver<()>>,
     /// Channel to notify an observer when the current target is reached.
@@ -235,10 +310,99 @@ where
     pub max_retained_roots: usize,
 }
 
-/// Sync a `current` database from a trusted database root.
+/// Bounded FIFO of recent trusted canonical roots plus a `HashSet` for O(1) membership.
+struct TrustedRootBuffer<D: Digest> {
+    order: VecDeque<D>,
+    set: std::collections::HashSet<D>,
+    capacity: NonZeroUsize,
+}
+
+impl<D: Digest> TrustedRootBuffer<D> {
+    fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            order: VecDeque::with_capacity(capacity.get()),
+            set: std::collections::HashSet::with_capacity(capacity.get()),
+            capacity,
+        }
+    }
+
+    /// Insert `root`. Evicts the oldest entry when capacity is exceeded. No-op if already
+    /// present.
+    fn insert(&mut self, root: D) {
+        if !self.set.insert(root) {
+            return;
+        }
+        self.order.push_back(root);
+        while self.order.len() > self.capacity.get() {
+            if let Some(evicted) = self.order.pop_front() {
+                self.set.remove(&evicted);
+            }
+        }
+    }
+
+    fn contains(&self, root: &D) -> bool {
+        self.set.contains(root)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+
+    fn as_slice_vec(&self) -> Vec<D> {
+        // Most-recent first so resolvers honoring caller order check the freshest first.
+        self.order.iter().rev().copied().collect()
+    }
+}
+
+/// Ask `resolver` for a target whose root is in `trusted` and verify it.
 ///
-/// Verifies the initial target and any target update witnesses before giving them to the shared
-/// sync engine, then checks the reconstructed database root for the target the engine finishes on.
+/// Returns `Ok(Some(target))` only after passing two checks:
+/// 1. **Membership**: `target.root` is in `trusted`. A malicious resolver may return a
+///    self-consistent target for an untrusted root; the engine's end-of-sync `RootMismatch`
+///    check does not catch this, so the wrapper must.
+/// 2. **Witness**: `target.verify(&hasher)` succeeds (cryptographically binds `ops_root`).
+///
+/// A resolver `None` is `Ok(None)` (cache miss). A resolver error propagates.
+/// A returned target failing either check returns `Err(OpsRootWitnessInvalid)`.
+async fn next_verified_target<F, D, R, H>(
+    resolver: &R,
+    trusted: &TrustedRootBuffer<D>,
+    hasher: &StandardHasher<H>,
+) -> Result<Option<Target<F, D>>, qmdb_sync::Error<F, R::Error, D>>
+where
+    F: Graftable,
+    D: Digest,
+    H: commonware_cryptography::Hasher<Digest = D>,
+    R: CurrentResolver<Family = F, Digest = D>,
+{
+    let roots = trusted.as_slice_vec();
+    if roots.is_empty() {
+        return Ok(None);
+    }
+    let target = match resolver
+        .target_for_roots(&roots)
+        .await
+        .map_err(qmdb_sync::Error::Resolver)?
+    {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    if !trusted.contains(&target.root) {
+        tracing::warn!("resolver returned target for untrusted root");
+        return Err(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid));
+    }
+    if !target.verify(hasher) {
+        tracing::warn!("resolver returned target with invalid witness");
+        return Err(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid));
+    }
+    Ok(Some(target))
+}
+
+/// Sync a `current` database from a stream of trusted canonical roots.
+///
+/// The wrapper buffers recent trusted roots and queries `resolver` for matches. The first
+/// verified match (passing membership + witness checks) starts the engine; subsequent matches
+/// that strictly advance the current target are forwarded as engine updates.
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, qmdb_sync::Error<DB::Family, R::Error, DB::Digest>>
@@ -246,34 +410,73 @@ where
     DB: Database,
     DB::Family: Graftable,
     DB::Op: Encode,
-    R: DbResolver<DB>,
+    R: CurrentResolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
 {
     let hasher = qmdb::hasher::<DB::Hasher>();
-
-    if !config.target.verify(&hasher) {
-        return Err(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid));
+    let mut trusted_root_rx = config.trusted_root_rx;
+    let resolver = config.resolver;
+    if config.target_poll_interval.is_zero() {
+        return Err(qmdb_sync::Error::Engine(EngineError::InvalidConfig(
+            "target_poll_interval must be > 0",
+        )));
     }
-    let update_rx = config.update_rx;
+    let poll_interval = config.target_poll_interval;
 
-    // The caller controls the public update channel capacity. Once updates reach this wrapper,
-    // keep the internal queue shallow so verified current targets cannot get far ahead of the
-    // target the shared sync engine has consumed.
-    let (engine_update_tx, engine_update_rx) = if update_rx.is_some() {
-        let (tx, rx) = mpsc::channel(1);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
+    // Take an owned clock handle BEFORE moving `config.context` into the engine. Both the
+    // discovery loop (this function's body) and the forward task (spawned later via
+    // `select` in the same task) need to call `sleep`, but the engine consumes the
+    // primary context. `Supervisor::child` (via `Metrics: Supervisor`) returns a fresh
+    // child handle from `&self`, so we get a clock without requiring `Context: Clone`.
+    let poll_clock = config.context.child("current_sync_poll");
+
+    // Discovery phase: pull trusted roots, queried on each new root or `poll_interval`
+    // tick (whichever first), until the resolver returns a matching target.
+    //
+    // Channel-close handling: if the trusted-root stream closes while the buffer already
+    // holds roots, switch to poll-only mode — the resolver may catch up later and produce
+    // a match against the buffered roots. Only return `TrustedStreamClosed` when the
+    // channel closes AND the buffer is empty (we have nothing to match against).
+    let mut trusted = TrustedRootBuffer::<DB::Digest>::new(config.trusted_root_buffer);
+    let mut stream_closed = false;
+    let initial_target = loop {
+        if stream_closed {
+            // Buffer is non-empty (we checked at close); just poll.
+            poll_clock.sleep(poll_interval).await;
+        } else {
+            let recv_fut = trusted_root_rx.recv();
+            let sleep_fut = poll_clock.sleep(poll_interval);
+            futures::pin_mut!(recv_fut);
+            futures::pin_mut!(sleep_fut);
+            match select(recv_fut, sleep_fut).await {
+                Either::Left((Some(root), _)) => trusted.insert(root),
+                Either::Left((None, _)) => {
+                    if trusted.is_empty() {
+                        return Err(qmdb_sync::Error::Engine(EngineError::TrustedStreamClosed));
+                    }
+                    stream_closed = true;
+                }
+                Either::Right(_) => {} // poll tick: re-query the resolver with the current buffer
+            }
+        }
+        if let Some(t) =
+            next_verified_target::<_, _, _, DB::Hasher>(&resolver, &trusted, &hasher).await?
+        {
+            break t;
+        }
     };
 
-    let engine_config = EngineConfig {
+    // Build the engine, with an internal update channel of capacity 1: the wrapper-side
+    // discovery loop will push at most one in-flight target ahead of the engine at any time.
+    let (engine_update_tx, engine_update_rx) = mpsc::channel::<Target<DB::Family, DB::Digest>>(1);
+    let engine_config: EngineConfig<DB, R, Target<DB::Family, DB::Digest>> = EngineConfig {
         context: config.context,
-        resolver: config.resolver,
-        target: config.target,
+        resolver: resolver.clone(),
+        target: initial_target.clone(),
         max_outstanding_requests: config.max_outstanding_requests,
         fetch_batch_size: config.fetch_batch_size,
         apply_batch_size: config.apply_batch_size,
         db_config: config.db_config,
-        update_rx: engine_update_rx,
+        update_rx: Some(engine_update_rx),
         finish_rx: config.finish_rx,
         reached_target_tx: config.reached_target_tx,
         max_retained_roots: config.max_retained_roots,
@@ -282,31 +485,78 @@ where
     let engine = qmdb_sync::Engine::new(engine_config).await?;
     let engine_fut = Box::pin(engine.sync_with_target());
 
-    let (database, final_target) = if let Some(mut update_rx) = update_rx {
-        let update_tx = engine_update_tx.expect("engine update sender must exist");
-        let forward_fut = Box::pin(async {
-            let update_tx = update_tx;
-            while let Some(current_target) = update_rx.recv().await {
-                if !current_target.verify(&hasher) {
-                    tracing::warn!("target update witness verification failed");
-                    return Err(qmdb_sync::Error::Engine(EngineError::OpsRootWitnessInvalid));
-                }
-                if update_tx.send(current_target).await.is_err() {
-                    break;
+    // Continue feeding trusted roots and forwarding strictly-forward matches as engine
+    // updates while the engine runs.
+    //
+    // Channel-close handling mirrors the discovery loop: if the stream closes while the
+    // buffer holds roots, keep polling — a buffered trusted root may still match a future
+    // resolver state and produce a forward update. The forward task exits naturally when
+    // (a) the engine completes and the wrapping `select` drops this future, or (b) the
+    // engine update channel is closed (`engine_update_tx.send` returns Err).
+    let mut last_accepted = initial_target;
+    let forward_fut = Box::pin(async move {
+        type ForwardResult<DB, R> = Result<
+            (),
+            qmdb_sync::Error<
+                <DB as Database>::Family,
+                <R as qmdb_sync::Resolver>::Error,
+                <DB as Database>::Digest,
+            >,
+        >;
+        let result: ForwardResult<DB, R> = loop {
+            if stream_closed {
+                poll_clock.sleep(poll_interval).await;
+            } else {
+                let recv_fut = trusted_root_rx.recv();
+                let sleep_fut = poll_clock.sleep(poll_interval);
+                futures::pin_mut!(recv_fut);
+                futures::pin_mut!(sleep_fut);
+                match select(recv_fut, sleep_fut).await {
+                    Either::Left((Some(root), _)) => trusted.insert(root),
+                    Either::Left((None, _)) => {
+                        if trusted.is_empty() {
+                            break Ok(()); // nothing more to forward
+                        }
+                        stream_closed = true;
+                    }
+                    Either::Right(_) => {} // poll tick: re-query and continue
                 }
             }
-            Ok(())
-        });
-        let result = match select(engine_fut, forward_fut).await {
-            Either::Left((result, _)) => result?,
-            Either::Right((forward_result, engine_fut)) => {
-                forward_result?;
-                engine_fut.await?
+            let candidate =
+                match next_verified_target::<_, _, _, DB::Hasher>(&resolver, &trusted, &hasher)
+                    .await
+                {
+                    Ok(Some(t)) => t,
+                    Ok(None) => continue,
+                    Err(e) => break Err(e),
+                };
+            // Wrapper-level non-forward filter: mirror `qmdb_sync::target::validate_update`
+            // and drop anything that would fail it, so the engine never sees a hard error
+            // from a stale-but-valid target. The conditions match validate_update exactly:
+            //   - start moves backward
+            //   - end fails to strictly advance
+            //   - ops_root is unchanged
+            if candidate.range.start() < last_accepted.range.start()
+                || candidate.range.end() <= last_accepted.range.end()
+                || candidate.ops_root == last_accepted.ops_root
+            {
+                continue;
             }
+            if engine_update_tx.send(candidate.clone()).await.is_err() {
+                // Engine dropped its receiver: it has finished. Stop forwarding.
+                break Ok(());
+            }
+            last_accepted = candidate;
         };
         result
-    } else {
-        engine_fut.await?
+    });
+
+    let (database, final_target) = match select(engine_fut, forward_fut).await {
+        Either::Left((result, _)) => result?,
+        Either::Right((forward_result, engine_fut)) => {
+            forward_result?;
+            engine_fut.await?
+        }
     };
 
     let expected = final_target.root;
@@ -347,6 +597,7 @@ async fn build_db<F, E, U, I, H, J, T, const N: usize, S>(
     apply_batch_size: usize,
     metadata_partition: String,
     strategy: S,
+    witness_cache_size: usize,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
 where
     F: Graftable,
@@ -434,8 +685,8 @@ where
     )
     .await?;
 
-    // Compute the database root. The grafted root is deterministic from the ops
-    // (which are authenticated by the engine) and the bitmap (which is deterministic
+    // Compute the database root and the witness binding the ops root to it. The grafted root
+    // is deterministic from the ops (authenticated by the engine) and the bitmap (deterministic
     // from the ops).
     let storage = grafting::Storage::new(
         &grafted_tree,
@@ -444,29 +695,17 @@ where
         hasher.clone(),
     );
     let partial = db::partial_chunk(any.bitmap.as_ref());
-    let grafted_root = db::compute_grafted_root(
+    let ops_root = any.root();
+    let db::ComputedRoot { root, witness } = db::compute_db_root::<F, H, _, _, N>(
         &hasher,
         any.bitmap.as_ref(),
         &storage,
         ops_leaves,
+        partial,
         any.inactivity_floor_loc,
+        &ops_root,
     )
     .await?;
-    let ops_root = any.root();
-    let partial_digest = partial.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
-        (next_bit, digest)
-    });
-    let pending_digest =
-        db::pending_chunk::<F, _, N>(any.bitmap.as_ref(), ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(&chunk));
-    let root = db::combine_roots(
-        &hasher,
-        &ops_root,
-        &grafted_root,
-        pending_digest.as_ref(),
-        partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
-    );
 
     // Initialize metadata store and construct the Db.
     let (metadata, _, _) =
@@ -474,14 +713,17 @@ where
             .await?;
 
     let metrics = db::Metrics::new(context);
-    let current_db = db::Db {
+    let witness_cache = db::WitnessCache::new(witness_cache_size);
+    let mut current_db = db::Db {
         any,
         grafted_tree,
         metadata: AsyncMutex::new(metadata),
         strategy,
         root,
+        witness_cache,
         metrics,
     };
+    current_db.cache_current_target(ops_root, witness).await;
     current_db.update_metrics();
 
     // Persist metadata so the db can be reopened with init_fixed/init_variable.
@@ -528,6 +770,7 @@ macro_rules! impl_current_sync_database {
                 let metadata_partition = config.grafted_metadata_partition.clone();
                 let strategy = config.merkle_config.strategy.clone();
                 let translator = config.translator.clone();
+                let witness_cache_size = config.witness_cache_size;
                 build_db::<F, _, $update<K, V>, _, H, _, T, N, _>(
                     context,
                     merkle_config,
@@ -538,6 +781,7 @@ macro_rules! impl_current_sync_database {
                     apply_batch_size,
                     metadata_partition,
                     strategy,
+                    witness_cache_size,
                 )
                 .await
             }
@@ -773,6 +1017,95 @@ macro_rules! impl_current_resolver {
                     success_tx: oneshot::channel().0,
                     pinned_nodes,
                 })
+            }
+        }
+
+        impl<F, E, K, V, H, T, const N: usize, S> CurrentResolver
+            for std::sync::Arc<$db<F, E, K, V, H, T, N, S>>
+        where
+            F: Graftable,
+            E: Context,
+            K: $key_bound,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+            S: Strategy,
+            $($($where_extra)+)?
+        {
+            fn target_for_roots<'a>(
+                &'a self,
+                trusted_roots: &'a [H::Digest],
+            ) -> impl std::future::Future<
+                    Output = Result<Option<Target<F, H::Digest>>, qmdb::Error<F>>,
+                > + Send
+                  + 'a {
+                async move {
+                    Ok(self.cached_target(trusted_roots).map(Into::into))
+                }
+            }
+        }
+
+        impl<F, E, K, V, H, T, const N: usize, S> CurrentResolver
+            for std::sync::Arc<
+                commonware_utils::sync::AsyncRwLock<
+                    $db<F, E, K, V, H, T, N, S>,
+                >,
+            >
+        where
+            F: Graftable,
+            E: Context,
+            K: $key_bound,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+            S: Strategy,
+            $($($where_extra)+)?
+        {
+            fn target_for_roots<'a>(
+                &'a self,
+                trusted_roots: &'a [H::Digest],
+            ) -> impl std::future::Future<
+                    Output = Result<Option<Target<F, H::Digest>>, qmdb::Error<F>>,
+                > + Send
+                  + 'a {
+                async move {
+                    let db = self.read().await;
+                    Ok(db.cached_target(trusted_roots).map(Into::into))
+                }
+            }
+        }
+
+        impl<F, E, K, V, H, T, const N: usize, S> CurrentResolver
+            for std::sync::Arc<
+                commonware_utils::sync::AsyncRwLock<
+                    Option<$db<F, E, K, V, H, T, N, S>>,
+                >,
+            >
+        where
+            F: Graftable,
+            E: Context,
+            K: $key_bound,
+            V: $val_bound + Send + Sync + 'static,
+            H: Hasher,
+            T: Translator + Send + Sync + 'static,
+            T::Key: Send + Sync,
+            S: Strategy,
+            $($($where_extra)+)?
+        {
+            fn target_for_roots<'a>(
+                &'a self,
+                trusted_roots: &'a [H::Digest],
+            ) -> impl std::future::Future<
+                    Output = Result<Option<Target<F, H::Digest>>, qmdb::Error<F>>,
+                > + Send
+                  + 'a {
+                async move {
+                    let guard = self.read().await;
+                    let db = guard.as_ref().ok_or(qmdb::Error::<F>::KeyNotFound)?;
+                    Ok(db.cached_target(trusted_roots).map(Into::into))
+                }
             }
         }
     };

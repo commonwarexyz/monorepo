@@ -309,6 +309,14 @@ pub struct MerkleizedBatch<
 
     /// The canonical root (ops root + grafted root + partial chunk).
     pub(crate) canonical_root: D,
+
+    /// The `(ops_root, OpsRootWitness)` pair that authenticates `canonical_root` against
+    /// the ops tree. Present when this batch was produced by [`UnmerkleizedBatch::merkleize`]
+    /// (the components are already computed inline with `canonical_root`). `None` for batches
+    /// constructed via [`super::db::Db::to_batch`], which represent the current committed
+    /// state and have no in-flight commit to authenticate; the DB's witness cache already
+    /// holds an equivalent entry from when that state was committed.
+    pub(crate) ops_root_witness: Option<(D, crate::qmdb::current::proof::OpsRootWitness<F, D>)>,
 }
 
 impl<F, H, U, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, U, N, S>
@@ -675,7 +683,10 @@ where
             Some((chunk, rem))
         }
     };
-    let canonical_root = compute_db_root::<F, H, _, _, N>(
+    let crate::qmdb::current::db::ComputedRoot {
+        root: canonical_root,
+        witness: ops_root_witness,
+    } = compute_db_root::<F, H, _, _, N>(
         &hasher,
         &bitmap_batch,
         &grafted_storage,
@@ -691,6 +702,7 @@ where
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
+        ops_root_witness: Some((ops_root, ops_root_witness)),
     }))
 }
 
@@ -910,6 +922,7 @@ where
             grafted,
             bitmap: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
             canonical_root: self.root,
+            ops_root_witness: None,
         })
     }
 }
