@@ -12,7 +12,9 @@ use commonware_cryptography::{
         dkg::feldman_desmedt as dkg,
         primitives::variant::{MinPk, MinSig, Variant},
     },
-    certificate::{Attestation, ConstantProvider, Provider, Scheme as CertScheme, Signers, Subject},
+    certificate::{
+        Attestation, ConstantProvider, Provider, Scheme as CertScheme, Signers, Subject,
+    },
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     impl_certificate_bls12381_threshold,
     sha256::Digest as Sha256Digest,
@@ -339,8 +341,7 @@ where
                 let mut u = Unstructured::new(data);
 
                 // `Attestation::arbitrary`.
-                if let Ok(attestation) =
-                    u.arbitrary::<Attestation<Scheme<ed25519::PublicKey, V>>>()
+                if let Ok(attestation) = u.arbitrary::<Attestation<Scheme<ed25519::PublicKey, V>>>()
                 {
                     let _ = (attestation.signer, attestation.signature.get().is_some());
                 }
