@@ -813,6 +813,59 @@ mod tests {
     }
 
     #[test]
+    fn test_register_keeps_connected_peer_present_across_rollover() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (my_sk, _) = new_signer_and_pk(0);
+            let pk_1 = new_signer_and_pk(1).1;
+            let addr_1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 9001);
+            let pk_2 = new_signer_and_pk(2).1;
+            let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
+
+            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            cfg.tracked_peer_sets = NZUsize!(1);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            oracle.track(
+                0,
+                Map::<_, crate::Address>::try_from([(pk_1.clone(), addr_1.into())]).unwrap(),
+            );
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
+
+            let reservation = mailbox
+                .listen(pk_1.clone())
+                .await
+                .expect("peer should reserve");
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            assert!(mailbox.connect(pk_1.clone(), peer_mailbox).await);
+
+            oracle.track(
+                1,
+                Map::<_, crate::Address>::try_from([
+                    (pk_1.clone(), addr_1.into()),
+                    (pk_2.clone(), addr_2.into()),
+                ])
+                .unwrap(),
+            );
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
+
+            assert!(
+                !matches!(peer_rx.next().now_or_never(), Some(Some(peer::Message::Kill))),
+                "connected peer present in the new set should not be killed when the old set rolls off"
+            );
+            assert_eq!(reservation.metadata().public_key(), &pk_1);
+        });
+    }
+
+    #[test]
     fn test_reserved_removed_peer_is_killed_on_connect() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -885,7 +938,8 @@ mod tests {
             let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
 
-            let (reservation, ingress) = mailbox.dial(pk.clone()).await.expect("peer should reserve");
+            let (reservation, ingress) =
+                mailbox.dial(pk.clone()).await.expect("peer should reserve");
             assert_eq!(reservation.metadata().public_key(), &pk);
             assert_eq!(ingress, Ingress::Socket(addr_a));
 
@@ -932,7 +986,8 @@ mod tests {
             let registered_ips = listener_receiver.next().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
 
-            let (reservation, ingress) = mailbox.dial(pk.clone()).await.expect("peer should reserve");
+            let (reservation, ingress) =
+                mailbox.dial(pk.clone()).await.expect("peer should reserve");
             assert_eq!(reservation.metadata().public_key(), &pk);
             assert_eq!(ingress, Ingress::Socket(addr_a));
 
@@ -1231,7 +1286,11 @@ mod tests {
             let reservation = mailbox.listen(pk_unchanged.clone()).await;
             assert!(reservation.is_some());
             let (unchanged_mailbox, mut unchanged_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(mailbox.connect(pk_unchanged.clone(), unchanged_mailbox).await);
+            assert!(
+                mailbox
+                    .connect(pk_unchanged.clone(), unchanged_mailbox)
+                    .await
+            );
 
             // Call overwrite with mix of tracked+changed, tracked+unchanged, and unknown peers
             oracle.overwrite(

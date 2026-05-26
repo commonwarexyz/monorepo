@@ -352,6 +352,14 @@ mod tests {
         mailbox
     }
 
+    fn gauge_value(metrics: &str, name: &str) -> Option<i64> {
+        metrics
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<i64>().ok())
+    }
+
     // Helper to create Info
     fn new_peer_info(
         signer: &mut PrivateKey,
@@ -677,6 +685,114 @@ mod tests {
                     Some(Some(peer::Message::Kill))
                 ),
                 "connected peer should be killed after losing tracked-set membership"
+            );
+            assert_eq!(reservation.metadata().public_key(), &peer1_pk);
+        });
+    }
+
+    #[test]
+    fn test_reserved_removed_peer_rejected_on_connect() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            cfg.tracked_peer_sets = NZUsize!(1);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                tracker_pk,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            let (_s1, peer1_pk) = new_signer_and_pk(1);
+            let (_s2, peer2_pk) = new_signer_and_pk(2);
+            oracle.track(
+                0,
+                Set::try_from([tracker_pk.clone(), peer1_pk.clone()]).unwrap(),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            let reservation = mailbox
+                .listen(peer1_pk.clone())
+                .await
+                .expect("peer should reserve");
+            assert_eq!(reservation.metadata().public_key(), &peer1_pk);
+
+            oracle.track(1, Set::try_from([tracker_pk, peer2_pk]).unwrap());
+            context.sleep(Duration::from_millis(10)).await;
+
+            let (peer_mailbox, mut peer_receiver) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
+            assert!(
+                mailbox
+                    .connect(peer1_pk.clone(), peer_mailbox, false)
+                    .await
+                    .is_none(),
+                "reserved peer should be rejected if it connects after losing tracked-set membership"
+            );
+            assert!(
+                !matches!(
+                    peer_receiver.recv().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "discovery connect rejection is signaled by a missing greeting"
+            );
+
+            drop(reservation);
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                gauge_value(&context.encode(), "actor_directory_tracked"),
+                Some(1),
+                "dropping the reservation should release and delete the evicted peer record"
+            );
+        });
+    }
+
+    #[test]
+    fn test_register_keeps_connected_peer_present_across_rollover() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            cfg.tracked_peer_sets = NZUsize!(1);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                tracker_pk,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            let (_s1, peer1_pk) = new_signer_and_pk(1);
+            let (_s2, peer2_pk) = new_signer_and_pk(2);
+            oracle.track(
+                0,
+                Set::try_from([tracker_pk.clone(), peer1_pk.clone()]).unwrap(),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            let (peer_mailbox, mut peer_receiver) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
+            let reservation = connect_to_peer(&mailbox, &peer1_pk, peer_mailbox.clone()).await;
+
+            oracle.track(
+                1,
+                Set::try_from([tracker_pk, peer1_pk.clone(), peer2_pk]).unwrap(),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(
+                !matches!(
+                    peer_receiver.recv().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "connected peer present in the new set should not be killed when the old set rolls off"
+            );
+
+            mailbox.construct(peer1_pk.clone(), peer_mailbox);
+            assert!(
+                matches!(
+                    peer_receiver.recv().await,
+                    Some(peer::Message::BitVec(_))
+                ),
+                "connected peer should still receive tracker messages after rollover"
             );
             assert_eq!(reservation.metadata().public_key(), &peer1_pk);
         });
