@@ -1387,72 +1387,72 @@ pub mod tests {
     // Defines all variants across both supported Merkle families.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "of", OrderedFixedDb, fixed_config);
-            $cb!($($args)*, "ov", OrderedVariableDb, variable_config);
-            $cb!($($args)*, "uf", UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, "uv", UnorderedVariableDb, variable_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
-            $cb!($($args)*, "of-mmb", OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "ov-mmb", OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "uf-mmb", UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "uv-mmb", UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "ofp1-mmb", OrderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "ovp1-mmb", OrderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ufp1-mmb", UnorderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "uvp1-mmb", UnorderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ofp2-mmb", OrderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "ovp2-mmb", OrderedVariableMmbP2Db, variable_config);
-            $cb!($($args)*, "ufp2-mmb", UnorderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "uvp2-mmb", UnorderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
+            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
+            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
+            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
+            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config);
         };
     }
 
     // Defines 6 ordered variants.
     macro_rules! with_ordered_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "of", OrderedFixedDb, fixed_config);
-            $cb!($($args)*, "ov", OrderedVariableDb, variable_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
-            $cb!($($args)*, "of-mmb", OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "ov-mmb", OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "ofp1-mmb", OrderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "ovp1-mmb", OrderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ofp2-mmb", OrderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "ovp2-mmb", OrderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
+            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config);
+            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config);
         };
     }
 
     // Defines 6 unordered variants.
     macro_rules! with_unordered_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, "uv", UnorderedVariableDb, variable_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
-            $cb!($($args)*, "uf-mmb", UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "uv-mmb", UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "ufp1-mmb", UnorderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "uvp1-mmb", UnorderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ufp2-mmb", UnorderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "uvp2-mmb", UnorderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
+            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config);
         };
     }
 
     // Runner macros - receive common args followed by (label, type, config).
     macro_rules! test_simple {
-        ($f:expr, $l:literal, $db:ty, $cfg:ident) => {
+        ($f:expr, $l:ident, $db:ty, $cfg:ident) => {
             Box::pin(async {
                 $f(open_db_fn!($db, $cfg));
             })
@@ -1471,6 +1471,48 @@ pub mod tests {
         (unordered: $f:expr) => {{
             with_unordered_variants!(test_simple!($f));
         }};
+    }
+
+    // Emit one `#[test_group("slow")] #[test_traced]` test per variant.
+    // The fn name is `<prefix>_<variant_label>`, the body opens the variant's DB
+    // and runs the user-supplied test function.
+    macro_rules! per_variant_slow_test_emit {
+        ($prefix:ident, $f:path, $traced:literal, $label:ident, $db:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$prefix _ $label>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|_context| async move {
+                        Box::pin(async {
+                            $f(open_db_fn!($db, $cfg));
+                        })
+                        .await
+                    });
+                }
+            }
+        };
+    }
+
+    // Bulk-generate per-variant slow tests across all 24 variants.
+    macro_rules! per_all_variants_slow_tests {
+        ($prefix:ident, $f:path, $traced:literal) => {
+            with_all_variants!(per_variant_slow_test_emit!($prefix, $f, $traced));
+        };
+    }
+
+    // Bulk-generate per-variant slow tests across the 12 ordered variants.
+    macro_rules! per_ordered_variants_slow_tests {
+        ($prefix:ident, $f:path, $traced:literal) => {
+            with_ordered_variants!(per_variant_slow_test_emit!($prefix, $f, $traced));
+        };
+    }
+
+    // Bulk-generate per-variant slow tests across the 12 unordered variants.
+    macro_rules! per_unordered_variants_slow_tests {
+        ($prefix:ident, $f:path, $traced:literal) => {
+            with_unordered_variants!(per_variant_slow_test_emit!($prefix, $f, $traced));
+        };
     }
 
     // Wrapper functions for build_big tests with ordered/unordered expected values.
@@ -1498,41 +1540,26 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(open_db);
     }
 
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_build_random_close_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_build_random_close_reopen);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_simulate_write_failures() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_simulate_write_failures);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_different_pruning_delays_same_root() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_different_pruning_delays_same_root);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_sync_persists_bitmap_pruning_boundary() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_sync_persists_bitmap_pruning_boundary);
-        });
-    }
+    per_all_variants_slow_tests!(
+        test_all_variants_build_random_close_reopen,
+        test_build_random_close_reopen,
+        "WARN"
+    );
+    per_all_variants_slow_tests!(
+        test_all_variants_simulate_write_failures,
+        test_simulate_write_failures,
+        "WARN"
+    );
+    per_all_variants_slow_tests!(
+        test_all_variants_different_pruning_delays_same_root,
+        test_different_pruning_delays_same_root,
+        "WARN"
+    );
+    per_all_variants_slow_tests!(
+        test_all_variants_sync_persists_bitmap_pruning_boundary,
+        test_sync_persists_bitmap_pruning_boundary,
+        "WARN"
+    );
 
     #[test_group("slow")]
     #[test_traced("WARN")]
@@ -1551,41 +1578,26 @@ pub mod tests {
         });
     }
 
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_ordered_variants_build_big() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(ordered: test_ordered_build_big);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_unordered_variants_build_big() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(unordered: test_unordered_build_big);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("DEBUG")]
-    fn test_ordered_variants_build_small_close_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(ordered: ordered::tests::test_build_small_close_reopen);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("DEBUG")]
-    fn test_unordered_variants_build_small_close_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(unordered: unordered::tests::test_build_small_close_reopen);
-        });
-    }
+    per_ordered_variants_slow_tests!(
+        test_ordered_variants_build_big,
+        test_ordered_build_big,
+        "WARN"
+    );
+    per_unordered_variants_slow_tests!(
+        test_unordered_variants_build_big,
+        test_unordered_build_big,
+        "WARN"
+    );
+    per_ordered_variants_slow_tests!(
+        test_ordered_variants_build_small_close_reopen,
+        ordered::tests::test_build_small_close_reopen,
+        "DEBUG"
+    );
+    per_unordered_variants_slow_tests!(
+        test_unordered_variants_build_small_close_reopen,
+        unordered::tests::test_build_small_close_reopen,
+        "DEBUG"
+    );
 
     // ---- Current-level batch API tests ----
     //
@@ -2762,14 +2774,11 @@ pub mod tests {
         });
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_all_variants_speculative_root_matches_committed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_speculative_root_matches_committed);
-        });
-    }
+    per_all_variants_slow_tests!(
+        test_all_variants_speculative_root_matches_committed,
+        test_speculative_root_matches_committed,
+        "INFO"
+    );
 
     /// MerkleizedBatch::get() at the current level reads overlay then base DB.
     #[test_traced("INFO")]
