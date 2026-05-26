@@ -1366,7 +1366,10 @@ mod compact_variable_mmr {
             source.commit().await.unwrap();
 
             let bounds = source.bounds().await;
-            let target = sync::compact::Target::new(source.root(), bounds.end);
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: bounds.end,
+            };
             let source = Arc::new(source);
             let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await

@@ -27,14 +27,12 @@ use commonware_storage::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             db::Db,
             operation::{Operation, Update},
-            ordered,
-            sync::Target as AnySyncTarget,
-            unordered,
+            ordered, unordered,
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
             FixedConfig, VariableConfig,
         },
         operation::Key,
-        sync::{self, resolver::Resolver},
+        sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
     },
     translator::Translator,
@@ -393,10 +391,10 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -487,10 +485,10 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {

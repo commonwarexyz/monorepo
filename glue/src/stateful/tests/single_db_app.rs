@@ -47,7 +47,10 @@ use commonware_storage::{
     archive::immutable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, full::Config as MmrJournalConfig, Location},
-    qmdb::any::{sync::Target, unordered::fixed, FixedConfig},
+    qmdb::{
+        any::{unordered::fixed, FixedConfig},
+        sync::Target,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -248,7 +251,10 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }
 

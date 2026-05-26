@@ -788,7 +788,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, full::Config as MmrJournalConfig, Location},
-        qmdb::{any, any::sync::Target},
+        qmdb::{any, sync::Target},
         translator::TwoCap,
     };
     use commonware_utils::{
@@ -1062,7 +1062,10 @@ mod tests {
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            Target::new(block.state_root, block.range.clone())
+            Target {
+                root: block.state_root,
+                range: block.range.clone(),
+            }
         }
 
         async fn finalized(
