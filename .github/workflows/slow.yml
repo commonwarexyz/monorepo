@@ -113,11 +113,44 @@ jobs:
       run: just test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
 
   Fuzz:
+    name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       matrix:
-        fuzz_dir: [broadcast/fuzz, codec/fuzz, coding/fuzz, collector/fuzz, consensus/fuzz, cryptography/fuzz, math/fuzz, p2p/fuzz, runtime/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
+        include:
+          - fuzz_dir: broadcast/fuzz
+          - fuzz_dir: codec/fuzz
+          - fuzz_dir: coding/fuzz
+          - fuzz_dir: collector/fuzz
+          - fuzz_dir: consensus/fuzz
+            partition: "1/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "2/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "3/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "4/4"
+          - fuzz_dir: cryptography/fuzz
+            partition: "1/2"
+          - fuzz_dir: cryptography/fuzz
+            partition: "2/2"
+          - fuzz_dir: math/fuzz
+          - fuzz_dir: p2p/fuzz
+          - fuzz_dir: runtime/fuzz
+          - fuzz_dir: storage/fuzz
+            partition: "1/4"
+          - fuzz_dir: storage/fuzz
+            partition: "2/4"
+          - fuzz_dir: storage/fuzz
+            partition: "3/4"
+          - fuzz_dir: storage/fuzz
+            partition: "4/4"
+          - fuzz_dir: stream/fuzz
+          - fuzz_dir: utils/fuzz
+            partition: "1/2"
+          - fuzz_dir: utils/fuzz
+            partition: "2/2"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -149,7 +182,8 @@ jobs:
       id: fuzz-corpus-cache-key
       run: |
         sanitized_fuzz_dir="$(echo "${{ matrix.fuzz_dir }}" | tr '/' '-')"
-        echo "prefix=${{ runner.os }}-fuzz-corpus-${sanitized_fuzz_dir}" >> "$GITHUB_OUTPUT"
+        sanitized_partition="$(echo "${{ matrix.partition || '1/1' }}" | tr '/' '-')"
+        echo "prefix=${{ runner.os }}-fuzz-corpus-${sanitized_fuzz_dir}-${sanitized_partition}" >> "$GITHUB_OUTPUT"
     - name: Restore fuzz corpus
       id: fuzz-corpus-restore
       uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -159,7 +193,7 @@ jobs:
         restore-keys: |
           ${{ steps.fuzz-corpus-cache-key.outputs.prefix }}-
     - name: Test all targets
-      run: just fuzz ${{ matrix.fuzz_dir }} 60
+      run: just fuzz ${{ matrix.fuzz_dir }} ${{ matrix.partition || '1/1' }}
     - name: Save fuzz corpus
       if: success() && github.ref == 'refs/heads/main'
       uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4

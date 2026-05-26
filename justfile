@@ -85,10 +85,13 @@ cooldown:
 dylint:
     cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
 
-# Run all fuzz tests in a given directory
-fuzz fuzz_dir max_time='60' max_mem='4000':
+# Run all fuzz tests in a given directory.
+#
+# `partition` is "N/M", run partition N of M, where targets are hash-distributed across M jobs.
+fuzz fuzz_dir partition='1/1' max_time='60' max_mem='4000':
     #!/usr/bin/env bash
-    for target in $(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}}); do
+    targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
+    for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
         rm -f {{fuzz_dir}}/target/*/release/$target
     done
