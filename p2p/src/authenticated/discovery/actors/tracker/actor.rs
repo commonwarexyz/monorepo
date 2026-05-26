@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     authenticated::discovery::{
-        actors::tracker::ingress::Releaser,
+        actors::{peer, tracker::ingress::Releaser},
         types::{self, Info, InfoVerifier},
     },
     PeerSetUpdate,
@@ -21,6 +21,7 @@ use commonware_utils::{
     union, SystemTimeExt,
 };
 use rand::{seq::SliceRandom, Rng};
+use std::collections::HashMap;
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
@@ -50,6 +51,9 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
+
+    /// Set when a peer sends a keep-alive and cleared when it is reset or released.
+    mailboxes: HashMap<C::PublicKey, peer::Mailbox<C::PublicKey>>,
 
     /// Subscribers to peer set updates.
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
@@ -113,6 +117,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 receiver,
                 directory,
+                mailboxes: HashMap::new(),
                 subscribers: Vec::new(),
             },
             Mailbox::new(sender),
@@ -161,8 +166,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 );
 
                 // Attempt to update peer set membership.
-                if !self.directory.track(index, peers) {
+                let Some(reset_peers) = self.directory.track(index, peers) else {
                     return;
+                };
+
+                // Kill known peers no longer in any tracked peer set.
+                for peer in reset_peers {
+                    if let Some(mailbox) = self.mailboxes.remove(&peer) {
+                        mailbox.kill();
+                    }
                 }
 
                 // Notify all subscribers about the new peer set
@@ -209,10 +221,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Construct { public_key, peer } => {
                 // Kill if peer is not authorized
                 if !self.directory.eligible(&public_key) {
+                    self.mailboxes.remove(&public_key);
                     peer.kill();
                     return;
                 }
 
+                self.mailboxes.insert(public_key, peer.clone());
                 if let Some(bit_vec) = self.directory.get_random_bit_vec() {
                     peer.bit_vec(bit_vec);
                 } else {
@@ -265,10 +279,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Block the peer
                 self.directory.block(&public_key);
 
-                // We don't have to kill the peer now. It will be sent a `Kill` message the next
-                // time it sends the `Connect` or `Construct` message to the tracker.
+                // Kill the peer if it has already sent a keep-alive.
+                if let Some(peer) = self.mailboxes.remove(&public_key) {
+                    peer.kill();
+                }
             }
             Message::Release { metadata } => {
+                self.mailboxes.remove(metadata.public_key());
+
                 // Release the peer
                 self.directory.release(metadata);
             }
@@ -294,7 +312,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
     use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect};
-    use futures::future::Either;
+    use futures::{future::Either, FutureExt};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -612,6 +630,92 @@ mod tests {
 
             let dialable_peers = mailbox.dialable().await;
             assert!(!dialable_peers.peers.iter().any(|peer| peer == &pk1));
+        });
+    }
+
+    #[test]
+    fn test_register_disconnects_removed_peer_with_known_mailbox() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            cfg.tracked_peer_sets = NZUsize!(1);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                tracker_pk,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            let (_s1, peer1_pk) = new_signer_and_pk(1);
+            let (_s2, peer2_pk) = new_signer_and_pk(2);
+            oracle.track(
+                0,
+                Set::try_from([tracker_pk.clone(), peer1_pk.clone()]).unwrap(),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            let reservation = connect_to_peer(&mailbox, &peer1_pk).await;
+            let (peer_mailbox, mut peer_receiver) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
+            mailbox.construct(peer1_pk.clone(), peer_mailbox);
+            assert!(matches!(
+                peer_receiver.recv().await,
+                Some(peer::Message::BitVec(_))
+            ));
+
+            oracle.track(1, Set::try_from([tracker_pk, peer2_pk]).unwrap());
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(
+                matches!(
+                    peer_receiver.recv().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "connected peer should be killed after losing tracked-set membership"
+            );
+            assert_eq!(reservation.metadata().public_key(), &peer1_pk);
+        });
+    }
+
+    #[test]
+    fn test_block_disconnects_peer_with_known_mailbox() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                tracker_pk,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            let (_s1, peer_pk) = new_signer_and_pk(1);
+            oracle.track(
+                0,
+                Set::try_from([tracker_pk.clone(), peer_pk.clone()]).unwrap(),
+            );
+            context.sleep(Duration::from_millis(10)).await;
+
+            let reservation = connect_to_peer(&mailbox, &peer_pk).await;
+            let (peer_mailbox, mut peer_receiver) =
+                peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
+            mailbox.construct(peer_pk.clone(), peer_mailbox);
+            assert!(matches!(
+                peer_receiver.recv().await,
+                Some(peer::Message::BitVec(_))
+            ));
+
+            crate::block_peer(&mut oracle, peer_pk.clone());
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(
+                matches!(
+                    peer_receiver.recv().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "connected peer should be killed when blocked"
+            );
+            assert_eq!(reservation.metadata().public_key(), &peer_pk);
         });
     }
 

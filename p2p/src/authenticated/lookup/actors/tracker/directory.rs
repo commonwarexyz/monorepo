@@ -638,6 +638,49 @@ mod tests {
     }
 
     #[test]
+    fn test_track_resets_connected_peer_removed_from_sets() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(1),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory
+                .track(
+                    0,
+                    primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                )
+                .unwrap();
+            let reservation = directory.listen(&pk_1).expect("peer should reserve");
+            directory.connect(&pk_1);
+
+            let reset_peers = directory
+                .track(
+                    1,
+                    primary([(pk_2.clone(), addr(addr_2))].try_into().unwrap()),
+                )
+                .unwrap();
+
+            assert_eq!(reset_peers, Set::try_from([pk_1.clone()]).unwrap());
+            assert_eq!(reservation.metadata().public_key(), &pk_1);
+        });
+    }
+
+    #[test]
     fn test_secondary_sets_remain_until_eviction() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
