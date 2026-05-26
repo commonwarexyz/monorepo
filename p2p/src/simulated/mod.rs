@@ -2401,10 +2401,7 @@ mod tests {
                 .unwrap(),
             );
 
-            let peer_set = manager
-                .peer_set(1)
-                .await
-                .expect("peer set missing");
+            let peer_set = manager.peer_set(1).await.expect("peer set missing");
             let keys: Vec<_> = Vec::from(peer_set.primary.clone());
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
@@ -2631,10 +2628,7 @@ mod tests {
             );
 
             // Verify peer set contains expected keys (addresses are ignored by simulated network)
-            let peer_set = manager
-                .peer_set(1)
-                .await
-                .expect("peer set missing");
+            let peer_set = manager.peer_set(1).await.expect("peer set missing");
             let keys: Vec<_> = Vec::from(peer_set.primary);
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 

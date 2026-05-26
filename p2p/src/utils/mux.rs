@@ -547,10 +547,7 @@ mod tests {
         b: PublicKey,
     ) {
         let mut manager = oracle.manager();
-        let peers = manager
-            .peer_set(0)
-            .await
-            .unwrap_or_default();
+        let peers = manager.peer_set(0).await.unwrap_or_default();
         manager.track(
             0,
             Set::from_iter_dedup(peers.primary.iter().cloned().chain([a.clone(), b.clone()])),
