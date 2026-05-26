@@ -170,11 +170,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     return;
                 };
 
-                // Kill known peers no longer in any tracked peer set.
                 for peer in kill_peers {
-                    if let Some(mailbox) = self.mailboxes.remove(&peer) {
-                        mailbox.kill();
-                    }
+                    self.kill_peer(&peer);
                 }
 
                 // Notify all subscribers about the new peer set
@@ -280,15 +277,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Block the peer
                 self.directory.block(&public_key);
 
-                // Kill the peer if we're connected to it
-                if let Some(peer) = self.mailboxes.remove(&public_key) {
-                    peer.kill();
-                }
+                self.kill_peer(&public_key);
             }
             Message::Release { metadata } => {
                 self.mailboxes.remove(metadata.public_key());
                 self.directory.release(metadata);
             }
+        }
+    }
+
+    fn kill_peer(&mut self, public_key: &C::PublicKey) {
+        if let Some(peer) = self.mailboxes.remove(public_key) {
+            peer.kill();
         }
     }
 }

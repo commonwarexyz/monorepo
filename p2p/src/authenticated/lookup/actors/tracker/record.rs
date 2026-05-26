@@ -175,6 +175,16 @@ impl Record {
         !matches!(self.address, Address::Myself)
     }
 
+    /// Returns `true` while a connection is reserved or active.
+    pub const fn is_reserved_or_connected(&self) -> bool {
+        !matches!(self.status, Status::Inert)
+    }
+
+    /// Returns `true` when reserved or active connection state should be torn down.
+    pub const fn needs_teardown(&self) -> bool {
+        self.is_reserved_or_connected() && !self.eligible()
+    }
+
     /// Returns the number of primary peer sets this peer is part of.
     pub const fn primary_sets(&self) -> usize {
         self.primary_sets
@@ -263,11 +273,6 @@ impl Record {
             && self.secondary_sets == 0
             && !self.persistent
             && matches!(self.status, Status::Inert)
-    }
-
-    /// Returns `true` if a caller-owned connection should be killed.
-    pub const fn killable(&self) -> bool {
-        !matches!(self.status, Status::Inert) && self.is_blockable() && !self.eligible()
     }
 
     /// Returns `true` if this peer is eligible for connection.
@@ -405,6 +410,35 @@ mod tests {
     }
 
     #[test]
+    fn test_needs_teardown_after_losing_eligibility() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+            record.increment_primary();
+
+            assert!(!record.needs_teardown());
+            assert!(!record.is_reserved_or_connected());
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+            assert!(!record.needs_teardown());
+            assert!(record.is_reserved_or_connected());
+
+            record.decrement_primary();
+            assert!(record.needs_teardown());
+            assert!(record.is_reserved_or_connected());
+
+            record.connect();
+            assert!(record.needs_teardown());
+            assert!(record.is_reserved_or_connected());
+
+            record.release();
+            assert!(!record.needs_teardown());
+            assert!(!record.is_reserved_or_connected());
+        });
+    }
+
+    #[test]
     #[should_panic]
     fn test_connect_when_not_reserved_panics_from_inert() {
         let mut record = Record::known(test_address());
@@ -453,38 +487,11 @@ mod tests {
 
             record.connect();
             assert!(!record.deletable());
-            assert!(!record.killable());
 
             record.release();
             assert!(!record.deletable());
 
             record.decrement_primary();
-            assert!(record.deletable());
-            assert!(!record.killable());
-        });
-    }
-
-    #[test]
-    fn test_killable_logic() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::known(test_address());
-            assert!(!record.killable());
-
-            record.increment_primary();
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            assert!(!record.killable());
-
-            record.decrement_primary();
-            assert!(record.killable());
-
-            record.connect();
-            assert!(record.killable());
-
-            record.release();
-            assert!(!record.killable());
             assert!(record.deletable());
         });
     }

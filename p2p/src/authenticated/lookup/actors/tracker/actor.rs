@@ -122,9 +122,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Kill connections for peers no longer in any tracked peer set
                 // or whose addresses changed.
                 for peer in kill_peers {
-                    if let Some(mailbox) = self.mailboxes.remove(&peer) {
-                        mailbox.kill();
-                    }
+                    self.kill_peer(&peer);
                 }
 
                 // Send the updated listenable IPs to the listener.
@@ -148,9 +146,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     any_changed = true;
 
                     // Kill the existing connection since it was established to the old address.
-                    if let Some(peer) = self.mailboxes.remove(&public_key) {
-                        peer.kill();
-                    }
+                    self.kill_peer(&public_key);
                 }
 
                 // Send the updated listenable IPs to the listener (if any changes occurred).
@@ -211,10 +207,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Block the peer
                 self.directory.block(&public_key);
 
-                // Kill the peer if we're connected to it.
-                if let Some(peer) = self.mailboxes.remove(&public_key) {
-                    peer.kill();
-                }
+                self.kill_peer(&public_key);
 
                 // Send the updated listenable IPs to the listener.
                 let _ = self.listener.set(self.directory.listenable());
@@ -226,6 +219,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Release the peer
                 self.directory.release(metadata);
             }
+        }
+    }
+
+    fn kill_peer(&mut self, public_key: &C::PublicKey) {
+        if let Some(peer) = self.mailboxes.remove(public_key) {
+            peer.kill();
         }
     }
 }

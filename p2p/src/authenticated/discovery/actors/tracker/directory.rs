@@ -211,8 +211,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Track new primary and secondary peer sets for the given index.
     ///
-    /// Returns the peers whose connections should be killed because they were removed from all
-    /// tracked peer sets.
+    /// Returns peers that are no longer eligible after this update. Callers that hold live
+    /// connection handles should disconnect them.
     ///
     /// Returns `None` if the index is invalid.
     pub fn track(&mut self, index: u64, peers: TrackedPeers<C>) -> Option<OrderedSet<C>> {
@@ -277,15 +277,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(primary).unwrap().decrement_primary();
-                if self.delete_if_needed(primary) {
-                    kill_peers.push(primary.clone());
-                }
+                self.queue_if_ineligible(primary, &mut kill_peers);
             });
             sets.secondary.iter().for_each(|secondary| {
                 self.peers.get_mut(secondary).unwrap().decrement_secondary();
-                if self.delete_if_needed(secondary) {
-                    kill_peers.push(secondary.clone());
-                }
+                self.queue_if_ineligible(secondary, &mut kill_peers);
             });
         }
 
@@ -544,21 +540,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Attempt to delete a record and return whether caller-owned connection state should be
-    /// killed.
-    ///
-    /// Returns `true` if the record was deleted or if the peer is no longer eligible while a
-    /// connection is still reserved or active.
-    ///
-    /// Reserved and active records are not deleted here. The caller must kill the connection and
-    /// let [`Self::release`] delete the record once it becomes inert.
-    fn delete_if_needed(&mut self, peer: &C) -> bool {
+    fn queue_if_ineligible(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
+        if self.peers.get(peer).is_some_and(|record| record.needs_teardown()) {
+            kill_peers.push(peer.clone());
+        }
+        self.delete_if_needed(peer);
+    }
+
+    /// Attempt to delete a record.
+    fn delete_if_needed(&mut self, peer: &C) {
         let Some(record) = self.peers.get(peer) else {
-            return false;
+            return;
         };
-        let should_kill = record.killable();
         if !record.deletable() {
-            return should_kill;
+            return;
         }
 
         // We don't decrement the blocked metric here because the block
@@ -566,7 +561,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
         self.metrics.tracked.dec();
-        true
     }
 }
 

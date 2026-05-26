@@ -240,6 +240,11 @@ impl<C: PublicKey> Record<C> {
         !matches!(self.address, Address::Myself(_))
     }
 
+    /// Returns `true` when reserved or active connection state should be torn down.
+    pub const fn needs_teardown(&self) -> bool {
+        !matches!(self.status, Status::Inert) && !self.eligible()
+    }
+
     /// Returns the number of secondary peer sets this peer is part of.
     pub const fn secondary_sets(&self) -> usize {
         self.secondary_sets
@@ -330,11 +335,6 @@ impl<C: PublicKey> Record<C> {
             && self.secondary_sets == 0
             && !self.persistent
             && matches!(self.status, Status::Inert)
-    }
-
-    /// Returns `true` if a caller-owned connection should be killed.
-    pub const fn killable(&self) -> bool {
-        !matches!(self.status, Status::Inert) && self.is_blockable() && !self.eligible()
     }
 
     /// Returns `true` if this peer is eligible for connection.
@@ -681,6 +681,30 @@ mod tests {
     }
 
     #[test]
+    fn test_needs_teardown_after_losing_eligibility() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::<PublicKey>::unknown();
+            record.increment_primary();
+
+            assert!(!record.needs_teardown());
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+            assert!(!record.needs_teardown());
+
+            record.decrement_primary();
+            assert!(record.needs_teardown());
+
+            record.connect();
+            assert!(record.needs_teardown());
+
+            record.release();
+            assert!(!record.needs_teardown());
+        });
+    }
+
+    #[test]
     #[should_panic]
     fn test_connect_when_not_reserved_panics_from_inert() {
         let mut record = Record::<PublicKey>::unknown();
@@ -894,39 +918,12 @@ mod tests {
 
             record.connect(); // status = Active
             assert!(!record.deletable()); // status != Inert
-            assert!(!record.killable());
 
             record.release(); // status = Inert
             assert!(!record.deletable()); // primary_sets != 0
 
             record.decrement_primary(); // primary_sets = 0
             assert!(record.deletable()); // primary_sets = 0, !persistent, Inert
-            assert!(!record.killable());
-        });
-    }
-
-    #[test]
-    fn test_killable_logic() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let mut record = Record::<PublicKey>::unknown();
-            assert!(!record.killable());
-
-            record.increment_primary();
-            assert_eq!(
-                record.reserve(&mut context, Duration::ZERO),
-                ReserveResult::Reserved
-            );
-            assert!(!record.killable());
-
-            record.decrement_primary();
-            assert!(record.killable());
-
-            record.connect();
-            assert!(record.killable());
-
-            record.release();
-            assert!(!record.killable());
-            assert!(record.deletable());
         });
     }
 
