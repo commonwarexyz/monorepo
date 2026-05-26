@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-glue.svg)](https://crates.io/crates/commonware-glue)
 
-Compose distributed system constructions.
+Default constructions that span multiple primitives.
 
 ## Status
 
