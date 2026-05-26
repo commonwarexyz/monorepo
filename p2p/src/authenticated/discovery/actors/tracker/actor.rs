@@ -52,7 +52,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
 
-    /// Set when a peer sends a keep-alive and cleared when it is reset or released.
+    /// Set when a peer connects and cleared when it is reset or released.
     mailboxes: HashMap<C::PublicKey, peer::Mailbox<C::PublicKey>>,
 
     /// Subscribers to peer set updates.
@@ -203,16 +203,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Connect {
                 public_key,
+                peer,
                 dialer,
                 responder,
             } => {
-                // Drop responder if peer is not authorized (signals kill)
+                // Drop responder if peer is not authorized.
                 if !self.directory.eligible(&public_key) {
                     return;
                 }
 
                 // Mark the record as connected
                 self.directory.connect(&public_key, dialer);
+                self.mailboxes.insert(public_key, peer);
 
                 // Return greeting with our own info
                 let info = self.directory.info(&self.crypto.public_key()).unwrap();
@@ -226,7 +228,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     return;
                 }
 
-                self.mailboxes.insert(public_key, peer.clone());
                 if let Some(bit_vec) = self.directory.get_random_bit_vec() {
                     peer.bit_vec(bit_vec);
                 } else {
@@ -350,6 +351,12 @@ mod tests {
         (signer, pk)
     }
 
+    fn new_peer_mailbox() -> peer::Mailbox<PublicKey> {
+        let (mailbox, _receiver) =
+            peer::Mailbox::new(crate::utils::mocks::Metrics, NZUsize!(1));
+        mailbox
+    }
+
     // Helper to create Info
     fn new_peer_info(
         signer: &mut PrivateKey,
@@ -383,12 +390,20 @@ mod tests {
         mailbox: &Mailbox<PublicKey>,
         peer: &PublicKey,
     ) -> tracker::Reservation<PublicKey> {
+        connect_to_peer_with_mailbox(mailbox, peer, new_peer_mailbox()).await
+    }
+
+    async fn connect_to_peer_with_mailbox(
+        mailbox: &Mailbox<PublicKey>,
+        peer: &PublicKey,
+        peer_mailbox: peer::Mailbox<PublicKey>,
+    ) -> tracker::Reservation<PublicKey> {
         let res = mailbox
             .listen(peer.clone())
             .await
             .expect("reservation failed");
         let dialer = false;
-        let greeting = mailbox.connect(peer.clone(), dialer).await;
+        let greeting = mailbox.connect(peer.clone(), peer_mailbox, dialer).await;
         assert!(
             greeting.is_some(),
             "expected greeting info for authorized peer"
@@ -485,14 +500,16 @@ mod tests {
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
 
             // Connect as listener - should return None for unauthorized peer
-            let result = mailbox.connect(unauth_pk.clone(), false).await;
+            let result = mailbox
+                .connect(unauth_pk.clone(), new_peer_mailbox(), false)
+                .await;
             assert!(
                 result.is_none(),
                 "Unauthorized peer should get None on Connect"
             );
 
             // Connect as dialer - should return None for unauthorized peer
-            let result = mailbox.connect(unauth_pk, true).await;
+            let result = mailbox.connect(unauth_pk, new_peer_mailbox(), true).await;
             assert!(
                 result.is_none(),
                 "Unauthorized peer should get None on Connect"
@@ -523,7 +540,7 @@ mod tests {
 
             let _res = mailbox.listen(auth_pk.clone()).await.unwrap();
             let tracker_info = mailbox
-                .connect(auth_pk.clone(), false)
+                .connect(auth_pk.clone(), new_peer_mailbox(), false)
                 .await
                 .expect("Expected greeting info for authorized peer");
 
@@ -590,7 +607,8 @@ mod tests {
                 bits: BitMap::ones(1),
             };
 
-            let _r1 = connect_to_peer(&mailbox, &pk1).await;
+            let _r1 =
+                connect_to_peer_with_mailbox(&mailbox, &pk1, peer_mailbox_pk1.clone()).await;
 
             // Peer lets us know it received a bit vector
             mailbox.bit_vec(bit_vec_unknown_idx, peer_mailbox_pk1.clone());
@@ -654,9 +672,10 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let reservation = connect_to_peer(&mailbox, &peer1_pk).await;
             let (peer_mailbox, mut peer_receiver) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
+            let reservation =
+                connect_to_peer_with_mailbox(&mailbox, &peer1_pk, peer_mailbox.clone()).await;
             mailbox.construct(peer1_pk.clone(), peer_mailbox);
             assert!(matches!(
                 peer_receiver.recv().await,
@@ -696,9 +715,10 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let reservation = connect_to_peer(&mailbox, &peer_pk).await;
             let (peer_mailbox, mut peer_receiver) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
+            let reservation =
+                connect_to_peer_with_mailbox(&mailbox, &peer_pk, peer_mailbox.clone()).await;
             mailbox.construct(peer_pk.clone(), peer_mailbox);
             assert!(matches!(
                 peer_receiver.recv().await,
@@ -1197,7 +1217,8 @@ mod tests {
             oracle.track(0, set0_peers.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            let _r1 = connect_to_peer(&mailbox, &peer1_pk).await;
+            let _r1 =
+                connect_to_peer_with_mailbox(&mailbox, &peer1_pk, peer_mailbox1.clone()).await;
 
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
             let bit_vec0 = match peer_receiver1.recv().await {

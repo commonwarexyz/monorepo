@@ -106,17 +106,9 @@ impl<
                             let is_dialer = matches!(reservation.metadata(), Metadata::Dialer(..));
                             let info_verifier = self.info_verifier.clone();
                             move |context| async move {
-                                // Get greeting from tracker (returns None if not eligible)
-                                let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
-                                else {
-                                    debug!(?peer, "peer not eligible");
-                                    drop(reservation);
-                                    return;
-                                };
-
                                 // Create peer
                                 debug!(?peer, "peer started");
-                                let (peer_actor, messenger) = peer::Actor::new(
+                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
                                     context,
                                     peer::Config {
                                         sent_messages,
@@ -135,6 +127,17 @@ impl<
                                 let Some(channels) = router.ready(peer.clone(), messenger).await
                                 else {
                                     debug!(?peer, "router shut down during peer setup");
+                                    return;
+                                };
+
+                                // Get greeting from tracker (returns None if not eligible)
+                                let Some(greeting) = tracker
+                                    .connect(peer.clone(), peer_mailbox, is_dialer)
+                                    .await
+                                else {
+                                    debug!(?peer, "peer not eligible");
+                                    let _ = router.release(peer);
+                                    drop(reservation);
                                     return;
                                 };
 

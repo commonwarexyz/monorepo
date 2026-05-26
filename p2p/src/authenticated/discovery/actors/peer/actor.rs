@@ -44,10 +44,11 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Relay<EncodedData>) {
         let (control_sender, control_receiver) =
             Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
+        let mailbox = control_sender.clone();
         (
             Self {
                 context,
@@ -64,6 +65,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
             },
+            mailbox,
             relay,
         )
     }
@@ -522,7 +524,7 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
+            let (peer_actor, _mailbox, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.child("context"),
                 default_peer_config(context.child("config"), remote_pk),
             );
@@ -623,7 +625,7 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
+            let (peer_actor, _mailbox, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.child("context"),
                 default_peer_config(context.child("config"), remote_pk),
             );
@@ -730,7 +732,7 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
+            let (peer_actor, _mailbox, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
                 context.child("context"),
                 default_peer_config(context.child("config"), remote_pk),
             );
@@ -844,7 +846,7 @@ mod tests {
                 received_messages: received_messages.clone(),
                 ..default_peer_config(context.child("config"), remote_pk)
             };
-            let (peer_actor, _messenger) =
+            let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
             // Greeting the actor will send upon connecting to the peer.

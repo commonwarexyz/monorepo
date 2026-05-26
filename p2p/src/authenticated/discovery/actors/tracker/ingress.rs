@@ -53,6 +53,9 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer.
         public_key: C,
 
+        /// The mailbox of the peer actor.
+        peer: peer::Mailbox<C>,
+
         /// `true` if we are the dialer, `false` if we are the listener.
         dialer: bool,
 
@@ -161,10 +164,16 @@ impl<C: PublicKey> Mailbox<C> {
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
-    pub(crate) async fn connect(&self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
+    pub(crate) async fn connect(
+        &self,
+        public_key: C,
+        peer: peer::Mailbox<C>,
+        dialer: bool,
+    ) -> Option<types::Info<C>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Connect {
             public_key,
+            peer,
             dialer,
             responder,
         });
