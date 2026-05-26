@@ -205,11 +205,8 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 // subscriptions are validated, while unresolved ones remain pending.
 fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
     while let Some((digest, result)) = pending.next_completed().now_or_never() {
-        match result {
-            Ok(message) => {
-                assert_eq!(message.digest(), digest);
-            }
-            Err(_) => {}
+        if let Ok(message) = result {
+            assert_eq!(message.digest(), digest);
         }
     }
 }
