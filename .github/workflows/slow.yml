@@ -20,13 +20,13 @@ env:
 
 jobs:
   Tests:
-    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/8)"
+    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/16)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
@@ -61,7 +61,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run slow tests
-      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/8 --verbose --profile slow
+      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/16 --verbose --profile slow
 
   Tests-Gate:
     name: "Slow-Tests"
