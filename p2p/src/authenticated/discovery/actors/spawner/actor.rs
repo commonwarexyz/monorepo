@@ -123,20 +123,20 @@ impl<
                                     },
                                 );
 
-                                // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await
-                                else {
-                                    debug!(?peer, "router shut down during peer setup");
-                                    return;
-                                };
-
                                 // Get greeting from tracker (returns None if not eligible)
                                 let Some(greeting) = tracker
                                     .connect(peer.clone(), peer_mailbox, is_dialer)
                                     .await
                                 else {
                                     debug!(?peer, "peer not eligible");
-                                    let _ = router.release(peer);
+                                    drop(reservation);
+                                    return;
+                                };
+
+                                // Register peer with the router (may fail during shutdown)
+                                let Some(channels) = router.ready(peer.clone(), messenger).await
+                                else {
+                                    debug!(?peer, "router shut down during peer setup");
                                     drop(reservation);
                                     return;
                                 };

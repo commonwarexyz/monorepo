@@ -58,6 +58,9 @@ pub enum Message<C: PublicKey> {
 
         /// The mailbox of the peer actor.
         peer: peer::Mailbox,
+
+        /// Response with whether the tracker accepted the connection.
+        responder: oneshot::Sender<bool>,
     },
 
     // ---------- Used by dialer ----------
@@ -131,9 +134,15 @@ impl<C: PublicKey> Mailbox<C> {
         Self(sender)
     }
 
-    /// Send a `Connect` message to the tracker.
-    pub(crate) fn connect(&self, public_key: C, peer: peer::Mailbox) -> Feedback {
-        self.0.enqueue(Message::Connect { public_key, peer })
+    /// Send a `Connect` message to the tracker and wait for acceptance.
+    pub(crate) async fn connect(&self, public_key: C, peer: peer::Mailbox) -> bool {
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.0.enqueue(Message::Connect {
+            public_key,
+            peer,
+            responder,
+        });
+        receiver.await.unwrap_or(false)
     }
 
     /// Request dialable peers from the tracker.
