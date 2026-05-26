@@ -20,7 +20,7 @@ env:
 
 jobs:
   Tests:
-    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/16)"
+    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/16)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     strategy:

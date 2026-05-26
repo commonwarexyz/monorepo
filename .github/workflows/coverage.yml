@@ -19,7 +19,7 @@ env:
 
 jobs:
   Coverage:
-    name: "Coverage (flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/16)"
+    name: "Coverage${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }}/16)"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
