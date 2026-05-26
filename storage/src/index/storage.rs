@@ -11,12 +11,12 @@ use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 ///
 /// Again optimizing for the common case, we store the first value directly in the [Record] to avoid
 /// indirection (heap jumping).
-pub(super) struct Record<V: Send + Sync> {
+pub struct Record<V: Send + Sync> {
     pub(super) value: V,
     pub(super) next: Option<Box<Self>>,
 }
 
-pub(super) trait IndexEntry<V: Send + Sync>: Send + Sync {
+pub trait IndexEntry<V: Send + Sync>: Send + Sync {
     fn get(&self) -> &V;
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
@@ -55,7 +55,7 @@ enum Phase<V: Send + Sync> {
 }
 
 /// A cursor for [crate::index] types that can be instantiated with any [IndexEntry] implementation.
-pub(super) struct Cursor<'a, V: Send + Sync, E: IndexEntry<V>> {
+pub struct Cursor<'a, V: Send + Sync, E: IndexEntry<V>> {
     // The current phase of the cursor.
     phase: Phase<V>,
 

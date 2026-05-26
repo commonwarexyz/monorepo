@@ -39,45 +39,8 @@ impl<K: Ord + Send + Sync, V: Send + Sync> IndexEntry<V> for BTreeOccupiedEntry<
     }
 }
 
-/// A cursor for the ordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, K: Ord + Send + Sync, V: Send + Sync> {
-    inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
-}
-
-impl<'a, K: Ord + Send + Sync, V: Send + Sync> Cursor<'a, K, V> {
-    const fn new(
-        entry: BTreeOccupiedEntry<'a, K, Record<V>>,
-        keys: &'a Gauge,
-        items: &'a Gauge,
-        pruned: &'a Counter,
-    ) -> Self {
-        Self {
-            inner: CursorImpl::<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>::new(
-                entry, keys, items, pruned,
-            ),
-        }
-    }
-}
-
-impl<K: Ord + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, V> {
-    type Value = V;
-
-    fn update(&mut self, v: V) {
-        self.inner.update(v)
-    }
-
-    fn next(&mut self) -> Option<&V> {
-        self.inner.next()
-    }
-
-    fn insert(&mut self, v: V) {
-        self.inner.insert(v)
-    }
-
-    fn delete(&mut self) {
-        self.inner.delete()
-    }
-}
+/// A [crate::index::Cursor] over the values associated with a translated key.
+pub type Cursor<'a, K, V> = CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>;
 
 /// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
 /// values.
