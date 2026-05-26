@@ -86,8 +86,7 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer to check.
         public_key: C,
 
-        /// The remote IP observed on the accepted socket, used to validate
-        /// that the peer is connecting from its advertised egress IP.
+        /// The IP address the peer connected from.
         source_ip: IpAddr,
 
         /// The sender to respond with whether the peer is acceptable.
@@ -96,16 +95,12 @@ pub enum Message<C: PublicKey> {
 
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
+    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if  the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Listen {
         /// The public key of the peer to reserve.
         public_key: C,
-
-        /// The remote IP observed on the accepted socket. Reserving revalidates
-        /// it because the earlier acceptability check happened before the handshake.
-        source_ip: IpAddr,
 
         /// The sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<C>>>,
@@ -178,11 +173,10 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn listen(&self, public_key: C, source_ip: IpAddr) -> Option<Reservation<C>> {
+    pub(crate) async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,
-            source_ip,
             reservation,
         });
         receiver.await.ok().flatten()
