@@ -804,6 +804,55 @@ mod tests {
     }
 
     #[test]
+    fn test_reserved_removed_peer_is_killed_on_connect() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (my_sk, _) = new_signer_and_pk(0);
+            let pk_1 = new_signer_and_pk(1).1;
+            let addr_1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 9001);
+            let pk_2 = new_signer_and_pk(2).1;
+            let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
+
+            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            cfg.tracked_peer_sets = NZUsize!(1);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            oracle.track(
+                0,
+                Map::<_, crate::Address>::try_from([(pk_1.clone(), addr_1.into())]).unwrap(),
+            );
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
+
+            let reservation = mailbox
+                .listen(pk_1.clone())
+                .await
+                .expect("peer should reserve");
+            assert_eq!(reservation.metadata().public_key(), &pk_1);
+
+            oracle.track(
+                1,
+                Map::<_, crate::Address>::try_from([(pk_2.clone(), addr_2.into())]).unwrap(),
+            );
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
+
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            assert!(mailbox.connect(pk_1.clone(), peer_mailbox).accepted());
+            assert!(
+                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                "reserved peer should be killed if it connects after losing tracked-set membership"
+            );
+        });
+    }
+
+    #[test]
     fn test_overwrite_triggers_listener() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
