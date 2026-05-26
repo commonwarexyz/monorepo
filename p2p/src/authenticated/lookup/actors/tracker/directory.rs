@@ -150,7 +150,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Track new primary and secondary peer sets for the given index.
     ///
-    /// Returns peers whose existing connections should be killed because they were removed from all
+    /// Returns peers whose connection state should be torn down because they were removed from all
     /// tracked peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.

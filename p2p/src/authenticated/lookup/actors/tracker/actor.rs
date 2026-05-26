@@ -114,13 +114,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // Identify peers whose existing connections should be killed.
+                // Identify peers whose connection state should be torn down.
                 let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
                 };
 
-                // Kill connections for peers no longer in any tracked peer set
-                // or whose addresses changed.
+                // Kill active peers no longer in any tracked peer set or whose addresses changed.
                 for peer in kill_peers {
                     self.kill_peer(&peer);
                 }

@@ -455,6 +455,29 @@ mod tests {
     }
 
     #[test]
+    fn test_reserved_connect_rejected_after_address_change() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+            record.increment_primary();
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+
+            assert!(record.update(types::Address::Symmetric(SocketAddr::from((
+                [54, 12, 1, 10],
+                8081,
+            )))));
+            assert!(record.needs_teardown());
+            assert!(!record.connect());
+            assert_eq!(record.status, Status::Reserved);
+
+            record.release();
+            assert!(!record.needs_teardown());
+        });
+    }
+
+    #[test]
     #[should_panic]
     fn test_connect_when_not_reserved_panics_from_inert() {
         let mut record = Record::known(test_address());
