@@ -548,6 +548,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         {
             kill_peers.push(peer.clone());
         }
+
         // Only reserved or active peers are queued for teardown. Inactive records have no peer
         // actor to kill, so delete them if they are otherwise unreferenced.
         self.delete_if_needed(peer);
