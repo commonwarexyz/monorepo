@@ -1,5 +1,5 @@
-//! [`ManagedDb`] implementation for QMDB [`immutable`](commonware_storage::qmdb::immutable)
-//! databases.
+//! Journaled [`ManagedDb`] implementation for QMDB
+//! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
 //! deletions. The wrapper types here capture `Arc<AsyncRwLock<Immutable>>`
@@ -44,7 +44,7 @@ type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
     Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
+/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -131,7 +131,7 @@ where
 }
 
 /// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](super::Merkleized) trait.
+/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,

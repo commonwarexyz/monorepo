@@ -1,4 +1,4 @@
-//! [`ManagedDb`] implementation for unjournaled QMDB
+//! Compact [`ManagedDb`] implementation for QMDB
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! These compact databases retain only the current Merkle peaks, so the glue

@@ -101,9 +101,7 @@ const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 pub mod any;
 pub mod current;
 pub mod immutable;
-pub mod immutable_unjournaled;
 pub mod keyless;
-pub mod keyless_unjournaled;
 pub mod p2p;
 
 /// Mutable batch state before merkleization.

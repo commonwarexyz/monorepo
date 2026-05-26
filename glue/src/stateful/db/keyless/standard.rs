@@ -1,5 +1,5 @@
-//! [`ManagedDb`] implementation for QMDB [`keyless`](commonware_storage::qmdb::keyless)
-//! databases.
+//! Journaled [`ManagedDb`] implementation for QMDB
+//! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Keyless databases are append-only. Operations are addressed by
 //! [`Location`] rather than by key.
@@ -42,7 +42,7 @@ use std::{ops::Deref, sync::Arc};
 type KeylessDbHandle<F, E, V, C, H, S> = Arc<AsyncRwLock<Keyless<F, E, V, C, H, S>>>;
 
 /// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
+/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -127,7 +127,7 @@ where
 }
 
 /// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](super::Merkleized) trait.
+/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
