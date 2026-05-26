@@ -51,10 +51,17 @@ lint: check-fmt check-toml-fmt clippy check-docs check-features dylint check-pub
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 
-# Tests benchmarks in a given crate
-test-benches crate test_flags='' lint_flags='':
-    cargo test --benches -p {{ crate }} {{ test_flags }} -- --verbose
-    RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list | python3 .github/scripts/lint_benchmark_names.py -
+# Tests benchmarks in a given crate.
+#
+# `partition` is "N/M", run partition N of M, where bench binaries are hash-distributed across M jobs.
+test-benches crate partition='1/1' test_flags='' lint_flags='':
+    #!/usr/bin/env bash
+    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+    echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
+    binaries=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p' | python3 .github/scripts/hash_partition.py {{ partition }})
+    for bench in $binaries; do
+        cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
+    done
 
 # Run tests
 test *args='':

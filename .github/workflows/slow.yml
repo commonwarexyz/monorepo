@@ -78,6 +78,7 @@ jobs:
           echo "All tests passed successfully!"
 
   Benchmarks:
+    name: "Benchmarks (${{ matrix.package }}${{ matrix.test_flags && format(', {0}', matrix.test_flags) }}${{ matrix.lint_flags && format(', {0}', matrix.lint_flags) }}) (partition: ${{ matrix.partition || '1/1' }})"
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -94,6 +95,19 @@ jobs:
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
+            partition: "1/4"
+          - package: commonware-coding
+            test_flags: ""
+            lint_flags: ""
+            partition: "2/4"
+          - package: commonware-coding
+            test_flags: ""
+            lint_flags: ""
+            partition: "3/4"
+          - package: commonware-coding
+            test_flags: ""
+            lint_flags: ""
+            partition: "4/4"
           - package: commonware-math
             test_flags: ""
             lint_flags: ""
@@ -110,7 +124,7 @@ jobs:
       with:
         tool: just@1.43.0
     - name: Test benchmarks
-      run: just test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
+      run: just test-benches ${{ matrix.package }} ${{ matrix.partition || '1/1' }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
 
   Fuzz:
     name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"
