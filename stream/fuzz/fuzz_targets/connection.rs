@@ -148,7 +148,7 @@ fn fuzz(input: FuzzInput) {
             // buffer.
             let (sent, received) =
                 futures::join!(dialer_sender.send(msg.clone()), listener_receiver.recv());
-            let _ = sent.unwrap();
+            sent.unwrap();
             let received = received.unwrap();
 
             assert_eq!(received.coalesce(), &msg[..], "Message {i} mismatch");
@@ -163,7 +163,7 @@ fn fuzz(input: FuzzInput) {
             // Drive send and recv concurrently (same as above).
             let (sent, received) =
                 futures::join!(listener_sender.send(msg.clone()), dialer_receiver.recv());
-            let _ = sent.unwrap();
+            sent.unwrap();
             let received = received.unwrap();
 
             assert_eq!(received.coalesce(), &msg[..], "Message {i} mismatch");
