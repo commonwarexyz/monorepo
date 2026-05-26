@@ -1,0 +1,11 @@
+["commonware_glue::stateful::db::p2p::compact::handler::tests::conformance::CodecConformance<Request<mmr::Family,sha256::Digest>>"]
+n_cases = 65536
+hash = "290187801284530d0d7e82c33bb6ce975a5f4daa4b104230291cea9cffcd7686"
+
+["commonware_glue::stateful::db::p2p::standard::handler::tests::conformance::CodecConformance<Request<mmr::Family>>"]
+n_cases = 65536
+hash = "44c363dc52376203a66269a71e13f7271c1a9beb1f8ee9dd9864a3ce7ae2c281"
+
+["commonware_glue::stateful::db::p2p::standard::handler::tests::conformance::CodecConformance<Response<mmr::Family,u64,sha256::Digest>>"]
+n_cases = 65536
+hash = "7ca1ff124e5835f5be5d9b915233b9df088db121a0f5c3baa54b9ab8daf8bd78"
