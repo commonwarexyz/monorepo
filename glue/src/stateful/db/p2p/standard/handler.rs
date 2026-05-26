@@ -1,12 +1,13 @@
 //! Internal handler types for resolver actor coordination.
 
-use super::super::MAX_PINNED_NODES;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{self as resolver, p2p::Producer, Delivery};
-use commonware_storage::merkle::{Family, Location, Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
+use commonware_storage::merkle::{
+    Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
+};
 use commonware_utils::{channel::oneshot, Span};
 use std::{
     cmp::Ordering,

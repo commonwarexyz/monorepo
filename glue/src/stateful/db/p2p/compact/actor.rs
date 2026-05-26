@@ -1,6 +1,6 @@
 //! Actor for compact QMDB sync over P2P.
 
-use super::{super::MAX_PINNED_NODES, handler, mailbox, Mailbox};
+use super::{handler, mailbox, Mailbox};
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
 use commonware_cryptography::{Hasher, PublicKey};
@@ -9,7 +9,7 @@ use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Resolver as _};
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_storage::{
-    merkle::{Family, Location, MAX_PROOF_DIGESTS_PER_ELEMENT},
+    merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::{self, sync::compact},
 };
 use commonware_utils::{
