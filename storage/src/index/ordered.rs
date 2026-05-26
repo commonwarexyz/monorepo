@@ -80,8 +80,8 @@ impl<K: Ord + Send + Sync, V: Eq + Send + Sync> CursorTrait for Cursor<'_, K, V>
         self.inner.delete()
     }
 
-    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        self.inner.prune(predicate)
+    fn retain(&mut self, should_retain: &impl Fn(&V) -> bool) {
+        self.inner.retain(should_retain)
     }
 }
 
@@ -263,7 +263,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_prune(&mut self, key: &[u8], value: V, predicate: impl Fn(&V) -> bool) {
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             BTreeEntry::Occupied(entry) => {
@@ -271,11 +271,11 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                // Remove anything that is prunable.
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
 
-                // Add our new value (if not prunable).
-                if !predicate(&value) {
+                // Add the new value only if it should be retained.
+                if should_retain(&value) {
                     cursor.insert(value);
                 }
             }
@@ -285,7 +285,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&V) -> bool) {
+    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             BTreeEntry::Occupied(entry) => {
@@ -293,8 +293,8 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                // Remove anything that is prunable.
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
             }
             BTreeEntry::Vacant(_) => {}
         }
@@ -303,7 +303,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     fn remove(&mut self, key: &[u8]) {
         // To ensure metrics are accurate, we iterate over all conflicting values and remove them
         // one-by-one (rather than just removing the entire entry).
-        self.prune(key, |_| true);
+        self.retain(key, |_| false);
     }
 
     #[cfg(test)]
