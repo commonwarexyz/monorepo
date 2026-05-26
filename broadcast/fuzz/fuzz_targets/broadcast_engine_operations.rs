@@ -12,10 +12,8 @@ use commonware_cryptography::{
     Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{
-    deterministic, Buf, BufMut, Clock, Quota, Runner, Spawner, Supervisor as _,
-};
-use commonware_utils::NZUsize;
+use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
+use commonware_utils::{channel::oneshot, NZUsize};
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{
@@ -36,7 +34,7 @@ const MAX_SLEEP_DURATION_MS: u64 = 1000;
 /// Maximum number of recently broadcast digests tracked for `Recent` lookups.
 ///
 /// Indexed by `u8` modulo length, so a larger buffer would leave entries past 255
-/// unreachable via `DigestSource::Recent`.
+/// unreachable via `Source::Recent`.
 const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
 #[derive(Clone, Debug, Arbitrary)]
@@ -86,21 +84,21 @@ impl commonware_codec::Read for FuzzMessage {
 
 /// Source for the digest used by `Subscribe`/`Get` actions.
 #[derive(Clone, Debug, Arbitrary)]
-enum DigestSource {
+enum Source {
     /// A random message.
     Random(FuzzMessage),
     /// Index into messages broadcast earlier in this run.
     Recent(u8),
 }
 
-impl DigestSource {
+impl Source {
     /// Resolve to a concrete digest. Returns `None` when `Recent` is selected
     /// before any messages have been broadcast.
     fn resolve(self, recent: &VecDeque<Digest>) -> Option<Digest> {
         match self {
-            DigestSource::Random(message) => Some(message.digest()),
-            DigestSource::Recent(_) if recent.is_empty() => None,
-            DigestSource::Recent(idx) => Some(recent[(idx as usize) % recent.len()]),
+            Source::Random(message) => Some(message.digest()),
+            Source::Recent(_) if recent.is_empty() => None,
+            Source::Recent(idx) => Some(recent[(idx as usize) % recent.len()]),
         }
     }
 }
@@ -114,11 +112,11 @@ enum BroadcastAction {
     },
     Subscribe {
         peer_index: usize,
-        source: DigestSource,
+        digest: Source,
     },
     Get {
         peer_index: usize,
-        source: DigestSource,
+        digest: Source,
     },
     Sleep {
         duration_ms: u64,
@@ -136,11 +134,11 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
             }),
             1 => Ok(BroadcastAction::Subscribe {
                 peer_index: u.arbitrary()?,
-                source: u.arbitrary()?,
+                digest: u.arbitrary()?,
             }),
             2 => Ok(BroadcastAction::Get {
                 peer_index: u.arbitrary()?,
-                source: u.arbitrary()?,
+                digest: u.arbitrary()?,
             }),
             _ => Ok(BroadcastAction::Sleep {
                 duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION_MS)?,
@@ -199,6 +197,23 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
             let count = ((seed % peers.len() as u64) as usize).max(1);
             let peer_slice = shuffled_peers.into_iter().take(count).collect();
             Recipients::Some(peer_slice)
+        }
+    }
+}
+
+// Keep subscriptions alive without spawning one task per receiver. Ready
+// subscriptions are validated, while unresolved ones remain pending.
+fn drain_ready_subscriptions(pending: &mut VecDeque<(Digest, oneshot::Receiver<FuzzMessage>)>) {
+    for _ in 0..pending.len() {
+        let (digest, mut receiver) = pending.pop_front().unwrap();
+        match receiver.try_recv() {
+            Ok(message) => {
+                assert_eq!(message.digest(), digest);
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {
+                pending.push_back((digest, receiver));
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {}
         }
     }
 }
@@ -271,6 +286,8 @@ fn fuzz(input: FuzzInput) {
 
         // Execute fuzzed actions
         let mut recent_digests: VecDeque<Digest> = VecDeque::with_capacity(MAX_RECENT_DIGESTS);
+        let mut pending_subscriptions: VecDeque<(Digest, oneshot::Receiver<FuzzMessage>)> =
+            VecDeque::with_capacity(MAX_RECENT_DIGESTS);
         for action in input.actions {
             match action {
                 BroadcastAction::SendMessage {
@@ -290,38 +307,41 @@ fn fuzz(input: FuzzInput) {
                         let _ = mailbox.broadcast(resolved_recipients, message);
                     }
                 }
-                BroadcastAction::Subscribe { peer_index, source } => {
-                    let Some(digest) = source.resolve(&recent_digests) else {
-                        continue;
-                    };
-                    let clamped_peer_idx = peer_index % peers.len();
-                    let peer = peers[clamped_peer_idx].clone();
+                BroadcastAction::Subscribe {
+                    peer_index,
+                    digest: source,
+                } => {
+                    if let Some(digest) = source.resolve(&recent_digests) {
+                        let clamped_peer_idx = peer_index % peers.len();
+                        let peer = peers[clamped_peer_idx].clone();
 
-                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        // Spawn the await so the responder stays live and the
-                        // engine actually wakes it when a matching message
-                        // arrives.
-                        let receiver = mailbox.subscribe(digest);
-                        context.child("subscriber").spawn(|_| async move {
-                            let _ = receiver.await;
-                        });
+                        if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                            let receiver = mailbox.subscribe(digest);
+                            pending_subscriptions.push_back((digest, receiver));
+                            if pending_subscriptions.len() > MAX_RECENT_DIGESTS {
+                                pending_subscriptions.pop_front();
+                            }
+                        }
                     }
                 }
-                BroadcastAction::Get { peer_index, source } => {
-                    let Some(digest) = source.resolve(&recent_digests) else {
-                        continue;
-                    };
-                    let clamped_peer_idx = peer_index % peers.len();
-                    let peer = peers[clamped_peer_idx].clone();
+                BroadcastAction::Get {
+                    peer_index,
+                    digest: source,
+                } => {
+                    if let Some(digest) = source.resolve(&recent_digests) {
+                        let clamped_peer_idx = peer_index % peers.len();
+                        let peer = peers[clamped_peer_idx].clone();
 
-                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        drop(mailbox.get(digest).await);
+                        if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                            drop(mailbox.get(digest).await);
+                        }
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {
                     context.sleep(Duration::from_millis(duration_ms)).await;
                 }
             }
+            drain_ready_subscriptions(&mut pending_subscriptions);
         }
     });
 }
