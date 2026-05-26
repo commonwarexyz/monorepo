@@ -20,7 +20,6 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Sink, Spawner, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::channel::mpsc;
 use rand::Rng;
 use rand_core::CryptoRngCore;
 use tracing::{debug, info};
@@ -57,57 +56,22 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
     }
 
     /// Run the application actor.
-    pub async fn run(self) {
-        let Self {
-            context,
-            indexer,
-            this_network,
-            other_network,
-            hasher,
-            mut mailbox,
-        } = self;
-        let (worker_sender, worker_receiver) = mpsc::unbounded_channel();
-        let worker = context.child("indexer").spawn(move |context| {
-            Self::run_indexer(
-                context,
-                indexer,
-                this_network,
-                other_network,
-                hasher,
-                worker_receiver,
-            )
-        });
-
-        while let Some(message) = mailbox.recv().await {
-            if worker_sender.send(message).is_err() {
-                break;
-            }
-        }
-        worker.abort();
-    }
-
-    async fn run_indexer(
-        mut context: R,
-        (mut indexer_sender, mut indexer_receiver): (Sender<Si>, Receiver<St>),
-        this_network: <MinSig as Variant>::Public,
-        other_network: Scheme,
-        mut hasher: H,
-        mut messages: mpsc::UnboundedReceiver<Message<H::Digest>>,
-    ) {
-        while let Some(message) = messages.recv().await {
+    pub async fn run(mut self) {
+        let (mut indexer_sender, mut indexer_receiver) = self.indexer;
+        while let Some(message) = self.mailbox.recv().await {
             match message {
                 Message::Propose { round, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
-                    let block = match context.gen_bool(0.5) {
+                    let block = match self.context.gen_bool(0.5) {
                         true => {
                             // Generate a random message
-                            BlockFormat::<H::Digest>::Random(context.gen())
+                            BlockFormat::<H::Digest>::Random(self.context.gen())
                         }
                         false => {
                             // Fetch a certificate from the indexer for the other network
                             let msg =
                                 Inbound::GetFinalization::<H::Digest>(inbound::GetFinalization {
-                                    network: *other_network.identity(),
+                                    network: *self.other_network.identity(),
                                 })
                                 .encode();
                             indexer_sender
@@ -131,7 +95,11 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
 
                             // Verify certificate
                             assert!(
-                                finalization.verify(&mut context, &other_network, &Sequential),
+                                finalization.verify(
+                                    &mut self.context,
+                                    &self.other_network,
+                                    &Sequential
+                                ),
                                 "indexer is corrupt"
                             );
 
@@ -141,13 +109,13 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
                     };
 
                     // Hash the message
-                    hasher.update(&block.encode());
-                    let digest = hasher.finalize();
+                    self.hasher.update(&block.encode());
+                    let digest = self.hasher.finalize();
                     info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer
                     let msg = Inbound::PutBlock::<H::Digest>(inbound::PutBlock {
-                        network: this_network,
+                        network: self.this_network,
                         block,
                     })
                     .encode();
@@ -175,7 +143,7 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
                 Message::Verify { payload, response } => {
                     // Fetch payload from indexer
                     let msg = Inbound::GetBlock(inbound::GetBlock {
-                        network: this_network,
+                        network: self.this_network,
                         digest: payload,
                     })
                     .encode();
@@ -204,8 +172,11 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
                             let _ = response.send(true);
                         }
                         BlockFormat::Bridge(finalization) => {
-                            let result =
-                                finalization.verify(&mut context, &other_network, &Sequential);
+                            let result = finalization.verify(
+                                &mut self.context,
+                                &self.other_network,
+                                &Sequential,
+                            );
                             let _ = response.send(result);
                         }
                     }
@@ -222,7 +193,7 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
                             // Post finalization
                             let msg =
                                 Inbound::PutFinalization::<H::Digest>(inbound::PutFinalization {
-                                    network: this_network,
+                                    network: self.this_network,
                                     finalization,
                                 })
                                 .encode();
