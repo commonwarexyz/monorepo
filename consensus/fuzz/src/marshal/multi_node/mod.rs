@@ -1,16 +1,12 @@
 //! Multi-node marshal liveness fuzzing model.
 //!
-//! A second marshal fuzzing model (complementing the single-actor driver in the
-//! parent module): three honest validators plus one byzantine `Disrupter` run
-//! live simplex consensus wired to the marshal crate, reusing the shared fuzz
-//! infrastructure (`setup_network` helpers, the `Disrupter`, strategy sampling,
-//! [`FuzzInput`](crate::FuzzInput)). The honest validators are parametrized by
+//! This fuzzing harness runs three honest validators plus one byzantine `Disrupter`,
+//! reusing the shared fuzz infrastructure. The honest validators are parametrized by
 //! the *marshal sink* instead of the reporter sink: marshal is the consensus
 //! engine's reporter and delivers ordered finalized blocks to a downstream
 //! application.
 //!
-//! The liveness check borrows the ByzzFuzz *design* (not its code): inject
-//! byzantine faults, then assert honest nodes keep making progress -- here, that
+//! The liveness check injects byzantine faults, then assert that honest nodes keep making progress:
 //! every honest marshal delivers `required_containers` ordered finalized blocks.
 //!
 //! # Layout

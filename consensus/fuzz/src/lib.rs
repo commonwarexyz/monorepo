@@ -81,6 +81,10 @@ const FUZZ_LOG_ENV: &str = "CONSENSUS_FUZZ_LOG";
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+/// Index of the byzantine validator in `participants`. Single source of truth
+/// for the fixed byzantine identity used by the ByzzFuzz and marshal multi-node
+/// models (sender selection, injector key, invariant/liveness exclusion).
+pub(crate) const BYZANTINE_IDX: usize = 0;
 pub(crate) const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 1;

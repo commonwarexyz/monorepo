@@ -37,7 +37,9 @@
 //! `required_containers` ordered blocks.
 
 use super::{engine::LiveMarshal, invariant, ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE};
-use crate::{simplex::Simplex, start_disrupter_with_epoch, FuzzInput, SimplexBls12381MinPk};
+use crate::{
+    simplex::Simplex, start_disrupter_with_epoch, FuzzInput, SimplexBls12381MinPk, BYZANTINE_IDX,
+};
 use commonware_consensus::{
     marshal::mocks::{
         application::Application,
@@ -54,9 +56,6 @@ use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor as _}
 use commonware_utils::{FuzzRng, NZUsize};
 use futures::future::join_all;
 use std::{num::NonZeroUsize, time::Duration};
-
-/// Byzantine validator index; the other three run honest marshal validators.
-const BYZANTINE_IDX: usize = 0;
 
 /// Upper bound on the delivery target. Kept well below the epoch-0 boundary
 /// (`FixedEpocher::new(20)` makes height 19 the last block in epoch 0, after

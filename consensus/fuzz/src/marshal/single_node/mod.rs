@@ -1,0 +1,101 @@
+//! Single-actor fuzz driver for the marshal actor.
+//!
+//! Drives a single marshal actor under test by synthesizing every input
+//! marshal would normally receive from the consensus engine and from peers
+//! (blocks, notarizations, finalizations) and feeding them through the
+//! mailbox directly. Generic over `H: TestHarness` so the standard and
+//! coding variants share the same driver and corpora-per-binary discipline.
+//!
+//! # Invariants checked
+//!
+//! - **In-order delivery, no gaps within a marshal instance.** Within each
+//!   actor lifetime (segment between restarts), the first delivery is
+//!   `setup.height + 1` and subsequent deliveries advance strictly by one.
+//!   Marshal documents this guarantee on `Update::Block`.
+//! - **Ready-prefix delivery (anchor-based, chain-aware repair).**
+//!   When a `ReportFinalization` at height `h` arrives while block
+//!   `h` is locally available (durable or variant), marshal stores a
+//!   finalized anchor at `h` in its finalized archive. The driver
+//!   mirrors this with a persistent `finalized_anchors` set.
+//!
+//!   A `ReportFinalization` only triggers a repair wake when its
+//!   height is strictly above marshal's `processed_height` AND the
+//!   block is locally available. At-or-below-floor finalizations
+//!   are dropped by marshal's `store_finalization` (see
+//!   actor.rs:1732) and `try_repair_gaps` is gated on store success
+//!   (actor.rs:648). The driver mirrors this with a shadow
+//!   `processed_height`: initialized to `setup.height.get()`,
+//!   advanced on non-stale `AckNext`, and reset to
+//!   `setup.height.get()` after `Restart`.
+//!
+//!   On each repair wake (every above-floor `ReportFinalization`
+//!   that found its block, and every `Restart` after the variant
+//!   cache is cleared, since marshal's startup path runs
+//!   `try_repair_gaps` unconditionally) the driver finds the largest
+//!   anchor `a` for which every height `1..=a` is currently
+//!   available in (`durable_available` union `variant_available`).
+//!   If `a > ready_prefix`, the gap is repairable: marshal can walk
+//!   the chain from `a` back to 1 and deliver. The driver bumps
+//!   `ready_prefix = a` and promotes heights `prev_ready+1..=a` into
+//!   `durable_available` (marshal moves them to the finalized
+//!   archive, so they survive future restarts even if originally
+//!   sourced from the variant cache).
+//!
+//!   Availability state:
+//!     - `durable_available`: heights set by Propose / Verify /
+//!       Certify (marshal persists them), anchor blocks persisted by
+//!       `ReportFinalization` when the block was locally available
+//!       at that moment (marshal writes the block to
+//!       `finalized_blocks` alongside the finalization), plus
+//!       heights promoted by `ready_prefix` advances. Survives
+//!       restart.
+//!     - `variant_available`: heights set by `PublishViaVariant`
+//!       after confirmed local availability. Lives only in the
+//!       in-memory buffered / shards cache; cleared on `Restart`.
+//!     - `finalized_anchors`: heights at which a usable finalization
+//!       is stored. Survives restart.
+//! - **At-least-once across restart.** Heights pending ack at the moment
+//!   of restart are tracked. The new actor instance must redeliver each
+//!   of them at least once before the run ends.
+//! - **Digest fidelity.** Every block surfaced in `application.blocks()`
+//!   must match the canonical chain digest at its height.
+//! - **Durability acks.** `H::propose`/`H::verify`/`H::certify` return
+//!   `true` on durable persist; `false` surfaces an actor-died panic.
+//!
+//! # Variant buffer coverage
+//!
+//! `PublishViaVariant` exercises marshal's interaction with the local
+//! variant cache (buffered broadcast engine for Standard, shards engine
+//! for Coding). After publishing, the driver verifies the block actually
+//! landed in the local cache before counting it as `provided`; a publish
+//! that silently drops does not register.
+//!
+//! The marshal-mailbox path (`H::propose`/`H::verify`/`H::certify`) does
+//! NOT route through the shards mailbox for the coding harness: those
+//! wrappers call `handle.mailbox.proposed/verified/certified` directly.
+//! Shards-mailbox coverage is therefore exclusively via
+//! `PublishViaVariant`.
+//!
+//! # Known scope limitations
+//!
+//! - Single-validator only: peer-to-peer shard *dissemination* and
+//!   *reconstruction-from-peer-shards* are not exercised. Multi-validator
+//!   coding is covered by the [`super::multi_node`] model.
+//!
+//! # Layout
+//!
+//! - `input` defines the libFuzzer-facing scenario type.
+//! - `variant` adapts the standard / coding variant mailboxes to a
+//!   single publish trait the driver can call generically.
+//! - [`invariant`] holds the end-of-run assertions, one per property.
+//! - `runner` holds the deterministic-runtime driver and delegates
+//!   to [`invariant::check_all`] at the end.
+
+mod input;
+pub mod invariant;
+mod runner;
+mod variant;
+
+pub use input::{MarshalEvent, MarshalFuzzInput};
+pub use runner::fuzz_marshal;
+pub use variant::VariantPublish;

@@ -32,9 +32,6 @@ mod runner;
 mod sampling;
 mod scope;
 
+pub(crate) use crate::BYZANTINE_IDX;
 pub use runner::run;
 pub(crate) use sampling::ByzzFuzz;
-
-/// Byzantine index in `participants`. Single source of truth for the
-/// sampler and the runner (sender selection, injector key, invariant exclusion).
-pub(crate) const BYZANTINE_IDX: usize = 0;
