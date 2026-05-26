@@ -311,16 +311,17 @@ fn fuzz(input: FuzzInput) {
                     peer_index,
                     digest: source,
                 } => {
-                    if let Some(digest) = source.resolve(&recent_digests) {
-                        let clamped_peer_idx = peer_index % peers.len();
-                        let peer = peers[clamped_peer_idx].clone();
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
+                    let clamped_peer_idx = peer_index % peers.len();
+                    let peer = peers[clamped_peer_idx].clone();
 
-                        if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                            let receiver = mailbox.subscribe(digest);
-                            pending_subscriptions.push_back((digest, receiver));
-                            if pending_subscriptions.len() > MAX_RECENT_DIGESTS {
-                                pending_subscriptions.pop_front();
-                            }
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                        let receiver = mailbox.subscribe(digest);
+                        pending_subscriptions.push_back((digest, receiver));
+                        if pending_subscriptions.len() > MAX_RECENT_DIGESTS {
+                            pending_subscriptions.pop_front();
                         }
                     }
                 }
@@ -328,13 +329,14 @@ fn fuzz(input: FuzzInput) {
                     peer_index,
                     digest: source,
                 } => {
-                    if let Some(digest) = source.resolve(&recent_digests) {
-                        let clamped_peer_idx = peer_index % peers.len();
-                        let peer = peers[clamped_peer_idx].clone();
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
+                    let clamped_peer_idx = peer_index % peers.len();
+                    let peer = peers[clamped_peer_idx].clone();
 
-                        if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                            drop(mailbox.get(digest).await);
-                        }
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                        drop(mailbox.get(digest).await);
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {
