@@ -162,6 +162,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let _ = responder.send(self.directory.get_peer_set(&index));
             }
             Message::Subscribe { responder } => {
+                // Create a new subscription channel
                 let (sender, receiver) = mpsc::unbounded_channel();
 
                 // Send the latest peer set immediately
@@ -169,6 +170,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     sender.send_lossy(update);
                 }
                 self.subscribers.push(sender);
+
+                // Return the receiver to the caller
                 let _ = responder.send(receiver);
             }
             Message::Connect { public_key, peer } => {

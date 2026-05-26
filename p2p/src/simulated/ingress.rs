@@ -278,9 +278,12 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 
     /// Get the primary and secondary peers for a given ID.
     async fn peer_set(&self, id: u64) -> Option<TrackedPeers<P>> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send_lossy(Message::PeerSet { id, response });
-        receiver.await.ok().flatten()
+        request(&self.sender, move |response| Message::PeerSet {
+            id,
+            response,
+        })
+        .await
+        .flatten()
     }
 
     /// Subscribe to notifications when new peer sets are added.

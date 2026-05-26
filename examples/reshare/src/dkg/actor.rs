@@ -674,7 +674,7 @@ mod tests {
             None
         }
 
-        fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+        async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
             let (_, rx) = mpsc::unbounded_channel();
             rx
         }
