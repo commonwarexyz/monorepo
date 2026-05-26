@@ -45,6 +45,9 @@ pub struct Record {
     /// Connection status of the peer.
     status: Status,
 
+    /// If `true`, the reserved or active connection state was created before the latest address.
+    stale_connection: bool,
+
     /// Number of primary peer sets this peer is part of.
     primary_sets: usize,
 
@@ -69,6 +72,7 @@ impl Record {
         Self {
             address: Address::Known(addr),
             status: Status::Inert,
+            stale_connection: false,
             primary_sets: 0,
             secondary_sets: 0,
             persistent: false,
@@ -82,6 +86,7 @@ impl Record {
         Self {
             address: Address::Myself,
             status: Status::Inert,
+            stale_connection: false,
             primary_sets: 0,
             secondary_sets: 0,
             persistent: true,
@@ -103,6 +108,9 @@ impl Record {
                     return false;
                 }
                 *existing = addr;
+                if self.is_reserved_or_connected() {
+                    self.stale_connection = true;
+                }
                 true
             }
         }
@@ -146,6 +154,7 @@ impl Record {
             return ReserveResult::RateLimited;
         }
         self.status = Status::Reserved;
+        self.stale_connection = false;
         self.next_reservable_at = now.saturating_add_ext(interval);
         self.next_dial_at = self.next_reservable_at.add_jittered(context, interval / 2);
         ReserveResult::Reserved
@@ -154,15 +163,22 @@ impl Record {
     /// Marks the peer as connected.
     ///
     /// The peer must have the status [Status::Reserved].
-    pub fn connect(&mut self) {
+    ///
+    /// Returns `false` if the reservation was invalidated by an address change.
+    pub fn connect(&mut self) -> bool {
         assert!(matches!(self.status, Status::Reserved));
+        if self.stale_connection {
+            return false;
+        }
         self.status = Status::Active;
+        true
     }
 
     /// Releases any reservation on the peer.
     pub fn release(&mut self) {
         assert!(self.status != Status::Inert, "Cannot release an Inert peer");
         self.status = Status::Inert;
+        self.stale_connection = false;
     }
 
     // ---------- Getters ----------
@@ -182,7 +198,7 @@ impl Record {
 
     /// Returns `true` when reserved or active connection state should be torn down.
     pub const fn needs_teardown(&self) -> bool {
-        self.is_reserved_or_connected() && !self.eligible()
+        self.is_reserved_or_connected() && (self.stale_connection || !self.eligible())
     }
 
     /// Returns the number of primary peer sets this peer is part of.

@@ -171,14 +171,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let _ = responder.send(receiver);
             }
             Message::Connect { public_key, peer } => {
-                // Kill if peer is not eligible (not in a peer set)
+                // Kill if peer is not eligible (not in any tracked peer set).
                 if !self.directory.eligible(&public_key) {
                     peer.kill();
                     return;
                 }
 
-                // Mark the record as connected
-                self.directory.connect(&public_key);
+                // Promote the reservation unless it was invalidated before Connect arrived.
+                if !self.directory.connect(&public_key) {
+                    peer.kill();
+                    return;
+                }
                 self.mailboxes.insert(public_key, peer);
             }
             Message::Dialable { responder } => {
@@ -848,6 +851,100 @@ mod tests {
             assert!(
                 matches!(peer_rx.next().await, Some(peer::Message::Kill)),
                 "reserved peer should be killed if it connects after losing tracked-set membership"
+            );
+        });
+    }
+
+    #[test]
+    fn test_reserved_peer_is_killed_on_connect_after_tracked_address_change() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (my_sk, _) = new_signer_and_pk(0);
+            let pk = new_signer_and_pk(1).1;
+            let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
+            let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
+
+            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            cfg.tracked_peer_sets = NZUsize!(2);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            oracle.track(
+                0,
+                Map::<_, crate::Address>::try_from([(pk.clone(), addr_a.into())]).unwrap(),
+            );
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&addr_a.ip()));
+
+            let (reservation, ingress) = mailbox.dial(pk.clone()).await.expect("peer should reserve");
+            assert_eq!(reservation.metadata().public_key(), &pk);
+            assert_eq!(ingress, Ingress::Socket(addr_a));
+
+            oracle.track(
+                1,
+                Map::<_, crate::Address>::try_from([(pk.clone(), addr_b.into())]).unwrap(),
+            );
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&addr_a.ip()));
+            assert!(registered_ips.contains(&addr_b.ip()));
+
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            assert!(mailbox.connect(pk.clone(), peer_mailbox).accepted());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                matches!(
+                    peer_rx.next().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "reserved peer should be killed if it connects after its tracked address changes"
+            );
+        });
+    }
+
+    #[test]
+    fn test_reserved_peer_is_killed_on_connect_after_overwrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (my_sk, _) = new_signer_and_pk(0);
+            let pk = new_signer_and_pk(1).1;
+            let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
+            let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
+
+            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let TestHarness {
+                mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            oracle.track(
+                0,
+                Map::<_, crate::Address>::try_from([(pk.clone(), addr_a.into())]).unwrap(),
+            );
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(registered_ips.contains(&addr_a.ip()));
+
+            let (reservation, ingress) = mailbox.dial(pk.clone()).await.expect("peer should reserve");
+            assert_eq!(reservation.metadata().public_key(), &pk);
+            assert_eq!(ingress, Ingress::Socket(addr_a));
+
+            oracle.overwrite([(pk.clone(), addr_b.into())].try_into().unwrap());
+            let registered_ips = listener_receiver.next().await.unwrap();
+            assert!(!registered_ips.contains(&addr_a.ip()));
+            assert!(registered_ips.contains(&addr_b.ip()));
+
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            assert!(mailbox.connect(pk.clone(), peer_mailbox).accepted());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                matches!(
+                    peer_rx.next().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "reserved peer should be killed if it connects after its address is overwritten"
             );
         });
     }

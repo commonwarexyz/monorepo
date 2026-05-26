@@ -129,18 +129,23 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Sets the status of a peer to `connected`.
     ///
+    /// Returns `false` if the reservation was invalidated by an address change.
+    ///
     /// # Panics
     ///
     /// Panics if the peer has no record or if the peer is not in the reserved state.
-    pub fn connect(&mut self, peer: &C) {
+    pub fn connect(&mut self, peer: &C) -> bool {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
-        record.connect();
+        if !record.connect() {
+            return false;
+        }
         let _ = self
             .metrics
             .connected
             .get_or_create_by(peer)
             .try_set(self.context.current().epoch_millis());
+        true
     }
 
     /// Track new primary and secondary peer sets for the given index.
@@ -233,14 +238,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(index = removed_index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(&primary).unwrap().decrement_primary();
-                self.queue_if_ineligible(&primary, &mut kill_peers);
+                self.queue_if_needs_teardown(&primary, &mut kill_peers);
             });
             sets.secondary.into_iter().for_each(|secondary| {
                 self.peers
                     .get_mut(&secondary)
                     .unwrap()
                     .decrement_secondary();
-                self.queue_if_ineligible(&secondary, &mut kill_peers);
+                self.queue_if_needs_teardown(&secondary, &mut kill_peers);
             });
         }
 
@@ -486,11 +491,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Queue a live peer for teardown if it lost eligibility, then delete inert records.
+    /// Queue connection state for teardown if it is no longer valid, then delete inert records.
     ///
-    /// Reserved or active peers cannot be deleted until their reservation is released, so callers
-    /// must kill the peer actor before attempting record cleanup.
-    fn queue_if_ineligible(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
+    /// Active peers need a kill signal. Reserved peers are left for reservation release or Connect
+    /// rejection because no peer actor may exist yet.
+    fn queue_if_needs_teardown(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
         if self
             .peers
             .get(peer)
