@@ -541,7 +541,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     fn queue_if_ineligible(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
-        if self.peers.get(peer).is_some_and(|record| record.needs_teardown()) {
+        if self
+            .peers
+            .get(peer)
+            .is_some_and(|record| record.needs_teardown())
+        {
             kill_peers.push(peer.clone());
         }
         self.delete_if_needed(peer);
