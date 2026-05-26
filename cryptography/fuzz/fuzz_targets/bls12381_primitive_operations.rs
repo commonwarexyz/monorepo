@@ -201,17 +201,19 @@ enum FuzzOperation {
     },
 
     // Point subtraction
-    PointSubtraction {
-        g1a: G1,
-        g1b: G1,
-        g2a: G2,
-        g2b: G2,
+    G1Subtraction {
+        a: G1,
+        b: G1,
+    },
+    G2Subtraction {
+        a: G2,
+        b: G2,
     },
 }
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=39)?;
+        let choice = u.int_in_range(0..=40)?;
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
@@ -370,11 +372,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             38 => Ok(FuzzOperation::SerializeShare {
                 share: u.arbitrary()?,
             }),
-            39 => Ok(FuzzOperation::PointSubtraction {
-                g1a: arbitrary_g1(u)?,
-                g1b: arbitrary_g1(u)?,
-                g2a: arbitrary_g2(u)?,
-                g2b: arbitrary_g2(u)?,
+            39 => Ok(FuzzOperation::G1Subtraction {
+                a: arbitrary_g1(u)?,
+                b: arbitrary_g1(u)?,
+            }),
+            40 => Ok(FuzzOperation::G2Subtraction {
+                a: arbitrary_g2(u)?,
+                b: arbitrary_g2(u)?,
             }),
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
@@ -743,16 +747,14 @@ fn fuzz(op: FuzzOperation) {
             assert_eq!(share, decoded);
         }
 
-        FuzzOperation::PointSubtraction {
-            mut g1a,
-            g1b,
-            mut g2a,
-            g2b,
-        } => {
-            g1a -= &g1b;
-            let _ = g1a - &g1b;
-            g2a -= &g2b;
-            let _ = g2a - &g2b;
+        FuzzOperation::G1Subtraction { mut a, b } => {
+            a -= &b;
+            let _ = a - &b;
+        }
+
+        FuzzOperation::G2Subtraction { mut a, b } => {
+            a -= &b;
+            let _ = a - &b;
         }
     }
 }
