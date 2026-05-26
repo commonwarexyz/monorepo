@@ -1,6 +1,6 @@
 //! Multi-node marshal liveness driver.
 //!
-//! Runs `N4F1C3` (three honest validators plus one byzantine [`Disrupter`])
+//! Runs `N4F1C3` (three honest validators plus one byzantine `Disrupter`)
 //! over the simulated network and reuses the shared fuzz infrastructure
 //! (`setup_network`-style helpers, the byzantine `Disrupter`, strategy
 //! sampling, [`FuzzInput`]) exactly as the general harness does. The honest

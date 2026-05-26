@@ -1,7 +1,7 @@
 //! Multi-node marshal liveness fuzzing model.
 //!
 //! A second marshal fuzzing model (complementing the single-actor driver in the
-//! parent module): three honest validators plus one byzantine [`Disrupter`] run
+//! parent module): three honest validators plus one byzantine `Disrupter` run
 //! live simplex consensus wired to the marshal crate, reusing the shared fuzz
 //! infrastructure (`setup_network` helpers, the `Disrupter`, strategy sampling,
 //! [`FuzzInput`](crate::FuzzInput)). The honest validators are parametrized by
@@ -15,12 +15,12 @@
 //!
 //! # Layout
 //!
-//! - [`app`] is the block-building automaton bridging the engine to marshal.
-//! - [`engine`] wires the per-variant live simplex engine (standard `Deferred`,
+//! - `app` is the block-building automaton bridging the engine to marshal.
+//! - `engine` wires the per-variant live simplex engine (standard `Deferred`,
 //!   coding `Marshaled`) reporting to marshal.
-//! - [`runner`] sets up the cluster, drives the liveness window, and checks
+//! - `runner` sets up the cluster, drives the liveness window, and checks
 //!   invariants.
-//! - [`invariant`] holds the end-of-run assertions.
+//! - `invariant` holds the end-of-run assertions.
 
 mod app;
 mod engine;
