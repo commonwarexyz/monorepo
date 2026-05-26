@@ -493,8 +493,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Queue connection state for teardown if it is no longer valid, then delete inert records.
     ///
-    /// Active peers need a kill signal. Reserved peers are left for reservation release or Connect
-    /// rejection because no peer actor may exist yet.
+    /// Active peers need a kill signal. Reserved peers may not have registered a mailbox yet; in
+    /// that case the actor kill path is a no-op and later Connect rejection or reservation release
+    /// completes cleanup.
     fn queue_if_needs_teardown(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
         if self
             .peers

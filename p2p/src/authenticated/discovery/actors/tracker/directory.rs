@@ -540,10 +540,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Queue a live peer for teardown if it lost eligibility, then delete inert records.
+    /// Queue connection state for teardown if it is no longer valid, then delete inert records.
     ///
-    /// Reserved or active peers cannot be deleted until their reservation is released, so callers
-    /// must kill the peer actor before attempting record cleanup.
+    /// Active peers need a kill signal. Reserved peers may not have registered a mailbox yet; in
+    /// that case the actor kill path is a no-op and later Connect rejection or reservation release
+    /// completes cleanup.
     fn queue_if_ineligible(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
         if self
             .peers
