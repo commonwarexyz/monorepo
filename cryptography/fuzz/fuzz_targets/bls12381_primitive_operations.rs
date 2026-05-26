@@ -1,20 +1,21 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{ReadExt, Write};
+use commonware_codec::{EncodeSize, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
+    group::{Private, Scalar, Share, SmallScalar, G1, G1_MESSAGE, G2, G2_MESSAGE},
     ops,
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
-    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
+    algebra::{Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Ring, Space},
     poly::Poly,
 };
-use commonware_parallel::Sequential;
+use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::Participant;
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
+use std::{collections::HashSet, num::NonZeroUsize};
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -169,11 +170,48 @@ enum FuzzOperation {
     SerializeG2 {
         point: G2,
     },
+
+    // Parallel MSM (Pippenger tiling path)
+    G1MsmParallel {
+        points: Vec<G1>,
+        scalars: Vec<Scalar>,
+    },
+    G2MsmParallel {
+        points: Vec<G2>,
+        scalars: Vec<Scalar>,
+    },
+
+    // Scalar conversions, ordering, and hashing
+    ScalarConversions {
+        seed: [u8; 32],
+        value: u64,
+        a: Scalar,
+        b: Scalar,
+    },
+    ScalarFieldNtt {
+        scalar: Scalar,
+    },
+
+    // Private/Share serialization round-trips
+    SerializePrivate {
+        private: Private,
+    },
+    SerializeShare {
+        share: Share,
+    },
+
+    // Point subtraction
+    PointSubtraction {
+        g1a: G1,
+        g1b: G1,
+        g2a: G2,
+        g2b: G2,
+    },
 }
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=32)?;
+        let choice = u.int_in_range(0..=39)?;
 
         match choice {
             0 => Ok(FuzzOperation::ScalarArithmetic {
@@ -308,6 +346,35 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             32 => Ok(FuzzOperation::SerializeG2 {
                 point: arbitrary_g2(u)?,
+            }),
+            33 => Ok(FuzzOperation::G1MsmParallel {
+                points: arbitrary_vec_g1(u, 32, 64)?,
+                scalars: arbitrary_vec_scalar(u, 32, 64)?,
+            }),
+            34 => Ok(FuzzOperation::G2MsmParallel {
+                points: arbitrary_vec_g2(u, 32, 64)?,
+                scalars: arbitrary_vec_scalar(u, 32, 64)?,
+            }),
+            35 => Ok(FuzzOperation::ScalarConversions {
+                seed: u.arbitrary()?,
+                value: u.arbitrary()?,
+                a: u.arbitrary()?,
+                b: u.arbitrary()?,
+            }),
+            36 => Ok(FuzzOperation::ScalarFieldNtt {
+                scalar: u.arbitrary()?,
+            }),
+            37 => Ok(FuzzOperation::SerializePrivate {
+                private: u.arbitrary()?,
+            }),
+            38 => Ok(FuzzOperation::SerializeShare {
+                share: u.arbitrary()?,
+            }),
+            39 => Ok(FuzzOperation::PointSubtraction {
+                g1a: arbitrary_g1(u)?,
+                g1b: arbitrary_g1(u)?,
+                g2a: arbitrary_g2(u)?,
+                g2b: arbitrary_g2(u)?,
             }),
             _ => Ok(FuzzOperation::KeypairGeneration),
         }
@@ -623,6 +690,69 @@ fn fuzz(op: FuzzOperation) {
             if let Ok(decoded) = G2::read(&mut encoded.as_slice()) {
                 assert_eq!(point, decoded);
             }
+        }
+
+        FuzzOperation::G1MsmParallel { points, scalars } => {
+            let len = points.len().min(scalars.len());
+            if len > 0 {
+                let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+                let _ = G1::msm(&points[..len], &scalars[..len], &strategy);
+            }
+        }
+
+        FuzzOperation::G2MsmParallel { points, scalars } => {
+            let len = points.len().min(scalars.len());
+            if len > 0 {
+                let strategy = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+                let _ = G2::msm(&points[..len], &scalars[..len], &strategy);
+            }
+        }
+
+        FuzzOperation::ScalarConversions { seed, value, a, b } => {
+            let _ = Scalar::from(value);
+            let _ = Scalar::zero();
+            let small = SmallScalar::random(&mut StdRng::from_seed(seed));
+            let _ = Scalar::from(small);
+            let ord = a.cmp(&b);
+            assert_eq!(a < b, ord == core::cmp::Ordering::Less);
+            assert_eq!(ord, b.cmp(&a).reverse());
+            let mut set = HashSet::new();
+            set.insert(a);
+            set.insert(b);
+        }
+
+        FuzzOperation::ScalarFieldNtt { scalar } => {
+            let _ = Scalar::coset_shift();
+            let _ = Scalar::coset_shift_inv();
+            let _ = scalar.div_2();
+        }
+
+        FuzzOperation::SerializePrivate { private } => {
+            let mut encoded = Vec::new();
+            private.write(&mut encoded);
+            let decoded = Private::read(&mut encoded.as_slice()).expect("private decodes");
+            assert_eq!(private.expose_unwrap(), decoded.expose_unwrap());
+        }
+
+        FuzzOperation::SerializeShare { share } => {
+            let _ = format!("{share}");
+            let mut encoded = Vec::new();
+            share.write(&mut encoded);
+            assert_eq!(share.encode_size(), encoded.len());
+            let decoded = Share::read(&mut encoded.as_slice()).expect("share decodes");
+            assert_eq!(share, decoded);
+        }
+
+        FuzzOperation::PointSubtraction {
+            mut g1a,
+            g1b,
+            mut g2a,
+            g2b,
+        } => {
+            g1a -= &g1b;
+            let _ = g1a - &g1b;
+            g2a -= &g2b;
+            let _ = g2a - &g2b;
         }
     }
 }

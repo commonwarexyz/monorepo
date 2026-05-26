@@ -3,11 +3,8 @@
 mod common;
 
 use arbitrary::{Arbitrary, Unstructured};
-use common::{
-    arbitrary_ciphertext_minpk, arbitrary_ciphertext_minsig, arbitrary_minpk_signature,
-    arbitrary_minsig_signature,
-};
-use commonware_codec::ReadExt;
+use common::{arbitrary_minpk_signature, arbitrary_minsig_signature};
+use commonware_codec::{EncodeSize, ReadExt, Write};
 use commonware_cryptography::bls12381::{
     primitives::{
         group::Private,
@@ -134,11 +131,11 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             6 => Ok(FuzzOperation::DecryptArbitraryMinPk {
                 signature: arbitrary_minpk_signature(u)?,
-                ciphertext: arbitrary_ciphertext_minpk(u)?,
+                ciphertext: u.arbitrary()?,
             }),
             7 => Ok(FuzzOperation::DecryptArbitraryMinSig {
                 signature: arbitrary_minsig_signature(u)?,
-                ciphertext: arbitrary_ciphertext_minsig(u)?,
+                ciphertext: u.arbitrary()?,
             }),
             _ => unreachable!(),
         }
@@ -317,6 +314,13 @@ fn fuzz(op: FuzzOperation) {
             signature,
             ciphertext,
         } => {
+            let mut encoded = Vec::new();
+            ciphertext.write(&mut encoded);
+            assert_eq!(ciphertext.encode_size(), encoded.len());
+            assert_eq!(
+                Ciphertext::<MinPk>::read(&mut encoded.as_slice()).unwrap(),
+                ciphertext
+            );
             let _ = decrypt::<MinPk>(&signature, &ciphertext);
         }
 
@@ -324,6 +328,13 @@ fn fuzz(op: FuzzOperation) {
             signature,
             ciphertext,
         } => {
+            let mut encoded = Vec::new();
+            ciphertext.write(&mut encoded);
+            assert_eq!(ciphertext.encode_size(), encoded.len());
+            assert_eq!(
+                Ciphertext::<MinSig>::read(&mut encoded.as_slice()).unwrap(),
+                ciphertext
+            );
             let _ = decrypt::<MinSig>(&signature, &ciphertext);
         }
     }

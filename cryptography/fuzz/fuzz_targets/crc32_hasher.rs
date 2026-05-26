@@ -1,13 +1,15 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     crc32::{Crc32 as OurCrc32, Digest},
     Hasher,
 };
+use commonware_math::algebra::Random;
 use crc::{Crc, CRC_32_ISCSI};
 use libfuzzer_sys::fuzz_target;
+use rand::{rngs::StdRng, SeedableRng};
 
 /// Reference CRC32C implementation from the `crc` crate.
 const CRC32C_REF: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
@@ -28,6 +30,14 @@ enum Operation {
     DigestU32Roundtrip(Vec<u8>),
     /// Determinism and Debug/Display formatting.
     Determinism(Vec<Vec<u8>>),
+    /// Hasher `Clone` behavior.
+    CloneHasher(Vec<Vec<u8>>),
+    /// `Digest::arbitrary`, `From<[u8; 4]>`, `Deref`, and `Random`.
+    ArbitraryAndConvert {
+        data: Vec<u8>,
+        bytes: [u8; 4],
+        seed: u64,
+    },
 }
 
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
@@ -132,6 +142,40 @@ fn fuzz_determinism(chunks: &[Vec<u8>]) {
     assert_eq!(debug_str.len(), 8); // 4 bytes * 2 hex chars
 }
 
+fn fuzz_clone_hasher(chunks: &[Vec<u8>]) {
+    let mut hasher = OurCrc32::new();
+    for chunk in chunks {
+        hasher.update(chunk);
+    }
+    // `Clone` returns a fresh hasher; hashing the same data through the clone
+    // must match the reference checksum.
+    let mut cloned = hasher.clone();
+    let mut all = Vec::new();
+    for chunk in chunks {
+        all.extend_from_slice(chunk);
+        cloned.update(chunk);
+    }
+    assert_eq!(cloned.finalize().as_u32(), CRC32C_REF.checksum(&all));
+}
+
+fn fuzz_arbitrary_and_convert(data: &[u8], bytes: [u8; 4], seed: u64) {
+    let mut u = Unstructured::new(data);
+    if let Ok(digest) = Digest::arbitrary(&mut u) {
+        // Deref to `[u8]`.
+        assert_eq!(digest.len(), 4);
+        assert_eq!(&digest[..], digest.as_ref());
+    }
+
+    // `From<[u8; 4]>`.
+    let from_bytes = Digest::from(bytes);
+    assert_eq!(from_bytes.as_ref(), &bytes);
+
+    // `Random`.
+    let mut rng = StdRng::seed_from_u64(seed);
+    let random = Digest::random(&mut rng);
+    assert_eq!(random.len(), 4);
+}
+
 fuzz_target!(|op: Operation| {
     match op {
         Operation::BasicHashing(chunks) => fuzz_basic_hashing(&chunks),
@@ -141,5 +185,9 @@ fuzz_target!(|op: Operation| {
         Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
         Operation::DigestU32Roundtrip(data) => fuzz_digest_u32_roundtrip(&data),
         Operation::Determinism(chunks) => fuzz_determinism(&chunks),
+        Operation::CloneHasher(chunks) => fuzz_clone_hasher(&chunks),
+        Operation::ArbitraryAndConvert { data, bytes, seed } => {
+            fuzz_arbitrary_and_convert(&data, bytes, seed)
+        }
     }
 });

@@ -1528,6 +1528,7 @@ dependencies = [
  "num-rational",
  "p256 0.13.2",
  "rand 0.8.5",
+ "rand_core 0.6.4",
  "sha2 0.10.9",
  "zeroize",
 ]

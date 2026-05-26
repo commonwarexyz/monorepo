@@ -25,6 +25,7 @@ libfuzzer-sys.workspace = true
 num-rational.workspace = true
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
+rand_core.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 
@@ -80,6 +81,13 @@ bench = false
 [[bin]]
 name = "bls12381_batch_operations"
 path = "fuzz_targets/bls12381_batch_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_certificate_threshold"
+path = "fuzz_targets/bls12381_certificate_threshold.rs"
 test = false
 doc = false
 bench = false

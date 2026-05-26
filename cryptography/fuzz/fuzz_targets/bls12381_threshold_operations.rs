@@ -1,18 +1,18 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{ReadExt, Write};
+use commonware_codec::{Encode, Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Share, G1, G2},
     ops::threshold,
-    sharing::Sharing,
-    variant::{MinPk, MinSig, PartialSignature},
+    sharing::{ModeVersion, Sharing},
+    variant::{MinPk, MinSig, PartialSignature, Variant},
 };
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{N3f1, Participant};
 use libfuzzer_sys::fuzz_target;
 use rand::thread_rng;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 
 mod common;
 use common::{
@@ -107,11 +107,25 @@ enum FuzzOperation {
     SerializeShare {
         share: Share,
     },
+    BatchVerifyMinSig {
+        publics: Vec<G2>,
+        hms: Vec<G1>,
+        signatures: Vec<G1>,
+    },
+    SerializePartialSignature {
+        partial: PartialSignature<MinSig>,
+    },
+    SerializeSharing {
+        sharing: Sharing<MinSig>,
+    },
+    PrecomputeSharing {
+        sharing: Sharing<MinSig>,
+    },
 }
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=16)?;
+        let choice = u.int_in_range(0..=20)?;
 
         match choice {
             0 => Ok(FuzzOperation::SignProofOfPossessionMinPk {
@@ -220,6 +234,23 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             16 => Ok(FuzzOperation::SerializeShare {
                 share: arbitrary_share(u)?,
+            }),
+            17 => {
+                let count = u.int_in_range(0usize..=8)?;
+                Ok(FuzzOperation::BatchVerifyMinSig {
+                    publics: arbitrary_vec_g2(u, count, count)?,
+                    hms: arbitrary_vec_g1(u, count, count)?,
+                    signatures: arbitrary_vec_g1(u, count, count)?,
+                })
+            }
+            18 => Ok(FuzzOperation::SerializePartialSignature {
+                partial: u.arbitrary()?,
+            }),
+            19 => Ok(FuzzOperation::SerializeSharing {
+                sharing: u.arbitrary()?,
+            }),
+            20 => Ok(FuzzOperation::PrecomputeSharing {
+                sharing: u.arbitrary()?,
             }),
             _ => {
                 panic!("Unsupported operation type");
@@ -473,6 +504,39 @@ fn fuzz(op: FuzzOperation) {
             if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
                 assert_eq!(share, decoded);
             }
+        }
+
+        FuzzOperation::BatchVerifyMinSig {
+            publics,
+            hms,
+            signatures,
+        } => {
+            let _ =
+                MinSig::batch_verify(&mut thread_rng(), &publics, &hms, &signatures, &Sequential);
+        }
+
+        FuzzOperation::SerializePartialSignature { partial } => {
+            let mut encoded = Vec::new();
+            partial.write(&mut encoded);
+            let decoded =
+                PartialSignature::<MinSig>::read(&mut encoded.as_slice()).expect("partial decodes");
+            assert_eq!(partial, decoded);
+        }
+
+        FuzzOperation::SerializeSharing { sharing } => {
+            let encoded = sharing.encode();
+            let cfg = (NonZeroU32::new(100).unwrap(), ModeVersion::v1());
+            let decoded = Sharing::<MinSig>::read_cfg(&mut encoded.as_ref(), &cfg)
+                .expect("sharing roundtrips");
+            assert_eq!(sharing, decoded);
+            // v0 only supports the original mode; exercise the version gate.
+            let v0 = (NonZeroU32::new(100).unwrap(), ModeVersion::v0());
+            let _ = Sharing::<MinSig>::read_cfg(&mut encoded.as_ref(), &v0);
+        }
+
+        FuzzOperation::PrecomputeSharing { sharing } => {
+            sharing.precompute_partial_publics();
+            let _ = sharing.partial_public(Participant::new(0));
         }
     }
 }
