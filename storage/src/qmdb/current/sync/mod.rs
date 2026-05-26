@@ -129,11 +129,12 @@ impl<F: Graftable, D: Digest> From<db::CachedTarget<F, D>> for Target<F, D> {
 /// Resolver extension for `current` databases: query the server for a sync target whose
 /// canonical root appears in a set of trusted roots.
 ///
-/// The server's witness cache holds the last `witness_cache_size` committed targets plus
-/// the current target seeded at init. The client passes its recent trusted-root buffer
-/// (e.g., from consensus) and the server returns the first match, if any. Callers must
-/// still verify each returned target's witness against the trusted root before driving
-/// sync; the helper [`sync()`] in this module performs both checks.
+/// The server's witness cache holds up to `witness_cache_size` recent committed targets,
+/// including the init-seeded entry when the database is non-empty (the seed counts
+/// against capacity and may be evicted by later commits). The client passes its recent
+/// trusted-root buffer (e.g., from consensus) and the server returns the first match, if
+/// any. Callers must still verify each returned target's witness against the trusted
+/// root before driving sync; the helper [`sync()`] in this module performs both checks.
 pub trait CurrentResolver: qmdb_sync::Resolver
 where
     Self::Family: Graftable,

@@ -229,4 +229,107 @@ mod tests {
             other => panic!("unexpected message variant: {other:?}"),
         }
     }
+
+    /// `GetCurrentTargetForRootsRequest` round-trips through encode/decode and clamps
+    /// per the configured `MAX_TRUSTED_ROOTS` only on the network-resolver side; the wire
+    /// codec itself accepts up to `MAX_TRUSTED_ROOTS` entries and rejects more.
+    #[test]
+    fn test_get_current_target_for_roots_request_roundtrip() {
+        let request_id = Generator::new().next();
+        let roots: Vec<sha256::Digest> = (0..3)
+            .map(|i| sha256::Digest::from([i as u8 + 1; 32]))
+            .collect();
+        let message: wire::Message<keyless_compact::Operation, sha256::Digest> =
+            wire::Message::GetCurrentTargetForRootsRequest(wire::GetCurrentTargetForRootsRequest {
+                request_id,
+                trusted_roots: roots.clone(),
+            });
+
+        let encoded = message.encode().to_vec();
+        let decoded =
+            wire::Message::<keyless_compact::Operation, sha256::Digest>::decode(&encoded[..])
+                .expect("failed to decode");
+
+        match decoded {
+            wire::Message::GetCurrentTargetForRootsRequest(req) => {
+                assert_eq!(req.request_id, request_id);
+                assert_eq!(req.trusted_roots, roots);
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    /// `GetCurrentTargetForRootsResponse` round-trips both `None` (cache miss) and
+    /// `Some(target)` (cache hit). The strict Option decode is exercised by these paths.
+    #[test]
+    fn test_get_current_target_for_roots_response_roundtrip_none() {
+        let request_id = Generator::new().next();
+        let message: wire::Message<keyless_compact::Operation, sha256::Digest> =
+            wire::Message::GetCurrentTargetForRootsResponse(
+                wire::GetCurrentTargetForRootsResponse {
+                    request_id,
+                    target: None,
+                },
+            );
+
+        let encoded = message.encode().to_vec();
+        let decoded =
+            wire::Message::<keyless_compact::Operation, sha256::Digest>::decode(&encoded[..])
+                .expect("failed to decode None response");
+
+        match decoded {
+            wire::Message::GetCurrentTargetForRootsResponse(resp) => {
+                assert_eq!(resp.request_id, request_id);
+                assert!(resp.target.is_none());
+            }
+            other => panic!("unexpected message variant: {other:?}"),
+        }
+    }
+
+    /// The wire decode caps `trusted_roots` at `MAX_TRUSTED_ROOTS`. A request encoded with
+    /// more than the cap must be rejected at decode — which is why the network resolver
+    /// clamps its slice before sending (see `Resolver::get_current_target_for_roots`).
+    #[test]
+    fn test_get_current_target_for_roots_request_rejects_oversize() {
+        let request_id = Generator::new().next();
+        let roots: Vec<sha256::Digest> = (0..=wire::MAX_TRUSTED_ROOTS)
+            .map(|i| sha256::Digest::from([(i & 0xFF) as u8; 32]))
+            .collect();
+        assert_eq!(roots.len(), wire::MAX_TRUSTED_ROOTS + 1);
+
+        let message: wire::Message<keyless_compact::Operation, sha256::Digest> =
+            wire::Message::GetCurrentTargetForRootsRequest(wire::GetCurrentTargetForRootsRequest {
+                request_id,
+                trusted_roots: roots,
+            });
+
+        let encoded = message.encode().to_vec();
+        let result =
+            wire::Message::<keyless_compact::Operation, sha256::Digest>::decode(&encoded[..]);
+        assert!(
+            result.is_err(),
+            "wire decode must reject more than MAX_TRUSTED_ROOTS entries, got {result:?}"
+        );
+    }
+
+    /// The Option discriminant in `GetCurrentTargetForRootsResponse` must accept ONLY 0
+    /// and 1. Any other byte value is a malformed encoding and should produce
+    /// `CodecError::Invalid`, not be silently interpreted as `Some`.
+    #[test]
+    fn test_get_current_target_for_roots_response_rejects_invalid_option_discriminant() {
+        use commonware_codec::Write as _;
+        // Construct the response bytes manually: message tag (10) + request_id + an
+        // invalid Option discriminant (2). Strict decode must reject.
+        let request_id = Generator::new().next();
+        let mut framed = vec![10u8];
+        request_id.write(&mut framed);
+        2u8.write(&mut framed); // illegal Option discriminant
+
+        let result =
+            wire::Message::<keyless_compact::Operation, sha256::Digest>::decode(&framed[..]);
+        assert!(
+            matches!(result, Err(commonware_codec::Error::Invalid(_, _))),
+            "strict decode must reject Option discriminant != 0/1, got {result:?}"
+        );
+    }
 }

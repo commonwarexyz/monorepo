@@ -133,8 +133,8 @@ impl<E: Context> Metrics<E> {
 }
 
 /// A recent committed target: the four pieces a sync client needs to bridge a trusted
-/// canonical root to a verified ops root. Constructed at commit time when the witness
-/// components are already computed for the canonical root.
+/// canonical root to a verified ops root. Constructed whenever the database produces a
+/// canonical root — init (when non-empty), `apply_batch`, `rewind`, and the sync builder.
 #[derive(Clone, Debug)]
 pub struct CachedTarget<F: merkle::Graftable, D: Digest> {
     /// The canonical database root.
@@ -351,9 +351,10 @@ where
     /// or `None` if no cached entry matches.
     ///
     /// This is the server-side entrypoint for sync clients that hold trusted canonical roots
-    /// from consensus. The cache holds the last `witness_cache_size` committed targets, plus
-    /// the current target seeded at init. Callers must still verify each returned target's
-    /// witness against the trusted root before driving sync.
+    /// from consensus. The cache holds up to `witness_cache_size` recent committed targets,
+    /// including the init-seeded entry (when the database is non-empty). The init seed
+    /// counts against capacity and may be evicted by later commits. Callers must still
+    /// verify each returned target's witness against the trusted root before driving sync.
     pub fn cached_target(&self, trusted_roots: &[H::Digest]) -> Option<CachedTarget<F, H::Digest>> {
         self.witness_cache.lookup(trusted_roots)
     }
@@ -569,8 +570,11 @@ where
     /// Insert the current `(root, ops_root, witness)` triple into the witness cache, using
     /// the database's current `[sync_boundary, bounds.end)` as the target range.
     ///
-    /// No-op when the cache capacity is zero or the range would be empty (e.g. an empty
-    /// database before any commits).
+    /// No-op in either of two cases:
+    /// - The cache capacity is zero.
+    /// - The range would be empty (`sync_boundary == bounds.end`). This happens for a
+    ///   fresh database with no operations: there is nothing for a sync client to fetch,
+    ///   so no target is meaningful. The cache stays empty until the first commit.
     pub(crate) async fn cache_current_target(
         &mut self,
         ops_root: H::Digest,

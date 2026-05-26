@@ -240,6 +240,27 @@ where
     Ok(response)
 }
 
+/// Handle a `current` target-for-roots lookup. The DB cache is consulted synchronously
+/// (a hash-map probe over `request.trusted_roots`); the result is always `Ok(...)` — a
+/// cache miss is encoded as `Some(target: None)`, not a server error.
+async fn handle_get_current_target_for_roots<E>(
+    state: &State<current::Database<E>>,
+    request: wire::GetCurrentTargetForRootsRequest<Key>,
+) -> Result<wire::GetCurrentTargetForRootsResponse<Key>, Error>
+where
+    E: Storage + Clock + Metrics + Send + Sync + 'static,
+{
+    state.request_counter.inc();
+    let database = state.database.read().await;
+    let target =
+        current::current_target_for_roots(&*database, &request.trusted_roots).map(Into::into);
+    debug!(?target, "serving current target lookup");
+    Ok(wire::GetCurrentTargetForRootsResponse {
+        request_id: request.request_id,
+        target,
+    })
+}
+
 /// Handle a request for compact-sync target.
 async fn handle_get_compact_sync_target<DB>(
     state: &State<DB>,
@@ -438,19 +459,12 @@ where
                 wire::Message::GetSyncTargetResponse,
                 handle_get_sync_target::<current::Database<E>>(state, request)
             ),
-            wire::Message::GetCurrentTargetForRootsRequest(request) => {
-                state.request_counter.inc();
-                let database = state.database.read().await;
-                let target = current::current_target_for_roots(&*database, &request.trusted_roots)
-                    .map(Into::into);
-                debug!(?target, "serving current target lookup");
-                wire::Message::GetCurrentTargetForRootsResponse(
-                    wire::GetCurrentTargetForRootsResponse {
-                        request_id: request.request_id,
-                        target,
-                    },
-                )
-            }
+            wire::Message::GetCurrentTargetForRootsRequest(request) => dispatch_message!(
+                state,
+                request_id,
+                wire::Message::GetCurrentTargetForRootsResponse,
+                handle_get_current_target_for_roots::<E>(state, request)
+            ),
             _ => unexpected_message(state, request_id),
         }
     }

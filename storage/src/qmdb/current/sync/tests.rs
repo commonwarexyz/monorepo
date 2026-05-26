@@ -1463,8 +1463,11 @@ mod root_sync {
             let init_root = target_db.root();
             assert!(target_db.cached_target(&[init_root]).is_some());
 
-            // Apply enough distinct writes so multiple chunks complete and sync_boundary > 0.
-            // CHUNK_SIZE_BITS is N * 8 = 256 here.
+            // Apply enough operations so multiple bitmap chunks complete and the
+            // `sync_boundary` advances past zero. CHUNK_SIZE_BITS is `N * 8 = 256`, so
+            // ~400 commits is comfortably more than one full chunk. Keys cycle through
+            // 256 distinct u8 patterns (rounds 256..399 overwrite earlier keys) — fine
+            // for the test, which only cares about the operation count.
             for round in 0..400u64 {
                 let key = Digest::from([(round & 0xFF) as u8; 32]);
                 apply_round(&mut target_db, key, round).await;
