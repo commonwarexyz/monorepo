@@ -1,14 +1,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, Encode, EncodeSize};
+use commonware_codec::{error::Error as CodecError, Decode, Encode, EncodeSize};
 use commonware_cryptography::{sha256::Sha256, BloomFilter};
 use commonware_utils::rational::BigRationalExt;
 use libfuzzer_sys::fuzz_target;
 use num_rational::BigRational;
 use std::{
     collections::HashSet,
-    num::{NonZeroU16, NonZeroU8, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroU8, NonZeroUsize},
 };
 
 #[derive(Arbitrary, Debug)]
@@ -18,6 +18,10 @@ enum Op {
     Encode(Vec<u8>),
     DecodeCfg(Vec<u8>, NonZeroU8, NonZeroU16),
     EncodeSize,
+    EstimatedFalsePositiveRate,
+    EstimatedCount,
+    OptimalHashers(u16, u16),
+    DecodeWiderBits,
 }
 
 #[derive(Debug)]
@@ -31,29 +35,34 @@ enum Constructor {
         fp_numerator: u64,
         fp_denominator: u64,
     },
+    Arbitrary(BloomFilter<Sha256>),
 }
 
 impl<'a> Arbitrary<'a> for Constructor {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        if u.arbitrary::<bool>()? {
-            let hashers = u.arbitrary()?;
-            // Fallback to highest power of two in u16 on overflow
-            let bits = u
-                .arbitrary::<u16>()?
-                .checked_next_power_of_two()
-                .and_then(NonZeroU16::new)
-                .unwrap_or(NonZeroU16::new(1 << 15).unwrap());
-            Ok(Constructor::New { hashers, bits })
-        } else {
-            let expected_items = u.arbitrary::<NonZeroU16>()?;
-            // Generate FP rate as rational: numerator in [1, denominator-1] to ensure (0, 1)
-            let fp_denominator = u.int_in_range(2u64..=10_000)?;
-            let fp_numerator = u.int_in_range(1u64..=fp_denominator - 1)?;
-            Ok(Constructor::WithRate {
-                expected_items,
-                fp_numerator,
-                fp_denominator,
-            })
+        match u.int_in_range(0u8..=2)? {
+            0 => {
+                let hashers = u.arbitrary()?;
+                // Fallback to highest power of two in u16 on overflow
+                let bits = u
+                    .arbitrary::<u16>()?
+                    .checked_next_power_of_two()
+                    .and_then(NonZeroU16::new)
+                    .unwrap_or(NonZeroU16::new(1 << 15).unwrap());
+                Ok(Constructor::New { hashers, bits })
+            }
+            1 => {
+                let expected_items = u.arbitrary::<NonZeroU16>()?;
+                // Generate FP rate as rational: numerator in [1, denominator-1] to ensure (0, 1)
+                let fp_denominator = u.int_in_range(2u64..=10_000)?;
+                let fp_numerator = u.int_in_range(1u64..=fp_denominator - 1)?;
+                Ok(Constructor::WithRate {
+                    expected_items,
+                    fp_numerator,
+                    fp_denominator,
+                })
+            }
+            _ => Ok(Constructor::Arbitrary(BloomFilter::<Sha256>::arbitrary(u)?)),
         }
     }
 }
@@ -91,6 +100,7 @@ fn fuzz(input: FuzzInput) {
                 fp_rate,
             )
         }
+        Constructor::Arbitrary(bf) => bf,
     };
 
     let cfg = (bf.hashers(), bf.bits().try_into().unwrap());
@@ -136,6 +146,37 @@ fn fuzz(input: FuzzInput) {
                 assert_eq!(bf, decoded);
 
                 assert_eq!(decoded.encode_size(), size1);
+            }
+            Op::EstimatedFalsePositiveRate => {
+                let rate = bf.estimated_false_positive_rate();
+                assert!(
+                    rate >= BigRational::from_frac_u64(0, 1)
+                        && rate <= BigRational::from_frac_u64(1, 1)
+                );
+            }
+            Op::EstimatedCount => {
+                let count = bf.estimated_count();
+                assert!(count >= BigRational::from_frac_u64(0, 1));
+            }
+            Op::OptimalHashers(expected_items, bits) => {
+                let k =
+                    BloomFilter::<Sha256>::optimal_hashers(expected_items as usize, bits as usize);
+                assert!((1..=16).contains(&k));
+            }
+            Op::DecodeWiderBits => {
+                // Decoding with a valid (power-of-two) bit count larger than the encoded
+                // bitmap must be rejected as a length mismatch.
+                if let Some(wider) = cfg.1.get().checked_mul(2).and_then(NonZeroU64::new) {
+                    let encoded = bf.encode();
+                    let res = BloomFilter::<Sha256>::decode_cfg(encoded, &(cfg.0, wider));
+                    assert!(matches!(
+                        res,
+                        Err(CodecError::Invalid(
+                            "BloomFilter",
+                            "bitmap length doesn't match config"
+                        ))
+                    ));
+                }
             }
         }
     }
