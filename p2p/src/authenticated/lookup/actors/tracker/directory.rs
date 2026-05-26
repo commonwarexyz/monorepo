@@ -486,6 +486,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
+    /// Queue a live peer for teardown if it lost eligibility, then delete inert records.
+    ///
+    /// Reserved or active peers cannot be deleted until their reservation is released, so callers
+    /// must kill the peer actor before attempting record cleanup.
     fn queue_if_ineligible(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
         if self
             .peers
@@ -494,9 +498,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         {
             kill_peers.push(peer.clone());
         }
-
-        // Only reserved or active peers are queued for teardown. Inactive records have no peer
-        // actor to kill, so delete them if they are otherwise unreferenced.
         self.delete_if_needed(peer);
     }
 
