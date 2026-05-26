@@ -325,7 +325,9 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        drop(mailbox.get(digest).await);
+                        if let Some(message) = mailbox.get(digest).await {
+                            assert_eq!(message.digest(), digest);
+                        }
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {
