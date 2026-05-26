@@ -3,6 +3,7 @@
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Runner, Spawner, Supervisor as _};
 use commonware_stream::encrypted::{dial, listen, Config};
+use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
@@ -146,8 +147,7 @@ fn fuzz(input: FuzzInput) {
             // Drive send and recv concurrently so the mock channel's
             // backpressure is satisfied while sending messages larger than that
             // buffer.
-            let (sent, received) =
-                futures::join!(dialer_sender.send(msg.clone()), listener_receiver.recv());
+            let (sent, received) = join!(dialer_sender.send(msg.clone()), listener_receiver.recv());
             sent.unwrap();
             let received = received.unwrap();
 
@@ -161,8 +161,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             // Drive send and recv concurrently (same as above).
-            let (sent, received) =
-                futures::join!(listener_sender.send(msg.clone()), dialer_receiver.recv());
+            let (sent, received) = join!(listener_sender.send(msg.clone()), dialer_receiver.recv());
             sent.unwrap();
             let received = received.unwrap();
 
