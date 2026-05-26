@@ -7,6 +7,8 @@ pub mod byzzfuzz;
 pub mod disrupter;
 pub mod id_mock;
 pub mod invariants;
+#[cfg(feature = "mocks")]
+pub mod marshal;
 pub mod network;
 #[cfg(feature = "mocks")]
 pub mod ordered_broadcast;
@@ -79,6 +81,10 @@ const FUZZ_LOG_ENV: &str = "CONSENSUS_FUZZ_LOG";
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+/// Index of the byzantine validator in `participants`. Single source of truth
+/// for the fixed byzantine identity used by the ByzzFuzz and marshal multi-node
+/// models (sender selection, injector key, invariant/liveness exclusion).
+pub(crate) const BYZANTINE_IDX: usize = 0;
 pub(crate) const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 1;
@@ -91,6 +97,14 @@ const MAX_REQUIRED_CONTAINERS: u64 = 30;
 pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
 pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
 pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
+/// Bounded pre-GST fault phase: how long network faults stay active before a
+/// run that has not already finished is given a GST transition. Shared by the
+/// ByzzFuzz runner and the marshal multi-node liveness runner.
+pub(crate) const FAULT_PHASE: Duration = Duration::from_secs(30);
+/// Bounded post-GST window: how long honest nodes have to recover once the
+/// network heals (process/byzantine faults stay active). Shared by the ByzzFuzz
+/// runner and the marshal multi-node liveness runner.
+pub(crate) const POST_GST_WINDOW: Duration = Duration::from_secs(360);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
@@ -423,7 +437,8 @@ pub(crate) async fn setup_network<P: simplex::Simplex>(
     (oracle, participants, schemes, registrations)
 }
 
-/// Start a Disrupter with the given strategy and network channels.
+/// Start a Disrupter with the given strategy and network channels, using the
+/// harness-wide [`EPOCH`] for emitted messages.
 fn start_disrupter<P: simplex::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
@@ -442,12 +457,48 @@ fn start_disrupter<P: simplex::Simplex>(
         impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) {
+    start_disrupter_with_epoch::<P>(
+        context,
+        scheme,
+        strategy,
+        required_containers,
+        Epoch::new(EPOCH),
+        vote_network,
+        certificate_network,
+        resolver_network,
+    );
+}
+
+/// Like [`start_disrupter`] but stamps emitted byzantine messages with `epoch`.
+/// The marshal liveness target passes `Epoch::zero()` so the disrupter shares
+/// the epoch its honest engines run in (making it an in-epoch adversary rather
+/// than wrong-epoch noise).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_disrupter_with_epoch<P: simplex::Simplex>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    strategy: &StrategyChoice,
+    required_containers: u64,
+    epoch: Epoch,
+    vote_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    certificate_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+    resolver_network: (
+        impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
+        impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
+    ),
+) {
     match *strategy {
         StrategyChoice::SmallScope {
             fault_rounds,
             fault_rounds_bound,
         } => {
-            let disrupter = Disrupter::new(
+            let disrupter = Disrupter::new_with_epoch(
                 context,
                 scheme,
                 SmallScope {
@@ -455,18 +506,20 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds_bound,
                 },
                 required_containers,
+                epoch,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::AnyScope => {
-            let disrupter = Disrupter::new(context, scheme, AnyScope, required_containers);
+            let disrupter =
+                Disrupter::new_with_epoch(context, scheme, AnyScope, required_containers, epoch);
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::FutureScope {
             fault_rounds,
             fault_rounds_bound,
         } => {
-            let disrupter = Disrupter::new(
+            let disrupter = Disrupter::new_with_epoch(
                 context,
                 scheme,
                 FutureScope {
@@ -474,6 +527,7 @@ fn start_disrupter<P: simplex::Simplex>(
                     fault_rounds_bound,
                 },
                 required_containers,
+                epoch,
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }

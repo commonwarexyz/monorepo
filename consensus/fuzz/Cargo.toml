@@ -20,7 +20,9 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
+commonware-broadcast.workspace = true
 commonware-codec.workspace = true
+commonware-coding.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-macros.workspace = true
@@ -359,6 +361,34 @@ bench = false
 [[bin]]
 name = "aggregation_cert_mock"
 path = "fuzz_targets/aggregation_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_standard"
+path = "fuzz_targets/marshal_standard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_coding"
+path = "fuzz_targets/marshal_coding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_liveness_standard"
+path = "fuzz_targets/marshal_liveness_standard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_liveness_coding"
+path = "fuzz_targets/marshal_liveness_coding.rs"
 test = false
 doc = false
 bench = false
