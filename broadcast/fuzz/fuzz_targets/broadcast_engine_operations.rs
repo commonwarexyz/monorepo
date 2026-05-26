@@ -12,11 +12,17 @@ use commonware_cryptography::{
     Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
+use commonware_runtime::{
+    deterministic, Buf, BufMut, Clock, Quota, Runner, Spawner, Supervisor as _,
+};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroU32,
+    time::Duration,
+};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -26,6 +32,12 @@ const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 /// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
 /// and can only represent durations up to ~584 years.
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
+
+/// Maximum number of recently broadcast digests tracked for `Recent` lookups.
+///
+/// Indexed by `u8` modulo length, so a larger buffer would leave entries past 255
+/// unreachable via `DigestSource::Recent`.
+const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -72,6 +84,27 @@ impl commonware_codec::Read for FuzzMessage {
     }
 }
 
+/// Source for the digest used by `Subscribe`/`Get` actions.
+#[derive(Clone, Debug, Arbitrary)]
+enum DigestSource {
+    /// A random message.
+    Random(FuzzMessage),
+    /// Index into messages broadcast earlier in this run.
+    Recent(u8),
+}
+
+impl DigestSource {
+    /// Resolve to a concrete digest. Returns `None` when `Recent` is selected
+    /// before any messages have been broadcast.
+    fn resolve(self, recent: &VecDeque<Digest>) -> Option<Digest> {
+        match self {
+            DigestSource::Random(message) => Some(message.digest()),
+            DigestSource::Recent(_) if recent.is_empty() => None,
+            DigestSource::Recent(idx) => Some(recent[(idx as usize) % recent.len()]),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum BroadcastAction {
     SendMessage {
@@ -81,11 +114,11 @@ enum BroadcastAction {
     },
     Subscribe {
         peer_index: usize,
-        digest: Digest,
+        source: DigestSource,
     },
     Get {
         peer_index: usize,
-        digest: Digest,
+        source: DigestSource,
     },
     Sleep {
         duration_ms: u64,
@@ -103,11 +136,11 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
             }),
             1 => Ok(BroadcastAction::Subscribe {
                 peer_index: u.arbitrary()?,
-                digest: u.arbitrary()?,
+                source: u.arbitrary()?,
             }),
             2 => Ok(BroadcastAction::Get {
                 peer_index: u.arbitrary()?,
-                digest: u.arbitrary()?,
+                source: u.arbitrary()?,
             }),
             _ => Ok(BroadcastAction::Sleep {
                 duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION_MS)?,
@@ -237,6 +270,7 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Execute fuzzed actions
+        let mut recent_digests: VecDeque<Digest> = VecDeque::with_capacity(MAX_RECENT_DIGESTS);
         for action in input.actions {
             match action {
                 BroadcastAction::SendMessage {
@@ -249,18 +283,34 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
+                        if recent_digests.len() == MAX_RECENT_DIGESTS {
+                            recent_digests.pop_front();
+                        }
+                        recent_digests.push_back(message.digest());
                         let _ = mailbox.broadcast(resolved_recipients, message);
                     }
                 }
-                BroadcastAction::Subscribe { peer_index, digest } => {
+                BroadcastAction::Subscribe { peer_index, source } => {
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        drop(mailbox.subscribe(digest).await);
+                        // Spawn the await so the responder stays live and the
+                        // engine actually wakes it when a matching message
+                        // arrives.
+                        let receiver = mailbox.subscribe(digest);
+                        context.child("subscriber").spawn(|_| async move {
+                            let _ = receiver.await;
+                        });
                     }
                 }
-                BroadcastAction::Get { peer_index, digest } => {
+                BroadcastAction::Get { peer_index, source } => {
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
