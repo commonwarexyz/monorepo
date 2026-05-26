@@ -12,7 +12,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt as dkg,
         primitives::variant::{MinPk, MinSig, Variant},
     },
-    certificate::{Scheme as _, Subject},
+    certificate::{Attestation, ConstantProvider, Provider, Scheme as CertScheme, Signers, Subject},
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     impl_certificate_bls12381_threshold,
     sha256::Digest as Sha256Digest,
@@ -23,17 +23,18 @@ use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, Faults, N3f1, Participant, TryCollect};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
-use std::{collections::BTreeSet, num::NonZeroU32};
+use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc};
 
 const NAMESPACE: &[u8] = b"fuzz-bls12381-threshold-certificate";
 
-/// Subject type for the generated scheme. Mirrors the test fixture in the module.
-#[derive(Clone, Debug)]
-pub struct TestSubject {
-    message: Bytes,
+/// Subject type for the generated scheme. Borrows its message so it can be `Copy`
+/// (required by `verify_certificates_bisect`).
+#[derive(Clone, Copy, Debug)]
+pub struct TestSubject<'a> {
+    message: &'a [u8],
 }
 
-impl Subject for TestSubject {
+impl Subject for TestSubject<'_> {
     type Namespace = Vec<u8>;
 
     fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
@@ -41,11 +42,28 @@ impl Subject for TestSubject {
     }
 
     fn message(&self) -> Bytes {
-        self.message.clone()
+        Bytes::copy_from_slice(self.message)
     }
 }
 
-impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>);
+impl_certificate_bls12381_threshold!(TestSubject<'a>, Vec<u8>);
+
+fn subject(message: &[u8]) -> TestSubject<'_> {
+    TestSubject { message }
+}
+
+/// A [`Provider`] that only implements `scoped`, exercising the default `all` (returns `None`).
+#[derive(Clone)]
+struct DefaultAllProvider<S: CertScheme>(Arc<S>);
+
+impl<S: CertScheme> Provider for DefaultAllProvider<S> {
+    type Scope = ();
+    type Scheme = S;
+
+    fn scoped(&self, _: ()) -> Option<Arc<S>> {
+        Some(self.0.clone())
+    }
+}
 
 #[derive(Arbitrary, Debug)]
 enum Op {
@@ -72,7 +90,9 @@ enum Op {
         corrupt: bool,
     },
     VerifyStoredCertificates,
+    BisectStoredCertificates,
     ArbitraryCertificate(Vec<u8>),
+    CertificateHelpers(Vec<u8>),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -144,11 +164,8 @@ where
     for op in ops {
         match op {
             Op::Sign { signer, message } => {
-                let subject = TestSubject {
-                    message: Bytes::copy_from_slice(message),
-                };
                 assert!(signers[*signer as usize % n]
-                    .sign::<Sha256Digest>(subject)
+                    .sign::<Sha256Digest>(subject(message))
                     .is_some());
             }
             Op::VerifyAttestation {
@@ -156,11 +173,8 @@ where
                 message,
                 corrupt,
             } => {
-                let subject = TestSubject {
-                    message: Bytes::copy_from_slice(message),
-                };
                 let Some(attestation) =
-                    signers[*signer as usize % n].sign::<Sha256Digest>(subject.clone())
+                    signers[*signer as usize % n].sign::<Sha256Digest>(subject(message))
                 else {
                     continue;
                 };
@@ -169,14 +183,14 @@ where
                     bad.signer = Participant::new(u32::MAX);
                     let _ = verifier.verify_attestation::<_, Sha256Digest>(
                         &mut rng,
-                        subject,
+                        subject(message),
                         &bad,
                         &Sequential,
                     );
                 } else {
                     assert!(verifier.verify_attestation::<_, Sha256Digest>(
                         &mut rng,
-                        subject,
+                        subject(message),
                         &attestation,
                         &Sequential,
                     ));
@@ -187,12 +201,9 @@ where
                 message,
                 corrupt,
             } => {
-                let subject = TestSubject {
-                    message: Bytes::copy_from_slice(message),
-                };
                 let mut attestations: Vec<_> = distinct_indices(selection, n)
                     .into_iter()
-                    .filter_map(|i| signers[i].sign::<Sha256Digest>(subject.clone()))
+                    .filter_map(|i| signers[i].sign::<Sha256Digest>(subject(message)))
                     .collect();
                 if attestations.is_empty() {
                     continue;
@@ -202,7 +213,7 @@ where
                 }
                 let result = verifier.verify_attestations::<_, Sha256Digest, _>(
                     &mut rng,
-                    subject,
+                    subject(message),
                     attestations.clone(),
                     &Sequential,
                 );
@@ -215,12 +226,9 @@ where
                 signers: selection,
                 message,
             } => {
-                let subject = TestSubject {
-                    message: Bytes::copy_from_slice(message),
-                };
                 let mut attestations: Vec<_> = distinct_indices(selection, n)
                     .into_iter()
-                    .filter_map(|i| signers[i].sign::<Sha256Digest>(subject.clone()))
+                    .filter_map(|i| signers[i].sign::<Sha256Digest>(subject(message)))
                     .collect();
                 if attestations.len() < quorum {
                     assert!(signers[0]
@@ -234,7 +242,7 @@ where
                         .expect("quorum-valid attestations assemble");
                     assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
                         &mut rng,
-                        subject,
+                        subject(message),
                         &certificate,
                         &Sequential,
                     ));
@@ -249,49 +257,67 @@ where
                     continue;
                 }
                 let (message, certificate) = &certs[*which as usize % certs.len()];
-                let subject = TestSubject {
-                    message: Bytes::copy_from_slice(message),
-                };
                 if *corrupt {
                     let bad = Certificate::<V>::new(V::Signature::zero());
                     let _ = cert_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
                         &mut rng,
-                        subject,
+                        subject(message),
                         &bad,
                         &Sequential,
                     );
                 } else {
                     assert!(verifier.verify_certificate::<_, Sha256Digest, N3f1>(
                         &mut rng,
-                        subject.clone(),
+                        subject(message),
                         certificate,
                         &Sequential,
                     ));
                     assert!(cert_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
                         &mut rng,
-                        subject,
+                        subject(message),
                         certificate,
                         &Sequential,
                     ));
                 }
             }
             Op::VerifyStoredCertificates => {
-                let items: Vec<(TestSubject, &Certificate<V>)> = certs
+                let items: Vec<(TestSubject<'_>, &Certificate<V>)> = certs
                     .iter()
-                    .map(|(message, certificate)| {
-                        (
-                            TestSubject {
-                                message: Bytes::copy_from_slice(message),
-                            },
-                            certificate,
-                        )
-                    })
+                    .map(|(message, certificate)| (subject(message), certificate))
                     .collect();
                 assert!(verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
                     &mut rng,
                     items.into_iter(),
                     &Sequential,
                 ));
+            }
+            Op::BisectStoredCertificates => {
+                // Empty input exercises the length-zero early return.
+                let none: Vec<(TestSubject<'_>, &Certificate<V>)> = Vec::new();
+                assert!(verifier
+                    .verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+                        &mut rng,
+                        &none,
+                        &Sequential
+                    )
+                    .is_empty());
+
+                // Valid stored certificates plus one corrupt entry drive both the
+                // batch-pass fill and the bisection split/singleton-fail paths.
+                let bad = Certificate::<V>::new(V::Signature::zero());
+                let mut items: Vec<(TestSubject<'_>, &Certificate<V>)> = certs
+                    .iter()
+                    .map(|(message, certificate)| (subject(message), certificate))
+                    .collect();
+                items.push((subject(b"corrupt"), &bad));
+                let verified = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+                    &mut rng,
+                    &items,
+                    &Sequential,
+                );
+                assert_eq!(verified.len(), certs.len() + 1);
+                assert!(verified[..certs.len()].iter().all(|&v| v));
+                assert!(!verified[certs.len()]);
             }
             Op::ArbitraryCertificate(data) => {
                 let mut u = Unstructured::new(data);
@@ -301,16 +327,39 @@ where
                     let decoded =
                         Certificate::<V>::decode(encoded).expect("certificate roundtrips");
                     assert_eq!(decoded, certificate);
-                    let subject = TestSubject {
-                        message: Bytes::from_static(b"arbitrary"),
-                    };
                     let _ = cert_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
                         &mut rng,
-                        subject,
+                        subject(b"arbitrary"),
                         &certificate,
                         &Sequential,
                     );
                 }
+            }
+            Op::CertificateHelpers(data) => {
+                let mut u = Unstructured::new(data);
+
+                // `Attestation::arbitrary`.
+                if let Ok(attestation) =
+                    u.arbitrary::<Attestation<Scheme<ed25519::PublicKey, V>>>()
+                {
+                    let _ = (attestation.signer, attestation.signature.get().is_some());
+                }
+
+                // `Signers::arbitrary` and its accessors.
+                if let Ok(signers) = u.arbitrary::<Signers>() {
+                    assert_eq!(signers.iter().count(), signers.count());
+                    assert!(signers.count() <= signers.len());
+                }
+
+                // `Provider` implementations: `ConstantProvider` overrides `all`,
+                // `DefaultAllProvider` uses the default `all` (returns `None`).
+                let constant =
+                    ConstantProvider::<Scheme<ed25519::PublicKey, V>>::new(verifier.clone());
+                assert!(constant.scoped(()).is_some());
+                assert!(constant.all().is_some());
+                let default_all = DefaultAllProvider(Arc::new(verifier.clone()));
+                assert!(default_all.scoped(()).is_some());
+                assert!(default_all.all().is_none());
             }
         }
     }
