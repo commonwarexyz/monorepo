@@ -128,15 +128,22 @@ pub fn check_redelivery_after_restart(
 
 /// Invariant: digest fidelity.
 ///
-/// Every block surfaced in `application.blocks()` must match the
-/// canonical chain digest at its height. Re-emits after restart
-/// overwrite the prior `BTreeMap` entry, so the latest delivery at each
-/// height is the one we compare against canonical.
+/// Every finalized block surfaced in `application.blocks()` must match the
+/// canonical chain digest at its height. The height-0 genesis floor block
+/// (which marshal surfaces on a fresh start) is intentionally skipped: it is
+/// not part of the canonical chain, which is indexed from height 1. Re-emits
+/// after restart overwrite the prior `BTreeMap` entry, so the latest delivery
+/// at each height is the one we compare against canonical.
 pub fn check_digest_fidelity<H: TestHarness>(
     application_blocks: &BTreeMap<Height, H::ApplicationBlock>,
     canonical: &[H::TestBlock],
 ) {
     for (height, block) in application_blocks.iter() {
+        // Height 0 is the genesis floor block, not part of the canonical chain
+        // (which is indexed from height 1); marshal surfaces it on a fresh start.
+        if height.get() == 0 {
+            continue;
+        }
         let canonical_block = &canonical[(height.get() - 1) as usize];
         assert_eq!(
             block.digest(),

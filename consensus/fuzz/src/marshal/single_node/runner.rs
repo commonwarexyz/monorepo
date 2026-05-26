@@ -28,8 +28,6 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
     certificate::{mocks::Fixture, ConstantProvider},
-    sha256::Sha256,
-    Hasher as _,
 };
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
 use commonware_utils::{FuzzRng, NZUsize};
@@ -113,10 +111,14 @@ where
         };
 
         // Canonical chain: every block fed to marshal is drawn from here.
+        // Seed the parent from the same genesis block the actor is started with
+        // (`Start::Genesis`), so height 1 links to the real genesis digest and
+        // the live standard/coding ancestry checks accept the chain.
         let num_participants = participants.len() as u16;
         let mut canonical = Vec::with_capacity(NUM_BLOCKS as usize);
-        let mut parent_digest = Sha256::hash(b"");
-        let mut parent_commitment = H::genesis_parent_commitment(num_participants);
+        let genesis = H::genesis_block(num_participants);
+        let mut parent_digest = H::digest(&genesis);
+        let mut parent_commitment = H::commitment(&genesis);
         for h in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
                 parent_digest,
@@ -136,11 +138,17 @@ where
         //   (via Propose / Verify / Certify, or via delivery on a
         //   ready_prefix advance). Survives restart.
         // - `variant_available`: blocks confirmed in the in-memory
-        //   variant cache via PublishViaVariant. Cleared on Restart.
+        //   variant cache via PublishViaVariant. Cleared on Restart, and
+        //   FIFO-evicted per the variant's `VariantPublish::CACHE_CAPACITY` to
+        //   mirror a bounded broadcast cache (otherwise the shadow would think
+        //   an evicted block is still repairable and assert a delivery that
+        //   cannot happen).
         // - `finalized_anchors`: heights at which marshal has stored
         //   a usable finalization. Survives restart.
         let mut durable_available: HashSet<u64> = HashSet::new();
         let mut variant_available: HashSet<u64> = HashSet::new();
+        // Publish order backing `variant_available`'s FIFO eviction.
+        let mut variant_order: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
         let mut finalized_anchors: HashSet<u64> = HashSet::new();
         // ready_prefix is monotone non-decreasing. It advances when
         // an anchor's chain becomes complete (chain-walk repair).
@@ -259,16 +267,34 @@ where
                     // before we ask whether it landed locally.
                     context.sleep(EVENT_SETTLE).await;
                     if handle.extra.locally_available(block).await {
-                        // Variant cache is in-memory only; cleared on
-                        // Restart.
-                        variant_available.insert(height.get());
+                        // Variant cache is in-memory only; cleared on Restart.
+                        let h = height.get();
+                        variant_available.insert(h);
+                        // Mirror the variant engine's cache bound. A fixed-size
+                        // FIFO (buffered engine) refreshes a re-published entry
+                        // and evicts the oldest past capacity; an unbounded
+                        // cache (shards engine, `None`) keeps every publish.
+                        if let Some(capacity) =
+                            <H::ValidatorExtra as VariantPublish<H::TestBlock>>::CACHE_CAPACITY
+                        {
+                            variant_order.retain(|&x| x != h);
+                            variant_order.push_back(h);
+                            while variant_order.len() > capacity {
+                                if let Some(evicted) = variant_order.pop_front() {
+                                    variant_available.remove(&evicted);
+                                }
+                            }
+                        }
                     }
                 }
                 MarshalEvent::AckNext => {
                     if let Some(height) = application.acknowledge_next() {
                         if stale_to_skip > 0 {
                             stale_to_skip -= 1;
-                        } else {
+                        } else if height.get() != 0 {
+                            // Height 0 is the genesis floor block marshal
+                            // surfaces on a fresh start; it is not a finalized
+                            // container, so it is not recorded or validated.
                             delivery_log.push(height);
                             // Marshal persists processed_height in
                             // its metadata as each ack returns.
@@ -301,15 +327,22 @@ where
                     // state retains them as unprocessed and the new
                     // instance must redeliver.
                     let pending_now = application.pending_ack_heights();
-                    for h in &pending_now {
+                    // All pending entries (including a genesis floor block) are
+                    // orphaned once this actor dies, so the next instance's
+                    // acks must skip every one of them.
+                    let stale_count = pending_now.len();
+                    // Only real finalized containers (height > 0) participate
+                    // in the segment ordering and redelivery checks.
+                    let pending_real: Vec<Height> =
+                        pending_now.into_iter().filter(|h| h.get() != 0).collect();
+                    for h in &pending_real {
                         delivery_log.push(*h);
                     }
-                    let pending_count = pending_now.len();
-                    expected_redeliveries.push(pending_now);
+                    expected_redeliveries.push(pending_real);
                     // The pending entries are now in delivery_log;
                     // mark them stale so the next pop doesn't
                     // re-record them.
-                    stale_to_skip = pending_count;
+                    stale_to_skip = stale_count;
 
                     segment_bounds.push(delivery_log.len());
 
@@ -337,6 +370,7 @@ where
                     // via the prior variant publish is no longer
                     // visible to marshal.
                     variant_available.clear();
+                    variant_order.clear();
                     // Marshal's processed_height for the new instance
                     // comes from its persistent metadata, which
                     // setup.height reflects. Pending deliveries that
@@ -387,7 +421,8 @@ where
         while let Some(height) = application.acknowledge_next() {
             if stale_to_skip > 0 {
                 stale_to_skip -= 1;
-            } else {
+            } else if height.get() != 0 {
+                // Skip the genesis floor block (height 0); see AckNext.
                 delivery_log.push(height);
                 processed_height = processed_height.max(height.get());
             }

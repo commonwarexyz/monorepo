@@ -9,9 +9,10 @@
 //! # Invariants checked
 //!
 //! - **In-order delivery, no gaps within a marshal instance.** Within each
-//!   actor lifetime (segment between restarts), the first delivery is
-//!   `setup.height + 1` and subsequent deliveries advance strictly by one.
-//!   Marshal documents this guarantee on `Update::Block`.
+//!   actor lifetime (segment between restarts), the first validated delivery
+//!   is `setup.height + 1` and subsequent deliveries advance strictly by one;
+//!   the height-0 genesis floor block surfaced on a fresh start is filtered
+//!   out. Marshal documents this guarantee on `Update::Block`.
 //! - **Ready-prefix delivery (anchor-based, chain-aware repair).**
 //!   When a `ReportFinalization` at height `h` arrives while block
 //!   `h` is locally available (durable or variant), marshal stores a
@@ -57,8 +58,10 @@
 //! - **At-least-once across restart.** Heights pending ack at the moment
 //!   of restart are tracked. The new actor instance must redeliver each
 //!   of them at least once before the run ends.
-//! - **Digest fidelity.** Every block surfaced in `application.blocks()`
-//!   must match the canonical chain digest at its height.
+//! - **Digest fidelity.** Every finalized block surfaced in
+//!   `application.blocks()` must match the canonical chain digest at its
+//!   height. The height-0 genesis floor block (surfaced on a fresh start) is
+//!   skipped: it is not part of the canonical chain, which starts at height 1.
 //! - **Durability acks.** `H::propose`/`H::verify`/`H::certify` return
 //!   `true` on durable persist; `false` surfaces an actor-died panic.
 //!

@@ -9,8 +9,9 @@
 //!   restarts) and asserting per-actor delivery invariants.
 //! - [`multi_node`]: runs a live `N4F1C3` cluster (three honest validators
 //!   plus one byzantine `Disrupter`) wired to real simplex consensus, and
-//!   checks marshal liveness (every honest node delivers `required_containers`
-//!   ordered finalized blocks) plus cross-node agreement.
+//!   checks marshal liveness (every honest node delivers a target number of
+//!   ordered finalized blocks, derived from `required_containers` clamped to a
+//!   single-epoch bound) plus cross-node agreement.
 
 pub mod multi_node;
 pub mod single_node;

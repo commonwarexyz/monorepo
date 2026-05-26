@@ -22,8 +22,9 @@ pub enum MarshalEvent {
     /// broadcast engine for Standard, shards engine for Coding) without
     /// going through marshal's mailbox.
     PublishViaVariant { block_idx: u8 },
-    /// Release one pending application ack, recording the popped height
-    /// as a delivery observation.
+    /// Release one pending application ack. The popped height is recorded as a
+    /// delivery observation unless it is a stale pre-restart entry or the
+    /// height-0 genesis floor block, which are skipped.
     AckNext,
     /// Abort the marshal actor and re-initialize from the same on-disk
     /// state. Pending acks at the moment of restart are NOT signaled,

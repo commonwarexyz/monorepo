@@ -24,6 +24,15 @@ use commonware_p2p::Recipients;
 /// for `buffered::Mailbox` (standard variant) and `shards::Mailbox`
 /// (coding variant).
 pub trait VariantPublish<Block: Clone + Send + 'static>: Sync {
+    /// Bound on the variant's local cache the driver uses to model FIFO
+    /// eviction in its availability shadow. `Some(n)` mirrors a fixed-size
+    /// FIFO of `n` entries (the buffered engine's `deque_size`); `None` means
+    /// the cache is not a fixed-size FIFO (the shards engine prunes on
+    /// finalization/ack, not by count), so published blocks stay modeled as
+    /// available until restart. Must track the corresponding engine config in
+    /// the harness.
+    const CACHE_CAPACITY: Option<usize>;
+
     /// Best-effort publish. The implementation may silently drop the
     /// request if the underlying mailbox enqueue fails; the driver
     /// confirms availability via [`Self::locally_available`] before
@@ -41,6 +50,9 @@ where
     P: PublicKey,
     M: Codec + Digestible + Clone + Send + 'static,
 {
+    // Mirrors `buffered::Config::deque_size` in the harness.
+    const CACHE_CAPACITY: Option<usize> = Some(10);
+
     fn publish_via_variant(&self, _round: Round, block: &M) {
         let _ = self.broadcast(Recipients::All, block.clone());
     }
@@ -57,6 +69,9 @@ where
     H: Hasher,
     P: PublicKey,
 {
+    // The shards engine prunes on finalization/ack, not as a fixed-size FIFO.
+    const CACHE_CAPACITY: Option<usize> = None;
+
     fn publish_via_variant(&self, round: Round, block: &CodedBlock<B, C, H>) {
         self.proposed(round, block.clone());
     }

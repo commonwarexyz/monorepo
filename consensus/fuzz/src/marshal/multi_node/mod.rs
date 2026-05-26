@@ -6,8 +6,9 @@
 //! engine's reporter and delivers ordered finalized blocks to a downstream
 //! application.
 //!
-//! The liveness check injects byzantine faults, then assert that honest nodes keep making progress:
-//! every honest marshal delivers `required_containers` ordered finalized blocks.
+//! The liveness check injects byzantine faults, then asserts that honest nodes keep making progress:
+//! every honest marshal delivers a target number of ordered finalized blocks
+//! (derived from `required_containers`, clamped to a single-epoch bound).
 //!
 //! # Layout
 //!

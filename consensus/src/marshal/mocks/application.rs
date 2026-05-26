@@ -14,6 +14,10 @@ use std::{
 #[derive(Clone)]
 pub struct Application<B: Block> {
     blocks: Arc<Mutex<BTreeMap<Height, B>>>,
+    /// Append-only record of every delivered block in arrival order, as
+    /// `(height, digest)`. Unlike `blocks` (a by-height map that overwrites),
+    /// this preserves delivery order and same-height forks for invariants.
+    delivered: Arc<Mutex<Vec<(Height, B::Digest)>>>,
     #[allow(clippy::type_complexity)]
     tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
     pending_acks: Arc<Mutex<VecDeque<(Height, Exact)>>>,
@@ -25,6 +29,7 @@ impl<B: Block> Default for Application<B> {
     fn default() -> Self {
         Self {
             blocks: Default::default(),
+            delivered: Default::default(),
             tip: Default::default(),
             pending_acks: Default::default(),
             notify: Arc::new(Notify::new()),
@@ -45,6 +50,12 @@ impl<B: Block> Application<B> {
     /// Returns the finalized blocks.
     pub fn blocks(&self) -> BTreeMap<Height, B> {
         self.blocks.lock().clone()
+    }
+
+    /// Returns every delivered block as `(height, digest)` in arrival order,
+    /// preserving duplicates and same-height forks (which `blocks` overwrites).
+    pub fn delivered(&self) -> Vec<(Height, B::Digest)> {
+        self.delivered.lock().clone()
     }
 
     /// Returns the tip.
@@ -86,6 +97,7 @@ impl<B: Block> Reporter for Application<B> {
         match activity {
             Update::Block(block, ack_tx) => {
                 let height = block.height();
+                self.delivered.lock().push((height, block.digest()));
                 self.blocks.lock().insert(height, block);
                 if self.auto_ack {
                     ack_tx.acknowledge();

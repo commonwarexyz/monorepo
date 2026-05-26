@@ -10,7 +10,8 @@
 //! downstream [`Application`] sink.
 //!
 //! Liveness (the design borrowed from ByzzFuzz, not its code): every honest
-//! node's marshal must deliver `required_containers` ordered finalized blocks
+//! node's marshal must deliver the target number of ordered finalized blocks
+//! (`required_containers` clamped to a single-epoch bound; see `MAX_REQUIRED`)
 //! within a bounded window; a stall panics with a per-node diagnostic. Safety
 //! invariants then assert in-order delivery and cross-node agreement.
 //!
@@ -30,11 +31,13 @@
 //!   the payload type with the honest engines, so it is a fully in-epoch
 //!   equivocating/mutating adversary.
 //! - Coding: the consensus payload is `Commitment`, not `Sha256Digest`, so the
-//!   disrupter's votes remain undecodable by honest coding engines and it
-//!   degrades to a withholding fault. (A coding-aware disrupter is future work.)
+//!   disrupter's notarize/finalize votes (which carry a payload) are undecodable
+//!   by honest coding engines and degrade to a withholding fault. Nullify votes
+//!   are payload-independent, so the coding target still gets valid in-epoch
+//!   nullify disruption. (A fully coding-aware disrupter is future work.)
 //!
 //! Either way the three honest validators (`QUORUM = 3`) must still deliver
-//! `required_containers` ordered blocks.
+//! that target number of ordered blocks.
 
 use super::{engine::LiveMarshal, invariant, ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE};
 use crate::{
@@ -161,7 +164,9 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
         }
 
         // Liveness (ByzzFuzz design): every honest marshal must deliver
-        // `required` ordered finalized blocks within the window.
+        // `required` ordered finalized blocks within the window. We track the
+        // highest delivered height (not the count) so the genesis floor block
+        // marshal surfaces at height 0 does not count as progress.
         let mut watchers = Vec::new();
         for (idx, app) in honest_apps.iter().cloned() {
             watchers.push(
@@ -169,7 +174,7 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
                     .child("liveness_watcher")
                     .with_attribute("index", idx)
                     .spawn(move |context| async move {
-                        while (app.blocks().len() as u64) < required {
+                        while app.blocks().keys().next_back().map_or(0, |h| h.get()) < required {
                             context.sleep(POLL).await;
                         }
                     }),
@@ -183,14 +188,22 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
             _ = context.sleep(LIVENESS_WINDOW) => false,
         };
         if !delivered {
-            let diag: Vec<String> = honest_apps
-                .iter()
-                .map(|(idx, app)| format!("node{idx}={}", app.blocks().len()))
-                .collect();
-            panic!(
-                "marshal liveness violation: honest nodes did not deliver {required} blocks \
-                 within {LIVENESS_WINDOW:?}; delivered={diag:?}"
-            );
+            // The watcher poll interval and the window timer race, so re-read
+            // the delivered heights once before declaring a stall: only panic if
+            // some honest node is genuinely still below `required`.
+            let highest = |app: &Application<H::ApplicationBlock>| {
+                app.blocks().keys().next_back().map_or(0, |h| h.get())
+            };
+            if honest_apps.iter().any(|(_, app)| highest(app) < required) {
+                let diag: Vec<String> = honest_apps
+                    .iter()
+                    .map(|(idx, app)| format!("node{idx}=height{}", highest(app)))
+                    .collect();
+                panic!(
+                    "marshal liveness violation: honest nodes did not deliver {required} blocks \
+                     within {LIVENESS_WINDOW:?}; highest delivered={diag:?}"
+                );
+            }
         }
 
         invariant::check_all::<H>(required, &honest_apps);
