@@ -44,7 +44,7 @@ pub mod unordered;
 /// `remove()` from [Unordered] instead._
 pub trait Cursor: Send + Sync {
     /// The type of values the cursor iterates over.
-    type Value: Eq + Send + Sync;
+    type Value: Send + Sync;
 
     /// Advances the cursor to the next value in the chain, returning a reference to it.
     ///
@@ -70,7 +70,13 @@ pub trait Cursor: Send + Sync {
     fn update(&mut self, value: Self::Value);
 
     /// Removes anything in the cursor that satisfies the predicate.
-    fn prune(&mut self, predicate: &impl Fn(&Self::Value) -> bool);
+    fn prune(&mut self, predicate: &impl Fn(&Self::Value) -> bool) {
+        while let Some(old) = self.next() {
+            if predicate(old) {
+                self.delete();
+            }
+        }
+    }
 
     /// Advances the cursor until finding a value matching the predicate.
     ///
@@ -108,7 +114,7 @@ pub trait Cursor: Send + Sync {
 /// to arbitrary values, with no ordering assumed over the key space.
 pub trait Unordered: Send + Sync {
     /// The type of values the index stores.
-    type Value: Eq + Send + Sync;
+    type Value: Send + Sync;
 
     /// The type of cursor returned by this index to iterate over values with conflicting keys.
     type Cursor<'a>: Cursor<Value = Self::Value>
