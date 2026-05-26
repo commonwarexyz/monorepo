@@ -35,9 +35,18 @@ pub use location::{Location, LocationRangeExt};
 pub use position::Position;
 #[cfg(test)]
 pub(crate) use proof::build_range_proof;
-pub use proof::Proof;
+pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
 pub use read::Readable;
 use thiserror::Error;
+
+/// Safe upper bound on the number of pinned nodes for any u64-backed Merkle family.
+///
+/// Pinned nodes are produced by [`Family::nodes_to_pin`], whose default
+/// implementation returns the peaks of the sub-structure at the prune
+/// location. A structure with `n` leaves has at most `popcount(n)` peaks, and
+/// since [`Location`] is backed by a `u64`, `n <= u64::MAX` yields at most 64
+/// peaks.
+pub const MAX_PINNED_NODES: usize = 64;
 
 /// Defines the strategy used to fold peaks into the final root digest.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

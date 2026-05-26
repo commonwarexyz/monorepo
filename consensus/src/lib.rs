@@ -18,7 +18,7 @@ stability_scope!(BETA {
     pub mod simplex;
 
     pub mod types;
-    use types::{Epoch, Height, View};
+    use types::{Epoch, Height, View, Round};
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -40,6 +40,18 @@ stability_scope!(BETA {
         /// Returns the view associated with this object.
         fn view(&self) -> View;
     }
+
+    /// Roundable is a trait that provides access to the [`Round`] number.
+    /// Any consensus message or object that implements [`Epochable`] and [`Viewable`] automatically
+    /// implements this trait.
+    pub trait Roundable: Epochable + Viewable {
+        /// Returns the round associated with this object, derived from its epoch and view.
+        fn round(&self) -> Round {
+            Round::new(self.epoch(), self.view())
+        }
+    }
+
+    impl<T: Epochable + Viewable> Roundable for T {}
 
     /// Block is the interface for a block in the blockchain.
     ///
@@ -63,7 +75,6 @@ stability_scope!(BETA {
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::types::Round;
     use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
@@ -272,6 +283,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Return `false` only when the block is permanently invalid for the supplied context and
         /// ancestry. If validity may still change as additional information becomes available,
         /// continue waiting instead of returning `false`.
+        ///
+        /// In other words, to abstain from voting, do not resolve this future yet. Keep it
+        /// pending until the implementation can either prove the block valid, prove it invalid,
+        /// or the consensus engine cancels the request. Abstaining is not represented by a
+        /// special return value.
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
