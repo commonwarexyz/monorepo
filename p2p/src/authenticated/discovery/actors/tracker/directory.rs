@@ -210,6 +210,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Track new primary and secondary peer sets for the given index.
+    ///
+    /// Returns the peers whose connections should be killed because they were removed from all
+    /// tracked peer sets.
+    ///
+    /// Returns `None` if the index is invalid.
     pub fn track(&mut self, index: u64, peers: TrackedPeers<C>) -> Option<OrderedSet<C>> {
         // Check if peer set already exists
         if self.peer_sets.contains_key(&index) {
@@ -544,6 +549,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `true` if the record was deleted or if the peer is no longer eligible while a
     /// connection is still reserved or active.
+    ///
+    /// Reserved and active records are not deleted here. The caller must kill the connection and
+    /// let [`Self::release`] delete the record once it becomes inert.
     fn delete_if_needed(&mut self, peer: &C) -> bool {
         let Some(record) = self.peers.get(peer) else {
             return false;

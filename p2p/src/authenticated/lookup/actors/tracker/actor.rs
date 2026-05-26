@@ -114,7 +114,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // Identify peers whose existing connection state should be reset.
+                // Identify peers whose existing connections should be killed.
                 let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
                 };

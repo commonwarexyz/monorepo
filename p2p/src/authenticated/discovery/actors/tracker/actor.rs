@@ -52,7 +52,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C::PublicKey>,
 
-    /// Set when a peer connects and cleared when it is reset or released.
+    /// Set when a peer connects and cleared when it is killed or released.
     mailboxes: HashMap<C::PublicKey, peer::Mailbox<C::PublicKey>>,
 
     /// Subscribers to peer set updates.

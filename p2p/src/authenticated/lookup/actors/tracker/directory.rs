@@ -491,6 +491,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `true` if the record was deleted or if the peer is no longer eligible while a
     /// connection is still reserved or active.
+    ///
+    /// Reserved and active records are not deleted here. The caller must kill the connection and
+    /// let [`Self::release`] delete the record once it becomes inert.
     fn delete_if_needed(&mut self, peer: &C) -> bool {
         let Some(record) = self.peers.get(peer) else {
             return false;
