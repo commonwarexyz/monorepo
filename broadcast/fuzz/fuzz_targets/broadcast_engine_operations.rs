@@ -13,7 +13,8 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
-use commonware_utils::NZUsize;
+use commonware_utils::{channel::oneshot, futures::Pool, vec::Bounded, NZUsize};
+use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -26,6 +27,15 @@ const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 /// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
 /// and can only represent durations up to ~584 years.
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
+
+/// Maximum number of recently broadcast digests tracked for `Recent` lookups.
+///
+/// Indexed by `u8` modulo length, so a larger buffer would leave entries past 255
+/// unreachable via `Source::Recent`.
+const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
+
+/// Subscription result paired with the digest requested so completions can be validated.
+type Subscription = (Digest, Result<FuzzMessage, oneshot::error::RecvError>);
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -72,6 +82,27 @@ impl commonware_codec::Read for FuzzMessage {
     }
 }
 
+/// Source for the digest used by `Subscribe`/`Get` actions.
+#[derive(Clone, Debug, Arbitrary)]
+enum Source {
+    /// A random message.
+    Random(FuzzMessage),
+    /// Index into messages broadcast earlier in this run.
+    Recent(u8),
+}
+
+impl Source {
+    /// Resolve to a concrete digest. Returns `None` when `Recent` is selected
+    /// before any messages have been broadcast.
+    fn resolve(self, recent: &Bounded<Digest>) -> Option<Digest> {
+        match self {
+            Source::Random(message) => Some(message.digest()),
+            Source::Recent(_) if recent.is_empty() => None,
+            Source::Recent(idx) => recent.get((idx as usize) % recent.len()).cloned(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum BroadcastAction {
     SendMessage {
@@ -81,11 +112,11 @@ enum BroadcastAction {
     },
     Subscribe {
         peer_index: usize,
-        digest: Digest,
+        digest: Source,
     },
     Get {
         peer_index: usize,
-        digest: Digest,
+        digest: Source,
     },
     Sleep {
         duration_ms: u64,
@@ -170,6 +201,16 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
     }
 }
 
+// Keep subscriptions alive without spawning one task per receiver. Ready
+// subscriptions are validated, while unresolved ones remain pending.
+fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
+    while let Some((digest, result)) = pending.next_completed().now_or_never() {
+        if let Ok(message) = result {
+            assert_eq!(message.digest(), digest);
+        }
+    }
+}
+
 fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
@@ -237,6 +278,8 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Execute fuzzed actions
+        let mut recent_digests = Bounded::new(NZUsize!(MAX_RECENT_DIGESTS));
+        let mut pending_subscriptions = Pool::default();
         for action in input.actions {
             match action {
                 BroadcastAction::SendMessage {
@@ -249,32 +292,46 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
+                        recent_digests.push(message.digest());
                         let _ = mailbox.broadcast(resolved_recipients, message);
                     }
                 }
-                BroadcastAction::Subscribe { peer_index, digest } => {
+                BroadcastAction::Subscribe {
+                    peer_index,
+                    digest: source,
+                } => {
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        // Missing subscriptions can wait forever; get replies immediately.
-                        let _ = context
-                            .timeout(Duration::from_millis(1), mailbox.subscribe(digest))
-                            .await;
+                        let receiver = mailbox.subscribe(digest);
+                        pending_subscriptions.push(async move { (digest, receiver.await) });
                     }
                 }
-                BroadcastAction::Get { peer_index, digest } => {
+                BroadcastAction::Get {
+                    peer_index,
+                    digest: source,
+                } => {
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
-                        drop(mailbox.get(digest).await);
+                        if let Some(message) = mailbox.get(digest).await {
+                            assert_eq!(message.digest(), digest);
+                        }
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {
                     context.sleep(Duration::from_millis(duration_ms)).await;
                 }
             }
+            drain_ready_subscriptions(&mut pending_subscriptions);
         }
     });
 }
