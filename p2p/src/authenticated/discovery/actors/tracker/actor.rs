@@ -352,8 +352,7 @@ mod tests {
     }
 
     fn new_peer_mailbox() -> peer::Mailbox<PublicKey> {
-        let (mailbox, _receiver) =
-            peer::Mailbox::new(crate::utils::mocks::Metrics, NZUsize!(1));
+        let (mailbox, _receiver) = peer::Mailbox::new(crate::utils::mocks::Metrics, NZUsize!(1));
         mailbox
     }
 
@@ -607,8 +606,7 @@ mod tests {
                 bits: BitMap::ones(1),
             };
 
-            let _r1 =
-                connect_to_peer_with_mailbox(&mailbox, &pk1, peer_mailbox_pk1.clone()).await;
+            let _r1 = connect_to_peer_with_mailbox(&mailbox, &pk1, peer_mailbox_pk1.clone()).await;
 
             // Peer lets us know it received a bit vector
             mailbox.bit_vec(bit_vec_unknown_idx, peer_mailbox_pk1.clone());
@@ -717,8 +715,7 @@ mod tests {
 
             let (peer_mailbox, mut peer_receiver) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
-            let reservation =
-                connect_to_peer_with_mailbox(&mailbox, &peer_pk, peer_mailbox).await;
+            let reservation = connect_to_peer_with_mailbox(&mailbox, &peer_pk, peer_mailbox).await;
 
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;

@@ -524,10 +524,11 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _mailbox, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.child("context"),
-                default_peer_config(context.child("config"), remote_pk),
-            );
+            let (peer_actor, _mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(
+                    context.child("context"),
+                    default_peer_config(context.child("config"), remote_pk),
+                );
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
@@ -625,10 +626,11 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _mailbox, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.child("context"),
-                default_peer_config(context.child("config"), remote_pk),
-            );
+            let (peer_actor, _mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(
+                    context.child("context"),
+                    default_peer_config(context.child("config"), remote_pk),
+                );
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
@@ -732,10 +734,11 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _mailbox, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.child("context"),
-                default_peer_config(context.child("config"), remote_pk),
-            );
+            let (peer_actor, _mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(
+                    context.child("context"),
+                    default_peer_config(context.child("config"), remote_pk),
+                );
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(

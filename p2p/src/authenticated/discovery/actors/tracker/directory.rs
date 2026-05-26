@@ -682,29 +682,35 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
-            assert!(directory.track(
-                0,
-                TrackedPeers::new(
-                    [primary_0].try_into().unwrap(),
-                    [secondary_0.clone()].try_into().unwrap(),
-                ),
-            ).is_some());
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        [primary_0].try_into().unwrap(),
+                        [secondary_0.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
             assert!(directory.eligible(&secondary_0));
 
-            assert!(directory.track(
-                1,
-                TrackedPeers::new(
-                    [primary_1].try_into().unwrap(),
-                    [secondary_1.clone()].try_into().unwrap(),
-                ),
-            ).is_some());
+            assert!(directory
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        [primary_1].try_into().unwrap(),
+                        [secondary_1.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
             assert!(directory.eligible(&secondary_0));
             assert!(directory.eligible(&secondary_1));
 
-            assert!(directory.track(
-                2,
-                TrackedPeers::from(OrderedSet::try_from([primary_2]).unwrap()),
-            ).is_some());
+            assert!(directory
+                .track(
+                    2,
+                    TrackedPeers::from(OrderedSet::try_from([primary_2]).unwrap()),
+                )
+                .is_some());
             assert!(!directory.peers.contains_key(&secondary_0));
             assert!(directory.eligible(&secondary_1));
         });
@@ -732,13 +738,15 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
-            assert!(directory.track(
-                0,
-                TrackedPeers::new(
-                    [pk_a.clone(), pk_b.clone()].try_into().unwrap(),
-                    [pk_b.clone(), pk_c.clone()].try_into().unwrap(),
-                ),
-            ).is_some());
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        [pk_a.clone(), pk_b.clone()].try_into().unwrap(),
+                        [pk_b.clone(), pk_c.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
 
             let peer_set = directory.get_peer_set(&0).unwrap();
             assert_eq!(peer_set.secondary.len(), 1);
@@ -780,26 +788,30 @@ mod tests {
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
             // Index 0: X is primary, Y is secondary.
-            assert!(directory.track(
-                0,
-                TrackedPeers::new(
-                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
-                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
-                ),
-            ).is_some());
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                        OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
             assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 1);
             assert_eq!(directory.peers.get(&pk_x).unwrap().secondary_sets(), 0);
             assert_eq!(directory.peers.get(&pk_y).unwrap().primary_sets(), 0);
             assert_eq!(directory.peers.get(&pk_y).unwrap().secondary_sets(), 1);
 
             // Index 1: X is demoted to secondary, Y is promoted to primary.
-            assert!(directory.track(
-                1,
-                TrackedPeers::new(
-                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
-                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
-                ),
-            ).is_some());
+            assert!(directory
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                        OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
 
             // Both indices retained (max_sets=2).
             assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 1);
@@ -814,13 +826,15 @@ mod tests {
             assert!(agg.secondary.is_empty());
 
             // Index 2: only Y is primary, X is secondary. This evicts index 0.
-            assert!(directory.track(
-                2,
-                TrackedPeers::new(
-                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
-                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
-                ),
-            ).is_some());
+            assert!(directory
+                .track(
+                    2,
+                    TrackedPeers::new(
+                        OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                        OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
 
             // Index 0 evicted. X lost its primary from index 0.
             assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 0);
@@ -860,19 +874,23 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
-            assert!(directory.track(
-                0,
-                TrackedPeers::from(
-                    OrderedSet::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
-                ),
-            ).is_some());
-            assert!(directory.track(
-                1,
-                TrackedPeers::new(
-                    [pk_b.clone()].try_into().unwrap(),
-                    [pk_overlap.clone(), pk_sec.clone()].try_into().unwrap(),
-                ),
-            ).is_some());
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::from(
+                        OrderedSet::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
+            assert!(directory
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        [pk_b.clone()].try_into().unwrap(),
+                        [pk_overlap.clone(), pk_sec.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
 
             let agg = directory.all();
             assert!(
