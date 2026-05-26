@@ -68,15 +68,15 @@ safety invariants
 
 | Parameter | Source | Meaning |
 | --------- | ------ | ------- |
-| Fault-phase length | `runner.rs` constant | Upper bound on phase 1 duration. |
-| Post-GST window length | `runner.rs` constant | Upper bound on phase 2 duration. |
+| Fault-phase length | shared crate constant (`lib.rs`) | Upper bound on phase 1 duration. |
+| Post-GST window length | shared crate constant (`lib.rs`) | Upper bound on phase 2 duration. |
 | Harness shape | `run` | Fixed 4-node connected topology with degraded network disabled. |
 | Byzantine identity | `mod.rs` | Single fixed index used end-to-end. |
 | Validator timeouts | `setup_engines` | Leader and certification timeouts passed to the Simplex engine. |
 
 ## Extension Points
 
-- Change phase timing by editing the runner constants and updating [ADR-005](../decisions/005-post-gst-required-container-catch-up.md) if the liveness model changes.
+- Change phase timing by editing the shared `lib.rs` constants (`FAULT_PHASE`, `POST_GST_WINDOW`) and updating [ADR-005](../decisions/005-post-gst-required-container-catch-up.md) if the liveness model changes.
 - Add a new target by routing it through the existing fuzz-mode dispatch.
 - Add new per-channel fault machinery in setup only after updating the network-interception and forwarder/injector specs.
 

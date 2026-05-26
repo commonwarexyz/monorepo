@@ -97,6 +97,14 @@ const MAX_REQUIRED_CONTAINERS: u64 = 30;
 pub(crate) const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
 pub(crate) const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
 pub(crate) const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
+/// Bounded pre-GST fault phase: how long network faults stay active before a
+/// run that has not already finished is given a GST transition. Shared by the
+/// ByzzFuzz runner and the marshal multi-node liveness runner.
+pub(crate) const FAULT_PHASE: Duration = Duration::from_secs(30);
+/// Bounded post-GST window: how long honest nodes have to recover once the
+/// network heals (process/byzantine faults stay active). Shared by the ByzzFuzz
+/// runner and the marshal multi-node liveness runner.
+pub(crate) const POST_GST_WINDOW: Duration = Duration::from_secs(360);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 

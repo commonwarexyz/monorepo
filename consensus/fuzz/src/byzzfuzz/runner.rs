@@ -20,7 +20,7 @@ use crate::{
     simplex::Simplex,
     spawn_honest_validator,
     utils::Partition,
-    CertifyChoice, PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, N4F0C4,
+    CertifyChoice, PublicKeyOf, EPOCH, FAULT_INJECTION_RATIO, FAULT_PHASE, N4F0C4, POST_GST_WINDOW,
 };
 use bytes::Bytes;
 use commonware_codec::Encode;
@@ -38,12 +38,6 @@ use commonware_utils::{channel::mpsc::Receiver as ViewReceiver, sync::Mutex, Fuz
 use futures::future::join_all;
 use rand::Rng;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
-
-/// Fault phase length before GST is reached when the run does not complete early.
-const BYZZFUZZ_FAULT_PHASE: Duration = Duration::from_secs(30);
-
-/// Liveness-mode post-GST window.
-const BYZZFUZZ_POST_GST_WINDOW: Duration = Duration::from_secs(360);
 
 type ByzzReporter<P> =
     Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
@@ -362,7 +356,7 @@ where
             results = join_all(phase1_finishers) => {
                 results.iter().all(|r| matches!(r, Ok(true)))
             },
-            _ = context.sleep(BYZZFUZZ_FAULT_PHASE) => false,
+            _ = context.sleep(FAULT_PHASE) => false,
         };
 
         if !phase1_early_complete {
@@ -434,7 +428,7 @@ where
                 results = join_all(watchers) => {
                     results.iter().all(|r| matches!(r, Ok(true)))
                 },
-                _ = context.sleep(BYZZFUZZ_POST_GST_WINDOW) => false,
+                _ = context.sleep(POST_GST_WINDOW) => false,
             };
 
             if !phase2_complete {
@@ -449,7 +443,7 @@ where
                 }
                 panic!(
                     "byzzfuzz: no post-GST progress within {:?};{diag}",
-                    BYZZFUZZ_POST_GST_WINDOW,
+                    POST_GST_WINDOW,
                 );
             }
         }

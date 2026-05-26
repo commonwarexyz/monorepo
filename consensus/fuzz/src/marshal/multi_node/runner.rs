@@ -1,4 +1,4 @@
-//! Multi-node marshal liveness driver.
+//! Multi-node marshal liveness harness runner.
 //!
 //! Runs `N4F1C3` (three honest validators plus one byzantine `Disrupter`)
 //! over the simulated network and reuses the shared fuzz infrastructure
@@ -9,11 +9,20 @@
 //! is a marshal mailbox, and marshal delivers ordered finalized blocks to a
 //! downstream [`Application`] sink.
 //!
-//! Liveness (the design borrowed from ByzzFuzz, not its code): every honest
-//! node's marshal must deliver the target number of ordered finalized blocks
-//! (`required_containers` clamped to a single-epoch bound; see `MAX_REQUIRED`)
-//! within a bounded window; a stall panics with a per-node diagnostic. Safety
-//! invariants then assert in-order delivery and cross-node agreement.
+//! Liveness check uses simulated-network topology changes ([`apply_partition`])
+//! rather than MITM message interception:
+//!
+//! - Phase 1 (pre-GST): a sampled network partition is held for [`FAULT_PHASE`]
+//!   while the byzantine `Disrupter` runs. If every honest marshal delivers the
+//!   target number of ordered finalized blocks (`required_containers` clamped to
+//!   a single-epoch bound; see `MAX_REQUIRED`) during this phase, the run passes.
+//! - GST: the network heals (`apply_partition(None)`); the `Disrupter` stays
+//!   active (its faults are not gated by GST).
+//! - Phase 2 (post-GST): each honest marshal must reach its target (`required`,
+//!   or baseline + 1 unless already at `MAX_REQUIRED`) within [`POST_GST_WINDOW`];
+//!   failure to make progress panics with a per-node diagnostic.
+//!
+//! Safety invariants then assert in-order delivery and cross-node agreement.
 //!
 //! Generic over the marshal variant `H`, so the same driver serves the standard
 //! and coding fuzz targets.
@@ -36,19 +45,23 @@
 //!   are payload-independent, so the coding target still gets valid in-epoch
 //!   nullify disruption. (A fully coding-aware disrupter is future work.)
 //!
-//! Either way the three honest validators (`QUORUM = 3`) must still deliver
+//! Either way the three honest validators must still deliver
 //! that target number of ordered blocks.
 
 use super::{engine::LiveMarshal, invariant, ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE};
 use crate::{
-    simplex::Simplex, start_disrupter_with_epoch, FuzzInput, SimplexBls12381MinPk, BYZANTINE_IDX,
+    network_faults,
+    simplex::Simplex,
+    start_disrupter_with_epoch,
+    utils::{apply_partition, Partition, SetPartition},
+    FuzzInput, SimplexBls12381MinPk, BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW,
 };
 use commonware_consensus::{
     marshal::mocks::{
         application::Application,
         harness::{
-            setup_network_links, setup_network_with_participants, K, LINK, NUM_VALIDATORS, S,
-            TEST_QUOTA,
+            setup_network_links, setup_network_with_participants, BLOCKS_PER_EPOCH, K, LINK,
+            NUM_VALIDATORS, S, TEST_QUOTA,
         },
     },
     types::Epoch,
@@ -58,23 +71,27 @@ use commonware_macros::select;
 use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor as _};
 use commonware_utils::{FuzzRng, NZUsize};
 use futures::future::join_all;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
 
-/// Upper bound on the delivery target. Kept well below the epoch-0 boundary
-/// (`FixedEpocher::new(20)` makes height 19 the last block in epoch 0, after
-/// which the wrappers re-propose the boundary block) so the run stays single
-/// epoch and never stalls on an epoch transition.
-const MAX_REQUIRED: u64 = 12;
+/// Highest fresh block height this single-epoch harness can require. With
+/// `FixedEpocher::new(BLOCKS_PER_EPOCH)`, height `BLOCKS_PER_EPOCH - 1` is the
+/// epoch-0 boundary block; after that the wrappers re-propose the boundary block
+/// instead of producing height `BLOCKS_PER_EPOCH`.
+const MAX_REQUIRED: u64 = BLOCKS_PER_EPOCH.get() - 1;
 
 /// Generous backlog so marshal never blocks on ack pressure; the downstream
 /// application auto-acks.
 const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 
-/// Bounded liveness window (simulated time). A stall panics with a diagnostic.
-const LIVENESS_WINDOW: Duration = Duration::from_secs(600);
-
 /// Poll interval for observing marshal delivery progress.
 const POLL: Duration = Duration::from_millis(50);
+
+/// Highest finalized-block height marshal has delivered to `app`'s sink. The
+/// height-0 genesis floor block does not count as progress, so an empty/genesis
+/// sink reports 0.
+fn highest_delivered<B: commonware_consensus::Block>(app: &Application<B>) -> u64 {
+    app.blocks().keys().next_back().map_or(0, |h| h.get())
+}
 
 /// Run a single multi-node marshal liveness iteration for variant `H`.
 pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
@@ -83,6 +100,8 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
+        let mut input = input;
+
         // Shared threshold fixture: the same participants/schemes drive the
         // byzantine disrupter, the honest engines, and the marshal providers.
         let (participants, schemes): (Vec<K>, Vec<S>) =
@@ -97,6 +116,26 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
         setup_network_links(&mut oracle, &participants, LINK).await;
 
         let required = input.required_containers.clamp(1, MAX_REQUIRED);
+
+        // Pre-GST network fault held for the bounded fault phase, applied via the
+        // simulated-network topology (not byzzfuzz interceptors). Populate an
+        // adaptive schedule from the chosen strategy (as the general harness
+        // does), then hold one partition: a static set-partition, or the first
+        // scheduled adaptive partition. `Connected` -> no fault.
+        if matches!(input.partition, Partition::Adaptive(_)) {
+            input.partition =
+                Partition::Adaptive(network_faults(input.strategy, required, &mut context));
+        }
+        let pre_gst_partition: Option<SetPartition> =
+            input.partition.set_partition().copied().or_else(|| {
+                input
+                    .partition
+                    .schedule()
+                    .and_then(|s| s.first().map(|&(_, p)| p))
+            });
+        if let Some(partition) = pre_gst_partition.as_ref() {
+            apply_partition(&oracle, &participants, Some(partition), &LINK).await;
+        }
 
         // Consensus genesis commitment must equal the marshal genesis block's
         // commitment so view-1 proposals link to the block marshal already
@@ -163,46 +202,90 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
             .await;
         }
 
-        // Liveness (ByzzFuzz design): every honest marshal must deliver
-        // `required` ordered finalized blocks within the window. We track the
-        // highest delivered height (not the count) so the genesis floor block
-        // marshal surfaces at height 0 does not count as progress.
-        let mut watchers = Vec::new();
+        // Phase 1: hold the pre-GST network fault until either every honest
+        // marshal reaches `required` or the fault phase expires. Watchers poll
+        // the highest delivered height (height 0 is the genesis floor, not
+        // progress) and return true only if their node reached `required`.
+        let mut phase1_finishers = Vec::new();
         for (idx, app) in honest_apps.iter().cloned() {
-            watchers.push(
+            phase1_finishers.push(
                 context
-                    .child("liveness_watcher")
+                    .child("phase1_finisher")
                     .with_attribute("index", idx)
                     .spawn(move |context| async move {
-                        while app.blocks().keys().next_back().map_or(0, |h| h.get()) < required {
+                        while highest_delivered(&app) < required {
                             context.sleep(POLL).await;
                         }
+                        true
                     }),
             );
         }
-
-        // Every watcher must return `Ok(())`; an aborted or panicked watcher
-        // (an `Err`) must not be mistaken for satisfied liveness.
-        let delivered = select! {
-            results = join_all(watchers) => results.iter().all(|r| matches!(r, Ok(()))),
-            _ = context.sleep(LIVENESS_WINDOW) => false,
+        let phase1_early_complete = select! {
+            results = join_all(phase1_finishers) => results.iter().all(|r| matches!(r, Ok(true))),
+            _ = context.sleep(FAULT_PHASE) => false,
         };
-        if !delivered {
-            // The watcher poll interval and the window timer race, so re-read
-            // the delivered heights once before declaring a stall: only panic if
-            // some honest node is genuinely still below `required`.
-            let highest = |app: &Application<H::ApplicationBlock>| {
-                app.blocks().keys().next_back().map_or(0, |h| h.get())
-            };
-            if honest_apps.iter().any(|(_, app)| highest(app) < required) {
-                let diag: Vec<String> = honest_apps
-                    .iter()
-                    .map(|(idx, app)| format!("node{idx}=height{}", highest(app)))
-                    .collect();
-                panic!(
-                    "marshal liveness violation: honest nodes did not deliver {required} blocks \
-                     within {LIVENESS_WINDOW:?}; highest delivered={diag:?}"
+
+        if !phase1_early_complete {
+            // Highest height deliverable in this single-epoch harness (the
+            // epoch-0 boundary). A fast honest node can reach it during the
+            // fault phase, so the post-GST target must not exceed it.
+            let max_live_height = MAX_REQUIRED;
+            // Record post-GST targets before healing (stable diagnostics): a
+            // node below `required` must reach it; one already at/above must
+            // advance by one, unless it is already at the epoch boundary.
+            let mut watch_targets: Vec<(usize, u64, u64)> = Vec::with_capacity(honest_apps.len());
+            let mut watcher_inputs = Vec::with_capacity(honest_apps.len());
+            for (idx, app) in honest_apps.iter().cloned() {
+                let baseline = highest_delivered(&app);
+                let target = if baseline < required {
+                    required
+                } else if baseline < max_live_height {
+                    baseline + 1
+                } else {
+                    baseline
+                };
+                watch_targets.push((idx, baseline, target));
+                watcher_inputs.push((idx, app, target));
+            }
+
+            // GST heals the network topology. The byzantine `Disrupter` stays
+            // active (its process faults are not gated by GST).
+            apply_partition(&oracle, &participants, None, &LINK).await;
+
+            // Phase 2: each honest marshal must reach its target within the
+            // post-GST window.
+            let mut watchers = Vec::new();
+            for (idx, app, target) in watcher_inputs {
+                watchers.push(
+                    context
+                        .child("post_gst_watcher")
+                        .with_attribute("index", idx)
+                        .spawn(move |context| async move {
+                            while highest_delivered(&app) < target {
+                                context.sleep(POLL).await;
+                            }
+                            true
+                        }),
                 );
+            }
+            let phase2_complete = select! {
+                results = join_all(watchers) => results.iter().all(|r| matches!(r, Ok(true))),
+                _ = context.sleep(POST_GST_WINDOW) => false,
+            };
+
+            if !phase2_complete {
+                let mut diag = String::new();
+                for &(idx, baseline, target) in &watch_targets {
+                    let current = honest_apps
+                        .iter()
+                        .find(|(i, _)| *i == idx)
+                        .map_or(0, |(_, app)| highest_delivered(app));
+                    let _ = write!(
+                        diag,
+                        " node{idx}={{baseline={baseline} target={target} current={current}}}"
+                    );
+                }
+                panic!("marshal: no post-GST progress within {POST_GST_WINDOW:?};{diag}");
             }
         }
 

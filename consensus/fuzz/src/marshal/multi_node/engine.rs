@@ -1,4 +1,4 @@
-//! Per-variant live simplex engine wiring for the marshal liveness model.
+//! Per-variant live simplex engine wiring for the marshal liveness harness.
 //!
 //! [`LiveMarshal`] extends the marshal [`TestHarness`] with the one piece the
 //! harness lacks: standing up a live simplex [`Engine`] whose automaton/relay

@@ -1,4 +1,4 @@
-//! Deterministic-runtime driver for the marshal fuzz target.
+//! Single-node marshal harness runner.
 //!
 //! Replays a [`MarshalFuzzInput`] event sequence against a single
 //! marshal actor (with restarts), maintains the shadow state described
