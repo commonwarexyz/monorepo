@@ -437,8 +437,9 @@ where
                 self.background_channel_capacity,
                 &self.strategy,
             );
-        let mut peer_set_subscription = self.peer_provider.subscribe();
+
         // Pre-leader shards outside latest.primary are dropped, so install peer sets first.
+        let mut peer_set_subscription = self.peer_provider.subscribe();
         let mut shutdown = self.context.stopped();
         let update = select! {
             update = peer_set_subscription.recv() => {
@@ -3378,7 +3379,8 @@ mod tests {
                 let reconstructed = peers[receiver_idx]
                     .mailbox
                     .get(commitment)
-                    .await.expect("block should reconstruct from buffered peer shards");
+                    .await
+                    .expect("block should reconstruct from buffered peer shards");
                 assert_eq!(reconstructed.commitment(), commitment);
 
                 let mut assigned = peers[receiver_idx]
@@ -3418,7 +3420,6 @@ mod tests {
         );
     }
 
-    /// Queued pre-leader shards must wait for the initial peer set before eligibility checks.
     #[test_traced]
     fn test_queued_preleader_shards_wait_for_initial_peer_set() {
         let executor = deterministic::Runner::default();
@@ -4681,7 +4682,8 @@ mod tests {
                 let reconstructed_a = peers[receiver_idx]
                     .mailbox
                     .get(commitment_a)
-                    .await.expect("conflicting commitment should reconstruct first");
+                    .await
+                    .expect("conflicting commitment should reconstruct first");
                 assert_eq!(reconstructed_a.commitment(), commitment_a);
 
                 // Commitment B should still be recoverable after A reconstructed.

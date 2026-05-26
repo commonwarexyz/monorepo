@@ -158,8 +158,9 @@ where
             network.0,
             network.1,
         );
-        let mut peer_set_subscription = self.peer_provider.subscribe();
+
         // Messages outside latest.primary are dropped, so install the initial set first.
+        let mut peer_set_subscription = self.peer_provider.subscribe();
         let mut shutdown = self.context.stopped();
         let update = select! {
             update = peer_set_subscription.recv() => {

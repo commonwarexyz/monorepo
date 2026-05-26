@@ -513,6 +513,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     fn should_reset_removed(&self, peer: &C) -> bool {
+        // This runs after membership counters are decremented and before optional
+        // deletion so reserved or connected peers can be reset if they lost eligibility.
         self.peers
             .get(peer)
             .is_some_and(|record| record.is_blockable() && !record.eligible())

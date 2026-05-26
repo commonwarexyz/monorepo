@@ -81,7 +81,7 @@ where
     /// Request the [Actor]'s next payload for inclusion within a block.
     ///
     /// [Actor]: super::Actor
-    pub fn act(&mut self) -> oneshot::Receiver<Option<SignedDealerLog<V, C>>> {
+    pub async fn act(&mut self) -> Option<SignedDealerLog<V, C>> {
         let (response_tx, response_rx) = oneshot::channel();
         if !self
             .sender
@@ -91,9 +91,16 @@ where
             .accepted()
         {
             error!("failed to send act message");
+            return None;
         }
 
-        response_rx
+        match response_rx.await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                error!(?err, "failed to receive act response");
+                None
+            }
+        }
     }
 }
 

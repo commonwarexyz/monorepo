@@ -1436,7 +1436,6 @@ mod tests {
         });
     }
 
-    /// Queued network ingress must see the initial peer set before cache eligibility runs.
     #[test_traced]
     fn test_network_message_queued_before_start_respects_initial_latest_primary() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
