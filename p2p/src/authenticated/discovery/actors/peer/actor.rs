@@ -526,7 +526,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
-                    context.child("context"),
+                    context.child("peer"),
                     default_peer_config(context.child("config"), remote_pk),
                 );
 
@@ -628,7 +628,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
-                    context.child("context"),
+                    context.child("peer"),
                     default_peer_config(context.child("config"), remote_pk),
                 );
 
@@ -736,7 +736,7 @@ mod tests {
             // Create peer actor (from remote's perspective, local is the peer)
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
-                    context.child("context"),
+                    context.child("peer"),
                     default_peer_config(context.child("config"), remote_pk),
                 );
 

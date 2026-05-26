@@ -1687,7 +1687,7 @@ mod tests {
             // Initialize with a bootstrapper
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
-                context.child("context"),
+                context.child("directory"),
                 vec![(bootstrapper_pk.clone(), bootstrapper_ingress)],
                 my_info,
                 config,
