@@ -272,23 +272,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(primary).unwrap().decrement_primary();
-                let should_reset = self
-                    .peers
-                    .get(primary)
-                    .is_some_and(|record| record.is_blockable() && !record.eligible());
-                self.delete_if_needed(primary);
-                if should_reset {
+                if self.delete_and_reset(primary) {
                     reset_peers.push(primary.clone());
                 }
             });
             sets.secondary.iter().for_each(|secondary| {
                 self.peers.get_mut(secondary).unwrap().decrement_secondary();
-                let should_reset = self
-                    .peers
-                    .get(secondary)
-                    .is_some_and(|record| record.is_blockable() && !record.eligible());
-                self.delete_if_needed(secondary);
-                if should_reset {
+                if self.delete_and_reset(secondary) {
                     reset_peers.push(secondary.clone());
                 }
             });
@@ -566,6 +556,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true
+    }
+
+    /// Attempt to delete a record and return whether the peer's connection should be reset.
+    fn delete_and_reset(&mut self, peer: &C) -> bool {
+        let should_reset = self
+            .peers
+            .get(peer)
+            .is_some_and(|record| record.is_blockable() && !record.eligible());
+        let deleted = self.delete_if_needed(peer);
+        should_reset || deleted
     }
 }
 
