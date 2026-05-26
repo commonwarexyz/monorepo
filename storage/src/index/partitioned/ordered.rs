@@ -2,7 +2,9 @@
 
 use crate::{
     index::{
-        ordered::Index as OrderedIndex, partitioned::partition_index_and_sub_key,
+        ordered::Index as OrderedIndex,
+        partitioned::partition_index_and_sub_key,
+        storage::{iter_chain, Record},
         Ordered as OrderedTrait, Unordered as UnorderedTrait,
     },
     translator::Translator,
@@ -45,6 +47,23 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
         let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&mut self.partitions[i], sub_key)
+    }
+
+    /// Returns the head record of the chain for the lexicographically first translated key across
+    /// all partitions, or None if every partition is empty.
+    fn first_translated_record(&self) -> Option<&Record<V>> {
+        self.partitions
+            .iter()
+            .find_map(|p| p.first_translated_record())
+    }
+
+    /// Returns the head record of the chain for the lexicographically last translated key across
+    /// all partitions, or None if every partition is empty.
+    fn last_translated_record(&self) -> Option<&Record<V>> {
+        self.partitions
+            .iter()
+            .rev()
+            .find_map(|p| p.last_translated_record())
     }
 }
 
@@ -152,85 +171,59 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Inde
 }
 
 impl<T: Translator, V: Eq + Send + Sync, const P: usize> OrderedTrait for Index<T, V, P> {
-    type Iterator<'a>
-        = <OrderedIndex<T, V> as OrderedTrait>::Iterator<'a>
+    fn prev_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
     where
-        Self: 'a;
-
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
-    where
-        Self::Value: 'a,
+        V: 'a,
     {
         let (partition_index, sub_key) = partition_index_and_sub_key::<P>(key);
-        {
-            let partition = &self.partitions[partition_index];
-            let iter = partition.prev_translated_key_no_cycle(sub_key);
-            if let Some(iter) = iter {
-                return Some((iter, false));
-            }
-        }
 
+        if let Some(r) = self.partitions[partition_index].prev_translated_record_no_cycle(sub_key) {
+            return Some((iter_chain(r), false));
+        }
         for partition in self.partitions[..partition_index].iter().rev() {
-            let iter = partition.last_translated_key();
-            if let Some(iter) = iter {
-                return Some((iter, false));
+            if let Some(r) = partition.last_translated_record() {
+                return Some((iter_chain(r), false));
             }
         }
-
-        self.last_translated_key().map(|iter| (iter, true))
+        self.last_translated_record().map(|r| (iter_chain(r), true))
     }
 
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
+    fn next_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
     where
-        Self::Value: 'a,
+        V: 'a,
     {
         let (partition_index, sub_key) = partition_index_and_sub_key::<P>(key);
-        {
-            let partition = &self.partitions[partition_index];
-            let iter = partition.next_translated_key_no_cycle(sub_key);
-            if let Some(iter) = iter {
-                return Some((iter, false));
-            }
-        }
 
+        if let Some(r) = self.partitions[partition_index].next_translated_record_no_cycle(sub_key) {
+            return Some((iter_chain(r), false));
+        }
         for partition in self.partitions[partition_index + 1..].iter() {
-            let iter = partition.first_translated_key();
-            if let Some(iter) = iter {
-                return Some((iter, false));
+            if let Some(r) = partition.first_translated_record() {
+                return Some((iter_chain(r), false));
             }
         }
-
-        self.first_translated_key().map(|iter| (iter, true))
+        self.first_translated_record()
+            .map(|r| (iter_chain(r), true))
     }
 
-    fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
-        Self::Value: 'a,
+        V: 'a,
     {
-        for partition in &self.partitions {
-            let iter = partition.first_translated_key();
-            if iter.is_none() {
-                continue;
-            }
-            return iter;
-        }
-
-        None
+        self.first_translated_record().map(iter_chain)
     }
 
-    fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
-        Self::Value: 'a,
+        V: 'a,
     {
-        for partition in self.partitions.iter().rev() {
-            let iter = partition.last_translated_key();
-            if iter.is_none() {
-                continue;
-            }
-            return iter;
-        }
-
-        None
+        self.last_translated_record().map(iter_chain)
     }
 }
 

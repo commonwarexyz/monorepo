@@ -6,7 +6,7 @@
 
 use crate::{
     index::{
-        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
+        storage::{iter_chain, Cursor as CursorImpl, IndexEntry, Record},
         Cursor as CursorTrait, Ordered, Unordered,
     },
     translator::Translator,
@@ -118,79 +118,76 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
         }
     }
 
-    /// Like [Ordered::next_translated_key] but without cycling around to the first key if there is
-    /// no next key.
-    pub(super) fn next_translated_key_no_cycle<'a>(
-        &'a self,
-        key: &[u8],
-    ) -> Option<ImmutableCursor<'a, V>> {
+    /// Returns the head record of the chain for the translated key that lexicographically follows
+    /// `key`, or None if no such key exists (no cycling).
+    pub(super) fn next_translated_record_no_cycle(&self, key: &[u8]) -> Option<&Record<V>> {
         let k = self.translator.transform(key);
         self.map
             .range((Excluded(k), Unbounded))
             .next()
-            .map(|(_, record)| ImmutableCursor::new(record))
+            .map(|(_, r)| r)
     }
 
-    /// Like [Ordered::prev_translated_key] but without cycling around to the last key if there is
-    /// no previous key.
-    pub(super) fn prev_translated_key_no_cycle<'a>(
-        &'a self,
-        key: &[u8],
-    ) -> Option<ImmutableCursor<'a, V>> {
+    /// Returns the head record of the chain for the translated key that lexicographically precedes
+    /// `key`, or None if no such key exists (no cycling).
+    pub(super) fn prev_translated_record_no_cycle(&self, key: &[u8]) -> Option<&Record<V>> {
         let k = self.translator.transform(key);
-        self.map
-            .range(..k)
-            .next_back()
-            .map(|(_, record)| ImmutableCursor::new(record))
+        self.map.range(..k).next_back().map(|(_, r)| r)
+    }
+
+    /// Returns the head record of the chain for the lexicographically first translated key, or
+    /// None if the index is empty.
+    pub(super) fn first_translated_record(&self) -> Option<&Record<V>> {
+        self.map.first_key_value().map(|(_, r)| r)
+    }
+
+    /// Returns the head record of the chain for the lexicographically last translated key, or
+    /// None if the index is empty.
+    pub(super) fn last_translated_record(&self) -> Option<&Record<V>> {
+        self.map.last_key_value().map(|(_, r)| r)
     }
 }
 
 impl<T: Translator, V: Eq + Send + Sync> Ordered for Index<T, V> {
-    type Iterator<'a>
-        = ImmutableCursor<'a, V>
+    fn prev_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
     where
-        Self: 'a;
-
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
-    where
-        Self::Value: 'a,
+        V: 'a,
     {
-        let res = self.prev_translated_key_no_cycle(key);
-        if let Some(res) = res {
-            return Some((res, false));
+        if let Some(r) = self.prev_translated_record_no_cycle(key) {
+            return Some((iter_chain(r), false));
         }
-
-        self.last_translated_key().map(|res| (res, true))
+        self.last_translated_record().map(|r| (iter_chain(r), true))
     }
 
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
+    fn next_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
     where
-        Self::Value: 'a,
+        V: 'a,
     {
-        let res = self.next_translated_key_no_cycle(key);
-        if let Some(res) = res {
-            return Some((res, false));
+        if let Some(r) = self.next_translated_record_no_cycle(key) {
+            return Some((iter_chain(r), false));
         }
-
-        self.first_translated_key().map(|res| (res, true))
+        self.first_translated_record()
+            .map(|r| (iter_chain(r), true))
     }
 
-    fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
-        Self::Value: 'a,
+        V: 'a,
     {
-        self.map
-            .first_key_value()
-            .map(|(_, record)| ImmutableCursor::new(record))
+        self.first_translated_record().map(iter_chain)
     }
 
-    fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
-        Self::Value: 'a,
+        V: 'a,
     {
-        self.map
-            .last_key_value()
-            .map(|(_, record)| ImmutableCursor::new(record))
+        self.last_translated_record().map(iter_chain)
     }
 }
 
@@ -212,11 +209,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         V: 'a,
     {
         let k = self.translator.transform(key);
-        self.map
-            .get(&k)
-            .map(|record| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
+        self.map.get(&k).into_iter().flat_map(iter_chain)
     }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
