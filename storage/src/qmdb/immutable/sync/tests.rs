@@ -1211,9 +1211,9 @@ mod compact_variable_mmr {
         async fn get_compact_state(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
         {
-            Ok(self.state.clone())
+            Ok(self.state.clone().into())
         }
     }
 
@@ -1303,7 +1303,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1346,7 +1347,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix);
@@ -1400,7 +1402,8 @@ mod compact_variable_mmr {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1668,9 +1671,9 @@ mod compact_variable_mmb {
         async fn get_compact_state(
             &self,
             _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::State<Self::Family, Self::Op, Self::Digest>, Self::Error>
+        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
         {
-            Ok(self.state.clone())
+            Ok(self.state.clone().into())
         }
     }
 
@@ -1760,7 +1763,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.last_commit_proof = crate::merkle::Proof::default();
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
@@ -1803,7 +1807,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
             let client_cfg = client_config(&suffix);
@@ -1857,7 +1862,8 @@ mod compact_variable_mmb {
             let source = Arc::new(source);
             let mut state = sync::compact::Resolver::get_compact_state(&source, target.clone())
                 .await
-                .unwrap();
+                .unwrap()
+                .state;
             state.leaf_count = Location::new(*state.leaf_count - 1);
 
             let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
