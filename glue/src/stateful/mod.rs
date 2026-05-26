@@ -170,8 +170,8 @@ where
     ///
     /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
     /// must still ensure the proposed block commits to the merkleized batch's
-    /// full database root. The wrapper's sync-target check only verifies the
-    /// operations root and active operation range used by replay sync.
+    /// canonical root. The wrapper's sync-target check only verifies the ops
+    /// root and operation range used by replay sync.
     ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
@@ -208,9 +208,9 @@ where
     /// before it is cached as pending state.
     ///
     /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
-    /// must still reject blocks whose committed full database root differs from
-    /// the merkleized batch root. The wrapper's sync-target check only verifies
-    /// the operations root and active operation range used by replay sync.
+    /// must still reject blocks whose committed canonical root differs from the
+    /// merkleized batch root. The wrapper's sync-target check only verifies the
+    /// ops root and operation range used by replay sync.
     ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
