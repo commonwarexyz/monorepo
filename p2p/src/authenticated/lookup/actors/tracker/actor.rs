@@ -174,16 +174,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 peer,
                 responder,
             } => {
-                // Kill if peer is not eligible (not in any tracked peer set).
                 if !self.directory.eligible(&public_key) {
-                    peer.kill();
                     let _ = responder.send(false);
                     return;
                 }
 
                 // Promote the reservation unless it was invalidated before Connect arrived.
                 if !self.directory.connect(&public_key) {
-                    peer.kill();
                     let _ = responder.send(false);
                     return;
                 }
@@ -306,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_unauthorized_peer_is_killed() {
+    fn test_connect_unauthorized_peer_returns_false() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -318,8 +315,11 @@ mod tests {
             // Connect as listener
             assert!(!mailbox.connect(unauth_pk.clone(), peer_mailbox).await);
             assert!(
-                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
-                "Unauthorized peer should be killed on Connect"
+                !matches!(
+                    peer_receiver.next().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "connect rejection is signaled by returning false"
             );
         });
     }
@@ -866,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reserved_removed_peer_is_killed_on_connect() {
+    fn test_reserved_removed_peer_rejected_on_connect() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, _) = new_signer_and_pk(0);
@@ -908,14 +908,17 @@ mod tests {
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
             assert!(!mailbox.connect(pk_1.clone(), peer_mailbox).await);
             assert!(
-                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
-                "reserved peer should be killed if it connects after losing tracked-set membership"
+                !matches!(
+                    peer_rx.next().now_or_never(),
+                    Some(Some(peer::Message::Kill))
+                ),
+                "connect rejection is signaled by returning false"
             );
         });
     }
 
     #[test]
-    fn test_reserved_peer_is_killed_on_connect_after_tracked_address_change() {
+    fn test_reserved_peer_rejected_on_connect_after_tracked_address_change() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, _) = new_signer_and_pk(0);
@@ -954,17 +957,17 @@ mod tests {
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
             assert!(!mailbox.connect(pk.clone(), peer_mailbox).await);
             assert!(
-                matches!(
+                !matches!(
                     peer_rx.next().now_or_never(),
                     Some(Some(peer::Message::Kill))
                 ),
-                "reserved peer should be killed if it connects after its tracked address changes"
+                "connect rejection is signaled by returning false"
             );
         });
     }
 
     #[test]
-    fn test_reserved_peer_is_killed_on_connect_after_overwrite() {
+    fn test_reserved_peer_rejected_on_connect_after_overwrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, _) = new_signer_and_pk(0);
@@ -999,11 +1002,11 @@ mod tests {
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
             assert!(!mailbox.connect(pk.clone(), peer_mailbox).await);
             assert!(
-                matches!(
+                !matches!(
                     peer_rx.next().now_or_never(),
                     Some(Some(peer::Message::Kill))
                 ),
-                "reserved peer should be killed if it connects after its address is overwritten"
+                "connect rejection is signaled by returning false"
             );
         });
     }
