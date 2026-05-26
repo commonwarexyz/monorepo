@@ -168,6 +168,11 @@ where
     /// result is cached as pending state. If the implementor produces a
     /// block with mismatched targets, this function will panic.
     ///
+    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
+    /// must still ensure the proposed block commits to the merkleized batch's
+    /// full database root. The wrapper's sync-target check only verifies the
+    /// operations root and active operation range used by replay sync.
+    ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
@@ -201,6 +206,11 @@ where
     /// against the produced batches themselves: the wrapper enforces
     /// this by checking that any returned merkleized state matches the block
     /// before it is cached as pending state.
+    ///
+    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current)
+    /// must still reject blocks whose committed full database root differs from
+    /// the merkleized batch root. The wrapper's sync-target check only verifies
+    /// the operations root and active operation range used by replay sync.
     ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
