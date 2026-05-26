@@ -143,8 +143,14 @@ fn fuzz(input: FuzzInput) {
                 continue;
             }
 
-            dialer_sender.send(msg.clone()).await.unwrap();
-            let received = listener_receiver.recv().await.unwrap();
+            // Drive send and recv concurrently so the mock channel's
+            // backpressure is satisfied while sending messages larger than that
+            // buffer.
+            let (sent, received) =
+                futures::join!(dialer_sender.send(msg.clone()), listener_receiver.recv());
+            let _ = sent.unwrap();
+            let received = received.unwrap();
+
             assert_eq!(received.coalesce(), &msg[..], "Message {i} mismatch");
         }
 
@@ -154,8 +160,12 @@ fn fuzz(input: FuzzInput) {
                 continue;
             }
 
-            listener_sender.send(msg.clone()).await.unwrap();
-            let received = dialer_receiver.recv().await.unwrap();
+            // Drive send and recv concurrently (same as above).
+            let (sent, received) =
+                futures::join!(listener_sender.send(msg.clone()), dialer_receiver.recv());
+            let _ = sent.unwrap();
+            let received = received.unwrap();
+
             assert_eq!(received.coalesce(), &msg[..], "Message {i} mismatch");
         }
     });
