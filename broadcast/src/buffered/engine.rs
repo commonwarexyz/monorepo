@@ -2,7 +2,7 @@ use super::{metrics, Config, Mailbox, Message};
 use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
     Provider, Receiver, Recipients, Sender,
@@ -159,6 +159,22 @@ where
             network.1,
         );
         let mut peer_set_subscription = self.peer_provider.subscribe();
+        // Messages outside latest.primary are dropped, so install the initial set first.
+        let mut shutdown = self.context.stopped();
+        let update = select! {
+            update = peer_set_subscription.recv() => {
+                let Some(update) = update else {
+                    debug!("peer set subscription closed before initialization");
+                    return;
+                };
+                update
+            },
+            _ = &mut shutdown => {
+                debug!("shutdown before peer set initialization");
+                return;
+            },
+        };
+        self.update_latest_primary_peers(update.latest.primary);
 
         select_loop! {
             self.context,

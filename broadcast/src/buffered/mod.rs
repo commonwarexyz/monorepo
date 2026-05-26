@@ -47,7 +47,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Digestible, Hasher, Sha256, Signer as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Manager as _, Recipients, Sender as _, TrackedPeers,
@@ -1436,8 +1436,70 @@ mod tests {
         });
     }
 
+    /// Queued network ingress must see the initial peer set before cache eligibility runs.
     #[test_traced]
-    fn test_engine_starts_before_initial_peer_set_and_delivers_after_tracking() {
+    fn test_network_message_queued_before_start_respects_initial_latest_primary() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 2, 1.0).await;
+            let peer_a = peers[0].clone();
+            let peer_b = peers[1].clone();
+
+            // Start A while B's receiver can queue packets but B's engine is offline.
+            let network_a = registrations.remove(&peer_a).unwrap();
+            let config_a = Config {
+                public_key: peer_a.clone(),
+                mailbox_size: NZUsize!(1024),
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+                peer_provider: oracle.manager(),
+            };
+            let (engine_a, mailbox_a) =
+                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_a"), config_a);
+            engine_a.start(network_a);
+            context.sleep(A_JIFFY).await;
+
+            // Deliver a valid network message to B before B's engine has started.
+            let msg = TestMessage::shared(b"queued-network-before-start");
+            assert!(mailbox_a
+                .broadcast(Recipients::All, msg.clone())
+                .accepted());
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // Starting B should seed latest.primary before draining the queued packet.
+            let network_b = registrations.remove(&peer_b).unwrap();
+            let config_b = Config {
+                public_key: peer_b.clone(),
+                mailbox_size: NZUsize!(1024),
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+                peer_provider: oracle.manager(),
+            };
+            let (engine_b, mailbox_b) =
+                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+            engine_b.start(network_b);
+
+            // Wait for the queued ingress path, then verify the message stayed cached.
+            let subscription = mailbox_b.subscribe(msg.digest());
+            select! {
+                _ = subscription => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("queued network message was not delivered to subscriber");
+                },
+            }
+            assert_eq!(
+                mailbox_b.get(msg.digest()).await,
+                Some(msg),
+                "peer B should apply the initial latest.primary set before draining queued network messages"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_engine_starts_before_initial_peer_set_and_processes_after_tracking() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
@@ -1510,23 +1572,18 @@ mod tests {
                     .accepted(),
                 "broadcast request should be accepted before a peer set is tracked"
             );
-            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-
-            assert_eq!(
-                mailbox_a.get(before.digest()).await,
-                None,
-                "without latest.primary, local broadcasts are not buffered"
-            );
-            assert!(
-                mailbox_b.get(before.digest()).await.is_none(),
-                "without latest.primary, remote peers do not cache inbound messages"
-            );
 
             oracle.manager().track(
                 0,
                 commonware_utils::ordered::Set::from_iter_dedup(peers.clone()),
             );
-            context.sleep(A_JIFFY).await;
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            assert_eq!(
+                mailbox_b.get(before.digest()).await,
+                Some(before),
+                "broadcast queued before initial peer set should be processed after tracking"
+            );
 
             let after = TestMessage::shared(b"after-tracking");
             assert!(mailbox_a

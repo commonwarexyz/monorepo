@@ -86,7 +86,8 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer to check.
         public_key: C,
 
-        /// The IP address the peer connected from.
+        /// The remote IP observed on the accepted socket, used to validate
+        /// that the peer is connecting from its advertised egress IP.
         source_ip: IpAddr,
 
         /// The sender to respond with whether the peer is acceptable.
@@ -95,14 +96,15 @@ pub enum Message<C: PublicKey> {
 
     /// Request a reservation for a particular peer.
     ///
-    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if  the
+    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
     /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
     /// has an active reservation).
     Listen {
         /// The public key of the peer to reserve.
         public_key: C,
 
-        /// The IP address the peer connected from.
+        /// The remote IP observed on the accepted socket. Reserving revalidates
+        /// it because the earlier acceptability check happened before the handshake.
         source_ip: IpAddr,
 
         /// The sender to respond with the reservation.

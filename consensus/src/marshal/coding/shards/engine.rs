@@ -157,7 +157,7 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher, PublicKey,
 };
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
@@ -437,9 +437,27 @@ where
                 self.background_channel_capacity,
                 &self.strategy,
             );
-        // Keep the handle alive to prevent the background receiver from being aborted.
-        let _receiver_handle = receiver_service.start();
         let mut peer_set_subscription = self.peer_provider.subscribe();
+        // Pre-leader shards outside latest.primary are dropped, so install peer sets first.
+        let mut shutdown = self.context.stopped();
+        let update = select! {
+            update = peer_set_subscription.recv() => {
+                let Some(update) = update else {
+                    debug!("peer set subscription closed before initialization");
+                    return;
+                };
+                update
+            },
+            _ = &mut shutdown => {
+                debug!("shutdown before peer set initialization");
+                return;
+            },
+        };
+        let all_peers = update.all.union();
+        self.update_latest_primary_peers(update.latest.primary);
+        self.aggregate_peers = all_peers;
+        // Start network draining only after peer eligibility is initialized.
+        let _receiver_handle = receiver_service.start();
 
         select_loop! {
             self.context,
@@ -3398,6 +3416,125 @@ mod tests {
                 );
             },
         );
+    }
+
+    /// Queued pre-leader shards must wait for the initial peer set before eligibility checks.
+    #[test_traced]
+    fn test_queued_preleader_shards_wait_for_initial_peer_set() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut private_keys: Vec<PrivateKey> = (0..10).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|s| s.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|k| k.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let receiver_idx = 3usize;
+            let receiver_pk = peer_keys[receiver_idx].clone();
+
+            // Create a tracked, fully connected peer set before the receiver engine starts.
+            let (network, oracle) =
+                simulated::Network::<deterministic::Context, P>::new_with_peers(
+                    context.child("network"),
+                    simulated::Config {
+                        max_size: MAX_SHARD_SIZE as u32,
+                        disconnect_on_block: true,
+                        tracked_peer_sets: NZUsize!(1),
+                    },
+                    peer_keys.clone(),
+                )
+                .await;
+            network.start();
+
+            let mut registrations = BTreeMap::new();
+            for key in &peer_keys {
+                let control = oracle.control(key.clone());
+                let (sender, receiver) = control
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .expect("registration should succeed");
+                registrations.insert(key.clone(), (control, sender, receiver));
+            }
+            for src in &peer_keys {
+                for dst in &peer_keys {
+                    if src == dst {
+                        continue;
+                    }
+                    oracle
+                        .add_link(src.clone(), dst.clone(), DEFAULT_LINK)
+                        .await
+                        .expect("link should be added");
+                }
+            }
+
+            let coding_config = coding_config_for_participants(peer_keys.len() as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+            let round = Round::new(Epoch::zero(), View::new(1));
+
+            // Queue enough valid pre-leader shards before the receiver's shard engine starts.
+            for sender_idx in [1usize, 2, 4, 5] {
+                let sender_pk = peer_keys[sender_idx].clone();
+                let participant = participants
+                    .index(&sender_pk)
+                    .expect("sender must be a participant");
+                let shard = coded_block
+                    .shard(participant.get() as u16)
+                    .expect("missing shard")
+                    .encode();
+                let (_, sender, _) = registrations
+                    .get_mut(&sender_pk)
+                    .expect("sender should be registered");
+                sender.send(Recipients::One(receiver_pk.clone()), shard, true);
+            }
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // Start the receiver after its network queue already contains valid shards.
+            let (receiver_control, receiver_sender, receiver_receiver) = registrations
+                .remove(&receiver_pk)
+                .expect("receiver should be registered");
+            let receiver_scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[receiver_idx].clone(),
+            )
+            .expect("signer scheme should be created");
+            let receiver_config: Config<_, _, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(receiver_scheme),
+                blocker: receiver_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: NZUsize!(1024),
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: NZUsize!(1024),
+                peer_provider: oracle.manager(),
+            };
+            let (receiver_engine, receiver_mailbox) =
+                ShardEngine::new(context.child("receiver"), receiver_config);
+            receiver_engine.start((receiver_sender, receiver_receiver));
+
+            // Notarization should reconstruct from the queued pre-leader shards.
+            let block_sub = receiver_mailbox.subscribe(commitment);
+            receiver_mailbox.notarized(commitment, round);
+            select! {
+                _ = block_sub => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("block subscription did not resolve from queued pre-leader shards");
+                },
+            }
+
+            let reconstructed = receiver_mailbox
+                .get(commitment)
+                .await
+                .expect("block should reconstruct from queued pre-leader shards");
+            assert_eq!(reconstructed.commitment(), commitment);
+            assert!(
+                oracle.blocked().await.unwrap().is_empty(),
+                "valid queued shards should not block peers"
+            );
+        });
     }
 
     #[test_traced]
