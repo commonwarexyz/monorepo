@@ -56,6 +56,7 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 # `partition` is "N/M", run partition N of M, where bench binaries are hash-distributed across M jobs.
 test-benches crate partition='1/1' test_flags='' lint_flags='':
     #!/usr/bin/env bash
+    set -euo pipefail
     list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
     echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
     binaries=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p' | python3 .github/scripts/hash_partition.py {{ partition }})
@@ -97,6 +98,7 @@ dylint:
 # `partition` is "N/M", run partition N of M, where targets are hash-distributed across M jobs.
 fuzz fuzz_dir partition='1/1' max_time='60' max_mem='4000':
     #!/usr/bin/env bash
+    set -euo pipefail
     targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
