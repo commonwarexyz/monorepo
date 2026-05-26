@@ -169,7 +169,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let Some(kill_peers) = self.directory.track(index, peers) else {
                     return;
                 };
-
                 for peer in kill_peers {
                     self.kill_peer(&peer);
                 }
@@ -276,7 +275,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Block { public_key } => {
                 // Block the peer
                 self.directory.block(&public_key);
-
                 self.kill_peer(&public_key);
             }
             Message::Release { metadata } => {

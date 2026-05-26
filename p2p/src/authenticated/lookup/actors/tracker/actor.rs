@@ -206,7 +206,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Block { public_key } => {
                 // Block the peer
                 self.directory.block(&public_key);
-
                 self.kill_peer(&public_key);
 
                 // Send the updated listenable IPs to the listener.
