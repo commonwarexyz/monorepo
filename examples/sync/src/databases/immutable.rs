@@ -173,6 +173,9 @@ where
     E: Storage + Clock + Metrics,
 {
     async fn current_target(&self) -> compact::Target<Self::Family, Key> {
-        compact::Target::new(self.root(), self.bounds().await.end)
+        compact::Target {
+            root: self.root(),
+            leaf_count: self.bounds().await.end,
+        }
     }
 }
