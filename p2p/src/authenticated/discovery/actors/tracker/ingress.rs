@@ -7,7 +7,7 @@ use crate::{
             types,
         },
     },
-    PeerSetSubscription, PeerSetUpdate, TrackedPeers,
+    PeerSetSubscription, TrackedPeers,
 };
 use commonware_actor::{
     mailbox::{self, Policy},
@@ -34,8 +34,8 @@ pub enum Message<C: PublicKey> {
     },
     /// Subscribe to notifications when new peer sets are added.
     Subscribe {
-        /// Sender to notify with peer set updates.
-        sender: mpsc::UnboundedSender<PeerSetUpdate<C>>,
+        /// One-shot channel to send the subscription receiver.
+        responder: oneshot::Sender<PeerSetSubscription<C>>,
     },
 
     // ---------- Used by blocker ----------
@@ -277,10 +277,13 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
         receiver.await.ok().flatten()
     }
 
-    fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let _ = self.sender.enqueue(Message::Subscribe { sender });
-        receiver
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Subscribe { responder });
+        receiver.await.unwrap_or_else(|_| {
+            let (_, rx) = mpsc::unbounded_channel();
+            rx
+        })
     }
 }
 

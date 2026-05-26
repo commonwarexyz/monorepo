@@ -472,14 +472,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         .map(|e| TrackedPeers::new(e.primary.clone(), e.secondary.clone())),
                 );
             }
-            ingress::Message::Subscribe { sender } => {
+            ingress::Message::Subscribe { response } => {
+                // Create a new subscription channel
+                let (sender, receiver) = mpsc::unbounded_channel();
+
                 // Send the latest peer set upon subscription.
                 if let Some(update) = self.latest_update() {
-                    if !sender.send_lossy(update) {
-                        return;
-                    }
+                    sender.send_lossy(update);
                 }
                 self.subscribers.push(sender);
+
+                // Return the receiver to the caller
+                let _ = response.send(receiver);
             }
             ingress::Message::SubscribePeers { exclude, sender } => {
                 self.subscribe_connected(exclude, sender);
@@ -1567,7 +1571,7 @@ mod tests {
                 Set::try_from([secondary.clone()]).unwrap()
             );
 
-            let mut updates = manager.subscribe();
+            let mut updates = manager.subscribe().await;
             let update = updates.recv().await.unwrap();
             assert_eq!(update.index, 0);
             assert_eq!(
@@ -1862,7 +1866,7 @@ mod tests {
 
             // Subscribe to peer sets
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
 
             // Register initial peer set
             manager.track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
@@ -1911,7 +1915,7 @@ mod tests {
             let pk_sec = ed25519::PrivateKey::from_seed(24).public_key();
 
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
 
             manager.track(
                 10,
@@ -2190,7 +2194,7 @@ mod tests {
                 ),
             );
 
-            let mut updates = manager.subscribe();
+            let mut updates = manager.subscribe().await;
             let update = updates.recv().await.unwrap();
             assert_eq!(update.index, 0);
             assert!(update.latest.primary.position(&pk2).is_some());
@@ -2272,7 +2276,7 @@ mod tests {
             let pk_y = ed25519::PrivateKey::from_seed(2).public_key();
 
             let mut manager = oracle.manager();
-            let mut sub = manager.subscribe();
+            let mut sub = manager.subscribe().await;
 
             // Index 0: X is primary, Y is secondary.
             manager.track(

@@ -157,7 +157,7 @@ use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher, PublicKey,
 };
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
     Blocker, Provider as PeerProvider, Receiver, Recipients, Sender,
@@ -437,27 +437,9 @@ where
                 self.background_channel_capacity,
                 &self.strategy,
             );
+        let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
-        // Pre-leader shards outside latest.primary are dropped, so install peer sets first.
-        let mut peer_set_subscription = self.peer_provider.subscribe();
-        let mut shutdown = self.context.stopped();
-        let update = select! {
-            update = peer_set_subscription.recv() => {
-                let Some(update) = update else {
-                    debug!("peer set subscription closed before initialization");
-                    return;
-                };
-                update
-            },
-            _ = &mut shutdown => {
-                debug!("shutdown before peer set initialization");
-                return;
-            },
-        };
-        let all_peers = update.all.union();
-        self.update_latest_primary_peers(update.latest.primary);
-        self.aggregate_peers = all_peers;
-        // Start network draining only after peer eligibility is initialized.
+        // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
 
         select_loop! {

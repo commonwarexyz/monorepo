@@ -67,7 +67,7 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
             mut mailbox,
         } = self;
         let (worker_sender, worker_receiver) = mpsc::unbounded_channel();
-        let worker = context.child("indexer_worker").spawn(move |context| {
+        let worker = context.child("indexer").spawn(move |context| {
             Self::run_indexer(
                 context,
                 indexer,

@@ -1,7 +1,6 @@
 use super::{Error, Receiver, Sender};
 use crate::{
-    Address, AddressableTrackedPeers, Channel, PeerSetSubscription, PeerSetUpdate, Recipients,
-    TrackedPeers,
+    Address, AddressableTrackedPeers, Channel, PeerSetSubscription, Recipients, TrackedPeers,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
@@ -37,7 +36,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         response: oneshot::Sender<Option<TrackedPeers<P>>>,
     },
     Subscribe {
-        sender: mpsc::UnboundedSender<PeerSetUpdate<P>>,
+        response: oneshot::Sender<PeerSetSubscription<P>>,
     },
     SubscribePeers {
         exclude: P,
@@ -285,10 +284,13 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Subscribe to notifications when new peer sets are added.
-    fn subscribe(&self) -> PeerSetSubscription<P> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let _ = self.sender.send_lossy(Message::Subscribe { sender });
-        receiver
+    async fn subscribe(&self) -> PeerSetSubscription<P> {
+        request(&self.sender, |response| Message::Subscribe { response })
+            .await
+            .unwrap_or_else(|| {
+                let (_, rx) = mpsc::unbounded_channel();
+                rx
+            })
     }
 }
 
@@ -321,8 +323,8 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
         self.oracle.peer_set(id).await
     }
 
-    fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-        self.oracle.subscribe()
+    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
+        self.oracle.subscribe().await
     }
 }
 
@@ -370,8 +372,8 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
         self.oracle.peer_set(id).await
     }
 
-    fn subscribe(&mut self) -> PeerSetSubscription<P> {
-        self.oracle.subscribe()
+    async fn subscribe(&mut self) -> PeerSetSubscription<P> {
+        self.oracle.subscribe().await
     }
 }
 

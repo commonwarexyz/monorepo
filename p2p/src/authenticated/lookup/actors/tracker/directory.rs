@@ -229,7 +229,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(index = removed_index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(&primary).unwrap().decrement_primary();
-                let should_reset = self.should_reset_removed(&primary);
+                let should_reset = self
+                    .peers
+                    .get(&primary)
+                    .is_some_and(|record| record.is_blockable() && !record.eligible());
                 self.delete_if_needed(&primary);
                 if should_reset {
                     reset_peers.push(primary);
@@ -240,7 +243,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                     .get_mut(&secondary)
                     .unwrap()
                     .decrement_secondary();
-                let should_reset = self.should_reset_removed(&secondary);
+                let should_reset = self
+                    .peers
+                    .get(&secondary)
+                    .is_some_and(|record| record.is_blockable() && !record.eligible());
                 self.delete_if_needed(&secondary);
                 if should_reset {
                     reset_peers.push(secondary);
@@ -510,16 +516,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.peers.remove(peer);
         self.metrics.tracked.dec();
         true
-    }
-
-    /// Returns whether a peer should be reset after losing tracked-set membership.
-    ///
-    /// This runs before optional deletion so reserved or connected peers can be
-    /// reset if they lost eligibility.
-    fn should_reset_removed(&self, peer: &C) -> bool {
-        self.peers
-            .get(peer)
-            .is_some_and(|record| record.is_blockable() && !record.eligible())
     }
 }
 

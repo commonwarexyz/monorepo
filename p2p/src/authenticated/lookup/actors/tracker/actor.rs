@@ -161,14 +161,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::PeerSet { index, responder } => {
                 let _ = responder.send(self.directory.get_peer_set(&index));
             }
-            Message::Subscribe { sender } => {
+            Message::Subscribe { responder } => {
+                let (sender, receiver) = mpsc::unbounded_channel();
+
                 // Send the latest peer set immediately
                 if let Some(update) = self.directory.latest_update() {
-                    if !sender.send_lossy(update) {
-                        return;
-                    }
+                    sender.send_lossy(update);
                 }
                 self.subscribers.push(sender);
+                let _ = responder.send(receiver);
             }
             Message::Connect { public_key, peer } => {
                 // Kill if peer is not eligible (not in a peer set)
@@ -604,7 +605,7 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let mut subscription = oracle.subscribe();
+            let mut subscription = oracle.subscribe().await;
 
             let (_primary_signer, primary_pk) = new_signer_and_pk(1);
             let primary_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
@@ -659,7 +660,7 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg);
 
-            let mut subscription = oracle.subscribe();
+            let mut subscription = oracle.subscribe().await;
 
             let (_signer, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);

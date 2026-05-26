@@ -2405,7 +2405,7 @@ mod tests {
             let keys: Vec<_> = Vec::from(peer_set.primary.clone());
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 1);
             let latest_keys: Vec<_> = Vec::from(update.latest.primary.clone());
@@ -2504,7 +2504,7 @@ mod tests {
                 )
             );
 
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 9);
             assert!(update.latest.primary.position(&pk2).is_some());
@@ -2572,7 +2572,7 @@ mod tests {
             let addr_primary: Address = SocketAddr::from(([127, 0, 0, 1], 4000)).into();
             let addr_secondary: Address = SocketAddr::from(([127, 0, 0, 1], 5000)).into();
             let mut manager = oracle.socket_manager();
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
 
             manager.track(
                 11,
@@ -2633,7 +2633,7 @@ mod tests {
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
             // Verify subscription works
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 1);
             let latest_keys: Vec<_> = Vec::from(update.latest.primary);
@@ -2804,7 +2804,7 @@ mod tests {
             );
             network.start();
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
 
             // Register a peer set
             let sender_pk = PrivateKey::from_seed(1).public_key();
@@ -2917,7 +2917,7 @@ mod tests {
 
             // Subscribe to peer set updates
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
 
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
@@ -3014,9 +3014,9 @@ mod tests {
 
             // Create multiple subscriptions
             let mut manager = oracle.manager();
-            let mut subscription1 = manager.subscribe();
-            let mut subscription2 = manager.subscribe();
-            let mut subscription3 = manager.subscribe();
+            let mut subscription1 = manager.subscribe().await;
+            let mut subscription2 = manager.subscribe().await;
+            let mut subscription3 = manager.subscribe().await;
 
             // Create peers
             let pk1 = PrivateKey::from_seed(1).public_key();
@@ -3076,7 +3076,7 @@ mod tests {
 
             // Subscribe to peer set updates
             let mut manager = oracle.manager();
-            let mut subscription = manager.subscribe();
+            let mut subscription = manager.subscribe().await;
 
             // Register a peer set that does NOT include self
             manager.track(1, Set::try_from(vec![other_pk.clone()]).unwrap());
@@ -3261,7 +3261,7 @@ mod tests {
             // Manager operations should not panic
             manager.track(1, Set::try_from([pk1.clone()]).unwrap());
             let _ = manager.peer_set(0).await;
-            let _ = manager.subscribe();
+            let _ = manager.subscribe().await;
 
             // Oracle operations should not panic
             let _ = oracle
@@ -3418,13 +3418,12 @@ mod tests {
             let mut manager = oracle.manager();
             Manager::track(&mut manager, 0, peers.clone());
 
-            // Subscribe after tracking. The current peer set should be sent
-            // through the subscription channel.
-            let mut subscription = Provider::subscribe(&mut manager);
+            // Subscribe after tracking. The current peer set should be
+            // available immediately on the subscription channel.
+            let mut subscription = Provider::subscribe(&mut manager).await;
             let update = subscription
-                .recv()
-                .await
-                .expect("current peer set should be sent after subscribe");
+                .try_recv()
+                .expect("current peer set should be available immediately after subscribe");
             assert_eq!(update.index, 0);
             assert_eq!(update.latest.primary, peers);
             assert!(update.latest.secondary.is_empty());

@@ -52,7 +52,7 @@ impl<P: PublicKey> Provider for StaticProvider<P> {
         Some(TrackedPeers::primary(self.peers.clone()))
     }
 
-    fn subscribe(&mut self) -> UnboundedReceiver<PeerSetUpdate<P>> {
+    async fn subscribe(&mut self) -> UnboundedReceiver<PeerSetUpdate<P>> {
         let (sender, receiver) = mpsc::unbounded_channel();
         sender.send_lossy(PeerSetUpdate {
             index: self.id,

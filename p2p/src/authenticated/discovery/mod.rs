@@ -784,7 +784,7 @@ mod tests {
             network.start();
 
             // Subscribe to peer sets
-            let mut subscription = oracle.subscribe();
+            let mut subscription = oracle.subscribe().await;
 
             // Register initial peer set
             let set10: Set<_> = peers_and_sks
@@ -992,7 +992,7 @@ mod tests {
             network.start();
 
             // Subscribe to peer sets
-            let mut subscription = oracle.subscribe();
+            let mut subscription = oracle.subscribe().await;
 
             // Register a peer set that does NOT include self
             let peer_set: Set<_> = [other_pk.clone()].try_into().unwrap();
@@ -2307,7 +2307,7 @@ mod tests {
             // Oracle operations should not panic even after shutdown
             oracle.track(1, peers.clone());
             let _ = oracle.peer_set(0).await;
-            let _ = oracle.subscribe();
+            let _ = oracle.subscribe().await;
             crate::block_peer(&mut oracle, address.clone());
 
             // Sender operations should not panic even after shutdown
