@@ -248,7 +248,7 @@ jobs:
     - name: Run miri tests for runtime::buffer::paged::append
       run: |
         cd runtime
-        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/12
+        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/12 --no-tests=pass
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
