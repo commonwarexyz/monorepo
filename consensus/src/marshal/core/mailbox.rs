@@ -730,44 +730,44 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Notifies the actor that a block has been locally proposed.
     ///
-    /// The returned receiver resolves after the block is durably persisted.
+    /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub fn proposed(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
+    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Proposed {
             round,
             block,
             ack: Some(ack),
         });
-        receiver
+        receiver.await.is_ok()
     }
 
     /// Notifies the actor that a block has been verified.
     ///
-    /// The returned receiver resolves after the block is durably persisted.
+    /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub fn verified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
+    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Verified {
             round,
             block,
             ack: Some(ack),
         });
-        receiver
+        receiver.await.is_ok()
     }
 
     /// Notifies the actor that a block has been certified.
     ///
-    /// The returned receiver resolves after the block is durably persisted.
+    /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub fn certified(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
+    pub async fn certified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Certified {
             round,
             block,
             ack: Some(ack),
         });
-        receiver
+        receiver.await.is_ok()
     }
 
     /// Attempts to set the sync starting point from a finalized commitment.

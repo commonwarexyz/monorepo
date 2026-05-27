@@ -29,8 +29,8 @@ impl Stage {
         block: V::Block,
     ) -> bool {
         match self {
-            Self::Verified => marshal.verified(round, block).await.is_ok(),
-            Self::Certified => marshal.certified(round, block).await.is_ok(),
+            Self::Verified => marshal.verified(round, block).await,
+            Self::Certified => marshal.certified(round, block).await,
         }
     }
 }

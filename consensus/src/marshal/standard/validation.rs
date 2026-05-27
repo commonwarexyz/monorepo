@@ -99,7 +99,7 @@ where
             return Some(Decision::Complete(false));
         }
 
-        if marshal.verified(context.round, block).await.is_err() {
+        if !marshal.verified(context.round, block).await {
             return None;
         }
         return Some(Decision::Complete(true));

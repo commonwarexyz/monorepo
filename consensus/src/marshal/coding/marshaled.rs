@@ -530,7 +530,7 @@ where
                 // Certifier holds a notarization for this block, so route
                 // the write to the notarized cache. `certified` is
                 // idempotent, so crash-recovery double-invocation is safe.
-                if marshaled.marshal.certified(round, block).await.is_err() {
+                if !marshaled.marshal.certified(round, block).await {
                     debug!(?round, "marshal unable to accept block");
                     return;
                 }
@@ -768,7 +768,7 @@ where
             if parent.height() == last_in_epoch {
                 let commitment = parent.commitment();
                 let round = consensus_context.round;
-                if marshal.verified(round, parent).await.is_err() {
+                if !marshal.verified(round, parent).await {
                     debug!(
                         ?round,
                         ?commitment,
@@ -825,7 +825,7 @@ where
 
             let commitment = coded_block.commitment();
             let round = consensus_context.round;
-            if marshal.proposed(round, coded_block).await.is_err() {
+            if !marshal.proposed(round, coded_block).await {
                 debug!(?round, ?commitment, "marshal rejected proposed block");
                 return;
             }
@@ -965,7 +965,7 @@ where
 
                     // Valid re-proposal: notify the marshal and complete the
                     // verification task for `certify`.
-                    if marshal.verified(round, block).await.is_err() {
+                    if !marshal.verified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
                     }
