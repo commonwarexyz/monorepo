@@ -419,7 +419,7 @@ where
                 if let Some(callback) = callback {
                     let _ = callback.send(false);
                 }
-                tracing::warn!(error = ?err, "compact state failed validation, will retry");
+                tracing::debug!(error = ?err, "compact state failed validation, will retry");
                 continue;
             }
         };
