@@ -474,13 +474,12 @@ where
         return Err(EngineError::InvalidProof);
     }
 
-    let mem =
-        crate::merkle::mem::Mem::<DB::Family, DB::Digest>::init(crate::merkle::mem::Config {
-            nodes: Vec::new(),
-            pruning_boundary: state.leaf_count,
-            pinned_nodes: state.pinned_nodes.clone(),
-        })
-        .map_err(compact_merkle_error_to_engine)?;
+    let mem = crate::merkle::mem::Mem::<DB::Family, DB::Digest>::init(crate::merkle::mem::Config {
+        nodes: Vec::new(),
+        pruning_boundary: state.leaf_count,
+        pinned_nodes: state.pinned_nodes.clone(),
+    })
+    .map_err(compact_merkle_error_to_engine)?;
     let hasher = qmdb::hasher::<DB::Hasher>();
     let inactive_peaks = DB::Family::inactive_peaks(
         DB::Family::location_to_position(state.leaf_count),
