@@ -238,7 +238,7 @@ where
             acknowledgement.acknowledge();
         }
 
-        syncer::set_sync_height(
+        syncer::set_sync_complete::<_, V::Commitment>(
             self.context.as_present(),
             self.partition_prefix.as_str(),
             synced_height,

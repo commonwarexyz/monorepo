@@ -2,16 +2,18 @@ use crate::stateful::{
     db::{Anchor, DatabaseSet},
     Application,
 };
+use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::{
-        core::{Mailbox as MarshalMailbox, Variant},
+        core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant},
         Identifier,
     },
+    simplex::types::Finalization,
     types::Height,
     CertifiableBlock, Heightable, Roundable,
 };
-use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{Clock, Metrics, Spawner, Storage, Supervisor};
+use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand::Rng;
@@ -26,9 +28,152 @@ mod plan;
 pub use plan::SyncPlan;
 
 const SYNC_METADATA_SUFFIX: &str = "state_sync_metadata";
-const SYNC_HEIGHT_KEY: FixedBytes<1> = fixed_bytes!("C0");
+const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
+
+/// Durable identity for an in-progress startup-sync floor.
+///
+/// The height enforces monotonic restarts, and the commitment distinguishes
+/// conflicting blocks at the same height.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FloorMarker<C>
+where
+    C: Digest,
+{
+    height: Height,
+    commitment: C,
+}
+
+impl<C> FloorMarker<C>
+where
+    C: Digest,
+{
+    /// Constructs a durable floor marker from the resolved floor block.
+    pub(crate) const fn new(height: Height, commitment: C) -> Self {
+        Self { height, commitment }
+    }
+
+    /// Ensures a newly selected floor is compatible with this persisted one.
+    ///
+    /// Restarts may resume from the same floor or advance to a newer one, but
+    /// must never move backward or switch to a different block at the same height.
+    pub(crate) fn ensure_not_behind(&self, selected: &Self) {
+        assert!(
+            selected.height >= self.height,
+            "selected startup sync floor cannot move behind the persisted in-progress floor",
+        );
+
+        if selected.height == self.height {
+            assert!(
+                selected.commitment == self.commitment,
+                "selected startup sync floor conflicts with the persisted in-progress floor",
+            );
+        }
+    }
+}
+
+impl<C> Write for FloorMarker<C>
+where
+    C: Digest,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        self.height.write(writer);
+        self.commitment.write(writer);
+    }
+}
+
+impl<C> EncodeSize for FloorMarker<C>
+where
+    C: Digest,
+{
+    fn encode_size(&self) -> usize {
+        self.height.encode_size() + self.commitment.encode_size()
+    }
+}
+
+impl<C> Read for FloorMarker<C>
+where
+    C: Digest,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        Ok(Self {
+            height: Height::read(reader)?,
+            commitment: C::read_cfg(reader, &())?,
+        })
+    }
+}
+
+/// Durable startup-sync progress stored under the metadata key `C0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StartupSyncState<C>
+where
+    C: Digest,
+{
+    InProgress(FloorMarker<C>),
+    Complete(Height),
+}
+
+impl<C> StartupSyncState<C>
+where
+    C: Digest,
+{
+    /// Returns the completed startup-sync height, if startup sync has finished.
+    pub(crate) const fn sync_height(&self) -> Option<Height> {
+        match self {
+            Self::InProgress(_) => None,
+            Self::Complete(height) => Some(*height),
+        }
+    }
+}
+
+impl<C> Write for StartupSyncState<C>
+where
+    C: Digest,
+{
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Self::InProgress(floor) => {
+                0u8.write(writer);
+                floor.write(writer);
+            }
+            Self::Complete(height) => {
+                1u8.write(writer);
+                height.write(writer);
+            }
+        }
+    }
+}
+
+impl<C> EncodeSize for StartupSyncState<C>
+where
+    C: Digest,
+{
+    fn encode_size(&self) -> usize {
+        u8::SIZE
+            + match self {
+                Self::InProgress(floor) => floor.encode_size(),
+                Self::Complete(height) => height.encode_size(),
+            }
+    }
+}
+
+impl<C> Read for StartupSyncState<C>
+where
+    C: Digest,
+{
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        match u8::read(reader)? {
+            0 => Ok(Self::InProgress(FloorMarker::<C>::read(reader)?)),
+            1 => Ok(Self::Complete(Height::read(reader)?)),
+            n => Err(Error::InvalidEnum(n)),
+        }
+    }
+}
 
 /// The result of a state sync operation.
 pub struct SyncResult<E, A>
@@ -55,11 +200,26 @@ where
     }
 }
 
-/// Loads the sync metadata from storage, initializing it if it does not already
-/// exist.
-async fn load_metadata<E>(context: &E, partition_prefix: &str) -> Metadata<E, FixedBytes<1>, Height>
+/// Resolved startup-sync floor data derived from the selected finalization.
+pub(crate) struct ResolvedFloor<E, A, C>
 where
-    E: Storage + Supervisor + Clock + Metrics,
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    C: Digest,
+{
+    pub anchor: Anchor<BlockDigest<A, E>>,
+    pub targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
+    pub marker: FloorMarker<C>,
+}
+
+/// Loads the durable startup-sync metadata partition, creating it if needed.
+async fn load_startup_sync_metadata<E, C>(
+    context: &E,
+    partition_prefix: &str,
+) -> Metadata<E, FixedBytes<1>, StartupSyncState<C>>
+where
+    E: Storage + Clock + Metrics,
+    C: Digest,
 {
     Metadata::init(
         context.child("metadata"),
@@ -72,34 +232,91 @@ where
     .expect("failed to load sync metadata")
 }
 
-/// Loads the durable startup-sync height from storage.
-///
-/// When this returns [`Some`], the node has already completed its one-time
-/// state sync for this partition and must recover from the later of that
-/// height and marshal's processed height on future startups instead of
-/// running peer state sync again.
-pub(crate) async fn sync_height<E>(context: &E, partition_prefix: &str) -> Option<Height>
+/// Loads the durable startup-sync state for this partition, if any.
+pub(crate) async fn startup_sync_state<E, C>(
+    context: &E,
+    partition_prefix: &str,
+) -> Option<StartupSyncState<C>>
 where
-    E: Storage + Supervisor + Clock + Metrics,
+    E: Storage + Clock + Metrics,
+    C: Digest,
 {
-    let metadata = load_metadata(context, partition_prefix).await;
-    metadata.get(&SYNC_HEIGHT_KEY).copied()
+    let metadata = load_startup_sync_metadata::<E, C>(context, partition_prefix).await;
+    metadata.get(&SYNC_STATE_KEY).cloned()
 }
 
-/// Records the height reached by one-time startup sync for this partition.
+/// Marks startup sync as in progress for the resolved floor.
+///
+/// This must be persisted before any startup-sync database mutation begins so a
+/// crash can reopen partial sync state and validate the next selected floor.
+///
+/// If an interrupted startup sync already stored a floor, the newly selected
+/// floor must resume from that same floor or a later one.
+pub(crate) async fn set_sync_in_progress<E, C>(
+    context: &E,
+    partition_prefix: &str,
+    floor: FloorMarker<C>,
+) where
+    E: Storage + Clock + Metrics,
+    C: Digest,
+{
+    let mut metadata = load_startup_sync_metadata::<E, C>(context, partition_prefix).await;
+
+    if let Some(StartupSyncState::InProgress(existing)) = metadata.get(&SYNC_STATE_KEY) {
+        existing.ensure_not_behind(&floor);
+    }
+
+    metadata
+        .put_sync(SYNC_STATE_KEY, StartupSyncState::InProgress(floor))
+        .await
+        .expect("failed to set startup sync state to in-progress");
+}
+
+/// Records that one-time startup sync completed at the given height.
 ///
 /// Once this height is set, future startups skip peer state sync and initialize
 /// from the later of this height and marshal's processed height instead. This
 /// action is irreversible.
-pub(crate) async fn set_sync_height<E>(context: &E, partition_prefix: &str, height: Height)
+pub(crate) async fn set_sync_complete<E, C>(context: &E, partition_prefix: &str, height: Height)
 where
-    E: Storage + Supervisor + Clock + Metrics,
+    E: Storage + Clock + Metrics,
+    C: Digest,
 {
-    let mut metadata = load_metadata(context, partition_prefix).await;
+    let mut metadata = load_startup_sync_metadata::<E, C>(context, partition_prefix).await;
     metadata
-        .put_sync(SYNC_HEIGHT_KEY, height)
+        .put_sync(SYNC_STATE_KEY, StartupSyncState::<C>::Complete(height))
         .await
-        .expect("failed to set sync height");
+        .expect("failed to set startup sync state to complete");
+}
+
+/// Resolves the selected startup-sync floor into the anchor, targets, and
+/// durable floor marker used by restart validation.
+pub(crate) async fn resolve_startup_floor<E, A, S, V>(
+    marshal: &MarshalMailbox<S, V>,
+    finalization: &Finalization<S, V::Commitment>,
+) -> ResolvedFloor<E, A, V::Commitment>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+    S: Scheme,
+    V: Variant<ApplicationBlock = A::Block>,
+{
+    // Wait to retrieve the floor block from marshal. We use `Wait` here,
+    // since marshal triggers a fetch for the floor block if it is not
+    // already available.
+    let floor = {
+        let block = marshal
+            .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+            .await
+            .expect("marshal must yield floor block");
+        V::into_inner(block)
+    };
+
+    ResolvedFloor {
+        anchor: Anchor::from(&floor),
+        targets: A::sync_targets(&floor),
+        marker: FloorMarker::new(floor.height(), finalization.proposal.payload),
+    }
 }
 
 /// The result of initializing state from marshal on startup.
@@ -181,7 +398,7 @@ where
     // Once startup has aligned databases with marshal, future boots should skip peer
     // state sync and recover from the later of this anchor and marshal's durable
     // processed height.
-    set_sync_height(context, partition_prefix, floor_block.height()).await;
+    set_sync_complete::<E, V::Commitment>(context, partition_prefix, floor_block.height()).await;
 
     let anchor = Anchor {
         height: floor_block.height(),

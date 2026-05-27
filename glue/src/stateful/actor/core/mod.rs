@@ -70,7 +70,7 @@ where
     /// Startup plan loaded via [`SyncPlan::init`], optionally augmented with
     /// a finalized floor via [`SyncPlan::with_floor`]. Carries the durable
     /// metadata partition prefix and the startup decision shared with marshal.
-    pub plan: SyncPlan<Finalization<S, V::Commitment>>,
+    pub plan: SyncPlan<S, V>,
 
     /// Resolver(s) for startup sync fetches and post-bootstrap serving.
     pub resolvers: R,
@@ -108,7 +108,7 @@ where
     db_config: <A::Databases as DatabaseSet<E>>::Config,
 
     /// Startup plan carrying the metadata partition prefix and floor decision.
-    plan: SyncPlan<Finalization<S, V::Commitment>>,
+    plan: SyncPlan<S, V>,
 
     /// Resolver(s) for startup sync fetches and post-bootstrap serving.
     resolvers: R,
@@ -158,6 +158,8 @@ where
     async fn run(self) {
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor).await;
+        } else if self.plan.requires_state_sync_floor() {
+            panic!("interrupted startup sync must resume from a newly selected floor");
         } else {
             self.start_from_marshal().await;
         }
@@ -166,14 +168,23 @@ where
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
+        let resolved_floor =
+            syncer::resolve_startup_floor::<E, A, S, V>(&self.marshal, &floor).await;
+        syncer::set_sync_in_progress(
+            self.context.as_present(),
+            self.plan.partition_prefix(),
+            resolved_floor.marker,
+        )
+        .await;
+
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
-            finalization: floor,
-            marshal: self.marshal.clone(),
+            starting_anchor: resolved_floor.anchor,
+            starting_targets: resolved_floor.targets,
             sync_complete,
         });
         let syncing = Syncing {

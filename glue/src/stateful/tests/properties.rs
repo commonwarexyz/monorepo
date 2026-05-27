@@ -94,3 +94,55 @@ where
         })
     }
 }
+
+/// Post-run property: a validator started startup sync, crashed before it
+/// completed, restarted, re-entered startup sync, then advanced beyond the
+/// synced height.
+#[derive(Clone, Copy)]
+pub(crate) struct CrashDuringStateSyncRecovery;
+
+impl<V> Property<ed25519::PublicKey, MockValidatorState<V>> for CrashDuringStateSyncRecovery
+where
+    V: Variant,
+    V::ApplicationBlock: Digestible<Digest = sha256::Digest>,
+    MockValidatorState<V>: Send + Sync,
+{
+    fn name(&self) -> &str {
+        "crash_during_state_sync_recovery"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a MockValidatorState<V>],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut observed = Vec::new();
+            for state in states {
+                let processed_height = state.processed_height().await;
+                observed.push(format!(
+                    "entries={} sync_height={:?} processed_height={processed_height}",
+                    state.startup_sync_entries(),
+                    state.startup_sync_height(),
+                ));
+
+                let Some(sync_height) = state.startup_sync_height() else {
+                    continue;
+                };
+                if state.startup_sync_entries() < 2 {
+                    continue;
+                }
+                if processed_height > sync_height {
+                    return Ok(());
+                }
+            }
+
+            Err(
+                format!(
+                    "no validator re-entered startup sync after a crash and then advanced beyond the synced height; observed [{}]",
+                    observed.join(", "),
+                ),
+            )
+        })
+    }
+}
