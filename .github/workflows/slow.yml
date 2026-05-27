@@ -20,13 +20,13 @@ env:
 
 jobs:
   Tests:
-    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/16)"
+    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/20)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
@@ -72,7 +72,7 @@ jobs:
         opt-level = 2
         EOF
     - name: Run slow tests
-      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/16 --verbose --profile slow
+      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/20 --verbose --profile slow
 
   Tests-Gate:
     name: "Slow-Tests"
