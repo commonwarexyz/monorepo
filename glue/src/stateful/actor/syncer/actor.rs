@@ -37,7 +37,7 @@ where
     /// Per-database resolvers used to fetch state from peers.
     pub resolvers: R,
 
-    /// Anchor where startup state sync begins.
+    /// Anchor where state sync begins.
     pub starting_anchor: Anchor<BlockDigest<A, E>>,
 
     /// Initial targets derived from the resolved startup floor block.
@@ -71,7 +71,7 @@ where
     /// Per-database resolvers used to fetch state from peers.
     resolvers: R,
 
-    /// Anchor where startup state sync begins.
+    /// Anchor where state sync begins.
     starting_anchor: Anchor<BlockDigest<A, E>>,
 
     /// Initial targets derived from the resolved startup floor block.

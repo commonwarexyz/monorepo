@@ -298,7 +298,7 @@ impl SingleDbEngine {
         self
     }
 
-    /// Forces startup sync to progress in the smallest possible batches.
+    /// Forces state sync to progress in the smallest possible batches.
     pub(crate) fn with_slow_state_sync(mut self) -> Self {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
@@ -433,7 +433,7 @@ impl EngineDefinition for SingleDbEngine {
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
-        let startup_sync_height = if self.enable_state_sync && plan.may_state_sync() {
+        let state_sync_height = if self.enable_state_sync && plan.may_state_sync() {
             match fetch_majority_sync_floor(&self.marshal_mailboxes, &context, public_key).await {
                 Some((finalization, height)) => {
                     *self
@@ -572,13 +572,13 @@ impl EngineDefinition for SingleDbEngine {
             handle,
             MockValidatorState {
                 marshal: marshal_mailbox,
-                startup_sync_entries: self
+                state_sync_entries: self
                     .sync_entries
                     .lock()
                     .get(public_key)
                     .copied()
                     .unwrap_or(0),
-                startup_sync_height,
+                state_sync_height,
             },
         )
     }

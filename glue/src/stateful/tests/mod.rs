@@ -608,7 +608,7 @@ where
 }
 
 /// Crash the late joiner mid-sync and restart it without clearing any state-sync
-/// partitions. The restarted node should resume startup sync from a compatible floor.
+/// partitions. The restarted node should resume state sync from a compatible floor.
 fn run_state_sync_crash_during_sync<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -641,7 +641,7 @@ where
 }
 
 /// Partition the late joiner, crash it mid-sync, then restart it into the same
-/// partition. Even with restartable startup sync, the late joiner still cannot
+/// partition. Even with restartable state sync, the late joiner still cannot
 /// recover until the network partition heals.
 fn run_state_sync_partitioned_restart_stays_stuck_until_network_heals<D>(engine: D)
 where

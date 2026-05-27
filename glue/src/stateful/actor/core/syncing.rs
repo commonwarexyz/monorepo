@@ -29,7 +29,7 @@ use commonware_utils::{
 use rand::Rng;
 use tracing::{debug, error};
 
-/// Verify request buffered while startup sync is still in progress.
+/// Verify request buffered while state sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
     context: C,
     ancestry: ErasedAncestorStream<B>,
@@ -77,7 +77,7 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// The state sync resolvers used for startup sync fetching and post-bootstrap
+    /// The state sync resolvers used for state sync fetching and post-bootstrap
     /// serving.
     pub(super) resolvers: R,
 
@@ -212,7 +212,7 @@ where
     }
 
     /// Transitions to [`Processing`] state once the database set has converged
-    /// on the startup-sync [`Anchor`].
+    /// on the state sync [`Anchor`].
     async fn transition(mut self, handoff: Option<(A::Block, Exact)>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;

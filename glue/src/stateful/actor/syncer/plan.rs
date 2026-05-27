@@ -1,4 +1,4 @@
-use super::StartupSyncState;
+use super::SyncState;
 use commonware_consensus::{
     marshal::{core::Variant, Start},
     simplex::types::Finalization,
@@ -10,14 +10,14 @@ use commonware_runtime::{Clock, Metrics, Storage};
 /// Startup plan that determines whether one-time peer state sync may still run.
 ///
 /// Construction is two-phase so the caller can avoid fetching a finalized
-/// floor from peers when startup sync has already completed:
+/// floor from peers when state sync has already completed:
 ///
-/// 1. [`SyncPlan::init`] reads the durable startup-sync state.
+/// 1. [`SyncPlan::init`] reads the durable state sync state.
 /// 2. If [`SyncPlan::may_state_sync`] returns `true`, the caller fetches a
 ///    finalized floor and attaches it via [`SyncPlan::with_floor`]. Otherwise
 ///    the caller skips floor selection entirely.
 ///
-/// Once startup sync completes, this node never performs peer state sync
+/// Once state sync completes, this node never performs peer state sync
 /// again. Future startups must recover from the later of that synced height
 /// and marshal's processed height instead.
 pub struct SyncPlan<S, V>
@@ -26,7 +26,7 @@ where
     V: Variant,
 {
     partition_prefix: String,
-    startup_sync_state: Option<StartupSyncState<V::Commitment>>,
+    state_sync_state: Option<SyncState<V::Commitment>>,
     floor: Option<Finalization<S, V::Commitment>>,
 }
 
@@ -35,7 +35,7 @@ where
     S: Scheme,
     V: Variant,
 {
-    /// Load the durable startup-sync state for this partition prefix.
+    /// Load the durable state sync state for this partition prefix.
     ///
     /// # Panics
     ///
@@ -46,11 +46,11 @@ where
     where
         E: Clock + Metrics + Storage,
     {
-        let startup_sync_state =
-            super::startup_sync_state::<E, V::Commitment>(context, partition_prefix.as_ref()).await;
+        let state_sync_state =
+            super::sync_state::<E, V::Commitment>(context, partition_prefix.as_ref()).await;
         Self {
             partition_prefix: partition_prefix.as_ref().into(),
-            startup_sync_state,
+            state_sync_state,
             floor: None,
         }
     }
@@ -59,22 +59,22 @@ where
     ///
     /// When `false`, the caller should skip floor selection: any floor passed
     /// to [`SyncPlan::with_floor`] would be ignored. The node already has a
-    /// durable completed startup-sync height, so future boots must recover from that
+    /// durable completed state sync height, so future boots must recover from that
     /// height or marshal's processed height instead of running peer state sync again.
     ///
     /// When `true`, the caller can optionally attach a finalized floor via
     /// [`SyncPlan::with_floor`]. If a floor is not attached, the node will
     /// attempt to sync from genesis via marshal unless it is resuming an
-    /// interrupted startup sync.
+    /// interrupted state sync.
     pub const fn may_state_sync(&self) -> bool {
-        !matches!(self.startup_sync_state, Some(StartupSyncState::Complete(_)))
+        !matches!(self.state_sync_state, Some(SyncState::Complete(_)))
     }
 
-    /// Returns the durable completed startup-sync height, if one has been stored.
+    /// Returns the durable completed state sync height, if one has been stored.
     pub fn sync_height(&self) -> Option<Height> {
-        self.startup_sync_state
+        self.state_sync_state
             .as_ref()
-            .map(StartupSyncState::sync_height)
+            .map(SyncState::sync_height)
             .unwrap_or_default()
     }
 
@@ -112,12 +112,9 @@ where
             .map_or_else(|| Start::Genesis(genesis), Start::Floor)
     }
 
-    /// Returns whether restart is blocked on selecting a new startup-sync floor.
+    /// Returns whether restart is blocked on selecting a new state sync floor.
     pub(crate) const fn requires_state_sync_floor(&self) -> bool {
-        matches!(
-            self.startup_sync_state,
-            Some(StartupSyncState::InProgress(_))
-        )
+        matches!(self.state_sync_state, Some(SyncState::InProgress(_)))
     }
 }
 

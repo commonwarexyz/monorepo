@@ -68,14 +68,14 @@ pub(super) fn archive_config<C>(
 #[derive(Clone)]
 pub(crate) struct MockValidatorState<V: Variant> {
     pub(super) marshal: marshal::core::Mailbox<MockScheme<ed25519::PublicKey>, V>,
-    pub(super) startup_sync_entries: u64,
-    pub(super) startup_sync_height: Option<u64>,
+    pub(super) state_sync_entries: u64,
+    pub(super) state_sync_height: Option<u64>,
 }
 
 impl<V: Variant> PartialEq for MockValidatorState<V> {
     fn eq(&self, other: &Self) -> bool {
-        self.startup_sync_entries == other.startup_sync_entries
-            && self.startup_sync_height == other.startup_sync_height
+        self.state_sync_entries == other.state_sync_entries
+            && self.state_sync_height == other.state_sync_height
     }
 }
 
@@ -91,12 +91,12 @@ where
             .map(|b| b.digest())
     }
 
-    pub(crate) const fn startup_sync_height(&self) -> Option<u64> {
-        self.startup_sync_height
+    pub(crate) const fn state_sync_height(&self) -> Option<u64> {
+        self.state_sync_height
     }
 
-    pub(crate) const fn startup_sync_entries(&self) -> u64 {
-        self.startup_sync_entries
+    pub(crate) const fn state_sync_entries(&self) -> u64 {
+        self.state_sync_entries
     }
 }
 

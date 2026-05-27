@@ -72,7 +72,7 @@ where
     /// metadata partition prefix and the startup decision shared with marshal.
     pub plan: SyncPlan<S, V>,
 
-    /// Resolver(s) for startup sync fetches and post-bootstrap serving.
+    /// Resolver(s) for state sync fetches and post-bootstrap serving.
     pub resolvers: R,
 
     /// Sync engine tuning knobs.
@@ -110,7 +110,7 @@ where
     /// Startup plan carrying the metadata partition prefix and floor decision.
     plan: SyncPlan<S, V>,
 
-    /// Resolver(s) for startup sync fetches and post-bootstrap serving.
+    /// Resolver(s) for state sync fetches and post-bootstrap serving.
     resolvers: R,
 
     /// Sync engine tuning knobs.
@@ -159,7 +159,7 @@ where
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor).await;
         } else if self.plan.requires_state_sync_floor() {
-            panic!("interrupted startup sync must resume from a newly selected floor");
+            panic!("interrupted state sync must resume from a newly selected floor");
         } else {
             self.start_from_marshal().await;
         }
@@ -169,7 +169,7 @@ where
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
         let resolved_floor =
-            syncer::resolve_startup_floor::<E, A, S, V>(&self.marshal, &floor).await;
+            syncer::resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &floor).await;
         syncer::set_sync_in_progress(
             self.context.as_present(),
             self.plan.partition_prefix(),

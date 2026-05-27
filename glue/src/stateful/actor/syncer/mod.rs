@@ -32,7 +32,7 @@ const SYNC_STATE_KEY: FixedBytes<1> = fixed_bytes!("C0");
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Durable identity for an in-progress startup-sync floor.
+/// Durable identity for an in-progress state sync floor.
 ///
 /// The height enforces monotonic restarts, and the commitment distinguishes
 /// conflicting blocks at the same height.
@@ -61,13 +61,13 @@ where
     pub(crate) fn ensure_not_behind(&self, selected: &Self) {
         assert!(
             selected.height >= self.height,
-            "selected startup sync floor cannot move behind the persisted in-progress floor",
+            "selected state sync floor cannot move behind the persisted in-progress floor",
         );
 
         if selected.height == self.height {
             assert!(
                 selected.commitment == self.commitment,
-                "selected startup sync floor conflicts with the persisted in-progress floor",
+                "selected state sync floor conflicts with the persisted in-progress floor",
             );
         }
     }
@@ -106,9 +106,9 @@ where
     }
 }
 
-/// Durable startup-sync progress stored under the metadata key `C0`.
+/// Durable sync progress.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StartupSyncState<C>
+pub(crate) enum SyncState<C>
 where
     C: Digest,
 {
@@ -116,11 +116,11 @@ where
     Complete(Height),
 }
 
-impl<C> StartupSyncState<C>
+impl<C> SyncState<C>
 where
     C: Digest,
 {
-    /// Returns the completed startup-sync height, if startup sync has finished.
+    /// Returns the completed state sync height, if state sync has finished.
     pub(crate) const fn sync_height(&self) -> Option<Height> {
         match self {
             Self::InProgress(_) => None,
@@ -129,7 +129,7 @@ where
     }
 }
 
-impl<C> Write for StartupSyncState<C>
+impl<C> Write for SyncState<C>
 where
     C: Digest,
 {
@@ -147,7 +147,7 @@ where
     }
 }
 
-impl<C> EncodeSize for StartupSyncState<C>
+impl<C> EncodeSize for SyncState<C>
 where
     C: Digest,
 {
@@ -160,7 +160,7 @@ where
     }
 }
 
-impl<C> Read for StartupSyncState<C>
+impl<C> Read for SyncState<C>
 where
     C: Digest,
 {
@@ -200,7 +200,7 @@ where
     }
 }
 
-/// Resolved startup-sync floor data derived from the selected finalization.
+/// Resolved state sync floor data derived from the selected finalization.
 pub(crate) struct ResolvedFloor<E, A, C>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -212,11 +212,11 @@ where
     pub marker: FloorMarker<C>,
 }
 
-/// Loads the durable startup-sync metadata partition, creating it if needed.
-async fn load_startup_sync_metadata<E, C>(
+/// Loads the durable state sync metadata partition, creating it if needed.
+async fn load_state_sync_metadata<E, C>(
     context: &E,
     partition_prefix: &str,
-) -> Metadata<E, FixedBytes<1>, StartupSyncState<C>>
+) -> Metadata<E, FixedBytes<1>, SyncState<C>>
 where
     E: Storage + Clock + Metrics,
     C: Digest,
@@ -232,25 +232,22 @@ where
     .expect("failed to load sync metadata")
 }
 
-/// Loads the durable startup-sync state for this partition, if any.
-pub(crate) async fn startup_sync_state<E, C>(
-    context: &E,
-    partition_prefix: &str,
-) -> Option<StartupSyncState<C>>
+/// Loads the durable state sync state for this partition, if any.
+pub(crate) async fn sync_state<E, C>(context: &E, partition_prefix: &str) -> Option<SyncState<C>>
 where
     E: Storage + Clock + Metrics,
     C: Digest,
 {
-    let metadata = load_startup_sync_metadata::<E, C>(context, partition_prefix).await;
+    let metadata = load_state_sync_metadata::<E, C>(context, partition_prefix).await;
     metadata.get(&SYNC_STATE_KEY).cloned()
 }
 
-/// Marks startup sync as in progress for the resolved floor.
+/// Marks state sync as in progress for the resolved floor.
 ///
-/// This must be persisted before any startup-sync database mutation begins so a
+/// This must be persisted before any state sync database mutation begins so a
 /// crash can reopen partial sync state and validate the next selected floor.
 ///
-/// If an interrupted startup sync already stored a floor, the newly selected
+/// If an interrupted state sync already stored a floor, the newly selected
 /// floor must resume from that same floor or a later one.
 pub(crate) async fn set_sync_in_progress<E, C>(
     context: &E,
@@ -260,19 +257,19 @@ pub(crate) async fn set_sync_in_progress<E, C>(
     E: Storage + Clock + Metrics,
     C: Digest,
 {
-    let mut metadata = load_startup_sync_metadata::<E, C>(context, partition_prefix).await;
+    let mut metadata = load_state_sync_metadata::<E, C>(context, partition_prefix).await;
 
-    if let Some(StartupSyncState::InProgress(existing)) = metadata.get(&SYNC_STATE_KEY) {
+    if let Some(SyncState::InProgress(existing)) = metadata.get(&SYNC_STATE_KEY) {
         existing.ensure_not_behind(&floor);
     }
 
     metadata
-        .put_sync(SYNC_STATE_KEY, StartupSyncState::InProgress(floor))
+        .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
         .await
-        .expect("failed to set startup sync state to in-progress");
+        .expect("failed to set state sync state to in-progress");
 }
 
-/// Records that one-time startup sync completed at the given height.
+/// Records that one-time state sync completed at the given height.
 ///
 /// Once this height is set, future startups skip peer state sync and initialize
 /// from the later of this height and marshal's processed height instead. This
@@ -282,16 +279,16 @@ where
     E: Storage + Clock + Metrics,
     C: Digest,
 {
-    let mut metadata = load_startup_sync_metadata::<E, C>(context, partition_prefix).await;
+    let mut metadata = load_state_sync_metadata::<E, C>(context, partition_prefix).await;
     metadata
-        .put_sync(SYNC_STATE_KEY, StartupSyncState::<C>::Complete(height))
+        .put_sync(SYNC_STATE_KEY, SyncState::<C>::Complete(height))
         .await
-        .expect("failed to set startup sync state to complete");
+        .expect("failed to set state sync state to complete");
 }
 
-/// Resolves the selected startup-sync floor into the anchor, targets, and
+/// Resolves the selected state sync floor into the anchor, targets, and
 /// durable floor marker used by restart validation.
-pub(crate) async fn resolve_startup_floor<E, A, S, V>(
+pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     finalization: &Finalization<S, V::Commitment>,
 ) -> ResolvedFloor<E, A, V::Commitment>

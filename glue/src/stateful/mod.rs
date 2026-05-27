@@ -31,7 +31,7 @@
 //! # Syncing
 //!
 //! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
-//! The plan reads the durable startup-sync height; callers gate floor selection
+//! The plan reads the durable state sync height; callers gate floor selection
 //! on [`SyncPlan::may_state_sync`] and, if state sync is desired, attach a finalized
 //! floor via [`SyncPlan::with_floor`]. The same plan then drives marshal (via
 //! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
@@ -44,7 +44,7 @@
 //! - **Marshal sync** (no floor attached): [`Stateful::start`] prepares the
 //!   databases before the actor is spawned. Fresh nodes initialize from
 //!   genesis; restarted nodes reconcile the database set against the later of
-//!   marshal's processed anchor and the stored startup-sync height, rewinding if
+//!   marshal's processed anchor and the stored state sync height, rewinding if
 //!   needed. If marshal is behind that stored height, the actor acknowledges old
 //!   finalized blocks without applying them again until marshal catches up. The
 //!   actor then starts directly in normal processing mode while marshal continues
@@ -52,7 +52,7 @@
 //!
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
-//!   [`db::StateSyncSet::sync`]. For each finalized block while startup sync
+//!   [`db::StateSyncSet::sync`]. For each finalized block while state sync
 //!   is live, the actor synchronously asks bootstrap to observe that block's
 //!   sync targets. If the live session accepts the block, the actor
 //!   acknowledges it immediately. Once bootstrap freezes databases at
@@ -152,7 +152,7 @@ where
     ///
     /// Called by the wrapper for finalized blocks received during state sync.
     ///
-    /// The returned targets are handed to the startup sync coordinator so the
+    /// The returned targets are handed to the state sync coordinator so the
     /// sync engines can track the latest finalized state root and range.
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets;
 

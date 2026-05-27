@@ -1,4 +1,4 @@
-//! Traits for database batch lifecycle and startup sync in [`Stateful`](super::Stateful).
+//! Traits for database batch lifecycle and state sync in [`Stateful`](super::Stateful).
 //!
 //! This module defines the boundary between stateful application logic and
 //! storage backends (QMDB variants).
@@ -13,9 +13,9 @@
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
 //!
-//! # Startup State Sync
+//! # State Sync
 //!
-//! Startup sync is expressed by two traits:
+//! State sync orchestration is expressed by two traits:
 //! - [`StateSyncDb`]: per-database sync entrypoint.
 //! - [`StateSyncSet`]: set-level orchestration.
 //!
@@ -404,7 +404,7 @@ impl<D: Digest, T> TipUpdate<D, T> {
     }
 }
 
-/// A [`DatabaseSet`] that can run one-time startup state sync.
+/// A [`DatabaseSet`] that can run one-time state sync.
 ///
 /// `D` is the block digest type. Each set of sync targets is paired
 /// with an [`Anchor`] identifying the block that produced those targets.
