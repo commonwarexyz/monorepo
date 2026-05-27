@@ -139,7 +139,10 @@ mod tests {
     use std::io::Cursor;
 
     fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
-        Target::new(root, non_empty_range!(Location::new(start), Location::new(end)))
+        Target::new(
+            root,
+            non_empty_range!(Location::new(start), Location::new(end)),
+        )
     }
 
     #[test]
