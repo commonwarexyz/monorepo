@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, BufferPooler, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -162,7 +162,9 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
                     let cache_page_size = cache_page_size.max(1);
-                    let max_cache_capacity = (MAX_CACHE_BYTES / cache_page_size as usize).max(1);
+                    let cache_slot_size = (cache_page_size as usize)
+                        .max(context.storage_buffer_pool().config().min_size.get());
+                    let max_cache_capacity = (MAX_CACHE_BYTES / cache_slot_size).max(1);
                     let cache_capacity =
                         NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));
 
