@@ -729,8 +729,9 @@ mod tests {
         bls12381::{
             dkg::feldman_desmedt as dkg,
             primitives::{
+                group::{Private, Scalar},
                 ops::threshold::sign_message,
-                sharing::{ModeVersion, Sharing},
+                sharing::{Mode, Sharing},
                 variant::{MinPk, MinSig, Variant},
             },
         },
@@ -740,8 +741,11 @@ mod tests {
         Signer as _,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, DecodeExt, Encode};
-    use commonware_math::algebra::{Additive, Random};
+    use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::{
+        algebra::{Additive, Random},
+        poly::Poly,
+    };
     use commonware_parallel::Sequential;
     use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect, NZU32};
 
@@ -1395,21 +1399,21 @@ mod tests {
             .expect("participants are unique")
     }
 
+    fn mismatched_sharing<V: Variant>(rng: &mut impl CryptoRngCore) -> (Sharing<V>, Share) {
+        let poly = Poly::new(&mut *rng, N3f1::quorum(2) - 1);
+        let share = Share::new(
+            Participant::new(0),
+            Private::new(poly.eval(&Scalar::from(1))),
+        );
+        let polynomial = Sharing::<V>::new(Mode::NonZeroCounter, NZU32!(4), Poly::commit(poly));
+        (polynomial, share)
+    }
+
     fn signer_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
         let participants = make_participants(&mut rng, 4);
-        let (polynomial, shares) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
-        let mut encoded = polynomial.encode().to_vec();
-        encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
-        let polynomial =
-            Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
-        Scheme::<ed25519::PublicKey, V>::signer::<N3f1>(
-            NAMESPACE,
-            participants,
-            polynomial,
-            shares[0].clone(),
-        );
+        let (polynomial, share) = mismatched_sharing::<V>(&mut rng);
+        Scheme::<ed25519::PublicKey, V>::signer::<N3f1>(NAMESPACE, participants, polynomial, share);
     }
 
     #[test]
@@ -1427,12 +1431,7 @@ mod tests {
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
         let participants = make_participants(&mut rng, 4);
-        let (polynomial, _) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
-        let mut encoded = polynomial.encode().to_vec();
-        encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
-        let polynomial =
-            Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
+        let (polynomial, _) = mismatched_sharing::<V>(&mut rng);
         Scheme::<ed25519::PublicKey, V>::verifier::<N3f1>(NAMESPACE, participants, polynomial);
     }
 
