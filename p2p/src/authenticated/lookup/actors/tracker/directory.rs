@@ -308,6 +308,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn listen(&mut self, peer: &C, source_ip: IpAddr) -> Option<Reservation<C>> {
+        // Re-check the source IP when reserving: the handshake's earlier
+        // acceptability check may be stale if the peer address changed.
         if !self.acceptable(peer, source_ip) {
             return None;
         }
