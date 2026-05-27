@@ -276,10 +276,10 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
         }
     }
 
-    /// Removes anything in the cursor that satisfies the predicate.
-    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
+    /// Retains only the values for which `should_retain` returns `true`; removes the rest.
+    fn retain(&mut self, should_retain: &impl Fn(&V) -> bool) {
         while let Some(old) = self.next() {
-            if predicate(old) {
+            if !should_retain(old) {
                 self.delete();
             }
         }
