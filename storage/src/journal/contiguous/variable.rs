@@ -123,6 +123,17 @@ struct Inner<E: Context, V: Codec> {
     dirty_from_section: Option<u64>,
 }
 
+struct SectionCount {
+    count: u64,
+    repaired: bool,
+}
+
+struct DataRecovery {
+    repaired_from_section: Option<u64>,
+    last_section: Option<u64>,
+    items_in_last_section: u64,
+}
+
 impl<E: Context, V: CodecShared> Inner<E, V> {
     /// Read the item at the given position using the provided offsets reader.
     ///
@@ -653,11 +664,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         };
         let discard_section = position_to_section(size, self.items_per_section);
 
+        self.offsets.rewind(size).await?;
         inner
             .data
             .rewind_to_offset(discard_section, discard_offset)
             .await?;
-        self.offsets.rewind(size).await?;
 
         // Update our size
         inner.size = size;
@@ -679,8 +690,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// The position returned is a stable, consecutively increasing value starting from 0.
     /// This position remains constant after pruning.
     ///
-    /// When a section becomes full, both the data journal and offsets journal are persisted
-    /// to maintain the invariant that all non-final sections are full and consistent.
+    /// When a section becomes full, the data section is flushed for visibility but not fsynced.
     ///
     /// # Errors
     ///
@@ -829,10 +839,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let pruned = inner.data.prune(min_section).await?;
         if pruned {
-            let new_oldest = (min_section * self.items_per_section).max(inner.pruning_boundary);
+            let new_oldest_section = inner.data.oldest_section().unwrap_or(min_section);
+            let new_oldest =
+                (new_oldest_section * self.items_per_section).max(inner.pruning_boundary);
             inner.pruning_boundary = new_oldest;
             if let Some(dirty_from) = inner.dirty_from_section {
-                inner.dirty_from_section = Some(dirty_from.max(min_section));
+                inner.dirty_from_section = Some(dirty_from.max(new_oldest_section));
             }
             self.offsets.prune(new_oldest).await?;
             self.metrics
@@ -926,11 +938,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     async fn count_section_items(
         data: &variable::Journal<E, V>,
         section: u64,
-    ) -> Result<u64, Error> {
+    ) -> Result<SectionCount, Error> {
+        let size_before = data.size(section).await?;
         let stream = data.replay(section, 0, REPLAY_BUFFER_SIZE).await?;
         futures::pin_mut!(stream);
         let mut count = 0u64;
-        // Recovery is fail-fast: partial counts are not useful once replay reports corruption.
+        // Replay can truncate trailing garbage as part of repair. Recovery tracks that side effect
+        // so the repaired section is synced before offsets are synced to the recovered state.
         while let Some(result) = stream.next().await {
             let (item_section, _, _, _) = result?;
             if item_section != section {
@@ -938,7 +952,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
             count += 1;
         }
-        Ok(count)
+        let size_after = data.size(section).await?;
+        Ok(SectionCount {
+            count,
+            repaired: size_after < size_before,
+        })
     }
 
     async fn recover_data_by_walking_lengths(
@@ -946,15 +964,21 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         offsets: &fixed::Journal<E, u64>,
         offsets_start: u64,
         items_per_section: u64,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<DataRecovery, Error> {
         let sections: Vec<u64> = data.sections().collect();
         if sections.is_empty() {
-            return Ok(None);
+            return Ok(DataRecovery {
+                repaired_from_section: None,
+                last_section: None,
+                items_in_last_section: 0,
+            });
         }
         let last_section = *sections.last().expect("sections is non-empty");
 
         let mut previous = None;
+        let mut previous_count = 0;
         let mut recovered_size = offsets_start;
+        let mut repaired_from_section = None;
         for (idx, section) in sections.iter().copied().enumerate() {
             if let Some(previous) = previous {
                 if section != previous + 1 {
@@ -965,11 +989,24 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                         section, "crash repair: truncating data journal before section gap"
                     );
                     data.rewind(previous, byte_offset).await?;
-                    return Ok(Some(previous));
+                    repaired_from_section = Some(
+                        repaired_from_section
+                            .map_or(previous, |repaired: u64| repaired.min(previous)),
+                    );
+                    return Ok(DataRecovery {
+                        repaired_from_section,
+                        last_section: Some(previous),
+                        items_in_last_section: previous_count,
+                    });
                 }
             }
 
-            let count = Self::count_section_items(data, section).await?;
+            let SectionCount { count, repaired } = Self::count_section_items(data, section).await?;
+            if repaired {
+                repaired_from_section = Some(
+                    repaired_from_section.map_or(section, |repaired: u64| repaired.min(section)),
+                );
+            }
 
             let section_start = section
                 .checked_mul(items_per_section)
@@ -1004,7 +1041,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             if count < capacity {
                 offsets.validate_recovered_size(recovered_size).await?;
                 if section == last_section {
-                    return Ok(None);
+                    return Ok(DataRecovery {
+                        repaired_from_section,
+                        last_section: Some(section),
+                        items_in_last_section: count,
+                    });
                 }
                 let byte_offset = data.size(section).await?;
                 warn!(
@@ -1012,13 +1053,25 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     count, capacity, "crash repair: truncating data journal after short section"
                 );
                 data.rewind(section, byte_offset).await?;
-                return Ok(Some(section));
+                repaired_from_section = Some(
+                    repaired_from_section.map_or(section, |repaired: u64| repaired.min(section)),
+                );
+                return Ok(DataRecovery {
+                    repaired_from_section,
+                    last_section: Some(section),
+                    items_in_last_section: count,
+                });
             }
 
             previous = Some(section);
+            previous_count = count;
         }
         offsets.validate_recovered_size(recovered_size).await?;
-        Ok(None)
+        Ok(DataRecovery {
+            repaired_from_section,
+            last_section: Some(last_section),
+            items_in_last_section: previous_count,
+        })
     }
 
     /// Align the offsets journal and data journal to be consistent in case a crash occurred
@@ -1039,7 +1092,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let offsets_reader = offsets.reader().await;
             offsets_reader.bounds()
         };
-        let repaired_from_section = Self::recover_data_by_walking_lengths(
+        let data_recovery = Self::recover_data_by_walking_lengths(
             data,
             offsets,
             initial_offsets_bounds.start,
@@ -1048,16 +1101,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         .await?;
 
         // === Handle empty data journal case ===
-        let items_in_last_section = match data.newest_section() {
-            Some(last_section) => Self::count_section_items(data, last_section).await?,
-            None => 0,
-        };
+        let items_in_last_section = data_recovery.items_in_last_section;
 
         // Data journal is empty if there are no sections or if there is one section and it has no items.
         // The latter should only occur if a crash occured after opening a data journal blob but
         // before writing to it.
-        let data_empty =
-            data.is_empty() || (data.num_sections() == 1 && items_in_last_section == 0);
+        let data_empty = data.is_empty()
+            || (data_recovery.last_section.is_some()
+                && data.num_sections() == 1
+                && items_in_last_section == 0);
         if data_empty {
             let offsets_bounds = {
                 let offsets_reader = offsets.reader().await;
@@ -1077,6 +1129,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 offsets.validate_recovered_size(target_pos).await?;
 
                 warn!("crash repair: clearing offsets to {target_pos} (empty section crash)");
+                if let (Some(start_section), Some(last_section)) =
+                    (data_recovery.repaired_from_section, data.newest_section())
+                {
+                    for section in start_section..=last_section {
+                        data.sync(section).await?;
+                    }
+                }
                 offsets.clear_to_size(target_pos).await?;
                 return Ok((target_pos, target_pos));
             }
@@ -1203,7 +1262,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         };
 
         if let (Some(start_section), Some(last_section)) =
-            (repaired_from_section, data.newest_section())
+            (data_recovery.repaired_from_section, data.newest_section())
         {
             for section in start_section..=last_section {
                 data.sync(section).await?;
@@ -1383,6 +1442,20 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Test helper: Rewind the internal offsets journal directly (simulates crash scenario).
     pub(crate) async fn test_rewind_offsets(&self, position: u64) -> Result<(), Error> {
         self.offsets.rewind(position).await
+    }
+
+    /// Test helper: Rewind the internal data journal directly (simulates crash scenario).
+    pub(crate) async fn test_rewind_data(&self, position: u64) -> Result<(), Error> {
+        let discard_offset = {
+            let offsets_reader = self.offsets.reader().await;
+            offsets_reader.read(position).await?
+        };
+        let discard_section = position_to_section(position, self.items_per_section);
+        let mut inner = self.inner.write().await;
+        inner
+            .data
+            .rewind_to_offset(discard_section, discard_offset)
+            .await
     }
 
     /// Test helper: Get the size of the internal offsets journal.
@@ -2395,6 +2468,40 @@ mod tests {
             assert_eq!(variable.read(25).await.unwrap(), 2500);
 
             variable.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_rejects_data_first_rewind_crash() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-data-first-rewind-crash".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let variable = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                variable.append(&(i * 100)).await.unwrap();
+            }
+            variable.sync().await.unwrap();
+
+            variable.test_rewind_data(5).await.unwrap();
+            drop(variable);
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
+            let _ = context.remove(&cfg.data_partition(), None).await;
+            let _ = context.remove(&cfg.offsets_partition(), None).await;
+            let _ = context
+                .remove(&format!("{}-metadata", cfg.offsets_partition()), None)
+                .await;
         });
     }
 

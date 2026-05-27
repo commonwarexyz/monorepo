@@ -1116,6 +1116,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
 
         // Upgrade only for bookkeeping/metadata mutation. Reads were allowed while syncing blobs.
+        // If metadata sync fails after this point, the journal must be discarded like any other
+        // failed mutable operation.
         let mut inner = inner.upgrade().await;
         inner.dirty_from_section = None;
         if let Some(put) = metadata_update {
