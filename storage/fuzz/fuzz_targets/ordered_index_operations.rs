@@ -162,14 +162,9 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 IndexOperation::CursorInsert { key, value } => {
-                    if index.get(key).next().is_some() {
-                        let mut cursor = index.get_mut(key).unwrap();
-                        if cursor.next().is_some() {
-                            cursor.insert(*value);
-                            let _ = cursor.next();
-                        }
-                    } else {
-                        index.insert(key, *value);
+                    if let Some(mut cursor) = index.get_mut_or_insert(key, *value) {
+                        cursor.next();
+                        cursor.insert(*value);
                     }
                 }
             }
