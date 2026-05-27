@@ -105,6 +105,9 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer to reserve.
         public_key: C,
 
+        /// The IP address the peer connected from.
+        source_ip: IpAddr,
+
         /// The sender to respond with the reservation.
         reservation: oneshot::Sender<Option<Reservation<C>>>,
     },
@@ -182,10 +185,11 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Listen` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn listen(&self, public_key: C) -> Option<Reservation<C>> {
+    pub(crate) async fn listen(&self, public_key: C, source_ip: IpAddr) -> Option<Reservation<C>> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Listen {
             public_key,
+            source_ip,
             reservation,
         });
         receiver.await.ok().flatten()

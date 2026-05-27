@@ -175,7 +175,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let rate_limits = Arc::new(rate_limits);
         let pool = self.context.network_buffer_pool().clone();
 
-        // Send greeting first before any other messages
+        // Send greeting before starting the sender/receiver tasks. A `Kill`
+        // may already be queued if the tracker revoked this peer while the
+        // spawner waited for router readiness; processing control first would
+        // leave the remote waiting for our first discovery frame.
         self.sent_messages
             .get_or_create(&metrics::Message::new_greeting(&peer))
             .inc();
@@ -406,7 +409,7 @@ mod tests {
         actors::{router, tracker},
         channels::Channels,
     };
-    use commonware_codec::Encode;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -781,6 +784,108 @@ mod tests {
             assert!(
                 matches!(result, Err(Error::GreetingMismatch)),
                 "Expected GreetingMismatch error, got: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_queued_kill_sends_greeting_before_shutdown() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.child("listener").spawn({
+                move |ctx| async move {
+                    commonware_stream::encrypted::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (_local_sender, mut local_receiver) = commonware_stream::encrypted::dial(
+                context.child("dialer"),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let (peer_actor, mailbox, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
+                context.child("peer"),
+                default_peer_config(context.child("config"), remote_pk.clone()),
+            );
+            mailbox.kill();
+
+            let greeting = types::Info::sign(
+                &remote_key,
+                IP_NAMESPACE,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+            );
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let channels = create_channels(context.child("channels"));
+
+            let peer_handle = context.child("peer_task").spawn(move |_ctx| async move {
+                peer_actor
+                    .run(
+                        local_pk,
+                        greeting,
+                        (remote_sender, remote_receiver),
+                        tracker::Mailbox::new(tracker_mailbox),
+                        channels,
+                    )
+                    .await
+            });
+
+            let msg = local_receiver.recv().await.expect("receive greeting");
+            let len = msg.len();
+            let payload = types::Payload::<PublicKey>::decode_cfg(
+                msg,
+                &types::PayloadConfig {
+                    max_bit_vec: 128,
+                    max_peers: 10,
+                    max_data_length: len,
+                },
+            )
+            .expect("decode greeting");
+            let types::Payload::Greeting(info) = payload else {
+                panic!("expected greeting");
+            };
+            assert_eq!(info.public_key, remote_pk);
+
+            let result = peer_handle.await.expect("peer task failed unexpectedly");
+            assert!(
+                matches!(result, Err(Error::PeerKilled(_))),
+                "Expected PeerKilled error, got: {result:?}"
             );
         });
     }
