@@ -8,6 +8,9 @@ license.workspace = true
 [package.metadata]
 cargo-fuzz = true
 
+[lib]
+bench = false
+
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 blake3.workspace = true
@@ -186,6 +189,41 @@ bench = false
 [[bin]]
 name = "zk"
 path = "fuzz_targets/zk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secret"
+path = "fuzz_targets/secret.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ed25519_certificate"
+path = "fuzz_targets/ed25519_certificate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secp256r1_certificate"
+path = "fuzz_targets/secp256r1_certificate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_certificate_multisig_minpk"
+path = "fuzz_targets/bls12381_certificate_multisig_minpk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bls12381_certificate_multisig_minsig"
+path = "fuzz_targets/bls12381_certificate_multisig_minsig.rs"
 test = false
 doc = false
 bench = false
