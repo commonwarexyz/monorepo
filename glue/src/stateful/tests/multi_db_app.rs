@@ -310,14 +310,8 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
-            Target {
-                root: block.root_a,
-                range: block.range_a.clone(),
-            },
-            Target {
-                root: block.root_b,
-                range: block.range_b.clone(),
-            },
+            Target::new(block.root_a, block.range_a.clone()),
+            Target::new(block.root_b, block.range_b.clone()),
         )
     }
 }

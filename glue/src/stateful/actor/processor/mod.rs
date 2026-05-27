@@ -1062,10 +1062,7 @@ mod tests {
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            Target {
-                root: block.state_root,
-                range: block.range.clone(),
-            }
+            Target::new(block.state_root, block.range.clone())
         }
 
         async fn finalized(
