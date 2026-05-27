@@ -240,6 +240,11 @@ impl<C: PublicKey> Record<C> {
         !matches!(self.address, Address::Myself(_))
     }
 
+    /// Returns `true` when reserved or active connection state should be torn down.
+    pub const fn needs_teardown(&self) -> bool {
+        !matches!(self.status, Status::Inert) && !self.eligible()
+    }
+
     /// Returns the number of secondary peer sets this peer is part of.
     pub const fn secondary_sets(&self) -> usize {
         self.secondary_sets
@@ -672,6 +677,30 @@ mod tests {
             assert_eq!(record.status, Status::Reserved);
             record.release();
             assert_eq!(record.status, Status::Inert);
+        });
+    }
+
+    #[test]
+    fn test_needs_teardown_after_losing_eligibility() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::<PublicKey>::unknown();
+            record.increment_primary();
+
+            assert!(!record.needs_teardown());
+            assert_eq!(
+                record.reserve(&mut context, Duration::ZERO),
+                ReserveResult::Reserved
+            );
+            assert!(!record.needs_teardown());
+
+            record.decrement_primary();
+            assert!(record.needs_teardown());
+
+            record.connect();
+            assert!(record.needs_teardown());
+
+            record.release();
+            assert!(!record.needs_teardown());
         });
     }
 

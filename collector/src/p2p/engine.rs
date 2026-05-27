@@ -184,7 +184,7 @@ where
 
                 // Handle the request
                 let (tx, rx) = oneshot::channel();
-                self.handler.process(peer.clone(), msg, tx).await;
+                self.handler.process(peer.clone(), msg, tx);
                 processed.push(async move { Ok((peer, rx.await?)) });
             },
 
@@ -222,7 +222,7 @@ where
                 }
 
                 // Send the response to the monitor
-                self.monitor.collected(peer, msg, responses.1.len()).await;
+                self.monitor.collected(peer, msg, responses.1.len());
             },
         }
     }
