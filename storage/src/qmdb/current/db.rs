@@ -408,8 +408,8 @@ where
     /// Returns the most recent location from which this database can safely be synced, and the
     /// upper bound on [`Self::prune`]'s `prune_loc`.
     ///
-    /// Callers constructing a sync [`Target`](crate::qmdb::current::sync::Target) may use this
-    /// value, or any earlier retained location, as `range.start`. Values *above* this boundary are unsafe:
+    /// Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use this value, or
+    /// any earlier retained location, as `range.start`. Values *above* this boundary are unsafe:
     /// the receiver's grafted-pin derivation requires absorption-settled state for every fully
     /// pruned chunk, which this value guarantees.
     ///

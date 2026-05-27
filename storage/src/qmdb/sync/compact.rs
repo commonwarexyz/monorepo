@@ -150,6 +150,18 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let leaf_count = Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?);
+        Ok(Self { root, leaf_count })
+    }
+}
+
 /// Authenticated state for initializing a compact-storage database at a target root.
 #[derive(Clone, Debug)]
 pub struct State<F: Family, Op, D: Digest> {
@@ -1072,21 +1084,6 @@ mod tests {
             }
             assert_eq!(attempts.load(Ordering::SeqCst), 1);
         });
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let root = u.arbitrary()?;
-        let leaf_count = u.int_in_range(1..=*F::MAX_LEAVES)?;
-        Ok(Self {
-            root,
-            leaf_count: Location::new(leaf_count),
-        })
     }
 }
 

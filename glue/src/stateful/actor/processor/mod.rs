@@ -788,7 +788,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, full::Config as MmrJournalConfig, Location},
-        qmdb::{any, any::sync::Target},
+        qmdb::{any, sync::Target},
         translator::TwoCap,
     };
     use commonware_utils::{
