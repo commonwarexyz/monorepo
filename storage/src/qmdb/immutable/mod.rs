@@ -580,7 +580,7 @@ where
         let rewind_loc = Location::<F>::new(rewind_size);
         for key in &rewound_keys {
             // Filter by location to make sure we don't also prune keys that happen to collide.
-            self.snapshot.prune(key, |loc| *loc >= rewind_loc);
+            self.snapshot.retain(key, |loc| *loc < rewind_loc);
         }
 
         // If the rewind target has a lower floor than the current snapshot was
@@ -702,7 +702,7 @@ where
         for (key, entry) in batch.diff.iter() {
             seen.insert(key.clone());
             self.snapshot
-                .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
+                .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.bounds.ancestors[i].end <= db_size {
@@ -711,7 +711,7 @@ where
             for (key, entry) in ancestor_diff.iter() {
                 if seen.insert(key.clone()) {
                     self.snapshot
-                        .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
+                        .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
                 }
             }
         }

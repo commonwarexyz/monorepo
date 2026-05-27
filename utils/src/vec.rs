@@ -1,15 +1,82 @@
-//! A vector type that guarantees at least one element.
+//! Vector-backed collection types with additional invariants.
 
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{collections::VecDeque, vec, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
 };
+#[cfg(feature = "std")]
+use std::collections::VecDeque;
 use thiserror::Error;
+
+/// A [`VecDeque`] that keeps at most `capacity` items.
+///
+/// Pushing past capacity evicts the oldest item.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Bounded<T> {
+    deque: VecDeque<T>,
+    capacity: NonZeroUsize,
+}
+
+impl<T> Bounded<T> {
+    /// Creates an empty [`Bounded`] with the given capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            deque: VecDeque::with_capacity(capacity.get()),
+            capacity,
+        }
+    }
+
+    /// Returns the maximum number of items retained.
+    pub const fn capacity(&self) -> NonZeroUsize {
+        self.capacity
+    }
+
+    /// Pushes an item, evicting the oldest item if full.
+    pub fn push(&mut self, value: T) -> Option<T> {
+        let evicted = if self.deque.len() == self.capacity.get() {
+            self.deque.pop_front()
+        } else {
+            None
+        };
+        self.deque.push_back(value);
+        evicted
+    }
+
+    /// Removes the oldest item.
+    pub fn pop_front(&mut self) -> Option<T> {
+        self.deque.pop_front()
+    }
+
+    /// Consumes the bounded deque and returns the underlying [`VecDeque`].
+    pub fn into_inner(self) -> VecDeque<T> {
+        self.deque
+    }
+}
+
+impl<T> Deref for Bounded<T> {
+    type Target = VecDeque<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.deque
+    }
+}
+
+impl<T> AsRef<VecDeque<T>> for Bounded<T> {
+    fn as_ref(&self) -> &VecDeque<T> {
+        &self.deque
+    }
+}
+
+impl<T> From<Bounded<T>> for VecDeque<T> {
+    fn from(deque: Bounded<T>) -> Self {
+        deque.deque
+    }
+}
 
 /// Errors that can occur when creating a [`NonEmptyVec`].
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -445,6 +512,44 @@ mod tests {
     use crate::{NZUsize, TryCollect};
     use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
     use std::num::NonZeroUsize;
+
+    #[test]
+    fn test_bounded_push_evicts_oldest() {
+        let mut deque = Bounded::new(NZUsize!(3));
+
+        assert_eq!(deque.push(1), None);
+        assert_eq!(deque.push(2), None);
+        assert_eq!(deque.push(3), None);
+        assert_eq!(deque.push(4), Some(1));
+
+        assert_eq!(deque.capacity().get(), 3);
+        assert_eq!(deque.iter().copied().collect::<Vec<_>>(), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_bounded_pop_front_reuses_capacity() {
+        let mut deque = Bounded::new(NZUsize!(2));
+
+        assert_eq!(deque.push(1), None);
+        assert_eq!(deque.push(2), None);
+        assert_eq!(deque.pop_front(), Some(1));
+        assert_eq!(deque.push(3), None);
+
+        assert_eq!(deque.iter().copied().collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_bounded_into_inner() {
+        let mut deque = Bounded::new(NZUsize!(2));
+
+        deque.push(1);
+        deque.push(2);
+
+        assert_eq!(
+            deque.into_inner().into_iter().collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
 
     #[test]
     fn test_new() {

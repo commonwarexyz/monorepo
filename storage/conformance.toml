@@ -134,14 +134,6 @@ hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
 n_cases = 65536
 hash = "a3fbb5f749fa5b73a684e9f0bebd8973c456e5ee43a0a3db75a99aa550dee302"
 
-["commonware_storage::qmdb::any::sync::conformance::CodecConformance<Target<mmb::Family,sha256::Digest>>"]
-n_cases = 65536
-hash = "fae4fc2ff4f22c0614eea3f0928dec8940398014bb4d696b2bb89d880ad02bac"
-
-["commonware_storage::qmdb::any::sync::conformance::CodecConformance<Target<mmr::Family,sha256::Digest>>"]
-n_cases = 65536
-hash = "f742d92a0af0af78a9519bf637bc52ea869965a85a84101a4c53f53eb39325ca"
-
 ["commonware_storage::qmdb::conformance::AnyMmbOrderedFixedConf"]
 n_cases = 200
 hash = "b3c1e2f17435b89294b6fc2f9b779574dc3fe9cc1d9e86a0ba76f3bd3f9361a0"
@@ -318,14 +310,6 @@ hash = "21375f68b817719323839af311b70dcd01925b413d3e2557fd4bbe75fd47008b"
 n_cases = 65536
 hash = "39ea177ae9f1c765339b4bfb88f0adb97812ab421daad405c041241324796f11"
 
-["commonware_storage::qmdb::current::sync::conformance::CodecConformance<Target<mmb::Family,Sha256Digest>>"]
-n_cases = 65536
-hash = "627d183063857a61fdb2e6cfc3599efc73111275bc197b7b92b7d2f5b81807ba"
-
-["commonware_storage::qmdb::current::sync::conformance::CodecConformance<Target<mmr::Family,Sha256Digest>>"]
-n_cases = 65536
-hash = "ea64a65b50482b6f7f5146e3623efd2100920c66c5397675268a350d8b9734a9"
-
 ["commonware_storage::qmdb::immutable::operation::fixed::tests::conformance::CodecConformance<FixedOp>"]
 n_cases = 65536
 hash = "1737c49c112fc9dfdc4dde3626d8ab08a9df8353b9a702e488d3a1fd8e9428dc"
@@ -353,6 +337,10 @@ hash = "c59085de482697991f0202388605c751020e257b858d4af35386495d4db7c14c"
 ["commonware_storage::qmdb::sync::compact::conformance::CodecConformance<Target<mmr::Family,Sha256Digest>>"]
 n_cases = 65536
 hash = "290187801284530d0d7e82c33bb6ce975a5f4daa4b104230291cea9cffcd7686"
+
+["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<MmrFamily,sha256::Digest>>"]
+n_cases = 65536
+hash = "f742d92a0af0af78a9519bf637bc52ea869965a85a84101a4c53f53eb39325ca"
 
 ["commonware_storage::queue::conformance::QueueConformance"]
 n_cases = 512

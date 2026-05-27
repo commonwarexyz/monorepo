@@ -196,13 +196,16 @@ zeroize = "1.5.7"
 zstd = "0.13.2"
 
 [profile.bench]
-# Because we enable overflow checks in "release," we should benchmark with them.
+# Because we enable overflow checks in "release", we should benchmark with them.
 overflow-checks = true
 
 [profile.dev]
 # Although overflow checks are enabled by default in "dev", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+# Keep line tables for file:line in panics and backtraces, but skip variable-level
+# debuginfo to speed up codegen and linking. Use `debug = 2` for debugger sessions.
+debug = "line-tables-only"
 
 [profile.release]
 # To guard against unexpected behavior in production, we enable overflow checks in
@@ -219,6 +222,9 @@ debug = true
 # Although overflow checks are enabled by default in "test", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+# Keep line tables for file:line in panics and backtraces, but skip variable-level
+# debuginfo to speed up codegen and linking. Use `debug = 2` for debugger sessions.
+debug = "line-tables-only"
 
 [profile.test.package.curve25519-dalek]
 opt-level = 3

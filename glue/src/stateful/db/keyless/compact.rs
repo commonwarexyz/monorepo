@@ -668,19 +668,19 @@ mod tests {
                 .await
                 .unwrap();
 
-            let valid_target = sync::compact::Target::new(
-                merkleized.root(),
-                mmr::Location::new(merkleized.bounds().total_size),
-            );
+            let valid_target = sync::compact::Target {
+                root: merkleized.root(),
+                leaf_count: mmr::Location::new(merkleized.bounds().total_size),
+            };
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,
             ));
 
-            let wrong_leaf_count = sync::compact::Target::new(
-                merkleized.root(),
-                mmr::Location::new(merkleized.bounds().total_size - 1),
-            );
+            let wrong_leaf_count = sync::compact::Target {
+                root: merkleized.root(),
+                leaf_count: mmr::Location::new(merkleized.bounds().total_size - 1),
+            };
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_leaf_count,

@@ -47,7 +47,10 @@ use commonware_storage::{
     archive::immutable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, full::Config as MmrJournalConfig, Location},
-    qmdb::any::{sync::Target, unordered::fixed, FixedConfig},
+    qmdb::{
+        any::{unordered::fixed, FixedConfig},
+        sync::Target,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{

@@ -145,10 +145,6 @@ where
         Ok(db)
     }
 
-    fn ops_root(&self) -> Self::Digest {
-        self.root()
-    }
-
     fn root(&self) -> Self::Digest {
         self.root()
     }

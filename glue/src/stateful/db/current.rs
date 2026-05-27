@@ -31,11 +31,10 @@ use commonware_storage::{
         current::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             db::Db,
-            sync::Target as CurrentSyncTarget,
             FixedConfig, VariableConfig,
         },
         operation::Key,
-        sync::{self, resolver::Resolver},
+        sync::{self, resolver::Resolver, Target as CurrentSyncTarget},
         Error,
     },
     translator::Translator,
@@ -376,10 +375,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        batch.root() == target.root
-            && batch.ops_root() == target.ops_root
-            && target.verify(&hasher)
+        batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
@@ -392,15 +388,8 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        let witness = self
-            .ops_root_witness(&hasher)
-            .await
-            .expect("failed to build ops root witness for sync target");
         CurrentSyncTarget::new(
-            self.root(),
             self.ops_root(),
-            witness,
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
@@ -533,10 +522,7 @@ where
     }
 
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        batch.root() == target.root
-            && batch.ops_root() == target.ops_root
-            && target.verify(&hasher)
+        batch.ops_root() == target.root
             && *target.range.start() == batch.sync_boundary()
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
@@ -549,15 +535,8 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        let witness = self
-            .ops_root_witness(&hasher)
-            .await
-            .expect("failed to build ops root witness for sync target");
         CurrentSyncTarget::new(
-            self.root(),
             self.ops_root(),
-            witness,
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
@@ -773,11 +752,11 @@ mod tests {
                 &valid_target,
             ));
 
-            let mut wrong_ops_root = valid_target.clone();
-            wrong_ops_root.ops_root = Sha256::hash(b"wrong ops root");
+            let mut wrong_root = valid_target.clone();
+            wrong_root.root = Sha256::hash(b"wrong ops root");
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
-                &wrong_ops_root,
+                &wrong_root,
             ));
 
             let mut wrong_range = valid_target.clone();
