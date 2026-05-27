@@ -402,7 +402,8 @@ where
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
 
-    // A resolver with feedback can discard a rejected peer response and return a fresh candidate.
+    // Keep fetching until a compact response validates, like standard sync reschedules invalid
+    // operation fetches. Feedback is only an optional signal to the resolver.
     loop {
         let FetchResult { state, callback } = config
             .resolver
@@ -410,16 +411,16 @@ where
             .await
             .map_err(Error::Resolver)?;
 
-        // Validation failures describe a bad compact response. If the resolver supplied feedback,
-        // reject this response and ask it for another one.
+        // Validation failures describe a bad compact response. Reject it if the resolver supplied
+        // feedback, then fetch another candidate.
         let validated_state = match validate_compact_state::<DB>(&target, state) {
             Ok(state) => state,
             Err(err) => {
                 if let Some(callback) = callback {
                     let _ = callback.send(false);
-                    continue;
                 }
-                return Err(Error::Engine(err));
+                tracing::warn!(error = ?err, "compact state failed validation, will retry");
+                continue;
             }
         };
 
@@ -1178,12 +1179,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_sync_retries_invalid_state_after_feedback() {
+    fn test_compact_sync_retries_invalid_state_without_feedback() {
         deterministic::Runner::default().start(|context| async move {
             let (good_state, target) = valid_state_and_target();
             let mut bad_state = good_state.clone();
             bad_state.pinned_nodes.push(Sha256::hash(b"extra pin"));
-            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
             let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
             let constructions = Arc::new(AtomicUsize::new(0));
 
@@ -1193,7 +1193,7 @@ mod tests {
                     states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                         FetchResult {
                             state: bad_state,
-                            callback: Some(bad_tx),
+                            callback: None,
                         },
                         FetchResult {
                             state: good_state,
@@ -1207,7 +1207,6 @@ mod tests {
             .await
             .unwrap();
 
-            assert!(!bad_rx.await.expect("invalid feedback should arrive"));
             assert!(good_rx.await.expect("valid feedback should arrive"));
             assert_eq!(constructions.load(Ordering::SeqCst), 1);
             assert_eq!(db.root(), target.root);
