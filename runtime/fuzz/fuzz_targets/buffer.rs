@@ -162,8 +162,12 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
                     let cache_page_size = cache_page_size.max(1);
+                    // Cache slots are allocated from the storage pool, which rounds
+                    // requests up to a power-of-two size class. Cap capacity against that
+                    // actual allocation size rather than the requested page size.
                     let cache_slot_size = (cache_page_size as usize)
-                        .max(context.storage_buffer_pool().config().min_size.get());
+                        .max(context.storage_buffer_pool().config().min_size.get())
+                        .next_power_of_two();
                     let max_cache_capacity = (MAX_CACHE_BYTES / cache_slot_size).max(1);
                     let cache_capacity =
                         NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));
