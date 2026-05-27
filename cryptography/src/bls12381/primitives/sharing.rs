@@ -328,7 +328,13 @@ impl<V: Variant> Sharing<V> {
     /// Return the number of participants required to recover the secret
     /// using the given fault model.
     pub fn required<M: Faults>(&self) -> u32 {
-        M::quorum(self.total.get())
+        let required = M::quorum(self.total.get());
+        assert_eq!(
+            self.poly.required().get(),
+            required,
+            "polynomial threshold must equal quorum"
+        );
+        required
     }
 
     /// Return the total number of participants in this sharing.
@@ -440,8 +446,9 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::variant::MinSig;
     use commonware_invariants::minifuzz;
-    use commonware_utils::ordered::Map;
+    use commonware_utils::{ordered::Map, N3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -538,6 +545,29 @@ mod tests {
             assert_eq!(recovered, poly.constant().clone());
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_required_matches_polynomial_threshold() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let sharing = Sharing::<MinSig>::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::new(&mut rng, N3f1::quorum(4) - 1)),
+        );
+        assert_eq!(sharing.required::<N3f1>(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_required_panics_on_threshold_quorum_mismatch() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let sharing = Sharing::<MinSig>::new(
+            Mode::NonZeroCounter,
+            NZU32!(4),
+            Poly::commit(Poly::new(&mut rng, 1)),
+        );
+        let _ = sharing.required::<N3f1>();
     }
 }
 
