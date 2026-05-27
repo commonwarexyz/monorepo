@@ -73,9 +73,16 @@ use tracing::warn;
 
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
-/// Metadata key marking journals that require length-walking recovery.
+/// Metadata key marking journals that require length-walking recovery on startup.
+///
+/// Legacy journals without this key are recovered with the historical invariant that all non-tail
+/// sections were synced on rollover. After a successful initialization, the key is installed so
+/// future appends can avoid rollover fsyncs without doing an append-time metadata sync.
 const LENGTH_RECOVERY_KEY: u64 = 2;
 /// Metadata key for the highest logical size durably synced as a recovery checkpoint.
+///
+/// Length-walking recovery may truncate an unsynced suffix, but it must not recover before this
+/// checkpoint. Destructive operations lower the checkpoint before mutating data.
 const RECOVERY_SIZE_KEY: u64 = 3;
 
 /// Return the first retained logical position in `section`.
@@ -474,6 +481,26 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .transpose()
     }
 
+    fn stage_length_recovery_metadata(
+        metadata: &mut Metadata<E, u64, Vec<u8>>,
+        length_recovery: &mut bool,
+        recovery_size: &mut Option<u64>,
+        size: u64,
+    ) -> bool {
+        let mut dirty = false;
+        if !*length_recovery {
+            metadata.put(LENGTH_RECOVERY_KEY, vec![1]);
+            *length_recovery = true;
+            dirty = true;
+        }
+        if recovery_size.is_none() {
+            metadata.put(RECOVERY_SIZE_KEY, size.to_be_bytes().to_vec());
+            *recovery_size = Some(size);
+            dirty = true;
+        }
+        dirty
+    }
+
     /// Scan a partition and return blob names, treating a missing partition as empty.
     async fn scan_partition(context: &E, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(partition).await {
@@ -536,9 +563,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // Parse metadata if present
         let meta_pruning_boundary =
             Self::parse_metadata_u64(&metadata, PRUNING_BOUNDARY_KEY, "pruning_boundary")?;
-        let recovery_size =
+        let mut recovery_size =
             Self::parse_metadata_u64(&metadata, RECOVERY_SIZE_KEY, "recovery_size")?;
-        let length_recovery = metadata.get(&LENGTH_RECOVERY_KEY).is_some();
+        let mut length_recovery = metadata.get(&LENGTH_RECOVERY_KEY).is_some();
 
         // Recover bounds from metadata and/or blobs
         let (pruning_boundary, size, needs_metadata_update) = Self::recover_bounds(
@@ -550,19 +577,28 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         )
         .await?;
 
-        // Persist metadata if needed
+        // Persist metadata if needed, and install length-recovery metadata after the legacy
+        // recovery pass so future appends do not need an append-time metadata sync.
+        let mut metadata_dirty = false;
         if needs_metadata_update {
             if pruning_boundary.is_multiple_of(items_per_blob) {
                 metadata.remove(&PRUNING_BOUNDARY_KEY);
-                metadata.sync().await?;
             } else {
-                metadata
-                    .put_sync(
-                        PRUNING_BOUNDARY_KEY,
-                        pruning_boundary.to_be_bytes().to_vec(),
-                    )
-                    .await?;
+                metadata.put(
+                    PRUNING_BOUNDARY_KEY,
+                    pruning_boundary.to_be_bytes().to_vec(),
+                );
             }
+            metadata_dirty = true;
+        }
+        metadata_dirty |= Self::stage_length_recovery_metadata(
+            &mut metadata,
+            &mut length_recovery,
+            &mut recovery_size,
+            size,
+        );
+        if metadata_dirty {
+            metadata.sync().await?;
         }
 
         // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
@@ -781,8 +817,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                             )));
                         }
                     }
-                }
-                if section != newest {
                     let byte_offset = len
                         .checked_mul(Self::CHUNK_SIZE_U64)
                         .ok_or(Error::OffsetOverflow)?;
@@ -852,20 +886,26 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         journal.clear().await?;
         journal.ensure_section_exists(tail_section).await?;
 
+        let mut metadata_dirty = false;
+
         // Persist metadata if pruning_boundary is mid-section.
         if !size.is_multiple_of(items_per_blob) {
-            metadata
-                .put_sync(PRUNING_BOUNDARY_KEY, size.to_be_bytes().to_vec())
-                .await?;
+            metadata.put(PRUNING_BOUNDARY_KEY, size.to_be_bytes().to_vec());
+            metadata_dirty = true;
         } else if metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
             metadata.remove(&PRUNING_BOUNDARY_KEY);
-            metadata.sync().await?;
+            metadata_dirty = true;
         }
-        let reset_recovery_metadata = metadata.get(&LENGTH_RECOVERY_KEY).is_some()
-            || metadata.get(&RECOVERY_SIZE_KEY).is_some();
-        if reset_recovery_metadata {
-            metadata.remove(&LENGTH_RECOVERY_KEY);
-            metadata.remove(&RECOVERY_SIZE_KEY);
+
+        let mut length_recovery = false;
+        let mut recovery_size = None;
+        metadata_dirty |= Self::stage_length_recovery_metadata(
+            &mut metadata,
+            &mut length_recovery,
+            &mut recovery_size,
+            size,
+        );
+        if metadata_dirty {
             metadata.sync().await?;
         }
 
@@ -879,8 +919,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 metadata,
                 pruning_boundary: size, // No data exists yet
                 dirty_from_section: None,
-                length_recovery: false,
-                recovery_size: None,
+                length_recovery,
+                recovery_size,
             }),
             items_per_blob,
             metrics,
@@ -893,27 +933,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let section = position / self.items_per_blob;
         let pos_in_section = position % self.items_per_blob;
         (section, pos_in_section)
-    }
-
-    async fn enable_length_recovery_inner(inner: &mut Inner<E, A>) -> Result<(), Error> {
-        if inner.length_recovery {
-            return Ok(());
-        }
-        inner.metadata.put(LENGTH_RECOVERY_KEY, vec![1]);
-        if inner.recovery_size.is_none() {
-            inner
-                .metadata
-                .put(RECOVERY_SIZE_KEY, inner.size.to_be_bytes().to_vec());
-            inner.recovery_size = Some(inner.size);
-        }
-        inner.metadata.sync().await?;
-        inner.length_recovery = true;
-        Ok(())
-    }
-
-    pub(crate) async fn enable_length_recovery(&self) -> Result<(), Error> {
-        let mut inner = self.inner.write().await;
-        Self::enable_length_recovery_inner(&mut inner).await
     }
 
     pub(crate) async fn length_recovery_enabled(&self) -> bool {
@@ -1078,7 +1097,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
-        Self::enable_length_recovery_inner(&mut inner).await?;
         let mut written = 0;
         while written < items_count {
             let (section, pos_in_section) = self.position_to_section(inner.size);
@@ -1391,6 +1409,60 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_installs_length_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(7));
+            let journal = Journal::<_, Digest>::init(context.child("init"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            assert!(journal.length_recovery_enabled().await);
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_length_recovery_truncates_unsynced_short_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(7));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            let item_count = cfg.items_per_blob.get() * 2 + 3;
+            for i in 0..item_count {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            sync_dirty_blobs(&journal).await;
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            blob.resize(size - 1)
+                .await
+                .expect("failed to truncate section");
+            blob.sync().await.expect("failed to sync section");
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to recover journal");
+            let recovered = journal.size().await;
+            assert!(
+                recovered < item_count,
+                "short non-tail section should truncate unsynced suffix"
+            );
+            assert!(
+                recovered >= cfg.items_per_blob.get(),
+                "recovery should keep the full prefix before the short section"
+            );
+            journal.destroy().await.expect("failed to destroy journal");
+        });
     }
 
     async fn scan_partition(context: &Context, partition: &str) -> Vec<Vec<u8>> {

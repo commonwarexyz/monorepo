@@ -733,8 +733,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
         }
 
-        self.offsets.enable_length_recovery().await?;
-
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
@@ -932,6 +930,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         futures::pin_mut!(stream);
         let mut count = 0u64;
         while let Some(result) = stream.next().await {
+            // Recovery is fail-fast: partial counts are not useful once replay reports corruption.
             let (item_section, _, _, _) = result?;
             if item_section != section {
                 break;
@@ -974,6 +973,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 let skipped = offsets_start
                     .checked_sub(section_start)
                     .ok_or(Error::OffsetOverflow)?;
+                if skipped > items_per_section {
+                    return Err(Error::Corruption(format!(
+                        "offsets start {offsets_start} is beyond data section {section}"
+                    )));
+                }
                 items_per_section
                     .checked_sub(skipped)
                     .ok_or(Error::OffsetOverflow)?
