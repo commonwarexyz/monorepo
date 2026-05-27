@@ -311,10 +311,10 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        AnySyncTarget {
-            root: self.root(),
-            range: non_empty_range!(self.sync_boundary(), bounds.end),
-        }
+        AnySyncTarget::new(
+            self.root(),
+            non_empty_range!(self.sync_boundary(), bounds.end),
+        )
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -393,10 +393,10 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        AnySyncTarget {
-            root: self.root(),
-            range: non_empty_range!(self.sync_boundary(), bounds.end),
-        }
+        AnySyncTarget::new(
+            self.root(),
+            non_empty_range!(self.sync_boundary(), bounds.end),
+        )
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {

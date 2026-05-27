@@ -283,10 +283,10 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        AnySyncTarget {
-            root: self.root(),
-            range: non_empty_range!(self.sync_boundary(), bounds.end),
-        }
+        AnySyncTarget::new(
+            self.root(),
+            non_empty_range!(self.sync_boundary(), bounds.end),
+        )
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -358,10 +358,10 @@ where
 
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
-        AnySyncTarget {
-            root: self.root(),
-            range: non_empty_range!(self.sync_boundary(), bounds.end),
-        }
+        AnySyncTarget::new(
+            self.root(),
+            non_empty_range!(self.sync_boundary(), bounds.end),
+        )
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
@@ -564,37 +564,37 @@ mod tests {
                 .await
                 .unwrap();
 
-            let valid_target = AnySyncTarget {
-                root: merkleized.root(),
-                range: non_empty_range!(
+            let valid_target = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
                     merkleized.bounds().inactivity_floor,
                     mmr::Location::new(merkleized.bounds().total_size)
                 ),
-            };
+            );
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,
             ));
 
-            let wrong_start = AnySyncTarget {
-                root: merkleized.root(),
-                range: non_empty_range!(
+            let wrong_start = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
                     mmr::Location::new(0),
                     mmr::Location::new(merkleized.bounds().total_size)
                 ),
-            };
+            );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_start,
             ));
 
-            let wrong_end = AnySyncTarget {
-                root: merkleized.root(),
-                range: non_empty_range!(
+            let wrong_end = AnySyncTarget::new(
+                merkleized.root(),
+                non_empty_range!(
                     merkleized.bounds().inactivity_floor,
                     mmr::Location::new(merkleized.bounds().total_size - 1)
                 ),
-            };
+            );
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_end,

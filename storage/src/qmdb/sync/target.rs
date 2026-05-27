@@ -19,6 +19,13 @@ pub struct Target<F: Family, D: Digest> {
     pub range: NonEmptyRange<Location<F>>,
 }
 
+impl<F: Family, D: Digest> Target<F, D> {
+    /// Create a sync target.
+    pub const fn new(root: D, range: NonEmptyRange<Location<F>>) -> Self {
+        Self { root, range }
+    }
+}
+
 impl<F: Family, D: Digest> Clone for Target<F, D> {
     fn clone(&self) -> Self {
         Self {
@@ -132,10 +139,7 @@ mod tests {
     use std::io::Cursor;
 
     fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
-        Target {
-            root,
-            range: non_empty_range!(Location::new(start), Location::new(end)),
-        }
+        Target::new(root, non_empty_range!(Location::new(start), Location::new(end)))
     }
 
     #[test]
