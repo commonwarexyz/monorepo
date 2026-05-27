@@ -309,7 +309,7 @@ where
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok(FetchResult::with_success_tx(
+                .send(Ok(FetchResult::with_callback(
                     decoded.proof.clone(),
                     decoded.operations.clone(),
                     decoded.pinned_nodes.clone(),
@@ -620,7 +620,7 @@ mod tests {
                 async {
                     let fetch = sub1_rx.await.unwrap().unwrap();
                     fetch
-                        .success_tx
+                        .callback
                         .expect("standard deliveries should include feedback")
                         .send(true)
                         .unwrap();
@@ -628,7 +628,7 @@ mod tests {
                 async {
                     let fetch = sub2_rx.await.unwrap().unwrap();
                     fetch
-                        .success_tx
+                        .callback
                         .expect("standard deliveries should include feedback")
                         .send(false)
                         .unwrap();
@@ -661,7 +661,7 @@ mod tests {
                 async {
                     let fetch = sub2_rx.await.unwrap().unwrap();
                     fetch
-                        .success_tx
+                        .callback
                         .expect("standard deliveries should include feedback")
                         .send(true)
                         .unwrap();

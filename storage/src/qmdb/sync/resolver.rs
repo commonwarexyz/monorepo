@@ -39,8 +39,8 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     pub operations: Vec<Op>,
     /// Pinned merkle nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
-    /// Optional channel for resolvers that observe downstream validation feedback.
-    pub success_tx: Option<oneshot::Sender<bool>>,
+    /// Optional callback for resolvers that observe downstream validation feedback.
+    pub callback: Option<oneshot::Sender<bool>>,
 }
 
 impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
@@ -54,22 +54,22 @@ impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
             proof,
             operations,
             pinned_nodes,
-            success_tx: None,
+            callback: None,
         }
     }
 
-    /// Creates a fetch result using an externally managed acknowledgement channel.
-    pub const fn with_success_tx(
+    /// Creates a fetch result using an externally managed validation callback.
+    pub const fn with_callback(
         proof: Proof<F, D>,
         operations: Vec<Op>,
         pinned_nodes: Option<Vec<D>>,
-        success_tx: oneshot::Sender<bool>,
+        callback: oneshot::Sender<bool>,
     ) -> Self {
         Self {
             proof,
             operations,
             pinned_nodes,
-            success_tx: Some(success_tx),
+            callback: Some(callback),
         }
     }
 }
@@ -105,10 +105,7 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
             .field("proof", &self.proof)
             .field("operations", &self.operations)
             .field("pinned_nodes", &self.pinned_nodes)
-            .field(
-                "success_tx",
-                &self.success_tx.as_ref().map(|_| "<callback>"),
-            )
+            .field("callback", &self.callback.as_ref().map(|_| "<callback>"))
             .finish()
     }
 }
@@ -638,23 +635,19 @@ pub(crate) mod tests {
     #[test]
     fn test_fetch_result_new_has_no_success_acknowledgement() {
         let result = FetchResult::<mmr::Family, (), ShaDigest>::new(empty_proof(), vec![], None);
-        assert!(result.success_tx.is_none());
+        assert!(result.callback.is_none());
     }
 
     #[test]
-    fn test_fetch_result_with_success_tx_reports_to_external_receiver() {
+    fn test_fetch_result_with_callback_reports_to_external_receiver() {
         let (success_tx, mut success_rx) = oneshot::channel();
-        let result = FetchResult::<mmr::Family, (), ShaDigest>::with_success_tx(
+        let result = FetchResult::<mmr::Family, (), ShaDigest>::with_callback(
             empty_proof(),
             vec![],
             None,
             success_tx,
         );
-        assert!(result
-            .success_tx
-            .expect("success sender")
-            .send(true)
-            .is_ok());
+        assert!(result.callback.expect("success sender").send(true).is_ok());
         assert_eq!(success_rx.try_recv(), Ok(true));
     }
 
