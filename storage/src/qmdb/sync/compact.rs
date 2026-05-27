@@ -375,37 +375,44 @@ where
     target
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
-    let FetchResult { state, callback } = config
-        .resolver
-        .get_compact_state(target.clone())
+
+    loop {
+        let FetchResult { state, callback } = config
+            .resolver
+            .get_compact_state(target.clone())
+            .await
+            .map_err(Error::Resolver)?;
+
+        let db = match try_build_compact_db::<DB>(
+            config.context.child("compact"),
+            config.db_config.clone(),
+            &target,
+            state,
+        )
         .await
-        .map_err(Error::Resolver)?;
-
-    let db = match try_build_compact_db::<DB>(
-        config.context.child("compact"),
-        config.db_config.clone(),
-        &target,
-        state,
-    )
-    .await
-    {
-        Ok(db) => db,
-        Err(BuildError::Engine(err)) => {
-            if let Some(callback) = callback {
-                let _ = callback.send(false);
+        {
+            Ok(db) => db,
+            Err(BuildError::InvalidPeer(err)) => {
+                if let Some(callback) = callback {
+                    let _ = callback.send(false);
+                    continue;
+                }
+                return Err(Error::Engine(err));
             }
-            return Err(Error::Engine(err));
-        }
-        Err(BuildError::Database(err)) => {
-            return Err(Error::Database(err));
-        }
-    };
+            Err(BuildError::Engine(err)) => {
+                return Err(Error::Engine(err));
+            }
+            Err(BuildError::Database(err)) => {
+                return Err(Error::Database(err));
+            }
+        };
 
-    if let Some(callback) = callback {
-        let _ = callback.send(true);
+        if let Some(callback) = callback {
+            let _ = callback.send(true);
+        }
+        db.persist_compact_state().await?;
+        return Ok(db);
     }
-    db.persist_compact_state().await?;
-    Ok(db)
 }
 
 async fn try_build_compact_db<DB>(
@@ -418,7 +425,7 @@ where
     DB: Database,
 {
     if state.leaf_count != target.leaf_count {
-        return Err(BuildError::Engine(EngineError::UnexpectedLeafCount {
+        return Err(BuildError::InvalidPeer(EngineError::UnexpectedLeafCount {
             expected: target.leaf_count,
             actual: state.leaf_count,
         }));
@@ -433,10 +440,10 @@ where
         std::slice::from_ref(&state.last_commit_op),
         &target.root,
     ) {
-        return Err(BuildError::Engine(EngineError::InvalidProof));
+        return Err(BuildError::InvalidPeer(EngineError::InvalidProof));
     }
 
-    validate_compact_frontier::<DB>(target, &state).map_err(BuildError::Engine)?;
+    validate_compact_frontier::<DB>(target, &state).map_err(BuildError::InvalidPeer)?;
 
     let db = DB::from_compact_state(context, db_config, state)
         .await
@@ -461,12 +468,10 @@ where
 {
     let last_commit_loc = Location::new(*state.leaf_count - 1);
     let Some(inactivity_floor_loc) = DB::inactivity_floor(&state.last_commit_op) else {
-        return Err(EngineError::InvalidCompactState(
-            "last operation was not a commit",
-        ));
+        return Err(EngineError::InvalidProof);
     };
     if inactivity_floor_loc > last_commit_loc {
-        return Err(EngineError::InvalidCompactState("invalid compact state"));
+        return Err(EngineError::InvalidProof);
     }
 
     let mem =
@@ -495,20 +500,15 @@ where
 }
 
 fn compact_merkle_error_to_engine<F: Family, D: Digest>(
-    err: crate::merkle::Error<F>,
+    _err: crate::merkle::Error<F>,
 ) -> EngineError<F, D> {
-    match err {
-        crate::merkle::Error::InvalidPinnedNodes => {
-            EngineError::InvalidCompactState("invalid pinned nodes")
-        }
-        crate::merkle::Error::DataCorrupted(reason) => EngineError::InvalidCompactState(reason),
-        _ => EngineError::InvalidCompactState("invalid compact state"),
-    }
+    EngineError::InvalidProof
 }
 
 enum BuildError<F: Family, D: Digest> {
     Database(qmdb::Error<F>),
     Engine(EngineError<F, D>),
+    InvalidPeer(EngineError<F, D>),
 }
 
 async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(
@@ -962,11 +962,8 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 mod tests {
     use super::{Config, Database, FetchResult, Resolver, State, Target};
     use crate::{
-        merkle::{mmr, Location, Proof},
-        qmdb::{
-            self,
-            sync::{EngineError, Error},
-        },
+        merkle::{mmr, Location},
+        qmdb,
     };
     use commonware_codec::{DecodeExt as _, Encode as _, RangeCfg};
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
@@ -974,6 +971,7 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::sync::AsyncRwLock;
     use std::{
+        collections::VecDeque,
         convert::Infallible,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -991,22 +989,25 @@ mod tests {
 
     fn assert_resolver<R: super::Resolver>() {}
 
-    struct RetryGuardDb;
+    struct TestDb {
+        root: Digest,
+    }
 
-    impl Database for RetryGuardDb {
+    impl Database for TestDb {
         type Family = mmr::Family;
         type Op = u8;
-        type Config = ();
+        type Config = (Digest, Arc<AtomicUsize>);
         type Digest = Digest;
         type Context = deterministic::Context;
         type Hasher = Sha256;
 
         async fn from_compact_state(
             _context: Self::Context,
-            _config: Self::Config,
+            (root, constructions): Self::Config,
             _state: State<Self::Family, Self::Op, Self::Digest>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
-            panic!("leaf-count mismatch should fail before database construction");
+            constructions.fetch_add(1, Ordering::SeqCst);
+            Ok(Self { root })
         }
 
         fn inactivity_floor(_op: &Self::Op) -> Option<Location<Self::Family>> {
@@ -1014,7 +1015,7 @@ mod tests {
         }
 
         fn root(&self) -> Self::Digest {
-            Sha256::hash(b"unused")
+            self.root
         }
 
         async fn persist_compact_state(&self) -> Result<(), qmdb::Error<Self::Family>> {
@@ -1023,11 +1024,11 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct RetryGuardResolver {
-        attempts: Arc<AtomicUsize>,
+    struct SequenceResolver {
+        states: Arc<commonware_utils::sync::Mutex<VecDeque<FetchResult<mmr::Family, u8, Digest>>>>,
     }
 
-    impl Resolver for RetryGuardResolver {
+    impl Resolver for SequenceResolver {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = u8;
@@ -1037,83 +1038,41 @@ mod tests {
             &self,
             _target: Target<Self::Family, Self::Digest>,
         ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-            let attempts = self.attempts.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(
-                attempts, 0,
-                "compact sync retried invalid compact state after downstream rejected it"
-            );
-
-            let (success_tx, _success_rx) = commonware_utils::channel::oneshot::channel();
-            Ok(FetchResult {
-                state: State {
-                    leaf_count: Location::new(2),
-                    pinned_nodes: Vec::new(),
-                    last_commit_op: 0,
-                    last_commit_proof: Proof {
-                        leaves: Location::new(2),
-                        inactive_peaks: 0,
-                        digests: Vec::new(),
-                    },
-                },
-                callback: Some(success_tx),
-            })
+            Ok(self
+                .states
+                .lock()
+                .pop_front()
+                .expect("missing compact fetch result"))
         }
     }
 
-    struct InvalidStateDb;
-
-    impl Database for InvalidStateDb {
-        type Family = mmr::Family;
-        type Op = u8;
-        type Config = ();
-        type Digest = Digest;
-        type Context = deterministic::Context;
-        type Hasher = Sha256;
-
-        async fn from_compact_state(
-            _context: Self::Context,
-            _config: Self::Config,
-            _state: State<Self::Family, Self::Op, Self::Digest>,
-        ) -> Result<Self, qmdb::Error<Self::Family>> {
-            panic!("invalid compact state should fail before database construction");
-        }
-
-        fn inactivity_floor(_op: &Self::Op) -> Option<Location<Self::Family>> {
-            Some(Location::new(0))
-        }
-
-        fn root(&self) -> Self::Digest {
-            Sha256::hash(b"unused")
-        }
-
-        async fn persist_compact_state(&self) -> Result<(), qmdb::Error<Self::Family>> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone)]
-    struct InvalidStateResolver {
-        state: State<mmr::Family, u8, Digest>,
-        callback: Arc<
-            commonware_utils::sync::Mutex<Option<commonware_utils::channel::oneshot::Sender<bool>>>,
-        >,
-    }
-
-    impl Resolver for InvalidStateResolver {
-        type Family = mmr::Family;
-        type Digest = Digest;
-        type Op = u8;
-        type Error = Infallible;
-
-        async fn get_compact_state(
-            &self,
-            _target: Target<Self::Family, Self::Digest>,
-        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-            Ok(FetchResult {
-                state: self.state.clone(),
-                callback: self.callback.lock().take(),
-            })
-        }
+    fn valid_state_and_target() -> (State<mmr::Family, u8, Digest>, Target<mmr::Family, Digest>) {
+        let hasher = qmdb::hasher::<Sha256>();
+        let mut merkle = crate::merkle::mem::Mem::<mmr::Family, Digest>::new();
+        let op = 0u8;
+        let first_op = 1u8;
+        let batch = merkle
+            .new_batch()
+            .add(&hasher, &first_op.encode())
+            .add(&hasher, &op.encode());
+        let batch = batch.merkleize(&merkle, &hasher);
+        merkle.apply_batch(&batch).unwrap();
+        let root = merkle.root(&hasher, 0).unwrap();
+        let leaf_count = Location::new(2);
+        let pinned_nodes = merkle
+            .nodes_to_pin(leaf_count)
+            .into_values()
+            .collect::<Vec<_>>();
+        let proof = merkle.proof(&hasher, Location::new(1), 0).unwrap();
+        (
+            State {
+                leaf_count,
+                pinned_nodes,
+                last_commit_op: op,
+                last_commit_proof: proof,
+            },
+            Target::<mmr::Family, Digest> { root, leaf_count },
+        )
     }
 
     #[test]
@@ -1170,87 +1129,39 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_sync_returns_error_after_callback_rejects_bad_state() {
+    fn test_compact_sync_retries_invalid_state_after_feedback() {
         deterministic::Runner::default().start(|context| async move {
-            let attempts = Arc::new(AtomicUsize::new(0));
-            let target = Target::<mmr::Family, Digest> {
-                root: Sha256::hash(b"target"),
-                leaf_count: Location::new(1),
-            };
+            let (good_state, target) = valid_state_and_target();
+            let mut bad_state = good_state.clone();
+            bad_state.pinned_nodes.push(Sha256::hash(b"extra pin"));
+            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
+            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
+            let constructions = Arc::new(AtomicUsize::new(0));
 
-            let result = super::sync::<RetryGuardDb, _>(Config {
+            let db = super::sync::<TestDb, _>(Config {
                 context,
-                resolver: RetryGuardResolver {
-                    attempts: attempts.clone(),
+                resolver: SequenceResolver {
+                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        FetchResult {
+                            state: bad_state,
+                            callback: Some(bad_tx),
+                        },
+                        FetchResult {
+                            state: good_state,
+                            callback: Some(good_tx),
+                        },
+                    ]))),
                 },
-                target,
-                db_config: (),
+                target: target.clone(),
+                db_config: (target.root, constructions.clone()),
             })
-            .await;
+            .await
+            .unwrap();
 
-            match result {
-                Err(Error::Engine(EngineError::UnexpectedLeafCount { expected, actual })) => {
-                    assert_eq!(expected, Location::new(1));
-                    assert_eq!(actual, Location::new(2));
-                }
-                Err(err) => panic!("unexpected compact sync error: {err:?}"),
-                Ok(_) => panic!("bad compact state should not sync successfully"),
-            }
-            assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        });
-    }
-
-    #[test]
-    fn test_compact_sync_reports_invalid_state_feedback() {
-        deterministic::Runner::default().start(|context| async move {
-            let (success_tx, success_rx) = commonware_utils::channel::oneshot::channel();
-            let hasher = qmdb::hasher::<Sha256>();
-            let mut merkle = crate::merkle::mem::Mem::<mmr::Family, Digest>::new();
-            let op = 0u8;
-            let first_op = 1u8;
-            let batch = merkle
-                .new_batch()
-                .add(&hasher, &first_op.encode())
-                .add(&hasher, &op.encode());
-            let batch = batch.merkleize(&merkle, &hasher);
-            merkle.apply_batch(&batch).unwrap();
-            let root = merkle.root(&hasher, 0).unwrap();
-            let leaf_count = Location::new(2);
-            let mut pinned_nodes = merkle
-                .nodes_to_pin(leaf_count)
-                .into_values()
-                .collect::<Vec<_>>();
-            pinned_nodes.push(Sha256::hash(b"extra pin"));
-            let proof = merkle.proof(&hasher, Location::new(1), 0).unwrap();
-            let state = State {
-                leaf_count,
-                pinned_nodes,
-                last_commit_op: op,
-                last_commit_proof: proof,
-            };
-            let target = Target::<mmr::Family, Digest> {
-                root,
-                leaf_count,
-            };
-
-            let result = super::sync::<InvalidStateDb, _>(Config {
-                context,
-                resolver: InvalidStateResolver {
-                    state,
-                    callback: Arc::new(commonware_utils::sync::Mutex::new(Some(success_tx))),
-                },
-                target,
-                db_config: (),
-            })
-            .await;
-
-            assert!(!success_rx.await.expect("feedback should be sent"));
-            assert!(matches!(
-                result,
-                Err(Error::Engine(EngineError::InvalidCompactState(
-                    "invalid pinned nodes"
-                )))
-            ));
+            assert!(!bad_rx.await.expect("invalid feedback should arrive"));
+            assert!(good_rx.await.expect("valid feedback should arrive"));
+            assert_eq!(constructions.load(Ordering::SeqCst), 1);
+            assert_eq!(db.root(), target.root);
         });
     }
 }

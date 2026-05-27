@@ -1350,7 +1350,7 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_sync_returns_error_for_bad_pinned_nodes_with_feedback() {
+    fn test_compact_sync_recovers_after_bad_pinned_nodes_with_feedback() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-feedback-{}", context.next_u64());
             let mut source =
@@ -1394,99 +1394,25 @@ mod compact_variable_mmr {
             };
 
             let client_cfg = client_config(&suffix);
-            let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
+            let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver,
                 target: target.clone(),
                 db_config: client_cfg.clone(),
             })
-            .await;
+            .await
+            .unwrap();
 
             assert!(!bad_rx.await.unwrap());
-            assert!(matches!(
-                result,
-                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
-            ));
-            assert!(good_rx.await.is_err());
+            assert!(good_rx.await.unwrap());
+            assert_eq!(synced.current_target(), target);
+            assert_eq!(synced.get_metadata(), Some(vec![7]));
 
             let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();
-            assert_eq!(reopened.last_commit_loc(), Location::new(0));
-            assert_eq!(reopened.get_metadata(), None);
-            assert_eq!(reopened.inactivity_floor_loc(), Location::new(0));
-            assert_ne!(reopened.root(), target.root);
-
-            reopened.destroy().await.unwrap();
-            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
-            source.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_compact_sync_reports_wrong_pinned_node_count_as_invalid_state() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-keyless-bad-pin-count-{}", context.next_u64());
-            let mut source =
-                SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                    .await
-                    .unwrap();
-            let batch = source
-                .new_batch()
-                .append(vec![1, 2, 3])
-                .append(vec![4, 5, 6])
-                .merkleize(&source, Some(vec![7]), Location::new(2));
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
-
-            let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
-            let source = Arc::new(source);
-            let mut bad_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .state;
-            bad_state
-                .pinned_nodes
-                .push(sha256::Digest::from([0xaa; 32]));
-
-            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
-            let resolver = SequenceResolver {
-                states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                    sync::compact::FetchResult {
-                        state: bad_state,
-                        callback: Some(bad_tx),
-                    },
-                ]))),
-            };
-
-            let client_cfg = client_config(&suffix);
-            let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                resolver,
-                target: target.clone(),
-                db_config: client_cfg.clone(),
-            })
-            .await;
-
-            assert!(!bad_rx.await.unwrap());
-            assert!(matches!(
-                result,
-                Err(sync::Error::Engine(
-                    sync::EngineError::InvalidCompactState("invalid pinned nodes")
-                ))
-            ));
-
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
-                .await
-                .unwrap();
-            assert_eq!(reopened.last_commit_loc(), Location::new(0));
-            assert_eq!(reopened.get_metadata(), None);
-            assert_eq!(reopened.inactivity_floor_loc(), Location::new(0));
-            assert_ne!(reopened.root(), target.root);
+            assert_eq!(reopened.current_target(), target);
+            assert_eq!(reopened.get_metadata(), Some(vec![7]));
 
             reopened.destroy().await.unwrap();
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));

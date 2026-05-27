@@ -9,7 +9,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{reschedule, Clock, Metrics, Storage};
@@ -47,16 +47,6 @@ async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T
             }
         }
     }
-}
-
-const fn retry_compact_engine_error<F: Family, D: Digest>(err: &sync::EngineError<F, D>) -> bool {
-    matches!(
-        err,
-        sync::EngineError::InvalidProof
-            | sync::EngineError::UnexpectedLeafCount { .. }
-            | sync::EngineError::InvalidCompactState(_)
-            | sync::EngineError::RootMismatch { .. }
-    )
 }
 
 /// Wraps an unjournaled keyless batch before merkleization.
@@ -387,11 +377,7 @@ where
                     resolver: resolver.clone(),
                     target: target.clone(),
                     db_config: config.clone(),
-                }) => match db {
-                    Ok(db) => db,
-                    Err(sync::Error::Engine(err)) if retry_compact_engine_error(&err) => continue,
-                    Err(err) => return Err(err),
-                },
+                }) => db?,
             };
 
             if let Some(tip_updates) = tip_updates.as_mut() {
@@ -482,11 +468,7 @@ where
                     resolver: resolver.clone(),
                     target: target.clone(),
                     db_config: config.clone(),
-                }) => match db {
-                    Ok(db) => db,
-                    Err(sync::Error::Engine(err)) if retry_compact_engine_error(&err) => continue,
-                    Err(err) => return Err(err),
-                },
+                }) => db?,
             };
 
             if let Some(tip_updates) = tip_updates.as_mut() {
@@ -536,13 +518,11 @@ mod tests {
         qmdb::keyless as storage_keyless,
     };
     use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
-    use std::{collections::VecDeque, convert::Infallible, time::Duration};
+    use std::time::Duration;
 
     type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
     type FullFixedDb =
         storage_keyless::fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
-    type FixedOp = storage_keyless::fixed::Operation<mmr::Family, U64>;
-    type CompactFetchResult = sync::compact::FetchResult<mmr::Family, FixedOp, Digest>;
     type VariableDb = variable::CompactDb<
         mmr::Family,
         deterministic::Context,
@@ -562,7 +542,7 @@ mod tests {
     impl sync::compact::Resolver for SupersedingCompactResolver {
         type Family = mmr::Family;
         type Digest = Digest;
-        type Op = FixedOp;
+        type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
         type Error = sync::compact::ServeError<mmr::Family, Digest>;
 
         async fn get_compact_state(
@@ -576,30 +556,6 @@ mod tests {
             }
 
             sync::compact::Resolver::get_compact_state(&self.source, target).await
-        }
-    }
-
-    #[derive(Clone)]
-    struct SequenceCompactResolver {
-        states: Arc<commonware_utils::sync::Mutex<VecDeque<CompactFetchResult>>>,
-    }
-
-    impl sync::compact::Resolver for SequenceCompactResolver {
-        type Family = mmr::Family;
-        type Digest = Digest;
-        type Op = FixedOp;
-        type Error = Infallible;
-
-        async fn get_compact_state(
-            &self,
-            _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
-        {
-            Ok(self
-                .states
-                .lock()
-                .pop_front()
-                .expect("missing compact fetch result"))
         }
     }
 
@@ -762,77 +718,6 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(synced.current_target(), target);
-            assert_eq!(synced.get_metadata(), Some(U64::new(9)));
-        });
-    }
-
-    #[test]
-    fn state_sync_retries_after_invalid_compact_proof() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut source = FullFixedDb::init(
-                context.child("source"),
-                full_fixed_config("invalid-proof-source", &context),
-            )
-            .await
-            .unwrap();
-
-            let floor = source.inactivity_floor_loc();
-            let batch =
-                source
-                    .new_batch()
-                    .append(U64::new(7))
-                    .merkleize(&source, Some(U64::new(9)), floor);
-            source.apply_batch(batch).await.unwrap();
-            source.sync().await.unwrap();
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: source.bounds().await.end,
-            };
-
-            let source = Arc::new(source);
-            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .state;
-            let mut bad_state = good_state.clone();
-            bad_state.last_commit_proof = commonware_storage::merkle::Proof {
-                leaves: bad_state.leaf_count,
-                inactive_peaks: 0,
-                digests: Vec::new(),
-            };
-
-            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
-            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
-            let resolver = SequenceCompactResolver {
-                states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
-                    sync::compact::FetchResult {
-                        state: bad_state,
-                        callback: Some(bad_tx),
-                    },
-                    sync::compact::FetchResult {
-                        state: good_state,
-                        callback: Some(good_tx),
-                    },
-                ]))),
-            };
-
-            let (_update_tx, update_rx) = mpsc::channel(1);
-            let synced = <FixedDb as StateSyncDb<_, _>>::sync_db(
-                context.child("target"),
-                fixed_config("invalid-proof-target"),
-                resolver,
-                target.clone(),
-                update_rx,
-                None,
-                None,
-                sync_config(),
-            )
-            .await
-            .unwrap();
-
-            assert!(!bad_rx.await.expect("invalid proof feedback should arrive"));
-            assert!(good_rx.await.expect("valid proof feedback should arrive"));
             assert_eq!(synced.current_target(), target);
             assert_eq!(synced.get_metadata(), Some(U64::new(9)));
         });
