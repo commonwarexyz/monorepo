@@ -108,14 +108,19 @@ impl<
                                 },
                             );
 
+                            // Register peer with tracker before making it routable.
+                            if !tracker.connect(peer.clone(), peer_mailbox).accepted() {
+                                debug!(?peer, "tracker shut down during peer setup");
+                                drop(reservation);
+                                return;
+                            }
+
                             // Register peer with the router (may fail during shutdown)
                             let Some(channels) = router.ready(peer.clone(), messenger).await else {
                                 debug!(?peer, "router shut down during peer setup");
+                                drop(reservation);
                                 return;
                             };
-
-                            // Register peer with tracker
-                            tracker.connect(peer.clone(), peer_mailbox);
 
                             // Run peer
                             let result = peer_actor.run(peer.clone(), connection, channels).await;

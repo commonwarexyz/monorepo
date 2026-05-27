@@ -40,7 +40,7 @@ pub mod unordered;
 /// - Dropping the `Cursor` automatically restores the list structure by reattaching any detached
 ///   `next` nodes.
 ///
-/// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
+/// _If you don't need advanced functionality, just use `insert()`, `insert_and_retain()`, or
 /// `remove()` from [Unordered] instead._
 pub trait Cursor: Send + Sync {
     /// The type of values the cursor iterates over.
@@ -69,10 +69,11 @@ pub trait Cursor: Send + Sync {
     /// Panics if called before `next()` or after iteration is complete (`Status::Done` phase).
     fn update(&mut self, value: Self::Value);
 
-    /// Removes anything in the cursor that satisfies the predicate.
-    fn prune(&mut self, predicate: &impl Fn(&Self::Value) -> bool) {
+    /// Retains only the values in the cursor for which `should_retain` returns `true`. All other
+    /// values are removed.
+    fn retain(&mut self, should_retain: &impl Fn(&Self::Value) -> bool) {
         while let Some(old) = self.next() {
-            if predicate(old) {
+            if !should_retain(old) {
                 self.delete();
             }
         }
@@ -140,18 +141,20 @@ pub trait Unordered: Send + Sync {
     /// Inserts a new value at the current position.
     fn insert(&mut self, key: &[u8], value: Self::Value);
 
-    /// Insert a value at the given translated key, and prune any values that are no longer valid.
+    /// Insert a value at the given translated key, and remove any values for which
+    /// `should_retain` returns `false`.
     ///
-    /// If the value is prunable, it will not be inserted.
-    fn insert_and_prune(
+    /// If `should_retain` returns `false` for the new value, it will not be inserted.
+    fn insert_and_retain(
         &mut self,
         key: &[u8],
         value: Self::Value,
-        predicate: impl Fn(&Self::Value) -> bool,
+        should_retain: impl Fn(&Self::Value) -> bool,
     );
 
-    /// Remove all values associated with a translated key that match `predicate`.
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&Self::Value) -> bool);
+    /// Retain only the values associated with a translated key for which `should_retain` returns
+    /// `true`. All other values are removed.
+    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&Self::Value) -> bool);
 
     /// Remove all values associated with a translated key.
     fn remove(&mut self, key: &[u8]);
@@ -260,9 +263,9 @@ mod tests {
         // Make sure we can remove keys with a predicate
         index.insert(key, 3);
         index.insert(key, 4);
-        index.prune(key, |i| *i == 3);
+        index.retain(key, |i| *i != 3);
         assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 4, 2]);
-        index.prune(key, |_| true);
+        index.retain(key, |_| false);
         // Try removing all of a keys values.
         assert_eq!(
             index.get(key).copied().collect::<Vec<_>>(),
@@ -273,7 +276,7 @@ mod tests {
         assert!(index.get_mut(key).is_none());
 
         // Removing a key that doesn't exist should be a no-op.
-        index.prune(key, |_| true);
+        index.retain(key, |_| false);
     }
 
     fn new_unordered(context: deterministic::Context) -> unordered::Index<TwoCap, u64> {
@@ -491,12 +494,12 @@ mod tests {
         assert_eq!(index.keys(), 2);
         assert_eq!(index.items(), 4);
 
-        index.prune(b"ab", |v| *v == 4);
+        index.retain(b"ab", |v| *v != 4);
         assert_eq!(index.get(b"ab").copied().collect::<Vec<_>>(), vec![2, 3]);
         assert_eq!(index.keys(), 2);
         assert_eq!(index.items(), 3);
 
-        index.prune(b"ab", |_| true);
+        index.retain(b"ab", |_| false);
         assert_eq!(
             index.get(b"ab").copied().collect::<Vec<_>>(),
             Vec::<u64>::new()
@@ -586,9 +589,9 @@ mod tests {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
-        index.prune(b"key", |v| *v == 2);
+        index.retain(b"key", |v| *v != 2);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1, 3]);
-        index.prune(b"key", |v| *v == 1);
+        index.retain(b"key", |v| *v != 1);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![3]);
     }
 
@@ -640,7 +643,7 @@ mod tests {
         values.sort();
         assert_eq!(values, vec![0, 1, 2]);
 
-        index.prune(b"", |v| *v == 1);
+        index.retain(b"", |v| *v != 1);
         let mut values = index.get(b"").copied().collect::<Vec<_>>();
         values.sort();
         assert_eq!(values, vec![0, 2]);
@@ -1086,8 +1089,8 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_prune_vacant<I: Unordered<Value = u64>>(index: &mut I) {
-        index.insert_and_prune(b"key", 1u64, |_| false);
+    fn run_index_insert_and_retain_vacant<I: Unordered<Value = u64>>(index: &mut I) {
+        index.insert_and_retain(b"key", 1u64, |_| true);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
         assert_eq!(index.items(), 1);
         assert_eq!(index.keys(), 1);
@@ -1095,41 +1098,41 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_hash_index_insert_and_prune_vacant() {
+    fn test_hash_index_insert_and_retain_vacant() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            run_index_insert_and_prune_vacant(&mut index);
+            run_index_insert_and_retain_vacant(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_ordered_index_insert_and_prune_vacant() {
+    fn test_ordered_index_insert_and_retain_vacant() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_ordered(context);
-            run_index_insert_and_prune_vacant(&mut index);
+            run_index_insert_and_retain_vacant(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_partitioned_index_insert_and_prune_vacant() {
+    fn test_partitioned_index_insert_and_retain_vacant() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
                 let mut index = new_partitioned_unordered(context.child("unordered"));
-                run_index_insert_and_prune_vacant(&mut index);
+                run_index_insert_and_retain_vacant(&mut index);
             }
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
-                run_index_insert_and_prune_vacant(&mut index);
+                run_index_insert_and_retain_vacant(&mut index);
             }
         });
     }
 
-    fn run_index_insert_and_prune_replace_one<I: Unordered<Value = u64>>(index: &mut I) {
+    fn run_index_insert_and_retain_replace_one<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1u64);
-        index.insert_and_prune(b"key", 2u64, |v| *v == 1);
+        index.insert_and_retain(b"key", 2u64, |v| *v != 1);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
         assert_eq!(index.items(), 1);
         assert_eq!(index.keys(), 1);
@@ -1137,42 +1140,42 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_hash_index_insert_and_prune_replace_one() {
+    fn test_hash_index_insert_and_retain_replace_one() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            run_index_insert_and_prune_replace_one(&mut index);
+            run_index_insert_and_retain_replace_one(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_ordered_index_insert_and_prune_replace_one() {
+    fn test_ordered_index_insert_and_retain_replace_one() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_ordered(context);
-            run_index_insert_and_prune_replace_one(&mut index);
+            run_index_insert_and_retain_replace_one(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_partitioned_index_insert_and_prune_replace_one() {
+    fn test_partitioned_index_insert_and_retain_replace_one() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
                 let mut index = new_partitioned_unordered(context.child("unordered"));
-                run_index_insert_and_prune_replace_one(&mut index);
+                run_index_insert_and_retain_replace_one(&mut index);
             }
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
-                run_index_insert_and_prune_replace_one(&mut index);
+                run_index_insert_and_retain_replace_one(&mut index);
             }
         });
     }
 
-    fn run_index_insert_and_prune_dead_insert<I: Unordered<Value = u64>>(index: &mut I) {
+    fn run_index_insert_and_retain_dead_insert<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 10u64);
         index.insert(b"key", 20u64);
-        index.insert_and_prune(b"key", 30u64, |_| true);
+        index.insert_and_retain(b"key", 30u64, |_| false);
         assert_eq!(
             index.get(b"key").copied().collect::<Vec<u64>>(),
             Vec::<u64>::new()
@@ -1183,34 +1186,34 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_hash_index_insert_and_prune_dead_insert() {
+    fn test_hash_index_insert_and_retain_dead_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            run_index_insert_and_prune_dead_insert(&mut index);
+            run_index_insert_and_retain_dead_insert(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_ordered_index_insert_and_prune_dead_insert() {
+    fn test_ordered_index_insert_and_retain_dead_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_ordered(context);
-            run_index_insert_and_prune_dead_insert(&mut index);
+            run_index_insert_and_retain_dead_insert(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_partitioned_index_insert_and_prune_dead_insert() {
+    fn test_partitioned_index_insert_and_retain_dead_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
                 let mut index = new_partitioned_unordered(context.child("unordered"));
-                run_index_insert_and_prune_dead_insert(&mut index);
+                run_index_insert_and_retain_dead_insert(&mut index);
             }
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
-                run_index_insert_and_prune_dead_insert(&mut index);
+                run_index_insert_and_retain_dead_insert(&mut index);
             }
         });
     }

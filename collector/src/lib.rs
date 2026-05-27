@@ -15,7 +15,6 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_cryptography::{Committable, Digestible, PublicKey};
     use commonware_p2p::Recipients;
     use commonware_utils::channel::oneshot;
-    use std::future::Future;
 
     pub mod p2p;
 
@@ -61,7 +60,7 @@ commonware_macros::stability_scope!(ALPHA {
             origin: Self::PublicKey,
             request: Self::Request,
             response: oneshot::Sender<Self::Response>,
-        ) -> impl Future<Output = ()> + Send;
+        );
     }
 
     /// A [Monitor] collects responses from [Handler]s.
@@ -81,6 +80,6 @@ commonware_macros::stability_scope!(ALPHA {
             handler: Self::PublicKey,
             response: Self::Response,
             count: usize,
-        ) -> impl Future<Output = ()> + Send;
+        );
     }
 });

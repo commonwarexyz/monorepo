@@ -53,6 +53,9 @@ pub enum Message<C: PublicKey> {
         /// The public key of the peer.
         public_key: C,
 
+        /// The mailbox of the peer actor.
+        peer: peer::Mailbox<C>,
+
         /// `true` if we are the dialer, `false` if we are the listener.
         dialer: bool,
 
@@ -63,24 +66,23 @@ pub enum Message<C: PublicKey> {
     /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
     /// keep-alive signal to the peer.
     ///
-    /// This request is formed on a recurring interval.
+    /// This request is formed on a recurring interval. The tracker sends any response to the
+    /// mailbox stored by the peer's most recent [`Message::Connect`].
     Construct {
         /// The public key of the peer.
         public_key: C,
-
-        /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
     },
 
     /// Notify the tracker that a [types::Payload::BitVec] message has been received from a peer.
     ///
-    /// The tracker will construct a [types::Payload::Peers] message in response.
+    /// The tracker will construct a [types::Payload::Peers] message in response and send it to the
+    /// mailbox stored by the peer's most recent [`Message::Connect`].
     BitVec {
+        /// The public key of the peer that sent the bit vector.
+        public_key: C,
+
         /// The bit vector received.
         bit_vec: types::BitVec,
-
-        /// The mailbox of the peer actor.
-        peer: peer::Mailbox<C>,
     },
 
     /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
@@ -161,10 +163,16 @@ impl<C: PublicKey> Mailbox<C> {
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was
     /// dropped (peer not eligible or tracker shut down).
-    pub(crate) async fn connect(&self, public_key: C, dialer: bool) -> Option<types::Info<C>> {
+    pub(crate) async fn connect(
+        &self,
+        public_key: C,
+        peer: peer::Mailbox<C>,
+        dialer: bool,
+    ) -> Option<types::Info<C>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Connect {
             public_key,
+            peer,
             dialer,
             responder,
         });
@@ -172,13 +180,16 @@ impl<C: PublicKey> Mailbox<C> {
     }
 
     /// Send a `Construct` message to the tracker.
-    pub(crate) fn construct(&self, public_key: C, peer: peer::Mailbox<C>) -> Feedback {
-        self.0.enqueue(Message::Construct { public_key, peer })
+    pub(crate) fn construct(&self, public_key: C) -> Feedback {
+        self.0.enqueue(Message::Construct { public_key })
     }
 
     /// Send a `BitVec` message to the tracker.
-    pub(crate) fn bit_vec(&self, bit_vec: types::BitVec, peer: peer::Mailbox<C>) -> Feedback {
-        self.0.enqueue(Message::BitVec { bit_vec, peer })
+    pub(crate) fn bit_vec(&self, public_key: C, bit_vec: types::BitVec) -> Feedback {
+        self.0.enqueue(Message::BitVec {
+            public_key,
+            bit_vec,
+        })
     }
 
     /// Send a `Peers` message to the tracker.

@@ -142,7 +142,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_prune(&mut self, key: &[u8], value: V, predicate: impl Fn(&V) -> bool) {
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
@@ -150,10 +150,11 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
 
-                // Add our new value (if not prunable).
-                if !predicate(&value) {
+                // Add the new value only if it should be retained.
+                if should_retain(&value) {
                     cursor.insert(value);
                 }
             }
@@ -163,7 +164,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&V) -> bool) {
+    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
@@ -171,7 +172,8 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
             }
             Entry::Vacant(_) => {}
         }
@@ -180,7 +182,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     fn remove(&mut self, key: &[u8]) {
         // To ensure metrics are accurate, we iterate over all conflicting values and remove them
         // one-by-one (rather than just removing the entire entry).
-        self.prune(key, |_| true);
+        self.retain(key, |_| false);
     }
 
     #[cfg(test)]

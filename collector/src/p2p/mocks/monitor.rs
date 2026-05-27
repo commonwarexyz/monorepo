@@ -34,12 +34,7 @@ impl crate::Monitor for Monitor {
     type PublicKey = PublicKey;
     type Response = Response;
 
-    async fn collected(
-        &mut self,
-        handler: Self::PublicKey,
-        response: Self::Response,
-        count: usize,
-    ) {
+    fn collected(&mut self, handler: Self::PublicKey, response: Self::Response, count: usize) {
         let _ = self.sender.send(Collected {
             handler,
             response,

@@ -210,18 +210,23 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Track new primary and secondary peer sets for the given index.
-    pub fn track(&mut self, index: u64, peers: TrackedPeers<C>) -> bool {
+    ///
+    /// Returns peers that are no longer eligible after this update. Callers that hold live
+    /// connection handles should disconnect them.
+    ///
+    /// Returns `None` if the index is invalid.
+    pub fn track(&mut self, index: u64, peers: TrackedPeers<C>) -> Option<OrderedSet<C>> {
         // Check if peer set already exists
         if self.peer_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
-            return false;
+            return None;
         }
 
         // Ensure that peer set is monotonically increasing
         if let Some((last, _)) = self.peer_sets.last_key_value() {
             if index <= *last {
                 warn!(?index, ?last, "index must monotonically increase");
-                return false;
+                return None;
             }
         }
 
@@ -266,20 +271,21 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         );
 
         // Remove oldest tracked peer sets if necessary.
+        let mut kill_peers = Vec::new();
         while self.peer_sets.len() > self.max_sets.get() {
             let (index, sets) = self.peer_sets.pop_first().unwrap();
             debug!(index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(primary).unwrap().decrement_primary();
-                self.delete_if_needed(primary);
+                self.queue_if_ineligible(primary, &mut kill_peers);
             });
             sets.secondary.iter().for_each(|secondary| {
                 self.peers.get_mut(secondary).unwrap().decrement_secondary();
-                self.delete_if_needed(secondary);
+                self.queue_if_ineligible(secondary, &mut kill_peers);
             });
         }
 
-        true
+        Some(OrderedSet::from_iter_dedup(kill_peers))
     }
 
     /// Gets the peer set (primary and secondary) at the given index.
@@ -534,15 +540,29 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Attempt to delete a record.
+    /// Queue connection state for teardown if it is no longer valid, then delete inert records.
     ///
-    /// Returns `true` if the record was deleted, `false` otherwise.
-    fn delete_if_needed(&mut self, peer: &C) -> bool {
+    /// Active peers need a kill signal. Reserved peers may not have registered a mailbox yet; in
+    /// that case the actor kill path is a no-op and later Connect rejection or reservation release
+    /// completes cleanup.
+    fn queue_if_ineligible(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
+        if self
+            .peers
+            .get(peer)
+            .is_some_and(|record| record.needs_teardown())
+        {
+            kill_peers.push(peer.clone());
+        }
+        self.delete_if_needed(peer);
+    }
+
+    /// Attempt to delete a record.
+    fn delete_if_needed(&mut self, peer: &C) {
         let Some(record) = self.peers.get(peer) else {
-            return false;
+            return;
         };
         if !record.deletable() {
-            return false;
+            return;
         }
 
         // We don't decrement the blocked metric here because the block
@@ -550,7 +570,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
         self.metrics.tracked.dec();
-        true
     }
 }
 
@@ -596,6 +615,51 @@ mod tests {
     ) -> Releaser<C> {
         let (tx, _rx) = mailbox::new(metrics, NZUsize!(1024));
         Releaser::new(tx)
+    }
+
+    #[test]
+    fn test_track_kills_connected_peer_removed_from_sets() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: NZUsize!(1),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let peer_1 = PrivateKey::from_seed(1).public_key();
+        let peer_2 = PrivateKey::from_seed(2).public_key();
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
+
+            let set_0: OrderedSet<_> = [peer_1.clone()].into_iter().try_collect().unwrap();
+            directory.track(0, TrackedPeers::from(set_0)).unwrap();
+            let reservation = directory.listen(&peer_1).expect("peer should reserve");
+            directory.connect(&peer_1, false);
+
+            let set_1: OrderedSet<_> = [peer_2.clone()].into_iter().try_collect().unwrap();
+            let kill_peers = directory.track(1, TrackedPeers::from(set_1)).unwrap();
+
+            let expected: OrderedSet<_> = [peer_1.clone()].into_iter().try_collect().unwrap();
+            assert_eq!(kill_peers, expected);
+            let record = directory.peers.get(&peer_1).unwrap();
+            assert!(!record.deletable());
+            directory.release(reservation.metadata().clone());
+            assert!(!directory.peers.contains_key(&peer_1));
+            assert_eq!(reservation.metadata().public_key(), &peer_1);
+        });
     }
 
     #[test]
@@ -667,29 +731,35 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
-            assert!(directory.track(
-                0,
-                TrackedPeers::new(
-                    [primary_0].try_into().unwrap(),
-                    [secondary_0.clone()].try_into().unwrap(),
-                ),
-            ));
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        [primary_0].try_into().unwrap(),
+                        [secondary_0.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
             assert!(directory.eligible(&secondary_0));
 
-            assert!(directory.track(
-                1,
-                TrackedPeers::new(
-                    [primary_1].try_into().unwrap(),
-                    [secondary_1.clone()].try_into().unwrap(),
-                ),
-            ));
+            assert!(directory
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        [primary_1].try_into().unwrap(),
+                        [secondary_1.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
             assert!(directory.eligible(&secondary_0));
             assert!(directory.eligible(&secondary_1));
 
-            assert!(directory.track(
-                2,
-                TrackedPeers::from(OrderedSet::try_from([primary_2]).unwrap()),
-            ));
+            assert!(directory
+                .track(
+                    2,
+                    TrackedPeers::from(OrderedSet::try_from([primary_2]).unwrap()),
+                )
+                .is_some());
             assert!(!directory.peers.contains_key(&secondary_0));
             assert!(directory.eligible(&secondary_1));
         });
@@ -717,13 +787,15 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
-            assert!(directory.track(
-                0,
-                TrackedPeers::new(
-                    [pk_a.clone(), pk_b.clone()].try_into().unwrap(),
-                    [pk_b.clone(), pk_c.clone()].try_into().unwrap(),
-                ),
-            ));
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        [pk_a.clone(), pk_b.clone()].try_into().unwrap(),
+                        [pk_b.clone(), pk_c.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
 
             let peer_set = directory.get_peer_set(&0).unwrap();
             assert_eq!(peer_set.secondary.len(), 1);
@@ -765,26 +837,30 @@ mod tests {
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
             // Index 0: X is primary, Y is secondary.
-            assert!(directory.track(
-                0,
-                TrackedPeers::new(
-                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
-                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
-                ),
-            ));
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                        OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
             assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 1);
             assert_eq!(directory.peers.get(&pk_x).unwrap().secondary_sets(), 0);
             assert_eq!(directory.peers.get(&pk_y).unwrap().primary_sets(), 0);
             assert_eq!(directory.peers.get(&pk_y).unwrap().secondary_sets(), 1);
 
             // Index 1: X is demoted to secondary, Y is promoted to primary.
-            assert!(directory.track(
-                1,
-                TrackedPeers::new(
-                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
-                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
-                ),
-            ));
+            assert!(directory
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                        OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
 
             // Both indices retained (max_sets=2).
             assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 1);
@@ -799,13 +875,15 @@ mod tests {
             assert!(agg.secondary.is_empty());
 
             // Index 2: only Y is primary, X is secondary. This evicts index 0.
-            assert!(directory.track(
-                2,
-                TrackedPeers::new(
-                    OrderedSet::try_from([pk_y.clone()]).unwrap(),
-                    OrderedSet::try_from([pk_x.clone()]).unwrap(),
-                ),
-            ));
+            assert!(directory
+                .track(
+                    2,
+                    TrackedPeers::new(
+                        OrderedSet::try_from([pk_y.clone()]).unwrap(),
+                        OrderedSet::try_from([pk_x.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
 
             // Index 0 evicted. X lost its primary from index 0.
             assert_eq!(directory.peers.get(&pk_x).unwrap().primary_sets(), 0);
@@ -845,19 +923,23 @@ mod tests {
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, vec![], my_info, config, releaser);
 
-            assert!(directory.track(
-                0,
-                TrackedPeers::from(
-                    OrderedSet::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
-                ),
-            ));
-            assert!(directory.track(
-                1,
-                TrackedPeers::new(
-                    [pk_b.clone()].try_into().unwrap(),
-                    [pk_overlap.clone(), pk_sec.clone()].try_into().unwrap(),
-                ),
-            ));
+            assert!(directory
+                .track(
+                    0,
+                    TrackedPeers::from(
+                        OrderedSet::try_from([pk_a.clone(), pk_overlap.clone()]).unwrap(),
+                    ),
+                )
+                .is_some());
+            assert!(directory
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        [pk_b.clone()].try_into().unwrap(),
+                        [pk_overlap.clone(), pk_sec.clone()].try_into().unwrap(),
+                    ),
+                )
+                .is_some());
 
             let agg = directory.all();
             assert!(
@@ -921,7 +1003,7 @@ mod tests {
 
             // Now track the peer in a set
             let peer_set: OrderedSet<_> = [unknown_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Peer should now be in peers and blocked (via PrioritySet)
             assert!(
@@ -985,7 +1067,7 @@ mod tests {
                 releaser,
             );
             let peer_set: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             let _reservation = directory.listen(&pk_1).expect("peer should reserve");
             let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
@@ -1039,7 +1121,7 @@ mod tests {
             // Register a peer
             let peer_set: OrderedSet<_> =
                 [registered_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             assert!(
                 directory.metrics.blocked.get_by(&registered_pk).is_none(),
                 "Peer should not be blocked initially"
@@ -1114,7 +1196,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Block the peer
             directory.block(&peer_pk);
@@ -1185,7 +1267,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Block the peer
             directory.block(&peer_pk);
@@ -1271,7 +1353,7 @@ mod tests {
 
             // Add pk_1 and block it
             let peer_set: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             directory.block(&pk_1);
             assert!(directory.blocked.contains(&pk_1));
             assert!(
@@ -1282,7 +1364,7 @@ mod tests {
             // Add a new set that evicts pk_1 (max_sets=1)
             // The blocked metric should remain since the block persists
             let peer_set_2: OrderedSet<_> = [pk_2.clone()].into_iter().try_collect().unwrap();
-            directory.track(1, TrackedPeers::from(peer_set_2));
+            directory.track(1, TrackedPeers::from(peer_set_2)).unwrap();
             assert!(
                 !directory.peers.contains_key(&pk_1),
                 "pk_1 should be removed"
@@ -1294,7 +1376,7 @@ mod tests {
 
             // Re-add pk_1 - should still be blocked because block persists
             let peer_set_3: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.track(2, TrackedPeers::from(peer_set_3));
+            directory.track(2, TrackedPeers::from(peer_set_3)).unwrap();
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Re-added pk_1 should still be blocked"
@@ -1353,7 +1435,7 @@ mod tests {
                 .into_iter()
                 .try_collect()
                 .unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             assert_eq!(directory.blocked(), 0);
 
             // Block all three peers
@@ -1408,7 +1490,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info so it has a dialable address
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1470,7 +1552,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1531,7 +1613,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Peer should be eligible before blocking
             assert!(
@@ -1589,7 +1671,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1654,7 +1736,7 @@ mod tests {
             // Initialize with a bootstrapper
             let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(
-                context.child("context"),
+                context.child("directory"),
                 vec![(bootstrapper_pk.clone(), bootstrapper_ingress)],
                 my_info,
                 config,
@@ -1730,7 +1812,7 @@ mod tests {
                 .into_iter()
                 .try_collect()
                 .unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info for both (use timestamp 0 to pass the epoch_millis filter)
             let peer_info_1 = types::Info::sign(&peer_signer_1, NAMESPACE, test_socket(), 0);
@@ -1810,7 +1892,7 @@ mod tests {
             );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1867,7 +1949,7 @@ mod tests {
             );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1946,7 +2028,7 @@ mod tests {
             );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1988,7 +2070,7 @@ mod tests {
             );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -2044,7 +2126,7 @@ mod tests {
             );
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.track(0, TrackedPeers::from(peer_set));
+            directory.track(0, TrackedPeers::from(peer_set)).unwrap();
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
