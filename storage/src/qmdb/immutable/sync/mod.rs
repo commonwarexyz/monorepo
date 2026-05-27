@@ -172,8 +172,9 @@ where
     async fn from_compact_state(
         context: Self::Context,
         config: Self::Config,
-        state: sync::compact::State<Self::Family, Self::Op, Self::Digest>,
+        state: sync::compact::VerifiedState<Self::Family, Self::Op, Self::Digest>,
     ) -> Result<Self, Error<F>> {
+        let (state, root, inactivity_floor_loc) = state.into_parts();
         let sync::compact::State {
             leaf_count,
             pinned_nodes,
@@ -181,15 +182,20 @@ where
             last_commit_proof,
         } = state;
         let last_commit_loc = Location::new(*leaf_count - 1);
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+        let Operation::Commit(last_commit_metadata, op_inactivity_floor_loc) = last_commit_op
+        else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
+        if op_inactivity_floor_loc != inactivity_floor_loc {
+            return Err(Error::DataCorrupted(
+                "verified compact state floor mismatch",
+            ));
+        }
         let commit_codec_config = config.commit_codec_config.clone();
         let last_commit_op_bytes =
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
-        let hasher = qmdb::hasher::<H>();
         let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
             context.child("merkle"),
             config.merkle,
@@ -197,11 +203,6 @@ where
             pinned_nodes.clone(),
         )
         .await?;
-        let inactive_peaks =
-            F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
-        let root = merkle
-            .root(&hasher, inactive_peaks)
-            .map_err(|_| Error::DataCorrupted("failed to compute compact state root"))?;
         Self::init_from_verified_state(
             merkle,
             commit_codec_config,

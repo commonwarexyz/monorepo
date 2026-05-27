@@ -174,6 +174,33 @@ pub struct State<F: Family, Op, D: Digest> {
     pub last_commit_proof: Proof<F, D>,
 }
 
+/// Compact state that has been authenticated against a target root.
+///
+/// This carries the original compact state plus the values derived while authenticating it. Compact
+/// database constructors still build their storage-backed Merkle state and witness cache, but they
+/// should use these values instead of re-deriving them from peer-provided state.
+#[derive(Clone, Debug)]
+pub struct VerifiedState<F: Family, Op, D: Digest> {
+    state: State<F, Op, D>,
+    root: D,
+    inactivity_floor: Location<F>,
+}
+
+impl<F: Family, Op, D: Digest> VerifiedState<F, Op, D> {
+    const fn new(state: State<F, Op, D>, root: D, inactivity_floor: Location<F>) -> Self {
+        Self {
+            state,
+            root,
+            inactivity_floor,
+        }
+    }
+
+    /// Consume the verified compact state.
+    pub fn into_parts(self) -> (State<F, Op, D>, D, Location<F>) {
+        (self.state, self.root, self.inactivity_floor)
+    }
+}
+
 impl<F: Family, Op, D: Digest> Write for State<F, Op, D>
 where
     Op: Write,
@@ -314,12 +341,13 @@ pub trait Database: Sized + Send {
     /// Build a database from authenticated state in memory.
     ///
     /// The caller has already verified `last_commit_proof` and the compact frontier against the
-    /// requested target root. This constructor must not durably persist anything; persistence happens
-    /// only after the caller re-checks that `Self::root()` matches the target root.
+    /// requested target root and passes the derived verification artifacts with the state. This
+    /// constructor must not durably persist anything; persistence happens only after the caller
+    /// re-checks that `Self::root()` matches the target root.
     fn from_compact_state(
         context: Self::Context,
         config: Self::Config,
-        state: State<Self::Family, Self::Op, Self::Digest>,
+        state: VerifiedState<Self::Family, Self::Op, Self::Digest>,
     ) -> impl Future<Output = Result<Self, qmdb::Error<Self::Family>>> + Send;
 
     /// Return the inactivity floor if the operation is a commit.
@@ -443,14 +471,13 @@ where
         return Err(BuildError::InvalidPeer(EngineError::InvalidProof));
     }
 
-    // This intentionally uses a disposable `merkle::mem::Mem` rather than constructing the
-    // compact database first. The proof authenticates the final commit, while this check
-    // authenticates the frontier pins as peer data and can therefore be reported through resolver
-    // feedback. The real compact database still has to build its storage-backed Merkle state and
-    // DB witness cache below, so `db.root()` is re-checked before persistence.
-    validate_compact_frontier::<DB>(target, &state).map_err(BuildError::InvalidPeer)?;
+    // Peer validation stops here: invalid proofs or frontier pins are retryable when resolver
+    // feedback exists. The DB constructor consumes these verified artifacts to initialize its
+    // storage-backed Merkle state and witness cache, and any constructor failure is local/terminal.
+    let verified_state =
+        validate_compact_frontier::<DB>(target, state).map_err(BuildError::InvalidPeer)?;
 
-    let db = DB::from_compact_state(context, db_config, state)
+    let db = DB::from_compact_state(context, db_config, verified_state)
         .await
         .map_err(BuildError::Database)?;
     let actual = db.root();
@@ -464,10 +491,15 @@ where
     Ok(db)
 }
 
+type CompactFrontierValidation<DB> = Result<
+    VerifiedState<<DB as Database>::Family, <DB as Database>::Op, <DB as Database>::Digest>,
+    EngineError<<DB as Database>::Family, <DB as Database>::Digest>,
+>;
+
 fn validate_compact_frontier<DB>(
     target: &Target<DB::Family, DB::Digest>,
-    state: &State<DB::Family, DB::Op, DB::Digest>,
-) -> Result<(), EngineError<DB::Family, DB::Digest>>
+    state: State<DB::Family, DB::Op, DB::Digest>,
+) -> CompactFrontierValidation<DB>
 where
     DB: Database,
 {
@@ -500,7 +532,7 @@ where
         });
     }
 
-    Ok(())
+    Ok(VerifiedState::new(state, target.root, inactivity_floor_loc))
 }
 
 fn compact_merkle_error_to_engine<F: Family, D: Digest>(
@@ -1008,7 +1040,7 @@ mod tests {
         async fn from_compact_state(
             _context: Self::Context,
             (root, constructions): Self::Config,
-            _state: State<Self::Family, Self::Op, Self::Digest>,
+            _state: super::VerifiedState<Self::Family, Self::Op, Self::Digest>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             constructions.fetch_add(1, Ordering::SeqCst);
             Ok(Self { root })
