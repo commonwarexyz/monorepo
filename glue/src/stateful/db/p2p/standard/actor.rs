@@ -309,12 +309,12 @@ where
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok(FetchResult {
-                    proof: decoded.proof.clone(),
-                    operations: decoded.operations.clone(),
-                    success_tx: Some(success_tx),
-                    pinned_nodes: decoded.pinned_nodes.clone(),
-                }))
+                .send(Ok(FetchResult::with_success_tx(
+                    decoded.proof.clone(),
+                    decoded.operations.clone(),
+                    success_tx,
+                    decoded.pinned_nodes.clone(),
+                )))
                 .is_err()
             {
                 continue;
