@@ -169,23 +169,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Return the receiver to the caller
                 let _ = responder.send(receiver);
             }
-            Message::Connect {
-                public_key,
-                peer,
-                responder,
-            } => {
+            Message::Connect { public_key, peer } => {
                 if !self.directory.eligible(&public_key) {
-                    let _ = responder.send(false);
+                    peer.kill();
                     return;
                 }
 
                 // Promote the reservation unless it was invalidated before Connect arrived.
                 if !self.directory.connect(&public_key) {
-                    let _ = responder.send(false);
+                    peer.kill();
                     return;
                 }
                 self.mailboxes.insert(public_key, peer);
-                let _ = responder.send(true);
             }
             Message::Dialable { responder } => {
                 let _ = responder.send(self.directory.dialable());
@@ -304,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_unauthorized_peer_returns_false() {
+    fn test_connect_unauthorized_peer_is_killed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -314,13 +309,10 @@ mod tests {
             let (peer_mailbox, mut peer_receiver) = peer::Mailbox::new(NZUsize!(1));
 
             // Connect as listener
-            assert!(!mailbox.connect(unauth_pk.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(unauth_pk.clone(), peer_mailbox);
             assert!(
-                !matches!(
-                    peer_receiver.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
-                "connect rejection is signaled by returning false"
+                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
+                "Unauthorized peer should be killed on Connect"
             );
         });
     }
@@ -728,7 +720,7 @@ mod tests {
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(mailbox.connect(peer_pk.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(peer_pk.clone(), peer_mailbox);
 
             // 3) Block it → should see exactly one Kill
             crate::block_peer(&mut oracle, peer_pk.clone());
@@ -795,7 +787,7 @@ mod tests {
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(mailbox.connect(pk_1.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(pk_1.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
             oracle.track(
@@ -844,7 +836,7 @@ mod tests {
                 .await
                 .expect("peer should reserve");
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(mailbox.connect(pk_1.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(pk_1.clone(), peer_mailbox);
 
             oracle.track(
                 1,
@@ -907,19 +899,16 @@ mod tests {
             assert!(registered_ips.contains(&addr_2.ip()));
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(!mailbox.connect(pk_1.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(pk_1.clone(), peer_mailbox);
             assert!(
-                !matches!(
-                    peer_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
-                "connect rejection is signaled by returning false"
+                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                "connect rejection is signaled by killing the peer"
             );
         });
     }
 
     #[test]
-    fn test_reserved_peer_rejected_on_connect_after_tracked_address_change() {
+    fn test_reserved_peer_killed_on_connect_after_tracked_address_change() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, _) = new_signer_and_pk(0);
@@ -956,19 +945,16 @@ mod tests {
             assert!(registered_ips.contains(&addr_b.ip()));
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(!mailbox.connect(pk.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(pk.clone(), peer_mailbox);
             assert!(
-                !matches!(
-                    peer_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
-                "connect rejection is signaled by returning false"
+                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                "connect rejection is signaled by killing the peer"
             );
         });
     }
 
     #[test]
-    fn test_reserved_peer_rejected_on_connect_after_overwrite() {
+    fn test_reserved_peer_killed_on_connect_after_overwrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, _) = new_signer_and_pk(0);
@@ -1001,13 +987,10 @@ mod tests {
             assert!(registered_ips.contains(&addr_b.ip()));
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(!mailbox.connect(pk.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(pk.clone(), peer_mailbox);
             assert!(
-                !matches!(
-                    peer_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
-                "connect rejection is signaled by returning false"
+                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                "connect rejection is signaled by killing the peer"
             );
         });
     }
@@ -1234,7 +1217,7 @@ mod tests {
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(mailbox.connect(pk.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(pk.clone(), peer_mailbox);
 
             // Update address - should kill the connection
             oracle.overwrite([(pk.clone(), addr_2.into())].try_into().unwrap());
@@ -1272,7 +1255,7 @@ mod tests {
             assert!(reservation.is_some());
 
             let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(mailbox.connect(pk.clone(), peer_mailbox).await);
+            let _ = mailbox.connect(pk.clone(), peer_mailbox);
 
             // Register new peer set with same peer at address B
             oracle.track(
@@ -1324,7 +1307,7 @@ mod tests {
             let reservation = mailbox.listen(pk_tracked.clone(), addr_1.ip()).await;
             assert!(reservation.is_some());
             let (tracked_mailbox, mut tracked_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(mailbox.connect(pk_tracked.clone(), tracked_mailbox).await);
+            let _ = mailbox.connect(pk_tracked.clone(), tracked_mailbox);
 
             // Establish connection to pk_unchanged
             let reservation = mailbox
@@ -1332,11 +1315,7 @@ mod tests {
                 .await;
             assert!(reservation.is_some());
             let (unchanged_mailbox, mut unchanged_rx) = peer::Mailbox::new(NZUsize!(1));
-            assert!(
-                mailbox
-                    .connect(pk_unchanged.clone(), unchanged_mailbox)
-                    .await
-            );
+            let _ = mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);
 
             // Call overwrite with mix of tracked+changed, tracked+unchanged, and unknown peers
             oracle.overwrite(

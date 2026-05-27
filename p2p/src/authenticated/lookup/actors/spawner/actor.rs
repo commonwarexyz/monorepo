@@ -109,8 +109,8 @@ impl<
                             );
 
                             // Register peer with tracker before making it routable.
-                            if !tracker.connect(peer.clone(), peer_mailbox).await {
-                                debug!(?peer, "peer not eligible");
+                            if !tracker.connect(peer.clone(), peer_mailbox).accepted() {
+                                debug!(?peer, "tracker shut down during peer setup");
                                 drop(reservation);
                                 return;
                             }
