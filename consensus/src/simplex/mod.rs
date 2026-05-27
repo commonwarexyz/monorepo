@@ -23,8 +23,8 @@
 //! ### Genesis
 //!
 //! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
-//! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
-//! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//! [`Config::floor`](config::Config::floor) supplies the initial finalized state. Voting begins
+//! at view 1, with the first proposal referencing genesis as its parent.
 //!
 //! ### Specification for View `v`
 //!
@@ -347,7 +347,7 @@ cfg_if::cfg_if! {
 
         mod actors;
         pub mod config;
-        pub use config::{Config, ForwardingPolicy};
+        pub use config::{Config, Floor, ForwardingPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
@@ -810,15 +810,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -974,6 +977,232 @@ mod tests {
         all_online::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_non_genesis_floor_joiner_catches_tip() {
+        // First let a quorum finalize beyond genesis so the joiner has a real
+        // floor certificate and existing tip to catch.
+        let n = 5;
+        let active_count = quorum(n) as usize;
+        let initial_tip_target = View::new(15);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let active = &participants[..active_count];
+            let joiner_idx = active_count;
+            let joiner = participants[joiner_idx].clone();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
+
+            let elector = RoundRobin::<Sha256>::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+
+            for (idx, validator) in active.iter().enumerate() {
+                let validator_context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter = mocks::reporter::Reporter::new(
+                    validator_context.child("reporter"),
+                    reporter_config,
+                );
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Always,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    validator_context.child("application"),
+                    application_cfg,
+                );
+                actor.start();
+
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker: oracle.control(validator.clone()),
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: format!("joiner_catches_tip_{validator}"),
+                    mailbox_size: NZUsize!(1024),
+                    epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: NZUsize!(4),
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(
+                        &validator_context,
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(validator_context.child("engine"), cfg);
+                let (pending, recovered, resolver) =
+                    register_validator(&mut oracle, validator.clone()).await;
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(
+                    context
+                        .child("initial_finalizer")
+                        .spawn(move |_| async move {
+                            while latest < initial_tip_target {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                            latest
+                        }),
+                );
+            }
+            let tip_at_join = join_all(finalizers)
+                .await
+                .into_iter()
+                .map(|result| result.expect("initial finalizer failed"))
+                .min()
+                .expect("initial validators missing");
+
+            let (floor_view, floor_finalization) = {
+                let finalizations = reporters[0].finalizations.lock();
+                finalizations
+                    .iter()
+                    .filter(|(view, _)| **view > View::zero() && **view < tip_at_join)
+                    .min_by_key(|(view, _)| view.get())
+                    .map(|(view, finalization)| (*view, finalization.clone()))
+                    .expect("non-genesis floor finalization missing")
+            };
+            assert!(floor_view > View::zero());
+            assert!(floor_view < tip_at_join);
+
+            // Start the extra validator from the non-genesis floor and require
+            // it to catch both the existing tip and later cluster progress.
+            for validator in active.iter() {
+                oracle
+                    .add_link(joiner.clone(), validator.clone(), link.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(validator.clone(), joiner.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+
+            let joiner_context = context
+                .child("validator")
+                .with_attribute("public_key", &joiner);
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[joiner_idx].clone(),
+                elector: elector.clone(),
+            };
+            let mut joiner_reporter =
+                mocks::reporter::Reporter::new(joiner_context.child("reporter"), reporter_config);
+            reporters.push(joiner_reporter.clone());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: joiner.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (actor, application) = mocks::application::Application::new(
+                joiner_context.child("application"),
+                application_cfg,
+            );
+            actor.start();
+
+            let cfg = config::Config {
+                scheme: schemes[joiner_idx].clone(),
+                elector,
+                blocker: oracle.control(joiner.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: joiner_reporter.clone(),
+                strategy: Sequential,
+                partition: format!("joiner_catches_tip_{joiner}"),
+                mailbox_size: NZUsize!(1024),
+                epoch: Epoch::new(333),
+                floor: config::Floor::Finalized(floor_finalization),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout,
+                skip_timeout,
+                fetch_concurrent: NZUsize!(4),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forwarding: ForwardingPolicy::Disabled,
+            };
+            let engine = Engine::new(joiner_context.child("engine"), cfg);
+            let (pending, recovered, resolver) = register_validator(&mut oracle, joiner).await;
+            engine_handlers.push(engine.start(pending, recovered, resolver));
+
+            let (mut joiner_latest, mut joiner_monitor) = joiner_reporter.subscribe().await;
+            while joiner_latest < tip_at_join {
+                joiner_latest = joiner_monitor.recv().await.expect("event missing");
+            }
+
+            let post_join_target = tip_at_join.saturating_add(ViewDelta::new(5));
+            while joiner_latest < post_join_target {
+                joiner_latest = joiner_monitor.recv().await.expect("event missing");
+            }
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
     /// A dishonest leader (validator 0) proposes payloads that all honest peers
     /// refuse to certify.
     ///
@@ -1066,15 +1295,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1225,15 +1457,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1386,15 +1621,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1570,15 +1808,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1689,15 +1930,18 @@ mod tests {
                 reporter: reporter.clone(),
                 strategy: Sequential,
                 partition: me.to_string(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                fetch_concurrent: 4,
+                fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1826,15 +2070,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2061,15 +2308,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2229,15 +2479,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2326,8 +2579,9 @@ mod tests {
                             found += 1;
                         }
                     }
+                    let tolerated_missing = skip_timeout.get().saturating_add(1);
                     assert!(
-                        found >= activity_timeout.get().saturating_sub(2),
+                        found >= activity_timeout.get().saturating_sub(tolerated_missing),
                         "found: {found}"
                     );
                 }
@@ -2429,15 +2683,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2625,15 +2882,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2877,15 +3137,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3056,15 +3319,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3230,15 +3496,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3329,6 +3598,141 @@ mod tests {
         );
         received_certificates_are_reported::<_, _, RoundRobin>(0, ed25519::fixture);
         received_certificates_are_reported::<_, _, RoundRobin>(0, secp256r1::fixture);
+    }
+
+    #[test_traced]
+    fn test_survives_burst() {
+        let n = 4;
+        let epoch = Epoch::new(333);
+        let namespace = b"mailbox_size_one_certificate_burst".to_vec();
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = scheme_mocks::fixture(&mut context, &namespace, n);
+            let me = participants[0].clone();
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let (pending, recovered, resolver) = register_validator(&mut oracle, me.clone()).await;
+
+            let injector_pk = PrivateKey::from_seed(9_000_000).public_key();
+            let (mut injector_sender, _injector_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(injector_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(std::iter::once(me.clone())),
+                    Set::from_iter_dedup(std::iter::once(injector_pk.clone())),
+                ),
+            );
+            context.sleep(Duration::from_millis(1)).await;
+
+            let quorum = quorum(n) as usize;
+            let notarization = |view: View, parent: View, payload: &[u8]| {
+                let proposal =
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(payload));
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .take(quorum)
+                    .map(|scheme| TNotarize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                    .expect("notarization requires quorum")
+            };
+            let finalization = |view: View, parent: View, payload: &[u8]| {
+                let proposal =
+                    Proposal::new(Round::new(epoch, view), parent, Sha256::hash(payload));
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .take(quorum)
+                    .map(|scheme| TFinalize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                    .expect("finalization requires quorum")
+            };
+
+            // Load the network with certificates that the batcher will want to pass to the voter
+            for certificate in [
+                Certificate::Notarization(notarization(View::new(1), View::zero(), b"payload-1")),
+                Certificate::Notarization(notarization(View::new(2), View::new(1), b"payload-2")),
+                Certificate::Notarization(notarization(View::new(3), View::new(2), b"payload-3")),
+                Certificate::Finalization(finalization(View::new(3), View::new(2), b"payload-3")),
+            ] {
+                injector_sender.send(Recipients::One(me.clone()), certificate.encode(), true);
+            }
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+            let mut monitor_reporter = reporter.clone();
+            let (mut latest, mut monitor) = monitor_reporter.subscribe().await;
+
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (0.0, 0.0),
+                verify_latency: (0.0, 0.0),
+                certify_latency: (0.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut application_actor, application) =
+                mocks::application::Application::new(context.child("application"), application_cfg);
+            application_actor.set_stall_proposals(true);
+            application_actor.start();
+
+            let cfg = config::Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application,
+                reporter,
+                strategy: Sequential,
+                partition: me.to_string(),
+                mailbox_size: NZUsize!(1),
+                epoch,
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                fetch_concurrent: NZUsize!(4),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forwarding: ForwardingPolicy::Disabled,
+            };
+            let engine = Engine::new(context.child("engine"), cfg);
+            engine.start(pending, recovered, resolver);
+
+            while latest < View::new(3) {
+                latest = monitor.recv().await.expect("finalization event missing");
+            }
+        });
     }
 
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
@@ -3425,15 +3829,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.clone().to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3589,15 +3996,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3680,15 +4090,18 @@ mod tests {
                 reporter: reporter.clone(),
                 strategy: Sequential,
                 partition: validator.to_string(),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(333),
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                fetch_concurrent: 4,
+                fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3907,15 +4320,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4063,15 +4479,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.clone().to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4236,15 +4655,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.clone().to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4375,15 +4797,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4537,15 +4962,18 @@ mod tests {
                 reporter: reporter.clone(),
                 strategy: Sequential,
                 partition: participants[0].clone().to_string(),
-                mailbox_size: 64,
+                mailbox_size: NZUsize!(64),
                 epoch: Epoch::new(333),
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(
+                    333,
+                ))),
                 leader_timeout: Duration::from_millis(50),
                 certification_timeout: Duration::from_millis(100),
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: ViewDelta::new(2),
-                fetch_concurrent: 4,
+                fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4762,15 +5190,18 @@ mod tests {
                     reporter: attributable_reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5007,31 +5438,22 @@ mod tests {
                     .await
                     .unwrap();
             }
-            oracle
-                .manager()
-                .track(
-                    1,
-                    TrackedPeers::new(
-                        Set::from_iter_dedup(participants.iter().cloned()),
-                        Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                    ),
-                )
-                .await;
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(participants.iter().cloned()),
+                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                ),
+            );
             context.sleep(Duration::from_millis(10)).await;
 
             // ========== Broadcast certificates over recovered network. ==========
 
             // View F:
             let msg = Certificate::<_, D>::Notarization(b0_notarization).encode();
-            injector_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            injector_sender.send(Recipients::All, msg, true);
             let msg = Certificate::<_, D>::Finalization(b0_finalization).encode();
-            injector_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
+            injector_sender.send(Recipients::All, msg, true);
             // View F+1:
             let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
             let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
@@ -5041,7 +5463,7 @@ mod tests {
                     ParticipantType::Group1 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).await.unwrap();
+                injector_sender.send(recipient, msg, true);
             }
             // View F+2:
             let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
@@ -5052,7 +5474,7 @@ mod tests {
                     ParticipantType::Group2 => notarization_msg.encode(),
                     _ => nullification_msg.encode(),
                 };
-                injector_sender.send(recipient, msg, true).await.unwrap();
+                injector_sender.send(recipient, msg, true);
             }
 
             // ========== Create engines ==========
@@ -5125,15 +5547,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(10),
                         certification_timeout: Duration::from_secs(10),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5339,15 +5764,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_millis(100),
                     certification_timeout: Duration::from_millis(200),
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_millis(100),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5482,15 +5910,18 @@ mod tests {
                     reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5581,15 +6012,18 @@ mod tests {
                     reporter: selected_reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
-                    mailbox_size: 1024,
+                    mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                        Epoch::new(333),
+                    )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    fetch_concurrent: 4,
+                    fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6079,15 +6513,18 @@ mod tests {
                             reporter: reporter.clone(),
                             strategy: Sequential,
                             partition,
-                            mailbox_size: 1024,
+                            mailbox_size: NZUsize!(1024),
                             epoch: Epoch::new(333),
+                            floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                                Epoch::new(333),
+                            )),
                             leader_timeout: Duration::from_secs(1),
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
                             activity_timeout,
                             skip_timeout,
-                            fetch_concurrent: 4,
+                            fetch_concurrent: NZUsize!(4),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6146,15 +6583,18 @@ mod tests {
                         reporter: reporter.clone(),
                         strategy: Sequential,
                         partition,
-                        mailbox_size: 1024,
+                        mailbox_size: NZUsize!(1024),
                         epoch: Epoch::new(333),
+                        floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
+                            Epoch::new(333),
+                        )),
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_concurrent: 4,
+                        fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

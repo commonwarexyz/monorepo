@@ -72,8 +72,8 @@ use commonware_codec::{
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage};
-use commonware_utils::{sync::AsyncRwLock, Array};
+use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
+use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
@@ -81,7 +81,7 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 /// Compact sync authenticates only the final committed root and total leaf count. Unlike replay
 /// sync, there is no lower replay bound here because compact sync does not transfer or reconstruct
 /// historical operations.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Target<F: Family, D: Digest> {
     /// Authenticated root of the committed compact state.
     pub root: D,
@@ -92,6 +92,11 @@ pub struct Target<F: Family, D: Digest> {
 impl<F: Family, D: Digest> Target<F, D> {
     const INVALID_LEAF_COUNT: &'static str = "leaf_count must be in 1..=MAX_LEAVES";
 
+    /// Create a compact-sync target.
+    pub const fn new(root: D, leaf_count: Location<F>) -> Self {
+        Self { root, leaf_count }
+    }
+
     /// Validate a compact target that may have been constructed programmatically.
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self.leaf_count.is_valid() || self.leaf_count == 0 {
@@ -100,6 +105,23 @@ impl<F: Family, D: Digest> Target<F, D> {
         Ok(())
     }
 }
+
+impl<F: Family, D: Digest> Clone for Target<F, D> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            leaf_count: self.leaf_count,
+        }
+    }
+}
+
+impl<F: Family, D: Digest> PartialEq for Target<F, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root && self.leaf_count == other.leaf_count
+    }
+}
+
+impl<F: Family, D: Digest> Eq for Target<F, D> {}
 
 impl<F: Family, D: Digest> Write for Target<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
@@ -128,6 +150,18 @@ impl<F: Family, D: Digest> Read for Target<F, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Target<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let root = u.arbitrary()?;
+        let leaf_count = Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?);
+        Ok(Self { root, leaf_count })
+    }
+}
+
 /// Authenticated state for initializing a compact-storage database at a target root.
 #[derive(Clone, Debug)]
 pub struct State<F: Family, Op, D: Digest> {
@@ -150,6 +184,32 @@ where
         self.pinned_nodes.write(buf);
         self.last_commit_op.write(buf);
         self.last_commit_proof.write(buf);
+    }
+}
+
+/// Result from a compact-state fetch.
+pub struct FetchResult<F: Family, Op, D: Digest> {
+    /// The fetched compact state.
+    pub state: State<F, Op, D>,
+    /// Callback used to report whether downstream accepted the state.
+    pub callback: Option<oneshot::Sender<bool>>,
+}
+
+impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FetchResult")
+            .field("state", &self.state)
+            .field("callback", &self.callback.as_ref().map(|_| "<callback>"))
+            .finish()
+    }
+}
+
+impl<F: Family, Op, D: Digest> From<State<F, Op, D>> for FetchResult<F, Op, D> {
+    fn from(state: State<F, Op, D>) -> Self {
+        Self {
+            state,
+            callback: None,
+        }
     }
 }
 
@@ -221,7 +281,9 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     fn get_compact_state<'a>(
         &'a self,
         target: Target<Self::Family, Self::Digest>,
-    ) -> impl Future<Output = Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
+    ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
+           + Send
+           + 'a;
 }
 
 /// Marker trait for resolvers whose associated types match a specific compact-sync database.
@@ -312,14 +374,50 @@ where
     target
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
-    let state = config
+    let FetchResult { state, callback } = config
         .resolver
         .get_compact_state(target.clone())
         .await
         .map_err(Error::Resolver)?;
 
+    let db = match try_build_compact_db::<DB>(
+        config.context.child("compact"),
+        config.db_config.clone(),
+        &target,
+        state,
+    )
+    .await
+    {
+        Ok(db) => db,
+        Err(BuildError::Engine(err)) => {
+            if let Some(callback) = callback {
+                let _ = callback.send(false);
+            }
+            return Err(Error::Engine(err));
+        }
+        Err(BuildError::Database(err)) => {
+            return Err(Error::Database(err));
+        }
+    };
+
+    if let Some(callback) = callback {
+        let _ = callback.send(true);
+    }
+    db.persist_compact_state().await?;
+    Ok(db)
+}
+
+async fn try_build_compact_db<DB>(
+    context: DB::Context,
+    db_config: DB::Config,
+    target: &Target<DB::Family, DB::Digest>,
+    state: State<DB::Family, DB::Op, DB::Digest>,
+) -> Result<DB, BuildError<DB::Family, DB::Digest>>
+where
+    DB: Database,
+{
     if state.leaf_count != target.leaf_count {
-        return Err(Error::Engine(EngineError::UnexpectedLeafCount {
+        return Err(BuildError::Engine(EngineError::UnexpectedLeafCount {
             expected: target.leaf_count,
             actual: state.leaf_count,
         }));
@@ -334,19 +432,26 @@ where
         std::slice::from_ref(&state.last_commit_op),
         &target.root,
     ) {
-        return Err(Error::Engine(EngineError::InvalidProof));
+        return Err(BuildError::Engine(EngineError::InvalidProof));
     }
 
-    let db = DB::from_compact_state(config.context, config.db_config, state).await?;
+    let db = DB::from_compact_state(context, db_config, state)
+        .await
+        .map_err(BuildError::Database)?;
     let actual = db.root();
     if actual != target.root {
-        return Err(Error::Engine(EngineError::RootMismatch {
+        return Err(BuildError::Engine(EngineError::RootMismatch {
             expected: target.root,
             actual,
         }));
     }
-    db.persist_compact_state().await?;
+
     Ok(db)
+}
+
+enum BuildError<F: Family, D: Digest> {
+    Database(qmdb::Error<F>),
+    Engine(EngineError<F, D>),
 }
 
 async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(
@@ -418,15 +523,10 @@ macro_rules! impl_compact_resolver_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: self.root(),
-                            leaf_count: self.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(self.root(), self.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -437,6 +537,7 @@ macro_rules! impl_compact_resolver_keyless {
                     |leaf_count| self.pinned_nodes_at(leaf_count),
                 )
                 .await
+                .map(Into::into)
             }
         }
 
@@ -456,16 +557,11 @@ macro_rules! impl_compact_resolver_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -476,6 +572,7 @@ macro_rules! impl_compact_resolver_keyless {
                     |leaf_count| db.pinned_nodes_at(leaf_count),
                 )
                 .await
+                .map(Into::into)
             }
         }
 
@@ -495,17 +592,12 @@ macro_rules! impl_compact_resolver_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -516,6 +608,7 @@ macro_rules! impl_compact_resolver_keyless {
                     |leaf_count| db.pinned_nodes_at(leaf_count),
                 )
                 .await
+                .map(Into::into)
             }
         }
     };
@@ -544,15 +637,10 @@ macro_rules! impl_compact_resolver_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: self.root(),
-                            leaf_count: self.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(self.root(), self.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -563,6 +651,7 @@ macro_rules! impl_compact_resolver_immutable {
                     |leaf_count| self.pinned_nodes_at(leaf_count),
                 )
                 .await
+                .map(Into::into)
             }
         }
 
@@ -585,16 +674,11 @@ macro_rules! impl_compact_resolver_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -605,6 +689,7 @@ macro_rules! impl_compact_resolver_immutable {
                     |leaf_count| db.pinned_nodes_at(leaf_count),
                 )
                 .await
+                .map(Into::into)
             }
         }
 
@@ -627,17 +712,12 @@ macro_rules! impl_compact_resolver_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async {
-                        Target {
-                            root: db.root(),
-                            leaf_count: db.bounds().await.end,
-                        }
-                    },
+                    || async { Target::new(db.root(), db.bounds().await.end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -648,6 +728,7 @@ macro_rules! impl_compact_resolver_immutable {
                     |leaf_count| db.pinned_nodes_at(leaf_count),
                 )
                 .await
+                .map(Into::into)
             }
         }
     };
@@ -675,8 +756,8 @@ macro_rules! impl_compact_resolver_compact_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target)
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                self.compact_state(target).map(Into::into)
             }
         }
 
@@ -698,9 +779,9 @@ macro_rules! impl_compact_resolver_compact_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target)
+                db.compact_state(target).map(Into::into)
             }
         }
 
@@ -722,10 +803,10 @@ macro_rules! impl_compact_resolver_compact_keyless {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target)
+                db.compact_state(target).map(Into::into)
             }
         }
     };
@@ -754,8 +835,8 @@ macro_rules! impl_compact_resolver_compact_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                self.compact_state(target)
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+                self.compact_state(target).map(Into::into)
             }
         }
 
@@ -778,9 +859,9 @@ macro_rules! impl_compact_resolver_compact_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                db.compact_state(target)
+                db.compact_state(target).map(Into::into)
             }
         }
 
@@ -803,10 +884,10 @@ macro_rules! impl_compact_resolver_compact_immutable {
             async fn get_compact_state(
                 &self,
                 target: Target<Self::Family, Self::Digest>,
-            ) -> Result<State<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
-                db.compact_state(target)
+                db.compact_state(target).map(Into::into)
             }
         }
     };
@@ -822,14 +903,26 @@ impl_compact_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, Varia
 
 #[cfg(test)]
 mod tests {
-    use super::Target;
-    use crate::merkle::mmr;
+    use super::{Config, Database, FetchResult, Resolver, State, Target};
+    use crate::{
+        merkle::{mmr, Location, Proof},
+        qmdb::{
+            self,
+            sync::{EngineError, Error},
+        },
+    };
     use commonware_codec::{DecodeExt as _, Encode as _, RangeCfg};
-    use commonware_cryptography::{sha256::Digest, Hasher as _};
+    use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_parallel::Rayon;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::sync::AsyncRwLock;
-    use std::sync::Arc;
+    use std::{
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     macro_rules! assert_resolver_variants {
         ($db:ty) => {
@@ -840,6 +933,71 @@ mod tests {
     }
 
     fn assert_resolver<R: super::Resolver>() {}
+
+    struct RetryGuardDb;
+
+    impl Database for RetryGuardDb {
+        type Family = mmr::Family;
+        type Op = u8;
+        type Config = ();
+        type Digest = Digest;
+        type Context = deterministic::Context;
+        type Hasher = Sha256;
+
+        async fn from_compact_state(
+            _context: Self::Context,
+            _config: Self::Config,
+            _state: State<Self::Family, Self::Op, Self::Digest>,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            panic!("leaf-count mismatch should fail before database construction");
+        }
+
+        fn root(&self) -> Self::Digest {
+            Sha256::hash(b"unused")
+        }
+
+        async fn persist_compact_state(&self) -> Result<(), qmdb::Error<Self::Family>> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct RetryGuardResolver {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl Resolver for RetryGuardResolver {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = u8;
+        type Error = Infallible;
+
+        async fn get_compact_state(
+            &self,
+            _target: Target<Self::Family, Self::Digest>,
+        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            let attempts = self.attempts.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                attempts, 0,
+                "compact sync retried invalid compact state after downstream rejected it"
+            );
+
+            let (success_tx, _success_rx) = commonware_utils::channel::oneshot::channel();
+            Ok(FetchResult {
+                state: State {
+                    leaf_count: Location::new(2),
+                    pinned_nodes: Vec::new(),
+                    last_commit_op: 0,
+                    last_commit_proof: Proof {
+                        leaves: Location::new(2),
+                        inactive_peaks: 0,
+                        digests: Vec::new(),
+                    },
+                },
+                callback: Some(success_tx),
+            })
+        }
+    }
 
     #[test]
     fn test_all_compact_qmdb_variants_implement_strategy_resolvers() {
@@ -892,5 +1050,49 @@ mod tests {
         .encode();
 
         assert!(Target::<mmr::Family, Digest>::decode(encoded).is_err());
+    }
+
+    #[test]
+    fn test_compact_sync_returns_error_after_callback_rejects_bad_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let target = Target::<mmr::Family, Digest> {
+                root: Sha256::hash(b"target"),
+                leaf_count: Location::new(1),
+            };
+
+            let result = super::sync::<RetryGuardDb, _>(Config {
+                context,
+                resolver: RetryGuardResolver {
+                    attempts: attempts.clone(),
+                },
+                target,
+                db_config: (),
+            })
+            .await;
+
+            match result {
+                Err(Error::Engine(EngineError::UnexpectedLeafCount { expected, actual })) => {
+                    assert_eq!(expected, Location::new(1));
+                    assert_eq!(actual, Location::new(2));
+                }
+                Err(err) => panic!("unexpected compact sync error: {err:?}"),
+                Ok(_) => panic!("bad compact state should not sync successfully"),
+            }
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        });
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::{mmb, mmr};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Target<mmr::Family, Sha256Digest>>,
+        CodecConformance<Target<mmb::Family, Sha256Digest>>,
     }
 }

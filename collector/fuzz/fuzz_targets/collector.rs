@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
     Write,
@@ -23,6 +24,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     collections::HashMap,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 
@@ -149,7 +151,7 @@ impl Handler for FuzzHandler {
     type Request = FuzzRequest;
     type Response = FuzzResponse;
 
-    async fn process(
+    fn process(
         &mut self,
         _origin: Self::PublicKey,
         request: Self::Request,
@@ -184,12 +186,7 @@ impl Monitor for FuzzMonitor {
     type PublicKey = PublicKey;
     type Response = FuzzResponse;
 
-    async fn collected(
-        &mut self,
-        _handler: Self::PublicKey,
-        _response: Self::Response,
-        _count: usize,
-    ) {
+    fn collected(&mut self, _handler: Self::PublicKey, _response: Self::Response, _count: usize) {
         self.collected_count += 1;
     }
 }
@@ -200,21 +197,19 @@ struct FuzzBlocker;
 impl Blocker for FuzzBlocker {
     type PublicKey = PublicKey;
 
-    async fn block(&mut self, _peer: Self::PublicKey) {}
+    fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+        Feedback::Ok
+    }
 }
 
 #[derive(Debug, Clone)]
 struct MockSender;
 
-#[derive(Debug, thiserror::Error)]
-#[error("mock send error")]
-struct MockSendError;
-
 impl LimitedSender for MockSender {
     type PublicKey = PublicKey;
     type Checked<'a> = MockCheckedSender;
 
-    async fn check(
+    fn check(
         &mut self,
         _recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
@@ -225,15 +220,14 @@ impl LimitedSender for MockSender {
 struct MockCheckedSender;
 
 impl CheckedSender for MockCheckedSender {
-    type Error = MockSendError;
     type PublicKey = PublicKey;
 
-    async fn send(
-        self,
-        _message: impl Into<IoBufs> + Send,
-        _priority: bool,
-    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        Ok(vec![])
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        Vec::new()
+    }
+
+    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
+        Unreliable::new(Feedback::Ok)
     }
 }
 
@@ -353,7 +347,7 @@ fn fuzz(input: FuzzInput) {
                                 Recipients::Some(selected)
                             }
                         };
-                        let _ = mailbox.send(recipients, request).await;
+                        let _ = mailbox.send(recipients, request);
                     }
                 }
 
@@ -365,7 +359,7 @@ fn fuzz(input: FuzzInput) {
                     let commitment = request.commitment();
 
                     for mailbox in mailboxes.values_mut() {
-                        mailbox.cancel(commitment).await;
+                        mailbox.cancel(commitment);
                     }
                 }
 
@@ -380,9 +374,7 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(handler) = handlers.get_mut(&handler_idx) {
                         let (tx, rx) = oneshot::channel();
-                        handler
-                            .process(peers[origin_idx].public_key(), request.clone(), tx)
-                            .await;
+                        handler.process(peers[origin_idx].public_key(), request.clone(), tx);
 
                         if should_respond {
                             if let Ok(response) = rx.await {
@@ -401,9 +393,7 @@ fn fuzz(input: FuzzInput) {
                     let handler_idx = (peer_idx as usize) % peers.len();
 
                     if let Some(monitor) = monitors.get_mut(&monitor_idx) {
-                        monitor
-                            .collected(peers[handler_idx].public_key(), response, count)
-                            .await;
+                        monitor.collected(peers[handler_idx].public_key(), response, count);
                     }
                 }
 
@@ -414,7 +404,8 @@ fn fuzz(input: FuzzInput) {
                     priority_response,
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
-                    let mailbox_size = mailbox_size.max(MIN_BUFFER_SIZE);
+                    let mailbox_size = usize::from(mailbox_size.max(MIN_BUFFER_SIZE));
+                    let mailbox_size = NonZeroUsize::new(mailbox_size).unwrap();
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
                         FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
                     });
@@ -423,7 +414,7 @@ fn fuzz(input: FuzzInput) {
                         blocker: FuzzBlocker,
                         monitor,
                         handler,
-                        mailbox_size: (mailbox_size as usize),
+                        mailbox_size,
                         priority_request,
                         request_codec: RangeCfg::from(..=MAX_LEN),
                         priority_response,

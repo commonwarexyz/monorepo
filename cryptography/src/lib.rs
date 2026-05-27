@@ -44,6 +44,8 @@ commonware_macros::stability_scope!(ALPHA {
 
     pub mod lthash;
     pub use crate::lthash::LtHash;
+
+    pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Encode, ReadExt};

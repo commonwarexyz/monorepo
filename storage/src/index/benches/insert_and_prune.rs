@@ -48,7 +48,7 @@ fn run_benchmark<I: Unordered<Value = u64>>(
     // Overwrite every key using insert_and_prune: prune the old value, insert the new one.
     let start = Instant::now();
     for (k, v) in kvs {
-        index.insert_and_prune(k, *v + 1, |old| *old == *v);
+        index.insert_and_retain(k, *v + 1, |old| *old == *v);
     }
     start.elapsed()
 }

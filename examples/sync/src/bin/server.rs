@@ -230,10 +230,7 @@ where
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
-        target: Target {
-            root,
-            range: non_empty_range!(sync_boundary, size),
-        },
+        target: Target::new(root, non_empty_range!(sync_boundary, size)),
     };
 
     debug!(?response, "serving target update");
@@ -371,7 +368,7 @@ where
 
     Ok(wire::GetCompactStateResponse {
         request_id: request.request_id,
-        state: compact_state,
+        state: compact_state.state,
     })
 }
 

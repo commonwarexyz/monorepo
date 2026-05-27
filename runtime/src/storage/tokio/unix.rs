@@ -1,5 +1,6 @@
 use super::Header;
 use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
+use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use std::{
     fs::File,
@@ -36,7 +37,12 @@ impl Blob {
         Ok(())
     }
 
-    fn write_vectored_at(file: &File, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
+    fn write_vectored_at(
+        file: &File,
+        mut offset: u64,
+        mut bufs: IoBufs,
+        flags: Option<libc::c_int>,
+    ) -> Result<(), Error> {
         while bufs.has_remaining() {
             let mut io_slices = [IoSlice::new(&[]); IOVEC_BATCH_SIZE];
             let io_slices_len = bufs.chunks_vectored(&mut io_slices);
@@ -45,18 +51,34 @@ impl Blob {
                 "chunks_vectored should produce at least one slice when bufs has remaining"
             );
 
-            // std::os::unix::fs::FileExt::write_vectored_at is unstable:
-            // https://doc.rust-lang.org/stable/std/os/unix/fs/trait.FileExt.html#method.write_vectored_at
-            // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-            // `slices` points to valid readable buffers held alive for this syscall.
-            let ret = unsafe {
-                libc::pwritev(
-                    file.as_raw_fd(),
-                    io_slices.as_ptr().cast::<libc::iovec>(),
-                    io_slices_len as i32,
-                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
-                )
-            };
+            cfg_if! {
+                if #[cfg(target_os = "linux")] {
+                    // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                    // `io_slices` points to valid readable buffers held alive for this syscall.
+                    let ret = unsafe {
+                        libc::pwritev2(
+                            file.as_raw_fd(),
+                            io_slices.as_ptr().cast::<libc::iovec>(),
+                            io_slices_len as i32,
+                            offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                            flags.unwrap_or(0),
+                        )
+                    };
+                } else {
+                    assert!(flags.is_none(), "flags are only supported on Linux");
+
+                    // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                    // `io_slices` points to valid readable buffers held alive for this syscall.
+                    let ret = unsafe {
+                        libc::pwritev(
+                            file.as_raw_fd(),
+                            io_slices.as_ptr().cast::<libc::iovec>(),
+                            io_slices_len as i32,
+                            offset.try_into().map_err(|_| Error::OffsetOverflow)?,
+                        )
+                    };
+                }
+            }
 
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
@@ -71,7 +93,9 @@ impl Blob {
                 return Err(Error::WriteFailed);
             }
             bufs.advance(bytes_written);
-            offset += bytes_written as u64;
+            offset = offset
+                .checked_add(bytes_written as u64)
+                .ok_or(Error::OffsetOverflow)?;
         }
 
         Ok(())
@@ -122,10 +146,47 @@ impl crate::Blob for Blob {
             .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || match bufs.try_into_single() {
             Ok(buf) => Self::write_single_at(&file, offset, buf.as_ref()),
-            Err(bufs) => Self::write_vectored_at(&file, offset, bufs),
+            Err(bufs) => Self::write_vectored_at(&file, offset, bufs, None),
         })
         .await
         .map_err(|_| Error::WriteFailed)?
+    }
+
+    async fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let file = self.file.clone();
+        let offset = offset
+            .checked_add(Header::SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        if !bufs.has_remaining() {
+            return Ok(());
+        }
+
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                task::spawn_blocking(move || {
+                    Self::write_vectored_at(&file, offset, bufs, Some(libc::RWF_SYNC))
+                })
+                .await
+                .map_err(|_| Error::WriteFailed)?
+            } else {
+                let partition = self.partition.clone();
+                let name = self.name.clone();
+                task::spawn_blocking(move || {
+                    Self::write_vectored_at(&file, offset, bufs, None)?;
+                    file.sync_all().map_err(|e| {
+                        Error::BlobSyncFailed(partition, hex(&name), e)
+                    })
+                })
+                .await
+                .map_err(|_| Error::WriteFailed)?
+            }
+        }
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {

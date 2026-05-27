@@ -824,6 +824,14 @@ where
     pub fn bounds(&self) -> &Bounds<F> {
         self.inner.bounds()
     }
+
+    /// Return the batch's safe sync boundary.
+    pub fn sync_boundary(&self) -> Location<F> {
+        super::db::sync_boundary::<F, N>(
+            self.bitmap.pruned_chunks() as u64,
+            self.inner.bounds().total_size,
+        )
+    }
 }
 
 impl<F: Graftable, D: Digest, U: update::Update + Send + Sync, const N: usize, S: Strategy>

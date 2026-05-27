@@ -522,7 +522,7 @@ where
     }
 
     /// Record a progress snapshot in metrics.
-    async fn record_progress(&self) {
+    async fn record_progress(&mut self) {
         self.progress_metrics
             .record(self.journal.size().await, *self.target.range.end());
     }
@@ -605,7 +605,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_at_target(&self) -> Result<bool, Error<DB, R>> {
+    pub async fn is_at_target(&mut self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
         let target_journal_size = self.target.range.end();
 
@@ -634,7 +634,7 @@ where
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
-    async fn is_ready_to_complete(&self) -> Result<bool, Error<DB, R>> {
+    async fn is_ready_to_complete(&mut self) -> Result<bool, Error<DB, R>> {
         Ok(self.is_at_target().await? && self.has_boundary_state())
     }
 
@@ -659,8 +659,8 @@ where
         let FetchResult {
             proof,
             operations,
-            success_tx,
             pinned_nodes,
+            callback,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -668,12 +668,16 @@ where
         if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
             // Invalid batch size - notify resolver of failure.
             // We will request these operations again when we scan for unfetched operations.
-            success_tx.send_lossy(false);
+            if let Some(callback) = callback {
+                callback.send_lossy(false);
+            }
             return Ok(());
         }
 
         if proof.leaves != request.target_size {
-            success_tx.send_lossy(false);
+            if let Some(callback) = callback {
+                callback.send_lossy(false);
+            }
             return Ok(());
         }
 
@@ -720,7 +724,9 @@ where
         };
 
         // Report success or failure to the resolver.
-        success_tx.send_lossy(valid);
+        if let Some(callback) = callback {
+            callback.send_lossy(valid);
+        }
 
         if !valid {
             if need_pinned {
@@ -783,9 +789,14 @@ where
     /// 3. Handles different event types (target updates, fetch results)
     /// 4. Coordinates request scheduling and operation application
     ///
-    /// Returns `StepResult::Complete(database)` when sync is finished, or
-    /// `StepResult::Continue(self)` when more work remains.
-    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+    /// Returns `NextStep::Complete(database)` when sync is finished, or
+    /// `NextStep::Continue(self)` when more work remains.
+    pub(crate) async fn step(self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+        Box::pin(Self::step_inner(self)).await
+    }
+
+    /// Implements one sync step behind a boxed future boundary.
+    async fn step_inner(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
         // Check if sync is complete
@@ -870,16 +881,15 @@ mod tests {
         Box::pin(async move {
             IndexedFetchResult {
                 id,
-                result: Ok(FetchResult {
-                    proof: Proof {
+                result: Ok(FetchResult::new(
+                    Proof {
                         leaves: Location::new(0),
                         inactive_peaks: 0,
                         digests: vec![],
                     },
-                    operations: vec![],
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes: None,
-                }),
+                    vec![],
+                    None,
+                )),
             }
         })
     }

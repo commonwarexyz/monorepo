@@ -11,6 +11,7 @@ members = [
     "cryptography",
     "deployer",
     "formatting",
+    "glue",
     "macros",
     "macros/impl",
     "math",
@@ -84,8 +85,14 @@ suspicious_op_assign_impl = "allow"
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
+ark-ec = { version = "0.5.0", default-features = false }
+ark-ed-on-bls12-381-bandersnatch = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
+ark-r1cs-std = { version = "0.5.0", default-features = false }
+ark-relations = { version = "0.5.1", default-features = false }
+ark-serialize = { version = "0.5.0", default-features = false }
 aws-config = "1.8.12"
-aws-lc-rs = "1.15.2"
+aws-lc-rs = "1.16.3"
 aws-sdk-ec2 = "1.200.0"
 aws-sdk-s3 = "1.91.0"
 axum = "0.8.1"
@@ -108,6 +115,7 @@ commonware-consensus = { version = "2026.4.0", path = "consensus" }
 commonware-cryptography = { version = "2026.4.0", path = "cryptography", default-features = false }
 commonware-deployer = { version = "2026.4.0", path = "deployer", default-features = false }
 commonware-formatting = { version = "2026.4.0", path = "formatting", default-features = false }
+commonware-glue = { version = "2026.4.0", path = "glue" }
 commonware-invariants = { version = "2026.4.0", path = "invariants" }
 commonware-macros = { version = "2026.4.0", path = "macros", default-features = false }
 commonware-macros-impl = { version = "2026.4.0", path = "macros/impl" }
@@ -188,13 +196,16 @@ zeroize = "1.5.7"
 zstd = "0.13.2"
 
 [profile.bench]
-# Because we enable overflow checks in "release," we should benchmark with them.
+# Because we enable overflow checks in "release", we should benchmark with them.
 overflow-checks = true
 
 [profile.dev]
 # Although overflow checks are enabled by default in "dev", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+# Keep line tables for file:line in panics and backtraces, but skip variable-level
+# debuginfo to speed up codegen and linking. Use `debug = 2` for debugger sessions.
+debug = "line-tables-only"
 
 [profile.release]
 # To guard against unexpected behavior in production, we enable overflow checks in
@@ -211,6 +222,9 @@ debug = true
 # Although overflow checks are enabled by default in "test", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+# Keep line tables for file:line in panics and backtraces, but skip variable-level
+# debuginfo to speed up codegen and linking. Use `debug = 2` for debugger sessions.
+debug = "line-tables-only"
 
 [profile.test.package.curve25519-dalek]
 opt-level = 3

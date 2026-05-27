@@ -481,7 +481,7 @@ impl<
         let _ = self.handle_ack(&ack).await;
 
         // Send ack over the network.
-        self.broadcast(ack, sender).await?;
+        self.broadcast(ack, sender);
 
         Ok(())
     }
@@ -549,7 +549,7 @@ impl<
         let certified = Activity::Certified(certificate);
         self.record(certified.clone()).await;
         self.sync(height).await;
-        self.reporter.report(certified).await;
+        self.reporter.report(certified);
 
         // Increase the tip if needed
         if height == self.tip {
@@ -598,7 +598,9 @@ impl<
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
         // Broadcast the ack to all peers
-        self.broadcast(ack, sender).await
+        self.broadcast(ack, sender);
+
+        Ok(())
     }
 
     // ---------- Validation ----------
@@ -719,28 +721,19 @@ impl<
     }
 
     /// Broadcasts an ack to all peers with the appropriate priority.
-    ///
-    /// Returns an error if the sender returns an error.
-    async fn broadcast(
+    fn broadcast(
         &mut self,
         ack: Ack<P::Scheme, D>,
         sender: &mut WrappedSender<
             impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
-    ) -> Result<(), Error> {
-        sender
-            .send(
-                Recipients::All,
-                TipAck { ack, tip: self.tip },
-                self.priority_acks,
-            )
-            .await
-            .map_err(|err| {
-                warn!(?err, "failed to send ack");
-                Error::UnableToSendMessage
-            })?;
-        Ok(())
+    ) {
+        sender.send(
+            Recipients::All,
+            TipAck { ack, tip: self.tip },
+            self.priority_acks,
+        );
     }
 
     /// Returns the next height that we should process. This is the minimum height for
@@ -777,7 +770,7 @@ impl<
         // Add tip to journal
         self.record(Activity::Tip(tip)).await;
         self.sync(tip).await;
-        self.reporter.report(Activity::Tip(tip)).await;
+        self.reporter.report(Activity::Tip(tip));
 
         // Prune journal with buffer, ignoring errors
         let section = self.get_journal_section(activity_threshold);
@@ -811,15 +804,15 @@ impl<
             match activity {
                 Activity::Tip(height) => {
                     tip = max(tip, height);
-                    self.reporter.report(Activity::Tip(height)).await;
+                    self.reporter.report(Activity::Tip(height));
                 }
                 Activity::Certified(certificate) => {
                     certified.push(certificate.clone());
-                    self.reporter.report(Activity::Certified(certificate)).await;
+                    self.reporter.report(Activity::Certified(certificate));
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack.clone());
-                    self.reporter.report(Activity::Ack(ack)).await;
+                    self.reporter.report(Activity::Ack(ack));
                 }
             }
         }

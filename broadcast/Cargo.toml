@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-broadcast"
 workspace = true
 
 [dependencies]
+commonware-actor.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros = { workspace = true, features = ["std"] }

@@ -13,6 +13,7 @@ commonware_macros::stability_scope!(ALPHA {
         pub mod goldilocks;
     }
     pub mod ntt;
+    pub mod synthetic;
 });
 commonware_macros::stability_scope!(BETA {
     pub mod algebra;
@@ -20,8 +21,8 @@ commonware_macros::stability_scope!(BETA {
 });
 
 commonware_macros::stability_scope!(ALPHA {
-    #[cfg(any(test, feature = "fuzz"))]
-    pub(crate) mod test;
+    #[cfg(any(test, feature = "arbitrary"))]
+    pub mod test;
 });
 
 commonware_macros::stability_scope!(ALPHA {
@@ -36,6 +37,7 @@ commonware_macros::stability_scope!(ALPHA {
             Goldilocks(crate::fields::goldilocks::fuzz::Plan),
             Test(crate::test::fuzz::Plan),
             Ntt(crate::ntt::fuzz::Plan),
+            Synthetic(crate::synthetic::fuzz::Plan),
         }
 
         impl Plan {
@@ -46,6 +48,7 @@ commonware_macros::stability_scope!(ALPHA {
                     Self::Goldilocks(plan) => plan.run(u),
                     Self::Test(plan) => plan.run(u),
                     Self::Ntt(plan) => plan.run(u),
+                    Self::Synthetic(plan) => plan.run(u),
                 }
             }
         }

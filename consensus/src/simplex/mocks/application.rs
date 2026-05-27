@@ -8,12 +8,13 @@ use crate::{
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;
+use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use commonware_utils::channel::{
-    fallible::{AsyncFallibleExt, OneshotExt},
+    fallible::{FallibleExt, OneshotExt},
     mpsc, oneshot,
 };
 use rand::{Rng, RngCore};
@@ -26,10 +27,6 @@ use std::{
 use tracing::debug;
 
 pub enum Message<D: Digest, P: PublicKey> {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<D>,
-    },
     Propose {
         context: Context<D, P>,
         response: oneshot::Sender<D>,
@@ -51,11 +48,11 @@ pub enum Message<D: Digest, P: PublicKey> {
 
 #[derive(Clone)]
 pub struct Mailbox<D: Digest, P: PublicKey> {
-    sender: mpsc::Sender<Message<D, P>>,
+    sender: mpsc::UnboundedSender<Message<D, P>>,
 }
 
 impl<D: Digest, P: PublicKey> Mailbox<D, P> {
-    pub(super) const fn new(sender: mpsc::Sender<Message<D, P>>) -> Self {
+    pub(super) const fn new(sender: mpsc::UnboundedSender<Message<D, P>>) -> Self {
         Self { sender }
     }
 }
@@ -64,19 +61,10 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
     type Context = Context<D, P>;
 
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Genesis { epoch, response })
-            .await;
-        receiver.await.expect("Failed to receive genesis")
-    }
-
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send_lossy(Message::Propose { context, response })
-            .await;
+            .send_lossy(Message::Propose { context, response });
         receiver
     }
 
@@ -86,13 +74,11 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Verify {
-                context,
-                payload,
-                response,
-            })
-            .await;
+        self.sender.send_lossy(Message::Verify {
+            context,
+            payload,
+            response,
+        });
         receiver
     }
 }
@@ -100,13 +86,11 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Certify {
-                round,
-                payload,
-                response: tx,
-            })
-            .await;
+        self.sender.send_lossy(Message::Certify {
+            round,
+            payload,
+            response: tx,
+        });
         rx
     }
 }
@@ -116,12 +100,22 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type PublicKey = P;
     type Plan = Plan<P>;
 
-    async fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) {
-        self.sender.send_lossy(Message::Broadcast { payload }).await;
+    fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) -> Feedback {
+        if self.sender.send_lossy(Message::Broadcast { payload }) {
+            Feedback::Ok
+        } else {
+            Feedback::Closed
+        }
     }
 }
 
 const GENESIS_BYTES: &[u8] = b"genesis";
+
+pub fn genesis<H: Hasher>(epoch: Epoch) -> H::Digest {
+    let mut hasher = H::default();
+    hasher.update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
+    hasher.finalize()
+}
 
 type Latency = (f64, f64);
 
@@ -178,7 +172,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     relay: Arc<Relay<H::Digest, P>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
 
-    mailbox: mpsc::Receiver<Message<H::Digest, P>>,
+    mailbox: mpsc::UnboundedReceiver<Message<H::Digest, P>>,
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
@@ -223,7 +217,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let certify_latency = Normal::new(cfg.certify_latency.0, cfg.certify_latency.1).unwrap();
 
         // Return constructed application
-        let (sender, receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 context: ContextCell::new(context),
@@ -287,14 +281,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
     #[cfg(not(feature = "mocks"))]
     fn panic(&self, msg: &str) -> ! {
         panic!("[{:?}] {}", self.me, msg);
-    }
-
-    fn genesis(&mut self, epoch: Epoch) -> H::Digest {
-        self.hasher
-            .update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
-        let digest = self.hasher.finalize();
-        self.verified.insert(digest);
-        digest
     }
 
     /// When proposing a block, we do not care if the parent is verified (or even in our possession).
@@ -423,10 +409,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             },
             Some(message) = self.mailbox.recv() else break => {
                 match message {
-                    Message::Genesis { epoch, response } => {
-                        let digest = self.genesis(epoch);
-                        response.send_lossy(digest);
-                    }
                     Message::Propose { context, response } => {
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());

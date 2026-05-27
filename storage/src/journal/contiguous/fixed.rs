@@ -236,7 +236,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         }
         let _timer = self.metrics.read_many_timer();
         self.metrics.read_many_calls.inc();
-        debug_assert!(
+        assert!(
             positions.windows(2).all(|w| w[0] < w[1]),
             "positions must be strictly increasing"
         );
@@ -487,13 +487,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         if needs_metadata_update {
             if pruning_boundary.is_multiple_of(items_per_blob) {
                 metadata.remove(&PRUNING_BOUNDARY_KEY);
+                metadata.sync().await?;
             } else {
-                metadata.put(
-                    PRUNING_BOUNDARY_KEY,
-                    pruning_boundary.to_be_bytes().to_vec(),
-                );
+                metadata
+                    .put_sync(
+                        PRUNING_BOUNDARY_KEY,
+                        pruning_boundary.to_be_bytes().to_vec(),
+                    )
+                    .await?;
             }
-            metadata.sync().await?;
         }
 
         // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
@@ -708,8 +710,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Persist metadata if pruning_boundary is mid-section.
         if !size.is_multiple_of(items_per_blob) {
-            metadata.put(PRUNING_BOUNDARY_KEY, size.to_be_bytes().to_vec());
-            metadata.sync().await?;
+            metadata
+                .put_sync(PRUNING_BOUNDARY_KEY, size.to_be_bytes().to_vec())
+                .await?;
         } else if metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
             metadata.remove(&PRUNING_BOUNDARY_KEY);
             metadata.sync().await?;
@@ -774,8 +777,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(());
         };
 
-        // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
-        // the tail section above.
+        // Upgrade only for the metadata mutation; reads were allowed while syncing
+        // the tail section above. Downgrade before the metadata fsync to unblock readers.
         let mut inner = inner.upgrade().await;
         if put {
             inner.metadata.put(
@@ -785,6 +788,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         } else {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
+        let inner = inner.downgrade_to_upgradable();
         inner.metadata.sync().await?;
 
         Ok(())
@@ -1001,8 +1005,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // Persist metadata only when pruning_boundary is mid-section.
         if !inner.pruning_boundary.is_multiple_of(self.items_per_blob) {
             let value = inner.pruning_boundary.to_be_bytes().to_vec();
-            inner.metadata.put(PRUNING_BOUNDARY_KEY, value);
-            inner.metadata.sync().await?;
+            inner.metadata.put_sync(PRUNING_BOUNDARY_KEY, value).await?;
         } else if inner.metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
             inner.metadata.sync().await?;
@@ -1171,23 +1174,18 @@ mod tests {
                 .await
                 .expect("Failed to open legacy blob");
             legacy_blob
-                .write_at(0, vec![0u8; 1])
+                .write_at_sync(0, vec![0u8; 1])
                 .await
                 .expect("Failed to write legacy blob");
-            legacy_blob
-                .sync()
-                .await
-                .expect("Failed to sync legacy blob");
 
             let (new_blob, _) = context
                 .open(&blobs_partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open new blob");
             new_blob
-                .write_at(0, vec![0u8; 1])
+                .write_at_sync(0, vec![0u8; 1])
                 .await
                 .expect("Failed to write new blob");
-            new_blob.sync().await.expect("Failed to sync new blob");
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
@@ -1208,13 +1206,9 @@ mod tests {
                 .await
                 .expect("Failed to open legacy blob");
             legacy_blob
-                .write_at(0, vec![0u8; 1])
+                .write_at_sync(0, vec![0u8; 1])
                 .await
                 .expect("Failed to write legacy blob");
-            legacy_blob
-                .sync()
-                .await
-                .expect("Failed to sync legacy blob");
 
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -1501,10 +1495,9 @@ mod tests {
                 .expect("Failed to open blob");
             // Write junk bytes.
             let bad_bytes = 123456789u32;
-            blob.write_at(1, bad_bytes.to_be_bytes().to_vec())
+            blob.write_at_sync(1, bad_bytes.to_be_bytes().to_vec())
                 .await
                 .expect("Failed to write bad bytes");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::init(context.child("second"), cfg.clone())
@@ -1928,10 +1921,9 @@ mod tests {
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            blob.write_at(size, vec![0u8; PAGE_SIZE.get() as usize * 3])
+            blob.write_at_sync(size, vec![0u8; PAGE_SIZE.get() as usize * 3])
                 .await
                 .expect("Failed to extend blob");
-            blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -2944,8 +2936,10 @@ mod tests {
                 Metadata::<_, u64, Vec<u8>>::init(context.child("restore_meta"), meta_cfg.clone())
                     .await
                     .unwrap();
-            metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
-            metadata.sync().await.unwrap();
+            metadata
+                .put_sync(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec())
+                .await
+                .unwrap();
 
             // Crash Scenario 2: After ensure_section_exists(), before metadata update
             // Target: init_at_size(12) -> should be section 2 (starts at 10)

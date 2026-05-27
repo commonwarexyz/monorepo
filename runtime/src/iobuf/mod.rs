@@ -4,7 +4,8 @@
 //! - [`Bytes`]/[`BytesMut`]: standard heap allocation (from `From` conversions)
 //! - Aligned: untracked aligned allocation (from [`IoBufMut::with_alignment`],
 //!   pool bypass for small requests, or fallback)
-//! - Pooled: tracked aligned allocation returned to a [`BufferPool`] on drop
+//! - Pooled: tracked aligned allocation returned to its originating [`BufferPool`]
+//!   on drop
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
@@ -13,25 +14,55 @@
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
-mod aligned;
+mod buffer;
 mod freelist;
 mod pool;
 
-pub(crate) use aligned::AlignedBuffer;
-use aligned::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
+pub(crate) use buffer::AlignedBuffer;
+use buffer::{AlignedBuf, AlignedBufMut, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
+use crossbeam_utils::CachePadded;
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
-use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
+use std::{collections::VecDeque, io::IoSlice, mem::align_of, num::NonZeroUsize, ops::RangeBounds};
+
+/// Returns the system page size.
+///
+/// On Unix systems, queries the actual page size via `sysconf`.
+/// On other systems (Windows), defaults to 4KB.
+#[allow(clippy::missing_const_for_fn)]
+pub fn page_size() -> usize {
+    #[cfg(unix)]
+    {
+        // SAFETY: sysconf is safe to call.
+        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if size <= 0 {
+            4096 // Safe fallback if sysconf fails
+        } else {
+            size as usize
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        4096
+    }
+}
+
+/// Returns the cache line size for the current architecture.
+pub const fn cache_line_size() -> usize {
+    align_of::<CachePadded<u8>>()
+}
 
 #[cfg(feature = "bench")]
 pub mod bench {
-    pub use super::{aligned::AlignedBuffer, freelist::Freelist};
+    pub use super::{buffer::PooledBuffer, freelist::Freelist};
 }
 
 /// Immutable byte buffer.
 ///
-/// Backed by either [`Bytes`] or a pooled aligned allocation.
+/// Backed by [`Bytes`], an untracked aligned allocation, or a pooled
+/// allocation.
 ///
 /// Use this for immutable payloads. To build or mutate data, use
 /// [`IoBufMut`] and then [`IoBufMut::freeze`].
@@ -428,7 +459,8 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 
 /// Mutable byte buffer.
 ///
-/// Backed by either [`BytesMut`] or a pooled aligned allocation.
+/// Backed by [`BytesMut`], an untracked aligned allocation, or a pooled
+/// allocation.
 ///
 /// Use this to build or mutate payloads before freezing into [`IoBuf`].
 ///

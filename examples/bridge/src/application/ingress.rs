@@ -1,21 +1,22 @@
 use crate::Scheme;
+use commonware_actor::{
+    mailbox::{Policy, Sender},
+    Feedback,
+};
 use commonware_consensus::{
     simplex::{
         types::{Activity, Context},
         Plan,
     },
-    types::{Epoch, Round},
+    types::Round,
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re, Reporter,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::channel::oneshot;
+use std::collections::VecDeque;
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<D>,
-    },
     Propose {
         round: Round,
         response: oneshot::Sender<D>,
@@ -29,14 +30,22 @@ pub enum Message<D: Digest> {
     },
 }
 
+impl<D: Digest> Policy for Message<D> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        overflow.push_back(message);
+    }
+}
+
 /// Mailbox for the application.
 #[derive(Clone)]
 pub struct Mailbox<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+    sender: Sender<Message<D>>,
 }
 
 impl<D: Digest> Mailbox<D> {
-    pub(super) const fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+    pub(super) const fn new(sender: Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
@@ -45,15 +54,6 @@ impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest, PublicKey>;
 
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
-        receiver.await.expect("Failed to receive genesis")
-    }
-
     async fn propose(
         &mut self,
         context: Context<Self::Digest, PublicKey>,
@@ -61,13 +61,15 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Propose {
-                round: context.round,
-                response,
-            })
-            .await
-            .expect("Failed to send propose");
+        assert!(
+            self.sender
+                .enqueue(Message::Propose {
+                    round: context.round,
+                    response,
+                })
+                .accepted(),
+            "Failed to send propose"
+        );
         receiver
     }
 
@@ -79,10 +81,12 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Verify { payload, response })
-            .await
-            .expect("Failed to send verify");
+        assert!(
+            self.sender
+                .enqueue(Message::Verify { payload, response })
+                .accepted(),
+            "Failed to send verify"
+        );
         receiver
     }
 }
@@ -96,21 +100,19 @@ impl<D: Digest> Re for Mailbox<D> {
     type PublicKey = PublicKey;
     type Plan = Plan<PublicKey>;
 
-    async fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) {
+    fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) -> Feedback {
         // We don't broadcast our raw messages to other peers.
         //
         // If we were building an EVM blockchain, for example, we'd
         // send the block to other peers here.
+        Feedback::Ok
     }
 }
 
 impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Activity<Scheme, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
-        self.sender
-            .send(Message::Report { activity })
-            .await
-            .expect("Failed to send report");
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        self.sender.enqueue(Message::Report { activity })
     }
 }

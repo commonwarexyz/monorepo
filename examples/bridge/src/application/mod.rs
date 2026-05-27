@@ -4,12 +4,24 @@
 
 use crate::Scheme;
 use commonware_cryptography::Hasher;
+use std::num::NonZeroUsize;
 
 mod actor;
 pub use actor::Application;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
 mod ingress;
+
+/// Genesis message to use during initialization.
+const GENESIS: &[u8] = b"commonware is neat";
+
+/// Returns the initial payload for the single consensus epoch.
+pub fn genesis<H: Hasher>() -> H::Digest {
+    // Use the digest of the genesis message as the initial payload.
+    let mut hasher = H::default();
+    hasher.update(GENESIS);
+    hasher.finalize()
+}
 
 /// Configuration for the application.
 pub struct Config<H: Hasher, Si: Sink, St: Stream> {
@@ -26,5 +38,5 @@ pub struct Config<H: Hasher, Si: Sink, St: Stream> {
 
     /// Number of messages from consensus to hold in our backlog
     /// before blocking.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 }

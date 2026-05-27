@@ -14,7 +14,9 @@ mod record;
 mod reservation;
 
 pub use actor::Actor;
-pub use ingress::{Message, Oracle};
+#[cfg(test)]
+pub(crate) use ingress::Message;
+pub use ingress::{Mailbox, Oracle};
 pub use metadata::Metadata;
 pub use reservation::Reservation;
 
@@ -27,6 +29,7 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
     pub allow_dns: bool,
     pub synchrony_bound: Duration,
+    pub mailbox_size: NonZeroUsize,
     pub tracked_peer_sets: NonZeroUsize,
     pub max_peer_set_size: u64,
     pub peer_connection_cooldown: Duration,

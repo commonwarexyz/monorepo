@@ -6,10 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::{
-    authenticated::{discovery::types::InfoVerifier, mailbox::UnboundedMailbox, Mailbox},
-    Channel,
-};
+use crate::{authenticated::discovery::types::InfoVerifier, Channel};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -37,9 +34,9 @@ pub struct Network<
 
     channels: Channels<C::PublicKey>,
     tracker: tracker::Actor<E, C>,
-    tracker_mailbox: UnboundedMailbox<tracker::Message<C::PublicKey>>,
+    tracker_mailbox: tracker::Mailbox<C::PublicKey>,
     router: router::Actor<E, C::PublicKey>,
-    router_mailbox: Mailbox<router::Message<C::PublicKey>>,
+    router_mailbox: router::Mailbox<C::PublicKey>,
     info_verifier: InfoVerifier<C::PublicKey>,
 }
 
@@ -69,6 +66,7 @@ impl<
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
                 synchrony_bound: cfg.synchrony_bound,
+                mailbox_size: cfg.mailbox_size,
                 tracked_peer_sets: cfg.tracked_peer_sets,
                 peer_connection_cooldown: cfg.peer_connection_cooldown,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -124,11 +122,11 @@ impl<
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
-        let clock = self
+        let context = self
             .context
             .child("channel")
             .with_attribute("index", channel);
-        self.channels.register(channel, rate, backlog, clock)
+        self.channels.register(channel, rate, backlog, context)
     }
 
     /// Starts the network.

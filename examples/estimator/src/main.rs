@@ -584,10 +584,7 @@ async fn process_command<C: Clock>(
         Command::Propose(id, size) => {
             if is_proposer {
                 let message = create_message(*id, *size);
-                sender
-                    .send(commonware_p2p::Recipients::All, message, true)
-                    .await
-                    .unwrap();
+                sender.send(commonware_p2p::Recipients::All, message, true);
                 received
                     .entry(*id)
                     .or_default()
@@ -598,10 +595,7 @@ async fn process_command<C: Clock>(
         }
         Command::Broadcast(id, size) => {
             let message = create_message(*id, *size);
-            sender
-                .send(commonware_p2p::Recipients::All, message, true)
-                .await
-                .unwrap();
+            sender.send(commonware_p2p::Recipients::All, message, true);
             received
                 .entry(*id)
                 .or_default()
@@ -617,14 +611,11 @@ async fn process_command<C: Clock>(
                     .insert(command_ctx.identity.clone());
             } else {
                 let message = create_message(*id, *size);
-                sender
-                    .send(
-                        commonware_p2p::Recipients::One(command_ctx.proposer_identity.clone()),
-                        message,
-                        true,
-                    )
-                    .await
-                    .unwrap();
+                sender.send(
+                    commonware_p2p::Recipients::One(command_ctx.proposer_identity.clone()),
+                    message,
+                    true,
+                );
             }
             *current_index += 1;
             true

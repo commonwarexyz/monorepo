@@ -13,7 +13,7 @@ use crate::{
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
         mem::Mem,
         storage::Storage as MerkleStorage,
-        Location, Position,
+        Graftable, Location, Position,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -434,30 +434,10 @@ where
     /// the chunk's last leaf, so condition (1) always holds and the function returns the
     /// inactivity floor rounded down to the nearest chunk boundary.
     pub fn sync_boundary(&self) -> Location<F> {
-        let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
-        let mut pruned_chunks = *self.any.inactivity_floor_loc / chunk_bits;
-
-        let ops_leaves = *self.any.last_commit_loc + 1;
-        let grafting_height = grafting::height::<N>();
-
-        while pruned_chunks > 0 {
-            let required_ops =
-                Self::pair_absorption_threshold(pruned_chunks).unwrap_or_else(|| {
-                    let youngest_start = (pruned_chunks - 1) * chunk_bits;
-                    let pos = F::subtree_root_position(
-                        Location::<F>::new(youngest_start),
-                        grafting_height,
-                    );
-                    F::peak_birth_size(pos, grafting_height)
-                });
-
-            if ops_leaves >= required_ops {
-                break;
-            }
-            pruned_chunks -= 1;
-        }
-
-        Location::new(pruned_chunks * chunk_bits)
+        sync_boundary::<F, N>(
+            *self.any.inactivity_floor_loc / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
+            *self.any.last_commit_loc + 1,
+        )
     }
 
     /// Update Current-specific state gauges.
@@ -466,33 +446,6 @@ where
             self.any.bitmap.pruned_chunks() as u64,
             *self.sync_boundary(),
         );
-    }
-
-    /// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
-    /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
-    /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
-    fn pair_absorption_threshold(pruned_chunks: u64) -> Option<u64> {
-        if pruned_chunks == 0 {
-            return None;
-        }
-
-        let grafting_height = grafting::height::<N>();
-        let youngest = pruned_chunks - 1;
-        let youngest_start = youngest << grafting_height;
-        let youngest_end = (youngest + 1) << grafting_height;
-        let youngest_pos =
-            F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
-
-        // Families without delayed merges: birth_size == chunk_end.
-        if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
-            return None;
-        }
-
-        let pair_chunk = youngest & !1;
-        let pair_start = pair_chunk << grafting_height;
-        let pair_pos =
-            F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
-        Some(F::peak_birth_size(pair_pos, grafting_height + 1))
     }
 
     /// Returns the minimum rewind target that keeps delayed-merge grafting queries valid
@@ -506,7 +459,7 @@ where
     ///
     /// Returns `None` for families without delayed merges.
     fn delayed_merge_rewind_floor(&self) -> Option<u64> {
-        Self::pair_absorption_threshold(self.any.bitmap.pruned_chunks() as u64)
+        pair_absorption_threshold::<F, N>(self.any.bitmap.pruned_chunks() as u64)
     }
 
     /// Prune the grafted tree to match the committed bitmap's pruned chunks.
@@ -736,6 +689,57 @@ where
 
         Ok(())
     }
+}
+
+/// Compute the safe sync boundary from a pruning boundary and the current ops-tree size.
+///
+/// Shared by the live DB and speculative batch wrappers so they both derive the same range start.
+pub(crate) fn sync_boundary<F: Graftable, const N: usize>(
+    mut pruned_chunks: u64,
+    ops_leaves: u64,
+) -> Location<F> {
+    let chunk_bits = bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+    let grafting_height = grafting::height::<N>();
+
+    while pruned_chunks > 0 {
+        let required_ops = pair_absorption_threshold::<F, N>(pruned_chunks).unwrap_or_else(|| {
+            let youngest_start = (pruned_chunks - 1) * chunk_bits;
+            let pos = F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
+            F::peak_birth_size(pos, grafting_height)
+        });
+
+        if ops_leaves >= required_ops {
+            break;
+        }
+        pruned_chunks -= 1;
+    }
+
+    Location::new(pruned_chunks * chunk_bits)
+}
+
+/// For the youngest of `pruned_chunks` chunks, return the `peak_birth_size` of its
+/// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
+/// (where `peak_birth_size` at height `gh` equals the chunk boundary).
+fn pair_absorption_threshold<F: Graftable, const N: usize>(pruned_chunks: u64) -> Option<u64> {
+    if pruned_chunks == 0 {
+        return None;
+    }
+
+    let grafting_height = grafting::height::<N>();
+    let youngest = pruned_chunks - 1;
+    let youngest_start = youngest << grafting_height;
+    let youngest_end = (youngest + 1) << grafting_height;
+    let youngest_pos =
+        F::subtree_root_position(Location::<F>::new(youngest_start), grafting_height);
+
+    if F::peak_birth_size(youngest_pos, grafting_height) <= youngest_end {
+        return None;
+    }
+
+    let pair_chunk = youngest & !1;
+    let pair_start = pair_chunk << grafting_height;
+    let pair_pos = F::subtree_root_position(Location::<F>::new(pair_start), grafting_height + 1);
+    Some(F::peak_birth_size(pair_pos, grafting_height + 1))
 }
 
 // Functionality requiring mutable + persistable journal.

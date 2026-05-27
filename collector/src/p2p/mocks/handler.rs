@@ -58,7 +58,7 @@ impl crate::Handler for Handler {
     type Request = Request;
     type Response = Response;
 
-    async fn process(
+    fn process(
         &mut self,
         origin: Self::PublicKey,
         request: Self::Request,

@@ -13,7 +13,7 @@ use std::ptr::NonNull;
 /// Again optimizing for the common case, we store the first value directly in the [Record] to avoid
 /// indirection (heap jumping).
 #[derive(PartialEq, Eq)]
-pub(super) struct Record<V: Eq + Send + Sync> {
+pub struct Record<V: Eq + Send + Sync> {
     pub(super) value: V,
     pub(super) next: Option<Box<Self>>,
 }
@@ -26,7 +26,7 @@ pub(super) fn insert_front<V: Eq + Send + Sync>(record: &mut Record<V>, mut valu
     }));
 }
 
-pub(super) trait IndexEntry<V: Eq + Send + Sync>: Send + Sync {
+pub trait IndexEntry<V: Eq + Send + Sync>: Send + Sync {
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
 }
@@ -77,7 +77,7 @@ impl<V: Eq + Send + Sync> Copy for State<V> {}
 /// - In [`State::Active`], when `prev` is `Some`, `prev.next` owns the node at `current`.
 /// - After a non-head delete, the [`State::NeedNext`] `from` is the surviving predecessor;
 ///   after a head delete, it is `None` so the next `next()` re-reads the entry head.
-pub(super) struct Cursor<'a, V: Eq + Send + Sync, E: IndexEntry<V>> {
+pub struct Cursor<'a, V: Eq + Send + Sync, E: IndexEntry<V>> {
     // The occupied index entry that owns the linked list while the cursor exists.
     entry: Option<E>,
     // The current position/state of the cursor, including any live pointers into the chain.
@@ -231,10 +231,10 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
         }
     }
 
-    /// Removes anything in the cursor that satisfies the predicate.
-    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
+    /// Retains only the values for which `should_retain` returns `true`; removes the rest.
+    fn retain(&mut self, should_retain: &impl Fn(&V) -> bool) {
         while let Some(old) = self.next() {
-            if predicate(old) {
+            if !should_retain(old) {
                 self.delete();
             }
         }

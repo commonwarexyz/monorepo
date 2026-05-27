@@ -10,37 +10,36 @@ use crate::{
     },
     Scheme,
 };
+use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Activity, types::Epoch, Viewable};
+use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Sink, Spawner, Stream};
+use commonware_runtime::{Metrics, Sink, Spawner, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use commonware_utils::channel::mpsc;
 use rand::Rng;
 use rand_core::CryptoRngCore;
 use tracing::{debug, info};
 
-/// Genesis message to use during initialization.
-const GENESIS: &[u8] = b"commonware is neat";
-
 /// Application actor.
-pub struct Application<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> {
+pub struct Application<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
     this_network: <MinSig as Variant>::Public,
     other_network: Scheme,
     hasher: H,
-    mailbox: mpsc::Receiver<Message<H::Digest>>,
+    mailbox: ActorReceiver<Message<H::Digest>>,
 }
 
-impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
+impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
+    Application<R, H, Si, St>
+{
     /// Create a new application actor.
     pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let this_network = *config.this_network.identity();
         (
             Self {
@@ -61,15 +60,6 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
         let (mut indexer_sender, mut indexer_receiver) = self.indexer;
         while let Some(message) = self.mailbox.recv().await {
             match message {
-                Message::Genesis { epoch, response } => {
-                    // Sanity check. We don't support multiple epochs.
-                    assert_eq!(epoch, Epoch::zero(), "epoch must be 0");
-
-                    // Use the digest of the genesis message as the initial payload.
-                    self.hasher.update(GENESIS);
-                    let digest = self.hasher.finalize();
-                    let _ = response.send(digest);
-                }
                 Message::Propose { round, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
                     let block = match self.context.gen_bool(0.5) {

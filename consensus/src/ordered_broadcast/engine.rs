@@ -303,7 +303,7 @@ impl<
         // and attempt to rebroadcast if necessary.
         if let Some(ref signer) = self.sequencer_signer {
             self.journal_prepare(&signer.public_key()).await;
-            if let Err(err) = self.rebroadcast(&mut node_sender).await {
+            if let Err(err) = self.rebroadcast(&mut node_sender) {
                 // Rebroadcasting may return a non-critical error, so log the error and continue.
                 info!(?err, "initial rebroadcast failed");
             }
@@ -351,7 +351,7 @@ impl<
             _ = rebroadcast => {
                 if let Some(ref signer) = self.sequencer_signer {
                     debug!(epoch = %self.epoch, sender = ?signer.public_key(), "rebroadcast");
-                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
+                    if let Err(err) = self.rebroadcast(&mut node_sender) {
                         info!(?err, "rebroadcast failed");
                         continue;
                     }
@@ -418,8 +418,7 @@ impl<
                         &parent_chunk,
                         parent.epoch,
                         parent.certificate.clone(),
-                    )
-                    .await;
+                    );
                 }
 
                 // Process the node
@@ -453,7 +452,7 @@ impl<
                     debug!(?err, ?sender, "ack validate failed");
                     continue;
                 };
-                if let Err(err) = self.handle_ack(&ack).await {
+                if let Err(err) = self.handle_ack(&ack) {
                     debug!(?err, ?sender, "ack handle failed");
                     guard.set(Status::Failure);
                     continue;
@@ -535,12 +534,10 @@ impl<
         }
 
         // Emit the activity
-        self.reporter
-            .report(Activity::Tip(Proposal::new(
-                tip.chunk.clone(),
-                tip.signature.clone(),
-            )))
-            .await;
+        self.reporter.report(Activity::Tip(Proposal::new(
+            tip.chunk.clone(),
+            tip.signature.clone(),
+        )));
 
         // Get the validator scheme for the current epoch
         let Some(scheme) = self.validators_provider.scoped(self.epoch) else {
@@ -568,13 +565,10 @@ impl<
         };
 
         // Handle the ack internally
-        self.handle_ack(&ack).await?;
+        self.handle_ack(&ack)?;
 
         // Send the ack to the network
-        ack_sender
-            .send(Recipients::Some(recipients), ack, self.priority_acks)
-            .await
-            .map_err(|_| Error::UnableToSendMessage)?;
+        ack_sender.send(Recipients::Some(recipients), ack, self.priority_acks);
 
         Ok(())
     }
@@ -584,7 +578,7 @@ impl<
     /// The certificate must already be verified.
     /// If the certificate is new, it is stored and the proof is emitted to the committer.
     /// If the certificate is already known, it is ignored.
-    async fn handle_certificate(
+    fn handle_certificate(
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
@@ -611,15 +605,14 @@ impl<
 
         // Emit the activity
         self.reporter
-            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, certificate)))
-            .await;
+            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, certificate)));
     }
 
     /// Handles an ack
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
+    fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
         let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
@@ -632,8 +625,7 @@ impl<
         {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = %ack.chunk.height, "recovered certificate");
             self.metrics.certificates.inc();
-            self.handle_certificate(&ack.chunk, ack.epoch, certificate)
-                .await;
+            self.handle_certificate(&ack.chunk, ack.epoch, certificate);
         }
 
         Ok(())
@@ -778,7 +770,7 @@ impl<
         self.propose_timer = Some(self.metrics.e2e_duration.timer(self.context.as_ref()));
 
         // Broadcast to network
-        if let Err(err) = self.broadcast(node, node_sender, self.epoch).await {
+        if let Err(err) = self.broadcast(node, node_sender, self.epoch) {
             guard.set(Status::Failure);
             return Err(err);
         };
@@ -794,7 +786,7 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the certificate for the chunk.
-    async fn rebroadcast(
+    fn rebroadcast(
         &mut self,
         node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
@@ -832,13 +824,13 @@ impl<
 
         // Broadcast the message, which resets the rebroadcast deadline
         guard.set(Status::Failure);
-        self.broadcast(tip, node_sender, self.epoch).await?;
+        self.broadcast(tip, node_sender, self.epoch)?;
         guard.set(Status::Success);
         Ok(())
     }
 
     /// Send a  `Node` message to all validators in the given epoch.
-    async fn broadcast(
+    fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
         node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
@@ -851,17 +843,14 @@ impl<
         let validators = scheme.participants();
 
         // Tell the relay to broadcast the full data
-        self.relay.broadcast(node.chunk.payload, ()).await;
+        let _ = self.relay.broadcast(node.chunk.payload, ());
 
         // Send the node to all validators
-        node_sender
-            .send(
-                Recipients::Some(validators.iter().cloned().collect()),
-                node.encode(),
-                self.priority_proposals,
-            )
-            .await
-            .map_err(|_| Error::BroadcastFailed)?;
+        node_sender.send(
+            Recipients::Some(validators.iter().cloned().collect()),
+            node.encode(),
+            self.priority_proposals,
+        );
 
         // Set the rebroadcast deadline
         self.rebroadcast_deadline = Some(self.context.current() + self.rebroadcast_timeout);

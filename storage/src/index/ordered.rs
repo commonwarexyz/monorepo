@@ -38,49 +38,8 @@ impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
     }
 }
 
-/// A cursor for the ordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, K: Ord + Send + Sync, V: Eq + Send + Sync> {
-    inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
-}
-
-impl<'a, K: Ord + Send + Sync, V: Eq + Send + Sync> Cursor<'a, K, V> {
-    const fn new(
-        entry: BTreeOccupiedEntry<'a, K, Record<V>>,
-        keys: &'a Gauge,
-        items: &'a Gauge,
-        pruned: &'a Counter,
-    ) -> Self {
-        Self {
-            inner: CursorImpl::<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>::new(
-                entry, keys, items, pruned,
-            ),
-        }
-    }
-}
-
-impl<K: Ord + Send + Sync, V: Eq + Send + Sync> CursorTrait for Cursor<'_, K, V> {
-    type Value = V;
-
-    fn update(&mut self, v: V) {
-        self.inner.update(v)
-    }
-
-    fn next(&mut self) -> Option<&V> {
-        self.inner.next()
-    }
-
-    fn insert(&mut self, v: V) {
-        self.inner.insert(v)
-    }
-
-    fn delete(&mut self) {
-        self.inner.delete()
-    }
-
-    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        self.inner.prune(predicate)
-    }
-}
+/// A [crate::index::Cursor] over the values associated with a translated key.
+pub type Cursor<'a, K, V> = CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>;
 
 /// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
 /// values.
@@ -258,23 +217,24 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_prune(&mut self, key: &[u8], value: V, predicate: impl Fn(&V) -> bool) {
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             BTreeEntry::Occupied(entry) => {
-                // Remove anything that is prunable.
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-                cursor.prune(&predicate);
 
-                // Add our new value (if not prunable).
-                if !predicate(&value) {
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
+
+                // Add the new value only if it should be retained.
+                if should_retain(&value) {
                     cursor.insert(value);
                 }
             }
             BTreeEntry::Vacant(entry) => {
-                // Create the entry only if the new value is not prunable.
-                if !predicate(&value) {
+                // Create the entry only if the value should be retained.
+                if should_retain(&value) {
                     Self::create(&self.keys, &self.items, entry, value);
                 }
             }

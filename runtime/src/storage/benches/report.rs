@@ -1,6 +1,9 @@
 //! Statistics collection and reporting.
 
-use crate::{config::Config, filesystem::backend_name};
+use crate::{
+    config::{Config, Workload},
+    filesystem::backend_name,
+};
 use serde_json::json;
 use std::time::Duration;
 
@@ -161,10 +164,12 @@ impl Report {
             println!("cache={cache}");
         }
         if cfg.workload.has_writes() {
-            println!(
-                "write_shape={} sync_every={}",
-                cfg.write_shape, cfg.sync_mode
-            );
+            println!("write_shape={}", cfg.write_shape);
+            if cfg.workload == Workload::WriteSync {
+                println!("sync_method={}", cfg.sync_method);
+            } else {
+                println!("sync_every={}", cfg.sync_mode);
+            }
         }
 
         if let Some(read) = &self.read {
@@ -190,7 +195,10 @@ impl Report {
             "root": cfg.root,
             "cache": cfg.cache.map(|mode| mode.to_string()),
             "write_shape": cfg.workload.has_writes().then(|| cfg.write_shape.to_string()),
-            "sync_every": cfg.workload.has_writes().then(|| cfg.sync_mode.to_string()),
+            "sync_every": (cfg.workload.has_writes() && cfg.workload != Workload::WriteSync)
+                .then(|| cfg.sync_mode.to_string()),
+            "sync_method": (cfg.workload == Workload::WriteSync)
+                .then(|| cfg.sync_method.to_string()),
             "seed": cfg.seed,
             "elapsed_ns": self.elapsed.as_nanos() as u64,
             "read": self.read.as_ref().map(OperationReport::to_json),

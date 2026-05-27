@@ -64,8 +64,8 @@ stability_scope!(BETA {
 
     pub mod iobuf;
     pub use iobuf::{
-        BufferPool, BufferPoolConfig, BufferPoolThreadCache, Builder as IoBufsBuilder, IoBuf,
-        IoBufMut, IoBufs, IoBufsMut,
+        cache_line_size, page_size, BufferPool, BufferPoolConfig, BufferPoolThreadCache,
+        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut,
     };
 
     pub mod utils;
@@ -768,6 +768,18 @@ stability_scope!(BETA {
 
         /// Write `bufs` to the blob at the given offset.
         fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Write `bufs` to the blob at the given offset and durably persist that write.
+        ///
+        /// This is not a durability barrier for previous operations. When it completes,
+        /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
+        /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
+        /// durable.
+        fn write_at_sync(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,

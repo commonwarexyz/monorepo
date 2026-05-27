@@ -44,21 +44,19 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::validation::Stage,
-        core::Mailbox,
+        core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
-            validation::{
-                fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
-            },
+            validation::{precheck_epoch_and_reproposal, verify_with_parent, Decision},
             Standard,
         },
         Update,
     },
     simplex::{types::Context, Plan},
-    types::{Epoch, Epocher, Round},
+    types::{Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Relay, Reporter,
 };
+use commonware_actor::Feedback;
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -145,6 +143,8 @@ where
     available_blocks: AvailableBlocks<B::Digest>,
 
     build_duration: Timed,
+    proposal_parent_fetch_duration: Timed,
+    ancestor_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
@@ -163,6 +163,8 @@ where
             epocher: self.epocher.clone(),
             available_blocks: self.available_blocks.clone(),
             build_duration: self.build_duration.clone(),
+            proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
+            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
         }
     }
 }
@@ -185,6 +187,18 @@ where
             Buckets::LOCAL,
         );
         let build_duration = Timed::new(build_histogram);
+        let parent_fetch_histogram = context.histogram(
+            "parent_fetch_duration",
+            "Histogram of time taken to fetch a parent block in propose, in seconds",
+            Buckets::LOCAL,
+        );
+        let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
+        let ancestor_fetch_histogram = context.histogram(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+            Buckets::LOCAL,
+        );
+        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
             context: Arc::new(AsyncMutex::new(context)),
@@ -193,6 +207,8 @@ where
             epocher,
             available_blocks: Arc::new(Mutex::new(BTreeSet::new())),
             build_duration,
+            proposal_parent_fetch_duration,
+            ancestor_fetch_duration,
         }
     }
 }
@@ -208,26 +224,6 @@ where
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
 
-    /// Returns the genesis digest for `epoch`.
-    ///
-    /// For epoch zero, returns the application genesis digest. For later epochs,
-    /// uses the previous epoch's terminal block from marshal storage.
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        if epoch.is_zero() {
-            return self.application.genesis().await.digest();
-        }
-
-        let prev = epoch.previous().expect("checked to be non-zero above");
-        let last_height = self
-            .epocher
-            .last(prev)
-            .expect("previous epoch should exist");
-        let Some(block) = self.marshal.get_block(last_height).await else {
-            unreachable!("missing starting epoch block at height {}", last_height);
-        };
-        block.digest()
-    }
-
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest.
@@ -238,10 +234,12 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
-        let mut marshal = self.marshal.clone();
+        let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let build_duration = self.build_duration.clone();
+        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -273,18 +271,23 @@ where
                 return;
             }
 
-            let (parent_view, parent_digest) = consensus_context.parent;
-            let parent_request = fetch_parent(
-                parent_digest,
-                // We are guaranteed that the parent round for any `consensus_context` is
-                // in the same epoch (recall, the boundary block of the previous epoch
-                // is the genesis block of the current epoch).
-                Some(Round::new(consensus_context.epoch(), parent_view)),
-                &mut application,
-                &mut marshal,
-            )
-            .await;
+            // The parent for any consensus context is in the same epoch: the
+            // boundary block of the previous epoch is the genesis block of the
+            // current epoch.
+            //
+            // Proposal context carries the certified parent view/commitment but
+            // not the parent height. The parent may be certified above the
+            // finalized tip, so this must stay round-bound until the block is
+            // returned.
+            let (parent_view, parent_commitment) = consensus_context.parent;
+            let parent_request = marshal.subscribe_by_commitment(
+                parent_commitment,
+                CommitmentFallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                },
+            );
 
+            let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
             let parent = select! {
                 _ = tx.closed() => {
                     debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -294,7 +297,7 @@ where
                     Ok(parent) => parent,
                     Err(_) => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "failed to fetch parent block",
                             "skipping proposal"
                         );
@@ -302,6 +305,7 @@ where
                     }
                 },
             };
+            parent_timer.observe(&runtime_context);
 
             // At epoch boundary, re-propose the parent block.
             let last_in_epoch = epocher
@@ -327,7 +331,11 @@ where
                 return;
             }
 
-            let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+            let ancestor_stream = marshal.ancestor_stream(
+                Arc::new(runtime_context.child("ancestor_stream")),
+                [parent],
+                ancestor_fetch_duration,
+            );
             let build_request = application.propose(
                 (
                     runtime_context.child("app_propose"),
@@ -346,7 +354,7 @@ where
                     Some(block) => block,
                     None => {
                         debug!(
-                            ?parent_digest,
+                            ?parent_commitment,
                             reason = "block building failed",
                             "skipping proposal"
                         );
@@ -379,7 +387,7 @@ where
     /// Performs complete verification inline.
     ///
     /// This method:
-    /// 1. Fetches the block by digest
+    /// 1. Waits for the block by digest
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
     /// 4. Runs application verification over ancestry
@@ -395,6 +403,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let available_blocks = self.available_blocks.clone();
+        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
@@ -404,9 +413,7 @@ where
             .child("inline_verify")
             .with_attribute("round", context.round);
         runtime_context.spawn(move |runtime_context| async move {
-            let block_request = marshal
-                .subscribe_by_digest(Some(context.round), digest)
-                .await;
+            let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
             let Some(block) =
                 await_block_subscription(&mut tx, block_request, &digest, "verification").await
             else {
@@ -451,6 +458,7 @@ where
                 &mut marshal,
                 &mut tx,
                 Stage::Verified,
+                ancestor_fetch_duration,
             )
             .await
             {
@@ -493,8 +501,14 @@ where
             return rx;
         }
 
-        // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        // Otherwise, wait for local block availability and recover from peers by
+        // notarized round if necessary. A Byzantine leader can form a notarization
+        // after sending the proposal to only f+1 honest validators; the honest
+        // validators left without the block must fetch it here to certify and
+        // avoid getting stuck if Byzantine validators stop participating.
+        let block_rx = self
+            .marshal
+            .subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -539,12 +553,12 @@ where
     type PublicKey = S::PublicKey;
     type Plan = Plan<S::PublicKey>;
 
-    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+    fn broadcast(&mut self, commitment: Self::Digest, plan: Plan<S::PublicKey>) -> Feedback {
         let (round, recipients) = match plan {
             Plan::Propose { round } => (round, Recipients::All),
             Plan::Forward { round, recipients } => (round, recipients),
         };
-        self.marshal.forward(round, digest, recipients).await;
+        self.marshal.forward(round, commitment, recipients)
     }
 }
 
@@ -560,13 +574,13 @@ where
     type Activity = A::Activity;
 
     /// Forwards consensus activity to the wrapped application reporter.
-    async fn report(&mut self, update: Self::Activity) {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         if let Update::Tip(tip_round, _, _) = &update {
             self.available_blocks
                 .lock()
                 .retain(|(round, _)| round > tip_round);
         }
-        self.application.report(update).await
+        self.application.report(update)
     }
 }
 
@@ -643,7 +657,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,
@@ -724,7 +738,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,
@@ -796,7 +810,7 @@ mod tests {
             let marshal_actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(context.child("inline"),
                 mock_app,
                 marshal.clone(),
@@ -899,7 +913,7 @@ mod tests {
             let actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
 
             let mut inline = Inline::new(
                 context.child("inline"),
@@ -922,16 +936,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             // Inline verify runs full validation inline and returns true only
             // after `marshal.verified` is enqueued. With the persistence-ack
@@ -1017,7 +1033,7 @@ mod tests {
             let actor_handle = setup.actor_handle;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,
@@ -1037,16 +1053,18 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent.clone())
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child.clone())
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             let certify_result = inline
@@ -1112,7 +1130,7 @@ mod tests {
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
-                GatedVerifyingApp::new(genesis.clone());
+                GatedVerifyingApp::new();
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,
@@ -1132,22 +1150,28 @@ mod tests {
             let child = B::new::<Sha256>(child_ctx.clone(), parent_digest, Height::new(2), 200);
             let child_digest = child.digest();
 
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
-                .await
-                .await
-                .expect("buffer broadcast for parent should ack");
-            buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
-                .await
-                .await
-                .expect("buffer broadcast for child should ack");
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                    .accepted(),
+                "buffer broadcast for parent should be accepted"
+            );
+            assert!(
+                buffer
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                    .accepted(),
+                "buffer broadcast for child should be accepted"
+            );
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
             verify_started
                 .await
                 .expect("verify should reach application before marshal abort");
+
+            // Wait for marshal shutdown to complete before releasing `app.verify`.
+            // This makes the later persistence ack fail deterministically.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             release_verify.send_lossy(());
 
             select! {
@@ -1273,7 +1297,7 @@ mod tests {
 
             let fresh_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let mock_app: MockVerifyingApp<B, S> =
-                MockVerifyingApp::new(genesis.clone()).with_propose_result(fresh_block);
+                MockVerifyingApp::new().with_propose_result(fresh_block);
             let mut inline = Inline::new(
                 context.child("inline"),
                 mock_app,

@@ -2,10 +2,8 @@ use super::{
     ingress::{Mailbox, Message},
     Config,
 };
-use crate::{
-    p2p::{Handler, Monitor},
-    Error,
-};
+use crate::p2p::{Handler, Monitor};
+use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
@@ -15,10 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, mpsc, oneshot},
-    futures::Pool,
-};
+use commonware_utils::{channel::oneshot, futures::Pool};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
@@ -44,7 +39,7 @@ where
     // Message passing
     monitor: M,
     handler: H,
-    mailbox: mpsc::Receiver<Message<P, Rq>>,
+    mailbox: mailbox::Receiver<Message<P, Rq>>,
 
     // State
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
@@ -70,7 +65,7 @@ where
     /// Returns a tuple of the engine and the mailbox for sending messages.
     pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
-        let (tx, rx) = mpsc::channel(cfg.mailbox_size);
+        let (tx, rx) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox: Mailbox<P, Rq> = Mailbox::new(tx);
 
         // Create metrics
@@ -136,41 +131,26 @@ where
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            Some(command) = self.mailbox.recv() else continue => {
-                match command {
-                    Message::Send {
-                        request,
-                        recipients,
-                        responder,
-                    } => {
-                        // Track commitment (if not already tracked)
-                        let commitment = request.commitment();
+            Some(command) = self.mailbox.recv() else continue => match command {
+                Message::Send {
+                    request,
+                    recipients,
+                } => {
+                    let commitment = request.commitment();
+                    let recipients = req_tx.send(recipients, request, self.priority_request);
+                    if !recipients.is_empty() {
                         let entry = self.tracked.entry(commitment).or_insert_with(|| {
                             self.outstanding.inc();
                             (HashSet::new(), HashSet::new())
                         });
-
-                        // Send the request to recipients
-                        match req_tx
-                            .send(recipients, request, self.priority_request)
-                            .await
-                        {
-                            Ok(recipients) => {
-                                entry.0.extend(recipients.iter().cloned());
-                                responder.send_lossy(Ok(recipients));
-                            }
-                            Err(err) => {
-                                error!(?err, ?commitment, "failed to send message");
-                                responder.send_lossy(Err(Error::SendFailed(err.into())));
-                            }
-                        }
+                        entry.0.extend(recipients);
                     }
-                    Message::Cancel { commitment } => {
-                        if self.tracked.remove(&commitment).is_none() {
-                            debug!(?commitment, "ignoring removal of unknown commitment");
-                        }
-                        let _ = self.outstanding.try_set(self.tracked.len());
+                }
+                Message::Cancel { commitment } => {
+                    if self.tracked.remove(&commitment).is_none() {
+                        debug!(?commitment, "ignoring removal of unknown commitment");
                     }
+                    let _ = self.outstanding.try_set(self.tracked.len());
                 }
             },
 
@@ -179,9 +159,7 @@ where
                 self.responses.inc();
 
                 // Send the response
-                let _ = res_tx
-                    .send(Recipients::One(peer), reply, self.priority_response)
-                    .await;
+                let _ = res_tx.send(Recipients::One(peer), reply, self.priority_response);
             },
 
             // Request from an originator
@@ -206,7 +184,7 @@ where
 
                 // Handle the request
                 let (tx, rx) = oneshot::channel();
-                self.handler.process(peer.clone(), msg, tx).await;
+                self.handler.process(peer.clone(), msg, tx);
                 processed.push(async move { Ok((peer, rx.await?)) });
             },
 
@@ -244,7 +222,7 @@ where
                 }
 
                 // Send the response to the monitor
-                self.monitor.collected(peer, msg, responses.1.len()).await;
+                self.monitor.collected(peer, msg, responses.1.len());
             },
         }
     }

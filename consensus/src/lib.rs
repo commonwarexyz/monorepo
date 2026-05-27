@@ -18,7 +18,7 @@ stability_scope!(BETA {
     pub mod simplex;
 
     pub mod types;
-    use types::{Epoch, Height, View};
+    use types::{Epoch, Height, View, Round};
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -40,6 +40,18 @@ stability_scope!(BETA {
         /// Returns the view associated with this object.
         fn view(&self) -> View;
     }
+
+    /// Roundable is a trait that provides access to the [`Round`] number.
+    /// Any consensus message or object that implements [`Epochable`] and [`Viewable`] automatically
+    /// implements this trait.
+    pub trait Roundable: Epochable + Viewable {
+        /// Returns the round associated with this object, derived from its epoch and view.
+        fn round(&self) -> Round {
+            Round::new(self.epoch(), self.view())
+        }
+    }
+
+    impl<T: Epochable + Viewable> Roundable for T {}
 
     /// Block is the interface for a block in the blockchain.
     ///
@@ -63,7 +75,7 @@ stability_scope!(BETA {
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::types::Round;
+    use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
@@ -90,9 +102,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Hash of an arbitrary payload.
         type Digest: Digest;
-
-        /// Payload used to initialize the consensus engine.
-        fn genesis(&mut self, epoch: Epoch) -> impl Future<Output = Self::Digest> + Send;
 
         /// Generate a new payload for the given context.
         ///
@@ -196,11 +205,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         type Plan: Send;
 
         /// Broadcast a payload according to the given plan.
-        fn broadcast(
-            &mut self,
-            payload: Self::Digest,
-            plan: Self::Plan,
-        ) -> impl Future<Output = ()> + Send;
+        fn broadcast(&mut self, payload: Self::Digest, plan: Self::Plan) -> Feedback;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.
@@ -214,7 +219,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         type Activity;
 
         /// Report some activity observed by the consensus implementation.
-        fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
+        fn report(&mut self, activity: Self::Activity) -> Feedback;
     }
 
     /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.
@@ -239,8 +244,8 @@ stability_scope!(ALPHA {
     pub mod ordered_broadcast;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::{AncestorStream, BlockProvider};
     use commonware_cryptography::certificate::Scheme;
+    use crate::marshal::ancestry::Ancestry;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand::Rng;
 
@@ -261,15 +266,15 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// The block type produced by the application's builder.
         type Block: Block;
 
-        /// Payload used to initialize the consensus engine in the first epoch.
-        fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
-
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
-        /// the implementor should return [None].
-        fn propose<A: BlockProvider<Block = Self::Block>>(
+        /// or the proposer's slot should be skipped, the implementor should return [None].
+        ///
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
+        fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<A, Self::Block>,
+            ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
@@ -278,10 +283,18 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Return `false` only when the block is permanently invalid for the supplied context and
         /// ancestry. If validity may still change as additional information becomes available,
         /// continue waiting instead of returning `false`.
-        fn verify<A: BlockProvider<Block = Self::Block>>(
+        ///
+        /// In other words, to abstain from voting, do not resolve this future yet. Keep it
+        /// pending until the implementation can either prove the block valid, prove it invalid,
+        /// or the consensus engine cancels the request. Abstaining is not represented by a
+        /// special return value.
+        ///
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
+        fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<A, Self::Block>,
+            ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

@@ -129,24 +129,29 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Sets the status of a peer to `connected`.
     ///
+    /// Returns `false` if the reservation was invalidated by an address change.
+    ///
     /// # Panics
     ///
     /// Panics if the peer has no record or if the peer is not in the reserved state.
-    pub fn connect(&mut self, peer: &C) {
+    pub fn connect(&mut self, peer: &C) -> bool {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
-        record.connect();
+        if !record.connect() {
+            return false;
+        }
         let _ = self
             .metrics
             .connected
             .get_or_create_by(peer)
             .try_set(self.context.current().epoch_millis());
+        true
     }
 
     /// Track new primary and secondary peer sets for the given index.
     ///
-    /// Returns the peers whose connections should be reset because they were
-    /// removed from all tracked peer sets or had their address changed.
+    /// Returns peers whose connection state should be torn down because they were removed from all
+    /// tracked peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.
     pub fn track(&mut self, index: u64, peers: AddressableTrackedPeers<C>) -> Option<Set<C>> {
@@ -166,14 +171,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Create and store new primary peer set (all peers are tracked regardless of address
         // validity).
-        let mut reset_peers = Vec::new();
+        let mut kill_peers = Vec::new();
         for (primary, addr) in &peers.primary {
             let record = match self.peers.entry(primary.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
                         self.metrics.updates.get_or_create_by(primary).inc();
-                        reset_peers.push(primary.clone());
+                        if entry.is_reserved_or_connected() {
+                            kill_peers.push(primary.clone());
+                        }
                     }
                     entry
                 }
@@ -195,7 +202,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
                         self.metrics.updates.get_or_create_by(secondary).inc();
-                        reset_peers.push(secondary.clone());
+                        if entry.is_reserved_or_connected() {
+                            kill_peers.push(secondary.clone());
+                        }
                     }
                     entry
                 }
@@ -229,24 +238,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(index = removed_index, "removed oldest tracked peer sets");
             sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(&primary).unwrap().decrement_primary();
-                let deleted = self.delete_if_needed(&primary);
-                if deleted {
-                    reset_peers.push(primary);
-                }
+                self.queue_if_needs_teardown(&primary, &mut kill_peers);
             });
             sets.secondary.into_iter().for_each(|secondary| {
                 self.peers
                     .get_mut(&secondary)
                     .unwrap()
                     .decrement_secondary();
-                let deleted = self.delete_if_needed(&secondary);
-                if deleted {
-                    reset_peers.push(secondary);
-                }
+                self.queue_if_needs_teardown(&secondary, &mut kill_peers);
             });
         }
 
-        Some(Set::from_iter_dedup(reset_peers))
+        Some(Set::from_iter_dedup(kill_peers))
     }
 
     /// Update a tracked peer's address.
@@ -304,7 +307,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to reserve a peer for the listener.
     ///
     /// Returns `Some` on success, `None` otherwise.
-    pub fn listen(&mut self, peer: &C) -> Option<Reservation<C>> {
+    pub fn listen(&mut self, peer: &C, source_ip: IpAddr) -> Option<Reservation<C>> {
+        // Re-check the source IP when reserving: the handshake's earlier
+        // acceptability check may be stale if the peer address changed.
+        if !self.acceptable(peer, source_ip) {
+            return None;
+        }
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
@@ -488,15 +496,29 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Attempt to delete a record.
+    /// Queue connection state for teardown if it is no longer valid, then delete inert records.
     ///
-    /// Returns `true` if the record was deleted, `false` otherwise.
-    fn delete_if_needed(&mut self, peer: &C) -> bool {
+    /// Active peers need a kill signal. Reserved peers may not have registered a mailbox yet; in
+    /// that case the actor kill path is a no-op and later Connect rejection or reservation release
+    /// completes cleanup.
+    fn queue_if_needs_teardown(&mut self, peer: &C, kill_peers: &mut Vec<C>) {
+        if self
+            .peers
+            .get(peer)
+            .is_some_and(|record| record.needs_teardown())
+        {
+            kill_peers.push(peer.clone());
+        }
+        self.delete_if_needed(peer);
+    }
+
+    /// Attempt to delete a record.
+    fn delete_if_needed(&mut self, peer: &C) {
         let Some(record) = self.peers.get(peer) else {
-            return false;
+            return;
         };
         if !record.deletable() {
-            return false;
+            return;
         }
 
         // We don't decrement the blocked metric here because the block
@@ -504,17 +526,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
         self.metrics.tracked.dec();
-        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        authenticated::{lookup::actors::tracker::directory::Directory, mailbox::UnboundedMailbox},
-        types::Address,
+        authenticated::lookup::actors::tracker::directory::Directory, types::Address,
         AddressableTrackedPeers, Ingress,
     };
+    use commonware_actor::mailbox;
     use commonware_cryptography::{ed25519, Signer};
     use commonware_runtime::{deterministic, Clock, Metrics as _, Runner, Supervisor as _};
     use commonware_utils::{
@@ -545,12 +566,17 @@ mod tests {
             .and_then(|value| value.parse::<i64>().ok())
     }
 
+    fn new_releaser<C: commonware_cryptography::PublicKey>(
+        metrics: impl commonware_runtime::Metrics,
+    ) -> super::Releaser<C> {
+        let (tx, _rx) = mailbox::new(metrics, NZUsize!(1024));
+        super::Releaser::new(tx)
+    }
+
     #[test]
-    fn test_track_return_value() {
+    fn test_track_only_returns_live_peers_for_teardown() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -568,9 +594,10 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     0,
                     primary(
@@ -581,11 +608,11 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                reset_peers.is_empty(),
-                "No peers should be deleted on first set"
+                kill_peers.is_empty(),
+                "No peers should need teardown on first set"
             );
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     1,
                     primary(
@@ -595,31 +622,78 @@ mod tests {
                     ),
                 )
                 .unwrap();
-            assert_eq!(reset_peers.len(), 1, "One peer should be reset");
             assert!(
-                reset_peers.position(&pk_1).is_some(),
-                "Reset peer should be pk_1"
+                kill_peers.is_empty(),
+                "Inert deleted records should not need teardown"
             );
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     2,
                     primary([(pk_3.clone(), addr(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
-            assert_eq!(reset_peers.len(), 1, "One peer should be reset");
             assert!(
-                reset_peers.position(&pk_2).is_some(),
-                "Reset peer should be pk_2"
+                kill_peers.is_empty(),
+                "Inert deleted records should not need teardown"
             );
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     3,
                     primary([(pk_3.clone(), addr(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
-            assert!(reset_peers.is_empty(), "No peers should be reset");
+            assert!(kill_peers.is_empty(), "No peers should be killed");
+        });
+    }
+
+    #[test]
+    fn test_track_kills_connected_peer_removed_from_sets() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(1),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory
+                .track(
+                    0,
+                    primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+                )
+                .unwrap();
+            let reservation = directory
+                .listen(&pk_1, addr_1.ip())
+                .expect("peer should reserve");
+            directory.connect(&pk_1);
+
+            let kill_peers = directory
+                .track(
+                    1,
+                    primary([(pk_2.clone(), addr(addr_2))].try_into().unwrap()),
+                )
+                .unwrap();
+
+            assert_eq!(kill_peers, Set::try_from([pk_1.clone()]).unwrap());
+            let record = directory.peers.get(&pk_1).unwrap();
+            assert!(!record.deletable());
+            directory.release(reservation.metadata().clone());
+            assert!(!directory.peers.contains_key(&pk_1));
+            assert_eq!(reservation.metadata().public_key(), &pk_1);
         });
     }
 
@@ -627,8 +701,6 @@ mod tests {
     fn test_secondary_sets_remain_until_eviction() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -650,6 +722,7 @@ mod tests {
         let secondary_1_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1239);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             assert!(directory
@@ -695,8 +768,6 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -715,8 +786,12 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk.clone(), config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk.clone(),
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             directory.track(
                 0,
@@ -783,23 +858,21 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     3,
                     primary([(my_pk.clone(), addr(my_addr))].try_into().unwrap()),
                 )
                 .unwrap();
-            assert_eq!(reset_peers.len(), 1);
-            assert!(reset_peers.position(&pk_2).is_some());
+            assert!(kill_peers.is_empty());
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     4,
                     primary([(my_pk.clone(), addr(addr_3))].try_into().unwrap()),
                 )
                 .unwrap();
-            assert_eq!(reset_peers.len(), 1);
-            assert!(reset_peers.position(&pk_1).is_some());
+            assert!(kill_peers.is_empty());
 
             let result = directory.track(
                 0,
@@ -817,8 +890,6 @@ mod tests {
     fn test_track_updates_metric_for_secondary_address_change() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -833,8 +904,12 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             directory
                 .track(
@@ -878,8 +953,6 @@ mod tests {
     fn test_track_primary_secondary_overlap_deduplicates() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -895,9 +968,10 @@ mod tests {
 
         runtime.start(|context| async move {
             // Same pk in primary and secondary maps; deduplicated as primary only.
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     0,
                     AddressableTrackedPeers::new(
@@ -907,7 +981,7 @@ mod tests {
                 )
                 .unwrap();
 
-            assert!(reset_peers.is_empty());
+            assert!(kill_peers.is_empty());
             assert_eq!(directory.latest_set_index(), Some(0));
             let peer_set = directory.get_peer_set(&0).unwrap();
             assert_eq!(peer_set.primary, [pk_1.clone()].try_into().unwrap());
@@ -933,8 +1007,6 @@ mod tests {
     fn test_demotion_from_primary_to_secondary() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -950,6 +1022,7 @@ mod tests {
         let addr_y = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2000);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Index 0: X is primary, Y is secondary.
@@ -1024,14 +1097,12 @@ mod tests {
     fn test_track_primary_wins_conflicting_overlap_when_updating_existing_address() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: NZUsize!(3),
-            peer_connection_cooldown: Duration::from_millis(100),
+            peer_connection_cooldown: Duration::ZERO,
             block_duration: Duration::from_secs(100),
         };
 
@@ -1040,17 +1111,22 @@ mod tests {
         let new_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2235);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let initial_reset = directory
+            let initial_kill = directory
                 .track(
                     0,
                     primary([(pk_1.clone(), addr(old_addr))].try_into().unwrap()),
                 )
                 .unwrap();
-            assert!(initial_reset.is_empty());
+            assert!(initial_kill.is_empty());
+            let reservation = directory
+                .listen(&pk_1, old_addr.ip())
+                .expect("peer should reserve");
+            directory.connect(&pk_1);
 
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     1,
                     AddressableTrackedPeers::new(
@@ -1060,7 +1136,7 @@ mod tests {
                 )
                 .unwrap();
 
-            assert_eq!(reset_peers, Set::try_from([pk_1.clone()]).unwrap());
+            assert_eq!(kill_peers, Set::try_from([pk_1.clone()]).unwrap());
             assert_eq!(directory.latest_set_index(), Some(1));
             assert_eq!(
                 directory.get_peer_set(&1).unwrap().primary,
@@ -1071,6 +1147,7 @@ mod tests {
                 Some(Ingress::Socket(new_addr))
             );
             assert_eq!(directory.all().primary, [pk_1.clone()].try_into().unwrap());
+            directory.release(reservation.metadata().clone());
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
             assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(new_addr));
             assert!(directory.listenable().contains(&new_addr.ip()));
@@ -1082,8 +1159,6 @@ mod tests {
     fn test_all_cross_index_primary_wins_for_overlap_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -1106,6 +1181,7 @@ mod tests {
 
         runtime.start(|context| async move {
             // pk_overlap: primary in set 0 (address addr_overlap_p), secondary in set 1 (addr_overlap_s).
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             assert!(directory
@@ -1156,8 +1232,6 @@ mod tests {
     fn test_connected_metric_tracks_active_peers() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -1171,8 +1245,12 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
             directory
                 .track(
                     0,
@@ -1180,7 +1258,9 @@ mod tests {
                 )
                 .unwrap();
 
-            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
+            let _reservation = directory
+                .listen(&pk_1, addr_1.ip())
+                .expect("peer should reserve");
             let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
             directory.connect(&pk_1);
 
@@ -1206,8 +1286,6 @@ mod tests {
     fn test_blocked_peer_remains_blocked_on_update() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -1223,8 +1301,12 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2235);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk.clone(), config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk.clone(),
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             directory.track(
                 0,
@@ -1282,8 +1364,6 @@ mod tests {
     fn test_asymmetric_addresses() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -1314,10 +1394,11 @@ mod tests {
         };
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             // Add set with asymmetric addresses
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     0,
                     primary(
@@ -1330,7 +1411,7 @@ mod tests {
                     ),
                 )
                 .unwrap();
-            assert!(reset_peers.is_empty());
+            assert!(kill_peers.is_empty());
 
             // Verify peer 1 has correct ingress and egress
             let record_1 = directory.peers.get(&pk_1).unwrap();
@@ -1382,8 +1463,6 @@ mod tests {
     fn test_dns_addresses_registered_but_not_dialable_when_disabled() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
 
         // DNS is disabled
         let config = super::Config {
@@ -1411,10 +1490,11 @@ mod tests {
         };
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both socket and DNS addresses
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     0,
                     primary(
@@ -1427,7 +1507,7 @@ mod tests {
                     ),
                 )
                 .unwrap();
-            assert!(reset_peers.is_empty());
+            assert!(kill_peers.is_empty());
 
             // Both peers should be in the peer set (for consistency)
             assert!(
@@ -1450,8 +1530,6 @@ mod tests {
     fn test_private_egress_ip_in_peer_set_but_not_dialable_or_tracked() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
 
         // Private IPs are NOT allowed
         let config = super::Config {
@@ -1476,10 +1554,11 @@ mod tests {
         ));
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both public and private egress IPs
-            let reset_peers = directory
+            let kill_peers = directory
                 .track(
                     0,
                     primary(
@@ -1492,7 +1571,7 @@ mod tests {
                     ),
                 )
                 .unwrap();
-            assert!(reset_peers.is_empty());
+            assert!(kill_peers.is_empty());
 
             // Both peers should be in the peer set (for consistency)
             assert!(
@@ -1520,8 +1599,6 @@ mod tests {
     fn test_listenable_ip_collision_eligible_wins() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -1539,8 +1616,12 @@ mod tests {
         let addr_2 = Address::Symmetric(SocketAddr::new(shared_ip, 8081));
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Add both peers with the same IP
             directory.track(
@@ -1585,8 +1666,6 @@ mod tests {
     fn test_unblock_expired() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -1601,8 +1680,12 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             directory.track(
                 0,
@@ -1668,8 +1751,6 @@ mod tests {
     fn test_unblock_expired_peer_removed_and_readded() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -1686,8 +1767,12 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Initially no blocked peers
             assert!(
@@ -1756,8 +1841,6 @@ mod tests {
     fn test_blocked_metric_multiple_peers() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -1776,8 +1859,12 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Add all peers
             directory.track(
@@ -1821,8 +1908,6 @@ mod tests {
     fn test_block_myself_no_panic_on_expiry() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -1834,8 +1919,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk.clone(), config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk.clone(),
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Blocking myself should be ignored (Myself is unblockable)
             directory.block(&my_pk);
@@ -1863,8 +1952,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let unknown_pk = ed25519::PrivateKey::from_seed(99).public_key();
         let unknown_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -1876,8 +1963,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Block a peer that doesn't exist yet
             directory.block(&unknown_pk);
@@ -1950,8 +2041,6 @@ mod tests {
         let unknown_pk = ed25519::PrivateKey::from_seed(99).public_key();
         let registered_pk = ed25519::PrivateKey::from_seed(50).public_key();
         let registered_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5050);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -1963,8 +2052,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Register a peer
             directory.track(
@@ -2026,8 +2119,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -2039,8 +2130,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Add peer to a set
             directory.track(
@@ -2081,8 +2176,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_secs(1);
         let config = super::Config {
             allow_private_ips: true,
@@ -2094,8 +2187,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2134,8 +2231,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_secs(1);
         let config = super::Config {
             allow_private_ips: true,
@@ -2147,8 +2242,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2174,8 +2273,6 @@ mod tests {
     fn test_dialable_empty() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_millis(200);
         let config = super::Config {
             allow_private_ips: true,
@@ -2187,7 +2284,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let directory = Directory::init(context.child("directory"), my_pk, config, releaser);
+            let directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
@@ -2201,8 +2303,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let cooldown = Duration::from_millis(200);
         let config = super::Config {
             allow_private_ips: true,
@@ -2214,8 +2314,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2240,8 +2344,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(1);
         let config = super::Config {
             allow_private_ips: true,
@@ -2253,8 +2355,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2290,8 +2396,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(1);
         let config = super::Config {
             allow_private_ips: true,
@@ -2303,8 +2407,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -2335,8 +2443,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -2348,8 +2454,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Add peer to a set
             directory.track(
@@ -2390,8 +2500,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -2403,8 +2511,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Add peer to a set
             directory.track(
@@ -2445,8 +2557,6 @@ mod tests {
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -2458,8 +2568,12 @@ mod tests {
         };
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             // Add peer to a set
             directory.track(
@@ -2498,8 +2612,6 @@ mod tests {
     fn test_overwrite_basic() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -2514,6 +2626,7 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             directory.track(
@@ -2539,8 +2652,6 @@ mod tests {
     fn test_overwrite_untracked_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -2554,6 +2665,7 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let success = directory.overwrite(&pk_1, addr(addr_1));
@@ -2565,8 +2677,6 @@ mod tests {
     fn test_overwrite_peer_not_in_set() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -2583,6 +2693,7 @@ mod tests {
         let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             directory.track(
@@ -2603,8 +2714,6 @@ mod tests {
     fn test_overwrite_blocked_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let block_duration = Duration::from_secs(100);
         let config = super::Config {
             allow_private_ips: true,
@@ -2620,8 +2729,12 @@ mod tests {
         let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
 
         runtime.start(|context| async move {
-            let mut directory =
-                Directory::init(context.child("directory"), my_pk, config, releaser);
+            let mut directory = Directory::init(
+                context.child("directory"),
+                my_pk,
+                config,
+                new_releaser(context.child("releaser")),
+            );
 
             directory.track(
                 0,
@@ -2651,8 +2764,6 @@ mod tests {
     fn test_overwrite_myself() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -2665,6 +2776,7 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             let success = directory.overwrite(&my_pk, addr(addr_1));
@@ -2676,8 +2788,6 @@ mod tests {
     fn test_overwrite_same_address() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
-        let (tx, _rx) = UnboundedMailbox::new();
-        let releaser = super::Releaser::new(tx);
         let config = super::Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -2691,6 +2801,7 @@ mod tests {
         let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
 
         runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             directory.track(

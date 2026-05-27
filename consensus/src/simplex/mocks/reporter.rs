@@ -12,6 +12,7 @@ use crate::{
     types::{Round, View},
     Monitor, Viewable,
 };
+use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_parallel::Sequential;
@@ -163,7 +164,7 @@ where
 {
     type Activity = Activity<S, D>;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
@@ -171,7 +172,7 @@ where
             Activity::Notarize(notarize) => {
                 if !notarize.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = notarize.encode();
                 Notarize::<S, D>::decode(encoded).unwrap();
@@ -196,7 +197,7 @@ where
                     &Sequential,
                 ) {
                     *self.invalid_certificates.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = notarization.encode();
                 Notarization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
@@ -207,7 +208,7 @@ where
             Activity::Nullify(nullify) => {
                 if !nullify.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = nullify.encode();
                 Nullify::<S>::decode(encoded).unwrap();
@@ -230,7 +231,7 @@ where
                     &Sequential,
                 ) {
                     *self.invalid_certificates.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = nullification.encode();
                 Nullification::<S>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
@@ -243,7 +244,7 @@ where
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = finalize.encode();
                 Finalize::<S, D>::decode(encoded).unwrap();
@@ -268,7 +269,7 @@ where
                     &Sequential,
                 ) {
                     *self.invalid_certificates.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = finalization.encode();
                 Finalization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
@@ -287,7 +288,7 @@ where
                 let view = conflicting.view();
                 if !conflicting.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<S, D>::decode(encoded).unwrap();
@@ -304,7 +305,7 @@ where
                 let view = conflicting.view();
                 if !conflicting.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<S, D>::decode(encoded).unwrap();
@@ -321,7 +322,7 @@ where
                 let view = conflicting.view();
                 if !conflicting.verify(&mut *self.context.lock(), &self.scheme, &Sequential) {
                     *self.invalid_votes.lock() += 1;
-                    return;
+                    return Feedback::Ok;
                 }
                 let encoded = conflicting.encode();
                 NullifyFinalize::<S, D>::decode(encoded).unwrap();
@@ -335,6 +336,7 @@ where
                     .insert(activity);
             }
         }
+        Feedback::Ok
     }
 }
 

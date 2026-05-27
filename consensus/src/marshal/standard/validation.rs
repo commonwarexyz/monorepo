@@ -1,10 +1,9 @@
 use crate::{
     marshal::{
-        ancestry::AncestorStream,
         application::validation::{
             has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify, Stage,
         },
-        core::Mailbox,
+        core::{CommitmentFallback, Mailbox},
         standard::Standard,
     },
     simplex::types::Context,
@@ -13,10 +12,10 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner};
-use commonware_utils::channel::oneshot::{self, error::RecvError};
-use futures::future::{ready, Either, Ready};
+use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics, Spawner};
+use commonware_utils::channel::oneshot;
 use rand::Rng;
+use std::sync::Arc;
 use tracing::debug;
 
 /// Validation failures for standard verification.
@@ -118,6 +117,7 @@ where
 /// - `Some(valid)` when a verification verdict is available.
 /// - `None` when work should stop early (e.g., receiver dropped or parent unavailable).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn verify_with_parent<E, S, A, B>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
@@ -126,6 +126,7 @@ pub(super) async fn verify_with_parent<E, S, A, B>(
     marshal: &mut Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
     stage: Stage,
+    ancestor_fetch_duration: Timed,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -133,17 +134,13 @@ where
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Clone,
 {
-    let (parent_view, parent_digest) = context.parent;
-    let parent_request = fetch_parent(
-        parent_digest,
-        // We are guaranteed that the parent round for any `context` is
-        // in the same epoch (recall, the boundary block of the previous epoch
-        // is the genesis block of the current epoch).
-        Some(Round::new(context.epoch(), parent_view)),
-        application,
-        marshal,
-    )
-    .await;
+    let (parent_view, parent_commitment) = context.parent;
+    let parent_request = marshal.subscribe_by_commitment(
+        parent_commitment,
+        CommitmentFallback::FetchByRound {
+            round: Round::new(context.epoch(), parent_view),
+        },
+    );
     // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
@@ -157,7 +154,7 @@ where
             Ok(parent) => parent,
             Err(_) => {
                 debug!(
-                    ?parent_digest,
+                    ?parent_commitment,
                     reason = "failed to fetch parent block",
                     "skipping verification"
                 );
@@ -166,8 +163,8 @@ where
         },
     };
 
-    // Validate parent digest and contiguous child height before application logic.
-    if let Err(err) = validate_block(&block, &parent, parent_digest) {
+    // Validate parent linkage and contiguous child height before application logic.
+    if let Err(err) = validate_block(&block, &parent, parent_commitment) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -180,7 +177,11 @@ where
     }
 
     // Request verification from the application over the two-block ancestry prefix.
-    let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
+    let ancestry_stream = marshal.ancestor_stream(
+        Arc::new(runtime_context.child("ancestor_stream")),
+        [block.clone(), parent],
+        ancestor_fetch_duration,
+    );
     let validity_request = application.verify(
         (runtime_context.child("app_verify"), context.clone()),
         ancestry_stream,
@@ -202,41 +203,6 @@ where
         return None;
     }
     Some(application_valid)
-}
-
-/// Fetches the parent block given its digest and optional round hint.
-///
-/// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
-/// to marshal for parent availability.
-///
-/// `parent_round` is a resolver hint. Callers should only provide a hint when the
-/// source context is trusted/validated. Untrusted paths should pass `None`.
-///
-/// The returned subscription receiver may resolve with `RecvError` if marshal
-/// cancels the request.
-#[inline]
-pub(super) async fn fetch_parent<E, S, A, B>(
-    parent_digest: B::Digest,
-    parent_round: Option<Round>,
-    application: &mut A,
-    marshal: &mut Mailbox<S, Standard<B>>,
-) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block + Clone,
-{
-    let genesis = application.genesis().await;
-    if parent_digest == genesis.digest() {
-        Either::Left(ready(Ok(genesis)))
-    } else {
-        Either::Right(
-            marshal
-                .subscribe_by_digest(parent_round, parent_digest)
-                .await,
-        )
-    }
 }
 
 #[cfg(test)]

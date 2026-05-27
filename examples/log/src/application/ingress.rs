@@ -1,32 +1,36 @@
+use commonware_actor::{
+    mailbox::{Policy, Sender},
+    Feedback,
+};
 use commonware_consensus::{
     simplex::{types::Context, Plan},
-    types::Epoch,
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::channel::oneshot;
+use std::collections::VecDeque;
 
 pub enum Message<D: Digest> {
-    Genesis {
-        epoch: Epoch,
-        response: oneshot::Sender<D>,
-    },
-    Propose {
-        response: oneshot::Sender<D>,
-    },
-    Verify {
-        response: oneshot::Sender<bool>,
-    },
+    Propose { response: oneshot::Sender<D> },
+    Verify { response: oneshot::Sender<bool> },
+}
+
+impl<D: Digest> Policy for Message<D> {
+    type Overflow = VecDeque<Self>;
+
+    fn handle(overflow: &mut VecDeque<Self>, message: Self) {
+        overflow.push_back(message);
+    }
 }
 
 /// Mailbox for the application.
 #[derive(Clone)]
 pub struct Mailbox<D: Digest> {
-    sender: mpsc::Sender<Message<D>>,
+    pub(super) sender: Sender<Message<D>>,
 }
 
 impl<D: Digest> Mailbox<D> {
-    pub(super) const fn new(sender: mpsc::Sender<Message<D>>) -> Self {
+    pub(super) const fn new(sender: Sender<Message<D>>) -> Self {
         Self { sender }
     }
 }
@@ -35,15 +39,6 @@ impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest, PublicKey>;
 
-    async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Genesis { epoch, response })
-            .await
-            .expect("Failed to send genesis");
-        receiver.await.expect("Failed to receive genesis")
-    }
-
     async fn propose(
         &mut self,
         _: Context<Self::Digest, PublicKey>,
@@ -51,10 +46,12 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Propose { response })
-            .await
-            .expect("Failed to send propose");
+        assert!(
+            self.sender
+                .enqueue(Message::Propose { response })
+                .accepted(),
+            "Failed to send propose"
+        );
         receiver
     }
 
@@ -68,10 +65,10 @@ impl<D: Digest> Au for Mailbox<D> {
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Verify { response })
-            .await
-            .expect("Failed to send verify");
+        assert!(
+            self.sender.enqueue(Message::Verify { response }).accepted(),
+            "Failed to send verify"
+        );
         receiver
     }
 }
@@ -85,10 +82,11 @@ impl<D: Digest> Re for Mailbox<D> {
     type PublicKey = PublicKey;
     type Plan = Plan<PublicKey>;
 
-    async fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) {
+    fn broadcast(&mut self, _: Self::Digest, _: Self::Plan) -> Feedback {
         // We don't broadcast our raw messages to other peers.
         //
         // If we were building an EVM blockchain, for example, we'd
         // send the block to other peers here.
+        Feedback::Ok
     }
 }

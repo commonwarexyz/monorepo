@@ -76,6 +76,11 @@ check-docs *args='':
 check-publish-order:
     python3 .github/scripts/check_publish_order.py
 
+# Check that locked dependencies are at least 7 days old
+cooldown:
+    cargo cooldown --workspace --all-features check
+    git diff --exit-code Cargo.lock
+
 # Run custom Dylint lints
 dylint:
     cargo {{ nightly_version }} dylint --all --workspace -- --all-targets

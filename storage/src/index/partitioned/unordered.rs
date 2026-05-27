@@ -94,15 +94,15 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Inde
         partition.insert(sub_key, value);
     }
 
-    fn insert_and_prune(
+    fn insert_and_retain(
         &mut self,
         key: &[u8],
         value: Self::Value,
-        predicate: impl Fn(&Self::Value) -> bool,
+        should_retain: impl Fn(&Self::Value) -> bool,
     ) {
         let (partition, sub_key) = self.get_partition_mut(key);
 
-        partition.insert_and_prune(sub_key, value, predicate);
+        partition.insert_and_retain(sub_key, value, should_retain);
     }
 
     fn remove(&mut self, key: &[u8]) {

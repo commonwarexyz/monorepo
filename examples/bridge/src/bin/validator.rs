@@ -4,7 +4,9 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine},
+    simplex::{
+        self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine, Floor,
+    },
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -193,7 +195,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.track(0, validators.clone()).await;
+        oracle.track(0, validators.clone());
 
         // Register consensus channels
         //
@@ -229,7 +231,7 @@ fn main() {
                 hasher: Sha256::default(),
                 this_network,
                 other_network,
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
             },
         );
 
@@ -244,8 +246,9 @@ fn main() {
                 relay: mailbox.clone(),
                 reporter: mailbox.clone(),
                 partition: String::from("log"),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch: Epoch::zero(),
+                floor: Floor::Genesis(application::genesis::<Sha256>()),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
@@ -254,7 +257,7 @@ fn main() {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
-                fetch_concurrent: 32,
+                fetch_concurrent: NZUsize!(32),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,

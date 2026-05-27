@@ -1,7 +1,7 @@
 //! Service engine for `commonware-reshare` validators.
 
 use crate::{
-    application::{Application, Block, EpochProvider, Provider},
+    application::{genesis, Application, Block, EpochProvider, Provider},
     dkg::{self, UpdateCallBack, MAX_SUPPORTED_MODE},
     orchestrator,
     setup::PeerConfig,
@@ -12,7 +12,7 @@ use commonware_consensus::{
     marshal::{
         self,
         core::Actor as MarshalActor,
-        resolver::handler,
+        resolver,
         standard::{Deferred, Standard},
     },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
@@ -20,7 +20,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::Output,
+        dkg::feldman_desmedt::Output,
         primitives::{group, variant::Variant},
     },
     ed25519::Batch,
@@ -33,17 +33,17 @@ use commonware_runtime::{
     Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
+use commonware_utils::{union, NZUsize, NZU16, NZU32, NZU64};
 use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
-    num::{NonZero, NonZeroU16},
+    num::{NonZero, NonZeroU16, NonZeroUsize},
     time::Instant,
 };
 use tracing::{error, info, warn};
 
-const MAILBOX_SIZE: usize = 1024;
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
 const DEQUE_SIZE: usize = 10;
 const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
@@ -260,6 +260,7 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
+        let genesis = genesis::<H, C, V>();
         let (marshal, marshal_mailbox, _processed_height) = MarshalActor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -267,6 +268,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                start: marshal::Start::Genesis(genesis),
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention_timeout: ViewDelta::new(
@@ -302,7 +304,7 @@ where
                 provider,
                 marshal: marshal_mailbox,
                 strategy: config.strategy.clone(),
-                muxer_size: MAILBOX_SIZE,
+                muxer_size: MAILBOX_SIZE.get(),
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
                 _phantom: PhantomData,
@@ -346,8 +348,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<H::Digest>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
+            resolver::handler::Receiver<H::Digest>,
+            resolver::p2p::Mailbox<H::Digest, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) -> Handle<()> {
@@ -389,8 +391,8 @@ where
             impl Receiver<PublicKey = C::PublicKey>,
         ),
         marshal: (
-            mpsc::Receiver<handler::Message<H::Digest>>,
-            commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
+            resolver::handler::Receiver<H::Digest>,
+            resolver::p2p::Mailbox<H::Digest, C::PublicKey>,
         ),
         callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {

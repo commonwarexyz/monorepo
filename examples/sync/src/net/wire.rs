@@ -5,6 +5,7 @@ use commonware_codec::{
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
+    merkle::MAX_PINNED_NODES,
     mmr::{self, Location, Proof},
     qmdb::sync::{compact, compact::State, Target},
 };
@@ -12,9 +13,6 @@ use std::num::NonZeroU64;
 
 /// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
-
-/// Maximum number of pinned nodes (one per MMR peak, bounded by max tree height).
-pub const MAX_PINNED_NODES: usize = 64;
 
 /// Request for operations from the server.
 #[derive(Debug)]

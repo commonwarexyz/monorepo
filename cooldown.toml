@@ -1,0 +1,4 @@
+cooldown_minutes = 10080
+enforcement = "strict"
+lockfile_baseline = "ignore"
+cache_dir = "target/cargo-cooldown"

@@ -10,6 +10,7 @@ use crate::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal,
         },
+        Floor,
     },
     types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
     Viewable,
@@ -151,6 +152,21 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.genesis = Some(genesis);
         self.enter_view(GENESIS_VIEW.next());
         self.set_leader(GENESIS_VIEW.next(), None);
+    }
+
+    /// Seeds the state machine from the configured floor.
+    pub fn set_floor(&mut self, floor: Floor<S, D>) -> Option<Finalization<S, D>> {
+        match floor {
+            Floor::Genesis(genesis) => {
+                self.set_genesis(genesis);
+                None
+            }
+            Floor::Finalized(finalization) => {
+                let returned = finalization.clone();
+                self.add_finalization(finalization);
+                Some(returned)
+            }
+        }
     }
 
     /// Returns the epoch managed by this state machine.

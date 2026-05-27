@@ -2709,6 +2709,7 @@ pub mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_all_variants_speculative_root_matches_committed() {
         let executor = deterministic::Runner::default();

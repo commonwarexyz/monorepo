@@ -16,7 +16,7 @@ use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch as EpochNum;
 use commonware_cryptography::{
     bls12381::{
-        dkg::{
+        dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Output,
             Player as CryptoPlayer, PlayerAck, SignedDealerLog,
         },
@@ -76,7 +76,11 @@ impl<V: Variant, P: PublicKey> Write for Epoch<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Read for Epoch<V, P> {
+impl<V, P> Read for Epoch<V, P>
+where
+    V: Variant,
+    P: PublicKey,
+{
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -173,7 +177,12 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps metadata storage for epoch state and journaled storage for protocol messages,
 /// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
 /// the position/epoch confusion that can occur with position-based journals.
-pub struct Storage<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
+pub struct Storage<E, V, P>
+where
+    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    V: Variant,
+    P: PublicKey,
+{
     states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
@@ -182,8 +191,11 @@ pub struct Storage<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Varian
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey>
-    Storage<E, V, P>
+impl<E, V, P> Storage<E, V, P>
+where
+    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    V: Variant,
+    P: PublicKey,
 {
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
@@ -532,13 +544,16 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ///
     /// If the ack is valid and new, persists it to storage.
     /// Returns true if the ack was successfully processed.
-    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics>(
+    pub async fn handle<E>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) -> bool {
+    ) -> bool
+    where
+        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    {
         if !self.unsent.contains_key(&player) {
             return false;
         }
@@ -604,14 +619,18 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics, M: Faults>(
+    pub async fn handle<E, M>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
         dealer: C::PublicKey,
         pub_msg: DealerPubMsg<V>,
         priv_msg: DealerPrivMsg,
-    ) -> Option<PlayerAck<C::PublicKey>> {
+    ) -> Option<PlayerAck<C::PublicKey>>
+    where
+        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        M: Faults,
+    {
         // If we've already generated an ack, return the cached version
         if let Some(ack) = self.acks.get(&dealer) {
             return Some(ack.clone());
@@ -637,8 +656,10 @@ impl<V: Variant, C: Signer> Player<V, C> {
         rng: &mut impl CryptoRngCore,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
-    {
+    ) -> Result<
+        (Output<V, C::PublicKey>, Share),
+        commonware_cryptography::bls12381::dkg::feldman_desmedt::Error,
+    > {
         self.player.finalize::<M, B>(rng, logs, strategy)
     }
 }
@@ -650,7 +671,7 @@ mod tests {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         bls12381::{
-            dkg::Info,
+            dkg::feldman_desmedt::Info,
             primitives::{group::Scalar, sharing::Mode, variant::MinPk},
         },
         ed25519, Signer,

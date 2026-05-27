@@ -18,7 +18,7 @@
 //!
 //! # Usage
 //!
-//! The actor is initialized with storage archives and started with a buffer implementation:
+//! The actor is initialized with storage archives and started with an optional buffer:
 //!
 //! ```rust,ignore
 //! // Initialize with storage
@@ -28,9 +28,13 @@
 //!     blocks_archive,
 //!     config,
 //! ).await;
+//! // `last_height` is `None` until the application acknowledges a block.
 //!
 //! // Start with application and buffer
 //! actor.start(application, buffer, resolver);
+//!
+//! // Or omit broadcast buffering for follower-only chain tracking
+//! actor.start_unbuffered(application, resolver);
 //! ```
 //!
 //! For standard mode, use [`crate::marshal::standard::Standard`] as the variant and
@@ -41,10 +45,15 @@
 mod actor;
 pub use actor::Actor;
 
+mod acks;
 pub(crate) mod cache;
+mod delivery;
+mod floor;
+mod stream;
 
 mod mailbox;
-pub use mailbox::Mailbox;
+pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
 
+mod subscriptions;
 mod variant;
 pub use variant::{Buffer, Variant};

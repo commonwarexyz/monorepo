@@ -30,7 +30,7 @@ const BROADCASTER_CHANNEL: u64 = 3;
 const MARSHAL_CHANNEL: u64 = 4;
 const DKG_CHANNEL: u64 = 5;
 
-const MAILBOX_SIZE: usize = 10;
+const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(10);
 const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
@@ -107,7 +107,7 @@ pub async fn run<S, L>(
         public_key: config.signing_key.public_key(),
         peer_provider: oracle.clone(),
         blocker: oracle.clone(),
-        mailbox_size: 200,
+        mailbox_size: NZUsize!(200),
         initial: Duration::from_secs(1),
         timeout: Duration::from_secs(2),
         fetch_retry_timeout: Duration::from_millis(100),
@@ -164,7 +164,7 @@ mod test {
     };
     use commonware_cryptography::{
         bls12381::{
-            dkg::{deal, Output},
+            dkg::feldman_desmedt::{deal, Output},
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},
@@ -378,7 +378,7 @@ mod test {
                 public_key: pk.clone(),
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(pk.clone()),
-                mailbox_size: 200,
+                mailbox_size: NZUsize!(200),
                 initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),

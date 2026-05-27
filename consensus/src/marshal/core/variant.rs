@@ -17,7 +17,7 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::future::Future;
+use std::{future::Future, marker::PhantomData};
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
@@ -118,17 +118,19 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     ///
     /// Returns a receiver that will resolve when the block becomes available.
     /// If the block is already cached, the receiver may resolve immediately.
+    /// Returns `None` when the buffer cannot provide availability notifications.
     ///
     /// The returned receiver can be dropped to cancel the subscription.
     fn subscribe_by_digest(
         &self,
         digest: <V::Block as Digestible>::Digest,
-    ) -> impl Future<Output = oneshot::Receiver<V::Block>> + Send;
+    ) -> Option<oneshot::Receiver<V::Block>>;
 
     /// Subscribe to a block's availability by its commitment.
     ///
     /// Returns a receiver that will resolve when the block becomes available.
     /// If the block is already cached, the receiver may resolve immediately.
+    /// Returns `None` when the buffer cannot provide availability notifications.
     ///
     /// Having the full commitment may enable additional retrieval mechanisms
     /// depending on the variant implementation.
@@ -137,18 +139,65 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     fn subscribe_by_commitment(
         &self,
         commitment: V::Commitment,
-    ) -> impl Future<Output = oneshot::Receiver<V::Block>> + Send;
+    ) -> Option<oneshot::Receiver<V::Block>>;
 
     /// Notify the buffer that a block has been finalized.
     ///
     /// This allows the buffer to perform variant-specific cleanup operations.
-    fn finalized(&self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
+    fn finalized(&self, commitment: V::Commitment);
 
     /// Send a block to peers.
-    fn send(
+    fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
+}
+
+/// A buffer implementation that never stores, subscribes, finalizes, or sends blocks.
+pub(super) struct NoBuffer<P> {
+    _public_key: PhantomData<fn() -> P>,
+}
+
+impl<P> NoBuffer<P> {
+    pub(super) const fn new() -> Self {
+        Self {
+            _public_key: PhantomData,
+        }
+    }
+}
+
+impl<P> Clone for NoBuffer<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for NoBuffer<P> {}
+
+impl<V, P> Buffer<V> for NoBuffer<P>
+where
+    V: Variant,
+    P: PublicKey,
+{
+    type PublicKey = P;
+
+    async fn find_by_digest(&self, _: <V::Block as Digestible>::Digest) -> Option<V::Block> {
+        None
+    }
+
+    async fn find_by_commitment(&self, _: V::Commitment) -> Option<V::Block> {
+        None
+    }
+
+    fn subscribe_by_digest(
         &self,
-        round: Round,
-        block: V::Block,
-        recipients: Recipients<Self::PublicKey>,
-    ) -> impl Future<Output = ()> + Send;
+        _: <V::Block as Digestible>::Digest,
+    ) -> Option<oneshot::Receiver<V::Block>> {
+        None
+    }
+
+    fn subscribe_by_commitment(&self, _: V::Commitment) -> Option<oneshot::Receiver<V::Block>> {
+        None
+    }
+
+    fn finalized(&self, _: V::Commitment) {}
+
+    fn send(&self, _: Round, _: V::Block, _: Recipients<Self::PublicKey>) {}
 }

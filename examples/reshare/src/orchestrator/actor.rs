@@ -1,23 +1,24 @@
 //! Consensus engine orchestrator for epoch transitions.
 
 use crate::{
-    application::{Block, EpochProvider, Provider},
+    application::{genesis, Block, EpochProvider, Provider},
     orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
+use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context, Plan},
-    types::{Epoch, Epocher, FixedEpocher, ViewDelta},
+    simplex::{self, elector::Config as Elector, scheme, types::Context, Floor, Plan},
+    types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Digestible, Hasher, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
-    Blocker, Receiver, Sender,
+    Blocker, Sender,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -26,9 +27,9 @@ use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
+use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroUsize, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
@@ -51,7 +52,7 @@ where
     pub strategy: T,
 
     pub muxer_size: usize,
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -74,7 +75,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
+    mailbox: mailbox::Receiver<Message<V, C::PublicKey>>,
     application: A,
 
     oracle: B,
@@ -109,7 +110,7 @@ where
         context: E,
         config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
-        let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let page_cache_ref = CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
@@ -138,15 +139,15 @@ where
         mut self,
         votes: (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         ),
         certificates: (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         ),
         resolver: (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(votes, certificates, resolver,))
@@ -156,15 +157,15 @@ where
         mut self,
         (vote_sender, vote_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         ),
         (certificate_sender, certificate_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         ),
         (resolver_sender, resolver_receiver): (
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         ),
     ) {
         // Start muxers for each physical channel used by consensus
@@ -232,8 +233,7 @@ where
                     "received backup message from future epoch, ensuring boundary finalization"
                 );
                 self.marshal
-                    .hint_finalized(boundary_height, NonEmptyVec::new(from))
-                    .await;
+                    .hint_finalized(boundary_height, NonEmptyVec::new(from));
             },
             Some(transition) = self.mailbox.recv() else {
                 warn!("mailbox closed, shutting down orchestrator");
@@ -246,6 +246,23 @@ where
                         continue;
                     }
 
+                    // DKG state does not persist the consensus floor; derive it from marshal's
+                    // finalized boundary block when entering each epoch.
+                    let floor = match Self::floor_boundary(&epocher, transition.epoch) {
+                        Some(boundary_height) => self
+                            .marshal
+                            .get_block(boundary_height)
+                            .await
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "missing finalized boundary block at height {} for epoch {}",
+                                    boundary_height, transition.epoch
+                                )
+                            })
+                            .digest(),
+                        None => genesis::<H, C, V>().digest(),
+                    };
+
                     // Register the new signing scheme with the scheme provider.
                     let scheme = self.provider.scheme_for_epoch(&transition);
                     assert!(self.provider.register(transition.epoch, scheme.clone()));
@@ -254,6 +271,7 @@ where
                     let handle = self
                         .enter_epoch(
                             transition.epoch,
+                            floor,
                             scheme,
                             &mut vote_mux,
                             &mut certificate_mux,
@@ -282,21 +300,33 @@ where
         }
     }
 
+    // Epoch zero uses genesis as its floor; every later epoch is anchored by the
+    // last finalized block from the previous epoch.
+    fn floor_boundary(epocher: &FixedEpocher, epoch: Epoch) -> Option<Height> {
+        let previous_epoch = epoch.previous()?;
+        Some(
+            epocher
+                .last(previous_epoch)
+                .expect("previous epoch should be covered by epoch strategy"),
+        )
+    }
+
     async fn enter_epoch(
         &mut self,
         epoch: Epoch,
+        floor: H::Digest,
         scheme: S,
         vote_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         >,
         certificate_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         >,
         resolver_mux: &mut MuxHandle<
             impl Sender<PublicKey = C::PublicKey>,
-            impl Receiver<PublicKey = C::PublicKey>,
+            impl commonware_p2p::Receiver<PublicKey = C::PublicKey>,
         >,
     ) -> Handle<()> {
         // Start the new engine
@@ -315,8 +345,9 @@ where
                 relay: self.application.clone(),
                 reporter: self.marshal.clone(),
                 partition: format!("{}_consensus_{}", self.partition_prefix, epoch),
-                mailbox_size: 1024,
+                mailbox_size: NZUsize!(1024),
                 epoch,
+                floor: Floor::Genesis(floor),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
@@ -325,7 +356,7 @@ where
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
-                fetch_concurrent: 32,
+                fetch_concurrent: NZUsize!(32),
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
                 forwarding: simplex::ForwardingPolicy::Disabled,

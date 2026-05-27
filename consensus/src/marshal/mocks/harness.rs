@@ -5,13 +5,14 @@
 
 use crate::{
     marshal::{
+        ancestry::BlockProvider,
         coding::{
             shards,
-            types::{coding_config_for_participants, CodedBlock},
+            types::{coding_config_for_participants, hash_context, CodedBlock},
             Coding,
         },
-        config::Config,
-        core::{Actor, Mailbox},
+        config::{Config, Start},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -33,10 +34,17 @@ use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
+use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, Quota, Runner, Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic,
+    telemetry::metrics::{
+        histogram::{Buckets, Timed},
+        MetricsExt as _,
+    },
+    Clock, Quota, Runner, Supervisor as _,
 };
 use commonware_storage::{
     archive::{immutable, prunable},
@@ -52,6 +60,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::info;
@@ -166,7 +175,7 @@ pub struct ValidatorSetup<H: TestHarness> {
     pub application: Application<H::ApplicationBlock>,
     pub mailbox: Mailbox<S, H::Variant>,
     pub extra: H::ValidatorExtra,
-    pub height: Height,
+    pub height: Option<Height>,
     pub actor_handle: commonware_runtime::Handle<()>,
 }
 
@@ -199,7 +208,10 @@ pub trait TestHarness: 'static + Sized {
     >;
 
     /// The block type used in test operations.
-    type TestBlock: Heightable + Clone + Send;
+    type TestBlock: Heightable
+        + Clone
+        + Send
+        + Into<<Self::Variant as crate::marshal::core::Variant>::Block>;
 
     /// Additional per-validator state (e.g., shards mailbox for coding).
     type ValidatorExtra: Clone + Send;
@@ -236,6 +248,17 @@ pub trait TestHarness: 'static + Sized {
         timestamp: u64,
         num_participants: u16,
     ) -> Self::TestBlock;
+
+    /// Create the height-zero block used to seed a fresh marshal actor.
+    fn genesis_block(num_participants: u16) -> Self::TestBlock {
+        Self::make_test_block(
+            Sha256::hash(b""),
+            Self::genesis_parent_commitment(num_participants),
+            Height::zero(),
+            0,
+            num_participants,
+        )
+    }
 
     /// Get the commitment from a test block.
     fn commitment(block: &Self::TestBlock) -> Self::Commitment;
@@ -402,13 +425,17 @@ async fn wait_for_validator_height<H: TestHarness>(
 async fn assert_validator_matches_canonical<H: TestHarness>(
     validator: &HailstormValidator<H>,
     canonical: &[CanonicalEntry<H>],
+    num_participants: u16,
     label: &str,
 ) {
+    let genesis_digest = H::digest(&H::genesis_block(num_participants));
     let delivered = validator.application.blocks();
     for (height, block) in delivered {
-        let (_, expected_digest, _) = canonical
+        let expected_digest = canonical
             .iter()
             .find(|(expected_height, _, _)| *expected_height == height)
+            .map(|(_, digest, _)| *digest)
+            .or_else(|| (height == Height::zero()).then_some(genesis_digest))
             .unwrap_or_else(|| {
                 panic!(
                     "{label}: unexpected delivered block at height {}",
@@ -417,25 +444,26 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
             });
         assert_eq!(
             block.digest(),
-            *expected_digest,
+            expected_digest,
             "{label}: application delivered wrong digest at height {}",
             height.get()
         );
     }
 
     if let Some((height, digest)) = validator.application.tip() {
-        let (_, expected_digest, _) = canonical
-            .iter()
-            .find(|(expected_height, _, _)| *expected_height == height)
-            .unwrap_or_else(|| {
-                panic!(
-                    "{label}: unexpected delivered tip at height {}",
-                    height.get()
-                )
-            });
+        let (expected_height, expected_digest) =
+            if let Some((expected_height, expected_digest, _)) = canonical.last() {
+                (*expected_height, *expected_digest)
+            } else {
+                (Height::zero(), genesis_digest)
+            };
+        assert_eq!(
+            height, expected_height,
+            "{label}: application reported wrong tip height",
+        );
         assert_eq!(
             digest,
-            *expected_digest,
+            expected_digest,
             "{label}: application reported wrong tip digest at height {}",
             height.get()
         );
@@ -492,12 +520,19 @@ async fn assert_validator_matches_canonical<H: TestHarness>(
 async fn assert_active_validators_match_canonical<H: TestHarness>(
     validators: &[Option<HailstormValidator<H>>],
     canonical: &[CanonicalEntry<H>],
+    num_participants: u16,
 ) {
     for idx in active_validator_indices(validators) {
         let validator = validators[idx]
             .as_ref()
             .expect("active validator should be present");
-        assert_validator_matches_canonical(validator, canonical, &format!("validator_{idx}")).await;
+        assert_validator_matches_canonical(
+            validator,
+            canonical,
+            num_participants,
+            &format!("validator_{idx}"),
+        )
+        .await;
     }
 }
 
@@ -634,7 +669,12 @@ async fn advance_hailstorm_to<H: TestHarness>(
         finalize_hailstorm_height(pending, context, state).await;
     }
 
-    assert_active_validators_match_canonical(state.validators, state.canonical).await;
+    assert_active_validators_match_canonical(
+        state.validators,
+        state.canonical,
+        state.participants.len() as u16,
+    )
+    .await;
 }
 
 /// Stress marshal with repeated validator crashes and recoveries while a
@@ -806,7 +846,7 @@ pub fn hailstorm<H: TestHarness>(
                 .await;
                 assert_eq!(
                     restarted.height,
-                    Height::new(persisted_height),
+                    Some(Height::new(persisted_height)),
                     "validator {idx} should recover its persisted finalized height before replay"
                 );
 
@@ -841,7 +881,12 @@ pub fn hailstorm<H: TestHarness>(
                     .await;
                 }
             }
-            assert_active_validators_match_canonical(&validators, &canonical).await;
+            assert_active_validators_match_canonical(
+                &validators,
+                &canonical,
+                participants.len() as u16,
+            )
+            .await;
             info!(
                 seed,
                 shutdown_idx,
@@ -1307,7 +1352,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             parent = digest;
             parent_commitment = commitment;
         }
-        while (application.blocks().len() as u64) < CHAIN_LEN {
+        while application.tip().map(|(height, _)| height) != Some(Height::new(CHAIN_LEN)) {
             context.sleep(Duration::from_millis(10)).await;
         }
         context.sleep(Duration::from_millis(100)).await;
@@ -1475,13 +1520,18 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                 H::verify(&mut handle, round, &block, &mut peers).await;
                 H::report_finalization(&mut mailbox, finalization.clone()).await;
 
-                let height = application.acknowledged().await;
-                assert_eq!(
-                    height,
-                    Height::new(1),
-                    "expected the first delivered finalized block to become visible at height 1 \
-                     before restart (seed={seed})"
-                );
+                loop {
+                    let height = application.acknowledged().await;
+                    if height == Height::new(1) {
+                        break;
+                    }
+                    assert_eq!(
+                        height,
+                        Height::zero(),
+                        "only genesis may precede the first finalized block before restart \
+                         (seed={seed})"
+                    );
+                }
             }
         });
 
@@ -1582,7 +1632,8 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
@@ -1787,14 +1838,14 @@ impl TestHarness for StandardHarness {
         mailbox: &mut Mailbox<S, Self::Variant>,
         finalization: Finalization<S, D>,
     ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
+        mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
         notarization: Notarization<S, D>,
     ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
+        mailbox.report(Activity::Notarization(notarization));
     }
 
     fn finalize_timeout() -> Duration {
@@ -1818,7 +1869,8 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -2347,6 +2399,16 @@ pub fn genesis_commitment() -> Commitment {
     ))
 }
 
+/// Create the coding height-zero block used to seed fresh marshal actors.
+pub fn make_coding_genesis_block() -> CodingB {
+    let context = CodingCtx {
+        round: Round::zero(),
+        leader: default_leader(),
+        parent: (View::zero(), genesis_commitment()),
+    };
+    make_coding_block(context, Sha256::hash(b""), Height::zero(), 0)
+}
+
 /// Create a test block with a Commitment-based context.
 pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestamp: u64) -> CodingB {
     CodingB::new::<Sha256>(context, parent, height, timestamp)
@@ -2387,7 +2449,8 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
@@ -2505,9 +2568,9 @@ impl TestHarness for CodingHarness {
             },
             block_codec_cfg: (),
             strategy: Sequential,
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
-            background_channel_capacity: 1024,
+            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
@@ -2556,6 +2619,17 @@ impl TestHarness for CodingHarness {
 
     fn genesis_parent_commitment(_num_participants: u16) -> Commitment {
         genesis_commitment()
+    }
+
+    fn genesis_block(_num_participants: u16) -> Self::TestBlock {
+        let inner = make_coding_genesis_block();
+        let commitment = Commitment::from((
+            inner.digest(),
+            inner.digest(),
+            hash_context::<Sha256, _>(&inner.context),
+            GENESIS_CODING_CONFIG,
+        ));
+        CodedBlock::new_trusted(inner, commitment)
     }
 
     fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Commitment {
@@ -2625,14 +2699,14 @@ impl TestHarness for CodingHarness {
         mailbox: &mut Mailbox<S, Self::Variant>,
         finalization: Finalization<S, Commitment>,
     ) {
-        mailbox.report(Activity::Finalization(finalization)).await;
+        mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
         notarization: Notarization<S, Commitment>,
     ) {
-        mailbox.report(Activity::Notarization(notarization)).await;
+        mailbox.report(Activity::Notarization(notarization));
     }
 
     fn finalize_timeout() -> Duration {
@@ -2656,7 +2730,8 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            mailbox_size: 100,
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            mailbox_size: NZUsize!(100),
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
@@ -2692,9 +2767,9 @@ impl TestHarness for CodingHarness {
             },
             block_codec_cfg: (),
             strategy: Sequential,
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
-            background_channel_capacity: 1024,
+            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
@@ -2884,7 +2959,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             }
             finished = true;
             for app in applications.values() {
-                if app.blocks().len() != NUM_BLOCKS as usize {
+                if app.blocks().len() != (NUM_BLOCKS + 1) as usize {
                     finished = false;
                     break;
                 }
@@ -2940,6 +3015,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             extra: setup.extra,
         }];
         let mut handle = handles[0].clone();
+        assert_eq!(application.acknowledged().await, Height::zero());
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut parent = Sha256::hash(b"");
@@ -3036,6 +3112,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             extra: setup.extra,
         }];
         let mut handle = handles[0].clone();
+        assert_eq!(application.acknowledged().await, Height::zero());
 
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         let mut parent = Sha256::hash(b"");
@@ -3100,7 +3177,74 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             Application::manual_ack(),
         )
         .await;
-        assert_eq!(restart.height, Height::new(3));
+        assert_eq!(restart.height, Some(Height::new(3)));
+    });
+}
+
+/// Test that genesis is delivered once and then suppressed after its ack is durable.
+pub fn genesis_emitted_once<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let validator = participants[0].clone();
+        let setup = H::setup_validator_with(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            validator.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::<H::ApplicationBlock>::manual_ack(),
+        )
+        .await;
+        assert_eq!(setup.height, None);
+        assert_eq!(setup.mailbox.get_processed_height().await, None);
+        assert_eq!(setup.application.acknowledged().await, Height::zero());
+        context.sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            setup.mailbox.get_processed_height().await,
+            Some(Height::zero())
+        );
+        assert!(setup.application.blocks().contains_key(&Height::zero()));
+
+        // Let marshal persist the height-zero acknowledgement before restart.
+        context.sleep(Duration::from_millis(10)).await;
+        setup.actor_handle.abort();
+        drop(setup.mailbox);
+        drop(setup.extra);
+        context.sleep(Duration::from_millis(10)).await;
+
+        let restart = H::setup_validator_with(
+            context
+                .child("validator_restart")
+                .with_attribute("index", 0),
+            &mut oracle,
+            validator,
+            ConstantProvider::new(schemes[0].clone()),
+            NZUsize!(1),
+            Application::<H::ApplicationBlock>::manual_ack(),
+        )
+        .await;
+        assert_eq!(restart.height, Some(Height::zero()));
+        context.sleep(Duration::from_millis(100)).await;
+        assert!(
+            restart.application.blocks().is_empty(),
+            "genesis should not be emitted again after height zero is acknowledged"
+        );
+        assert!(
+            restart.application.pending_ack_heights().is_empty(),
+            "restart should not leave a duplicate genesis ack pending"
+        );
     });
 }
 
@@ -3199,7 +3343,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             context.sleep(Duration::from_secs(1)).await;
             finished = true;
             for app in applications.values().skip(1) {
-                if app.blocks().len() != NUM_BLOCKS as usize {
+                if app.blocks().len() != (NUM_BLOCKS + 1) as usize {
                     finished = false;
                     break;
                 }
@@ -3235,15 +3379,20 @@ pub fn sync_height_floor<H: TestHarness>() {
             .get_finalization(Height::new(NUM_BLOCKS))
             .await
             .unwrap();
+        let floor_finalization = second_handle
+            .mailbox
+            .get_finalization(Height::new(NEW_SYNC_FLOOR))
+            .await
+            .unwrap();
 
-        mailbox.set_floor(Height::new(NEW_SYNC_FLOOR)).await;
+        mailbox.set_floor(floor_finalization);
         H::report_finalization(&mut mailbox, latest_finalization).await;
 
         let mut finished = false;
         while !finished {
             context.sleep(Duration::from_secs(1)).await;
             finished = true;
-            if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR) as usize {
+            if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR + 2) as usize {
                 finished = false;
                 continue;
             }
@@ -3261,7 +3410,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             let block = mailbox
                 .get_block(Identifier::Height(Height::new(height)))
                 .await;
-            if height <= NEW_SYNC_FLOOR {
+            if height < NEW_SYNC_FLOOR {
                 assert!(block.is_none());
             } else {
                 assert_eq!(block.unwrap().height().get(), height);
@@ -3347,7 +3496,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             H::report_finalization(&mut mailbox, finalization).await;
         }
 
-        while application.blocks().len() < 20 {
+        while application.tip().map(|(height, _)| height) != Some(Height::new(20)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 
@@ -3362,7 +3511,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
-        mailbox.prune(Height::new(25)).await;
+        mailbox.prune(Height::new(25));
         context.sleep(Duration::from_millis(50)).await;
         for i in 1..=20u64 {
             assert!(
@@ -3371,7 +3520,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
-        mailbox.prune(Height::new(10)).await;
+        mailbox.prune(Height::new(10));
         context.sleep(Duration::from_millis(100)).await;
         for i in 1..10u64 {
             assert!(
@@ -3395,7 +3544,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
-        mailbox.prune(Height::new(20)).await;
+        mailbox.prune(Height::new(20));
         context.sleep(Duration::from_millis(100)).await;
         for i in 10..20u64 {
             assert!(
@@ -3445,7 +3594,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
 /// Regression test: delayed block backfill delivered after floor advancement must not crash.
 ///
-/// This models a resolver peer that responds to `Request::Block` only after the
+/// This models a resolver peer that responds to `Key::Block` only after the
 /// victim has advanced its floor and pruned finalized storage. The stale delivery
 /// must be rejected and must not be persisted.
 pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
@@ -3488,8 +3637,6 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
                 page_cache,
             )
             .await;
-        let _ = victim_extra; // Used by CodingHarness, silence warning for StandardHarness.
-
         setup_network_links(&mut oracle, &peers, LINK).await;
         oracle
             .remove_link(attacker.clone(), victim.clone())
@@ -3535,7 +3682,40 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 
         // Advance floor beyond the stale block and prune.
         let floor = Height::new(10);
-        victim_mailbox.set_floor(floor).await;
+        let floor_parent = H::make_test_block(
+            Sha256::hash(b"floor-grandparent"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            floor.previous().expect("floor must have a parent"),
+            floor.get() - 1,
+            NUM_VALIDATORS as u16,
+        );
+        let floor_anchor = H::make_test_block(
+            H::digest(&floor_parent),
+            H::commitment(&floor_parent),
+            floor,
+            floor.get(),
+            NUM_VALIDATORS as u16,
+        );
+        let floor_round = Round::new(Epoch::zero(), View::new(floor.get()));
+        let floor_proposal = Proposal {
+            round: floor_round,
+            parent: View::new(floor.get() - 1),
+            payload: H::commitment(&floor_anchor),
+        };
+        let floor_finalization = H::make_finalization(floor_proposal, &schemes, QUORUM);
+        victim_mailbox.set_floor(floor_finalization);
+        let mut victim_handle = ValidatorHandle {
+            mailbox: victim_mailbox.clone(),
+            extra: victim_extra,
+        };
+        let mut no_handles: Vec<ValidatorHandle<H>> = Vec::new();
+        H::verify(
+            &mut victim_handle,
+            floor_round,
+            &floor_anchor,
+            no_handles.as_mut_slice(),
+        )
+        .await;
         // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
         // has been processed before we re-enable the delayed delivery path.
         let _ = victim_mailbox.get_finalization(floor).await;
@@ -3567,6 +3747,96 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
                 .is_none(),
             "stale finalization below floor must not be persisted"
         );
+    });
+}
+
+/// Regression test: commitment-fetched blocks must wake subscribers and cache by
+/// decoded height even when the local pruning hint is far ahead.
+pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+        let victim = participants[0].clone();
+        let server = participants[1].clone();
+        let peers = vec![victim.clone(), server.clone()];
+        let mut oracle =
+            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
+                .await;
+
+        let victim_setup = H::setup_validator(
+            context.child("victim"),
+            &mut oracle,
+            victim.clone(),
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let server_setup = H::setup_validator(
+            context.child("server"),
+            &mut oracle,
+            server.clone(),
+            ConstantProvider::new(schemes[1].clone()),
+        )
+        .await;
+
+        let victim_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: victim_setup.mailbox,
+            extra: victim_setup.extra,
+        };
+        let mut server_handle: ValidatorHandle<H> = ValidatorHandle {
+            mailbox: server_setup.mailbox,
+            extra: server_setup.extra,
+        };
+
+        let actual_height = Height::new(7);
+        let expected_height = Height::new(1_000_000);
+        let block = H::make_test_block(
+            Sha256::hash(b"commitment-fetch-height-hint-mismatch"),
+            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
+            actual_height,
+            7,
+            NUM_VALIDATORS as u16,
+        );
+        let commitment = H::commitment(&block);
+        H::propose(
+            &mut server_handle,
+            Round::new(Epoch::zero(), View::new(actual_height.get())),
+            &block,
+        )
+        .await;
+
+        let subscription = victim_handle.mailbox.subscribe_by_commitment(
+            commitment,
+            CommitmentFallback::FetchByCommitment {
+                height: expected_height,
+            },
+        );
+
+        setup_network_links(&mut oracle, &peers, LINK).await;
+
+        let received = select! {
+            result = subscription => {
+                result.expect("commitment subscription should receive the fetched block")
+            },
+            _ = context.sleep(Duration::from_secs(5)) => {
+                panic!("commitment subscription was not woken by height-hint-mismatched block");
+            },
+        };
+        assert_eq!(
+            <<H as TestHarness>::Variant as crate::marshal::core::Variant>::commitment(&received),
+            commitment
+        );
+        assert_eq!(received.height(), actual_height);
+        let cached = victim_handle
+            .mailbox
+            .get_block(&received.digest())
+            .await
+            .expect("height-hint-mismatched fetch should cache by decoded height");
+        assert_eq!(cached.height(), actual_height);
     });
 }
 
@@ -3616,11 +3886,12 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
 
-        let subscription_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest)
-            .await;
-
+        let subscription_rx = handle.mailbox.subscribe_by_digest(
+            digest,
+            DigestFallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+        );
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
         H::verify(
             &mut handle,
@@ -3700,19 +3971,24 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
-            .await;
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2)
-            .await;
-        let sub3_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
-            .await;
-
+        let sub1_rx = handle.mailbox.subscribe_by_digest(
+            digest1,
+            DigestFallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+        );
+        let sub2_rx = handle.mailbox.subscribe_by_digest(
+            digest2,
+            DigestFallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(2)),
+            },
+        );
+        let sub3_rx = handle.mailbox.subscribe_by_digest(
+            digest1,
+            DigestFallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+        );
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
             H::propose(&mut handle, round, block).await;
@@ -3796,15 +4072,18 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
-            .await;
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2)
-            .await;
-
+        let sub1_rx = handle.mailbox.subscribe_by_digest(
+            digest1,
+            DigestFallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(1)),
+            },
+        );
+        let sub2_rx = handle.mailbox.subscribe_by_digest(
+            digest2,
+            DigestFallback::FetchByRound {
+                round: Round::new(Epoch::zero(), View::new(2)),
+            },
+        );
         drop(sub1_rx);
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
@@ -3904,24 +4183,19 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         let sub1_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block1))
-            .await;
+            .subscribe_by_digest(H::digest(&block1), DigestFallback::Wait);
         let sub2_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block2))
-            .await;
+            .subscribe_by_digest(H::digest(&block2), DigestFallback::Wait);
         let sub3_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block3))
-            .await;
+            .subscribe_by_digest(H::digest(&block3), DigestFallback::Wait);
         let sub4_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block4))
-            .await;
+            .subscribe_by_digest(H::digest(&block4), DigestFallback::Wait);
         let sub5_rx = handle
             .mailbox
-            .subscribe_by_digest(None, H::digest(&block5))
-            .await;
+            .subscribe_by_digest(H::digest(&block5), DigestFallback::Wait);
 
         // Block1: Broadcasted by the actor
         H::propose(
@@ -4071,6 +4345,18 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
 
         // Initially, no latest
         assert!(handle.mailbox.get_info(Identifier::Latest).await.is_none());
+
+        // The genesis anchor is stored as a finalized block without a finalization row.
+        let genesis = H::genesis_block(participants.len() as u16);
+        let genesis_digest = H::digest(&genesis);
+        assert_eq!(
+            handle.mailbox.get_info(Height::zero()).await,
+            Some((Height::zero(), genesis_digest))
+        );
+        assert_eq!(
+            handle.mailbox.get_info(&genesis_digest).await,
+            Some((Height::zero(), genesis_digest))
+        );
 
         // Before finalization, specific height returns None
         assert!(handle.mailbox.get_info(Height::new(1)).await.is_none());
@@ -4529,7 +4815,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         }
 
         // Wait for validator 0 to process all blocks
-        while app0.blocks().len() < 5 {
+        while app0.tip().map(|(height, _)| height) != Some(Height::new(5)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 
@@ -4543,8 +4829,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1
             .mailbox
-            .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()))
-            .await;
+            .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()));
 
         // Wait for the fetch to complete
         while handle1
@@ -4567,7 +4852,10 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 }
 
 /// Test ancestry stream.
-pub fn ancestry_stream<H: TestHarness>() {
+pub fn ancestry_stream<H: TestHarness>()
+where
+    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+{
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         let Fixture {
@@ -4627,7 +4915,20 @@ pub fn ancestry_stream<H: TestHarness>() {
 
         // Stream from latest -> height 1
         let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
-        let ancestry = handle.mailbox.ancestry((None, commitment)).await.unwrap();
+        let fetch_duration = Timed::new(context.histogram(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+            Buckets::LOCAL,
+        ));
+        let ancestry = handle
+            .mailbox
+            .ancestry(
+                Arc::new(context.child("ancestor_stream")),
+                (DigestFallback::Wait, commitment),
+                fetch_duration,
+            )
+            .await
+            .unwrap();
         let blocks = ancestry.collect::<Vec<_>>().await;
 
         // Ensure correct delivery order: 5,4,3,2,1
@@ -4804,8 +5105,8 @@ pub fn init_processed_height<H: TestHarness>() {
         };
         let initial_height = setup.height;
 
-        // Initially should be zero (no blocks processed)
-        assert_eq!(initial_height, Height::zero());
+        // Initially no block has been durably acknowledged.
+        assert_eq!(initial_height, None);
 
         // Finalize blocks 1-5
         let mut parent = Sha256::hash(b"");
@@ -4838,7 +5139,7 @@ pub fn init_processed_height<H: TestHarness>() {
         }
 
         // Wait for application to process all blocks
-        while app.blocks().len() < 5 {
+        while app.tip().map(|(height, _)| height) != Some(Height::new(5)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 
@@ -4858,7 +5159,7 @@ pub fn init_processed_height<H: TestHarness>() {
         let recovered_height = setup2.height;
 
         // Should have recovered to height 5
-        assert_eq!(recovered_height, Height::new(5));
+        assert_eq!(recovered_height, Some(Height::new(5)));
     })
 }
 

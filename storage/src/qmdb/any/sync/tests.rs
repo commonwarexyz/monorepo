@@ -425,10 +425,7 @@ where
             reached_target_tx: None,
             max_retained_roots: 8,
         };
-        // Heap-pin the sync future so its (large, monomorphized-per-variant) state
-        // machine doesn't inflate this test's outer state machine and overflow the
-        // test thread stack.
-        let synced_db: H::Db = Box::pin(sync::sync(config)).await.unwrap();
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
 
         // Verify database state
         let bounds = synced_db.bounds().await;
@@ -964,10 +961,8 @@ where
             max_retained_roots: 0,
         };
 
-        // Heap-pin the sync future so its (large, monomorphized-per-variant) state
-        // machine doesn't inflate this test's outer state machine and overflow the
-        // test thread stack.
-        let mut sync_handle = Box::pin(sync::sync(config));
+        let sync_handle = sync::sync(config);
+        pin_mut!(sync_handle);
 
         select! {
             _ = sync_handle.as_mut() => {
