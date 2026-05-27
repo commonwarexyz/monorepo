@@ -288,10 +288,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Block { public_key } => {
                 // Block the peer
                 self.directory.block(&public_key);
+
+                // Kill the peer if we're connected to it
                 self.kill_peer(&public_key);
             }
             Message::Release { metadata } => {
                 self.mailboxes.remove(metadata.public_key());
+
+                // Release the peer
                 self.directory.release(metadata);
             }
         }
@@ -693,6 +697,7 @@ mod tests {
             oracle.track(1, Set::try_from([tracker_pk, peer2_pk]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
+            // Peer1 should be killed after losing tracked-set membership
             assert!(
                 matches!(
                     peer_receiver.recv().now_or_never(),

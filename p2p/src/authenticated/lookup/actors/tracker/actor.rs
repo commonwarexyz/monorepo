@@ -170,6 +170,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let _ = responder.send(receiver);
             }
             Message::Connect { public_key, peer } => {
+                // Kill if peer is not eligible
                 if !self.directory.eligible(&public_key) {
                     peer.kill();
                     return;
@@ -208,6 +209,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Block { public_key } => {
                 // Block the peer
                 self.directory.block(&public_key);
+
+                // Kill the peer if we're connected to it
                 self.kill_peer(&public_key);
 
                 // Send the updated listenable IPs to the listener.
@@ -801,6 +804,8 @@ mod tests {
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
 
+            // The first peer should have received a kill message because its
+            // peer set was removed when `tracked_peer_sets` is 1.
             assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
         });
     }
