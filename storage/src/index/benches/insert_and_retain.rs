@@ -13,7 +13,7 @@ const N_ITEMS: [usize; 2] = [10_000, 50_000];
 #[cfg(full_bench)]
 const N_ITEMS: [usize; 4] = [10_000, 50_000, 100_000, 500_000];
 
-fn bench_insert_and_prune(c: &mut Criterion) {
+fn bench_insert_and_retain(c: &mut Criterion) {
     for items in N_ITEMS {
         let mut rng = StdRng::seed_from_u64(0);
         let mut kvs = Vec::with_capacity(items);
@@ -45,10 +45,10 @@ fn run_benchmark<I: Unordered<Value = u64>>(
         index.insert(k, *v);
     }
 
-    // Overwrite every key using insert_and_prune: prune the old value, insert the new one.
+    // Overwrite every key using insert_and_retain: drop the old value, insert the new one.
     let start = Instant::now();
     for (k, v) in kvs {
-        index.insert_and_retain(k, *v + 1, |old| *old == *v);
+        index.insert_and_retain(k, *v + 1, |old| *old != *v);
     }
     start.elapsed()
 }
@@ -56,5 +56,5 @@ fn run_benchmark<I: Unordered<Value = u64>>(
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_insert_and_prune
+    targets = bench_insert_and_retain
 }
