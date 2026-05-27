@@ -12,7 +12,7 @@ use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
 #[stability(ALPHA)]
 use commonware_utils::{ordered::BiMap, TryFromIterator};
-use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
+use commonware_utils::{ordered::Set, Participant, NZU32};
 #[cfg(feature = "std")]
 use core::iter;
 use core::num::NonZeroU32;
@@ -326,7 +326,7 @@ impl<V: Variant> Sharing<V> {
     }
 
     /// Return the number of participants required to recover the secret.
-    pub fn required<M: Faults>(&self) -> u32 {
+    pub fn required(&self) -> u32 {
         self.poly.required().get()
     }
 
@@ -441,7 +441,7 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::variant::MinSig;
     use commonware_invariants::minifuzz;
-    use commonware_utils::{ordered::Map, N3f1, NZU32};
+    use commonware_utils::{ordered::Map, Faults, N3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -548,7 +548,7 @@ mod tests {
             NZU32!(4),
             Poly::commit(Poly::new(&mut rng, N3f1::quorum(4) - 1)),
         );
-        assert_eq!(sharing.required::<N3f1>(), 3);
+        assert_eq!(sharing.required(), 3);
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
             Poly::commit(Poly::new(&mut rng, 1)),
         );
         assert_eq!(N3f1::quorum(sharing.total().get()), 3);
-        assert_eq!(sharing.required::<N3f1>(), 2);
+        assert_eq!(sharing.required(), 2);
     }
 }
 

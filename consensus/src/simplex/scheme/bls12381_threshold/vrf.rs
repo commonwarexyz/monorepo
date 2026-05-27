@@ -121,7 +121,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn signer(
+    pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
@@ -133,8 +133,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.required::<N3f1>(),
-            N3f1::quorum(participants.len()),
+            polynomial.required(),
+            M::quorum(participants.len()),
             "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
@@ -164,15 +164,19 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    pub fn verifier<M: Faults>(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.required::<N3f1>(),
-            N3f1::quorum(participants.len()),
+            polynomial.required(),
+            M::quorum(participants.len()),
             "polynomial threshold must equal quorum"
         );
         polynomial.precompute_partial_publics();
@@ -313,9 +317,11 @@ where
         namespace,
         n,
         |namespace, participants, polynomial, share| {
-            Scheme::signer(namespace, participants, polynomial, share)
+            Scheme::signer::<N3f1>(namespace, participants, polynomial, share)
         },
-        |namespace, participants, polynomial| Scheme::verifier(namespace, participants, polynomial),
+        |namespace, participants, polynomial| {
+            Scheme::verifier::<N3f1>(namespace, participants, polynomial)
+        },
     )
 }
 
@@ -764,7 +770,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = partials.into_iter().unzip();
 
         let quorum = self.polynomial();
-        if vote_partials.len() < quorum.required::<M>() as usize {
+        if vote_partials.len() < quorum.required() as usize {
             return None;
         }
 
@@ -940,7 +946,7 @@ mod tests {
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = Participant::new(999);
-        Scheme::<V>::signer(
+        Scheme::<V>::signer::<N3f1>(
             NAMESPACE,
             participants.keys().clone(),
             polynomial,
@@ -969,7 +975,7 @@ mod tests {
         encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
         let polynomial =
             Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
-        Scheme::<V>::signer(
+        Scheme::<V>::signer::<N3f1>(
             NAMESPACE,
             participants.keys().clone(),
             polynomial,
@@ -998,7 +1004,7 @@ mod tests {
         encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
         let polynomial =
             Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
-        Scheme::<V>::verifier(NAMESPACE, participants.keys().clone(), polynomial);
+        Scheme::<V>::verifier::<N3f1>(NAMESPACE, participants.keys().clone(), polynomial);
     }
 
     #[test]

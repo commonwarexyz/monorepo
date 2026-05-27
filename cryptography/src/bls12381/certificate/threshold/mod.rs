@@ -26,7 +26,7 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{types::lazy::Lazy, Error, FixedSize, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, Faults, N3f1, Participant};
+use commonware_utils::{ordered::Set, Faults, Participant};
 use core::fmt::Debug;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
@@ -82,7 +82,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
-    pub fn signer(
+    pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
@@ -94,8 +94,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.required::<N3f1>(),
-            N3f1::quorum(participants.len()),
+            polynomial.required(),
+            M::quorum(participants.len()),
             "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
@@ -124,15 +124,19 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// * `namespace` - base namespace for domain separation
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
-    pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+    pub fn verifier<M: Faults>(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
         );
         assert_eq!(
-            polynomial.required::<N3f1>(),
-            N3f1::quorum(participants.len()),
+            polynomial.required(),
+            M::quorum(participants.len()),
             "polynomial threshold must equal quorum"
         );
         #[cfg(feature = "std")]
@@ -336,7 +340,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         let quorum = self.polynomial();
-        if partials.len() < quorum.required::<M>() as usize {
+        if partials.len() < quorum.required() as usize {
             return None;
         }
 
@@ -524,8 +528,8 @@ macro_rules! impl_certificate_bls12381_threshold {
                 rng,
                 namespace,
                 n,
-                Scheme::signer,
-                Scheme::verifier,
+                Scheme::signer::<commonware_utils::N3f1>,
+                Scheme::verifier::<commonware_utils::N3f1>,
             )
         }
 
@@ -543,14 +547,14 @@ macro_rules! impl_certificate_bls12381_threshold {
             V: $crate::bls12381::primitives::variant::Variant,
         > Scheme<P, V> {
             /// Creates a new signer instance with a private share and evaluated public polynomial.
-            pub fn signer(
+            pub fn signer<M: commonware_utils::Faults>(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
                 share: $crate::bls12381::primitives::group::Share,
             ) -> Option<Self> {
                 Some(Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::signer(
+                    generic: $crate::bls12381::certificate::threshold::Generic::signer::<M>(
                         namespace,
                         participants,
                         polynomial,
@@ -560,13 +564,13 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             /// Creates a verifier that can authenticate partial signatures.
-            pub fn verifier(
+            pub fn verifier<M: commonware_utils::Faults>(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
             ) -> Self {
                 Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::verifier(
+                    generic: $crate::bls12381::certificate::threshold::Generic::verifier::<M>(
                         namespace,
                         participants,
                         polynomial,
@@ -791,11 +795,12 @@ mod tests {
         let signers = shares
             .into_iter()
             .map(|share| {
-                Scheme::signer(NAMESPACE, participants.clone(), polynomial.clone(), share).unwrap()
+                Scheme::signer::<N3f1>(NAMESPACE, participants.clone(), polynomial.clone(), share)
+                    .unwrap()
             })
             .collect();
 
-        let verifier = Scheme::verifier(NAMESPACE, participants, polynomial.clone());
+        let verifier = Scheme::verifier::<N3f1>(NAMESPACE, participants, polynomial.clone());
 
         (signers, verifier, polynomial)
     }
@@ -1360,7 +1365,7 @@ mod tests {
         let (polynomial, mut shares) =
             dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(4));
         shares[0].index = Participant::new(999);
-        Scheme::<ed25519::PublicKey, V>::signer(
+        Scheme::<ed25519::PublicKey, V>::signer::<N3f1>(
             NAMESPACE,
             participants,
             polynomial,
@@ -1399,7 +1404,7 @@ mod tests {
         encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
         let polynomial =
             Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
-        Scheme::<ed25519::PublicKey, V>::signer(
+        Scheme::<ed25519::PublicKey, V>::signer::<N3f1>(
             NAMESPACE,
             participants,
             polynomial,
@@ -1428,7 +1433,7 @@ mod tests {
         encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
         let polynomial =
             Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
-        Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
+        Scheme::<ed25519::PublicKey, V>::verifier::<N3f1>(NAMESPACE, participants, polynomial);
     }
 
     #[test]

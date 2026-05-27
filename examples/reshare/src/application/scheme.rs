@@ -11,7 +11,7 @@ use commonware_cryptography::{
     certificate::{self, Scheme},
     ed25519, PublicKey, Signer,
 };
-use commonware_utils::sync::Mutex;
+use commonware_utils::{sync::Mutex, N3f1};
 use std::{collections::HashMap, sync::Arc};
 
 /// The BLS12-381 threshold signing scheme used in simplex.
@@ -105,7 +105,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
     ) -> Self::Scheme {
         transition.share.as_ref().map_or_else(
             || {
-                ThresholdScheme::verifier(
+                ThresholdScheme::verifier::<N3f1>(
                     &self.namespace,
                     transition.dealers.clone(),
                     transition
@@ -115,7 +115,7 @@ impl<V: Variant> EpochProvider for Provider<ThresholdScheme<V>, ed25519::Private
                 )
             },
             |share| {
-                ThresholdScheme::signer(
+                ThresholdScheme::signer::<N3f1>(
                     &self.namespace,
                     transition.dealers.clone(),
                     transition

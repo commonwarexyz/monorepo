@@ -23,7 +23,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, tokio, Network, Quota, Runner, Supervisor as _, ThreadPooler,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_utils::{ordered::Set, union, N3f1, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -221,7 +221,7 @@ fn main() {
         let strategy = context.create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network =
-            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+            Scheme::signer::<N3f1>(&consensus_namespace, validators.clone(), identity, share)
                 .expect("share must be in participants");
         let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
