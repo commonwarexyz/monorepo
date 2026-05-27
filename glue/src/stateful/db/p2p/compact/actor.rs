@@ -315,6 +315,9 @@ where
         if state.leaf_count != target.leaf_count || state.leaf_count == Location::new(0) {
             return false;
         }
+        if state.pinned_nodes.len() != F::nodes_to_pin(state.leaf_count).count() {
+            return false;
+        }
 
         let hasher = qmdb::hasher::<H>();
         qmdb::verify_proof(
@@ -487,6 +490,74 @@ mod tests {
 
             assert!(!valid_rx.await.expect("validation response should arrive"));
             assert!(actor.pending.contains_key(&request));
+        });
+    }
+
+    #[test]
+    fn invalid_pinned_node_count_is_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (target, mut fetch) = compact_state(context.child("state")).await;
+            let request = handler::Request::from_target(target);
+            let (pending_tx, _pending_rx) = oneshot::channel();
+            actor.pending.insert(request.clone(), vec![pending_tx]);
+            fetch.state.pinned_nodes.push(sha256::Digest::from([9; 32]));
+
+            let (valid_tx, valid_rx) = oneshot::channel();
+            actor
+                .handle_deliver(request.clone(), fetch.state.encode(), valid_tx)
+                .await;
+
+            assert!(!valid_rx.await.expect("validation response should arrive"));
+            assert!(actor.pending.contains_key(&request));
+        });
+    }
+
+    #[test]
+    fn valid_state_after_invalid_proof_completes_request() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (target, fetch) = compact_state(context.child("state")).await;
+            let request = handler::Request::from_target(target);
+            let (subscriber_tx, subscriber_rx) = oneshot::channel();
+            actor.pending.insert(request.clone(), vec![subscriber_tx]);
+
+            let mut bad_state = fetch.state.clone();
+            bad_state.last_commit_proof = Proof {
+                leaves: bad_state.leaf_count,
+                inactive_peaks: 0,
+                digests: Vec::new(),
+            };
+
+            let (bad_tx, bad_rx) = oneshot::channel();
+            actor
+                .handle_deliver(request.clone(), bad_state.encode(), bad_tx)
+                .await;
+            assert!(!bad_rx.await.expect("invalid response should be rejected"));
+            assert!(actor.pending.contains_key(&request));
+
+            let (good_tx, good_rx) = oneshot::channel();
+            futures::join!(
+                async {
+                    actor
+                        .handle_deliver(request.clone(), fetch.state.encode(), good_tx)
+                        .await;
+                },
+                async {
+                    let fetch = subscriber_rx
+                        .await
+                        .expect("subscriber should receive valid state")
+                        .expect("fetch should succeed");
+                    fetch
+                        .callback
+                        .expect("compact deliveries should include feedback")
+                        .send(true)
+                        .unwrap();
+                }
+            );
+
+            assert!(good_rx.await.expect("valid response should be accepted"));
+            assert!(!actor.pending.contains_key(&request));
         });
     }
 

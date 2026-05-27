@@ -23,6 +23,9 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Compact target parameters were invalid.
     #[error("invalid compact target: {0}")]
     InvalidCompactTarget(&'static str),
+    /// Peer-supplied compact state was malformed.
+    #[error("invalid compact state: {0}")]
+    InvalidCompactState(&'static str),
     /// Invalid target parameters
     #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
     InvalidTarget {

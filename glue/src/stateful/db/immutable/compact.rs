@@ -9,7 +9,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{reschedule, Clock, Metrics, Storage};
@@ -49,6 +49,16 @@ async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T
             }
         }
     }
+}
+
+const fn retry_compact_engine_error<F: Family, D: Digest>(err: &sync::EngineError<F, D>) -> bool {
+    matches!(
+        err,
+        sync::EngineError::InvalidProof
+            | sync::EngineError::UnexpectedLeafCount { .. }
+            | sync::EngineError::InvalidCompactState(_)
+            | sync::EngineError::RootMismatch { .. }
+    )
 }
 
 /// Wraps an unjournaled immutable batch before merkleization.
@@ -394,7 +404,11 @@ where
                     resolver: resolver.clone(),
                     target: target.clone(),
                     db_config: config.clone(),
-                }) => db?,
+                }) => match db {
+                    Ok(db) => db,
+                    Err(sync::Error::Engine(err)) if retry_compact_engine_error(&err) => continue,
+                    Err(err) => return Err(err),
+                },
             };
 
             if let Some(tip_updates) = tip_updates.as_mut() {
@@ -486,7 +500,11 @@ where
                     resolver: resolver.clone(),
                     target: target.clone(),
                     db_config: config.clone(),
-                }) => db?,
+                }) => match db {
+                    Ok(db) => db,
+                    Err(sync::Error::Engine(err)) if retry_compact_engine_error(&err) => continue,
+                    Err(err) => return Err(err),
+                },
             };
 
             if let Some(tip_updates) = tip_updates.as_mut() {

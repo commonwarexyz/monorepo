@@ -214,6 +214,10 @@ where
         )
     }
 
+    fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>> {
+        op.has_floor()
+    }
+
     fn root(&self) -> Self::Digest {
         self.root()
     }
