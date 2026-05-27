@@ -24,7 +24,7 @@ use std::collections::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Send + Sync, V: Eq + Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
+impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
     fn get_mut(&mut self) -> &mut Record<V> {
         self.get_mut()
     }
@@ -38,7 +38,7 @@ pub type Cursor<'a, K, V> = CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>;
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
-pub struct Index<T: Translator, V: Eq + Send + Sync> {
+pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
 
@@ -47,7 +47,7 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
+impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -70,13 +70,13 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> super::Factory<T> for Index<T, V> {
+impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
@@ -192,7 +192,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Drop for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {

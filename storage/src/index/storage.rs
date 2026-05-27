@@ -12,13 +12,12 @@ use std::ptr::NonNull;
 ///
 /// Again optimizing for the common case, we store the first value directly in the [Record] to avoid
 /// indirection (heap jumping).
-#[derive(PartialEq, Eq)]
-pub struct Record<V: Eq + Send + Sync> {
+pub struct Record<V: Send + Sync> {
     pub(super) value: V,
     pub(super) next: Option<Box<Self>>,
 }
 
-pub(super) fn insert_front<V: Eq + Send + Sync>(record: &mut Record<V>, value: V) {
+pub(super) fn insert_front<V: Send + Sync>(record: &mut Record<V>, value: V) {
     let old = std::mem::replace(&mut record.value, value);
     record.next = Some(Box::new(Record {
         value: old,
@@ -26,7 +25,7 @@ pub(super) fn insert_front<V: Eq + Send + Sync>(record: &mut Record<V>, value: V
     }));
 }
 
-pub trait IndexEntry<V: Eq + Send + Sync>: Send + Sync {
+pub trait IndexEntry<V: Send + Sync>: Send + Sync {
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
 }
@@ -39,7 +38,7 @@ const MUST_CALL_NEXT: &str = "must call Cursor::next()";
 const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 
 /// Position of the [Cursor] within the linked list owned by its entry.
-enum State<V: Eq + Send + Sync> {
+enum State<V: Send + Sync> {
     /// Before first `next()` call, or immediately after `insert()`/`delete()`.
     ///
     /// `from` is the node the next `next()` will step from; `None` means start at the entry head.
@@ -61,12 +60,12 @@ enum State<V: Eq + Send + Sync> {
 
 // Manual `Copy`/`Clone` to avoid deriving an unnecessary `V: Copy` bound: the enum only contains
 // `NonNull<Record<V>>` (always `Copy`) and `Option<NonNull<...>>` (also `Copy`).
-impl<V: Eq + Send + Sync> Clone for State<V> {
+impl<V: Send + Sync> Clone for State<V> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<V: Eq + Send + Sync> Copy for State<V> {}
+impl<V: Send + Sync> Copy for State<V> {}
 
 /// A cursor that traverses and mutates a linked list of [Record]s in place using raw pointers.
 ///
@@ -77,7 +76,7 @@ impl<V: Eq + Send + Sync> Copy for State<V> {}
 /// - In [`State::Active`], when `prev` is `Some`, `prev.next` owns the node at `current`.
 /// - After a non-head delete, the [`State::NeedNext`] `from` is the surviving predecessor;
 ///   after a head delete, it is `None` so the next `next()` re-reads the entry head.
-pub struct Cursor<'a, V: Eq + Send + Sync, E: IndexEntry<V>> {
+pub struct Cursor<'a, V: Send + Sync, E: IndexEntry<V>> {
     // The occupied index entry that owns the linked list while the cursor exists.
     entry: Option<E>,
     // The current position/state of the cursor, including any live pointers into the chain.
@@ -89,7 +88,7 @@ pub struct Cursor<'a, V: Eq + Send + Sync, E: IndexEntry<V>> {
     pruned: &'a Counter,
 }
 
-impl<'a, V: Eq + Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
+impl<'a, V: Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
     /// Creates a new [Cursor] from an occupied index entry.
     pub(super) const fn new(
         entry: E,
@@ -114,7 +113,7 @@ impl<'a, V: Eq + Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
     }
 }
 
-impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
+impl<V: Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {
@@ -226,28 +225,19 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
             }
         }
     }
-
-    /// Retains only the values for which `should_retain` returns `true`; removes the rest.
-    fn retain(&mut self, should_retain: &impl Fn(&V) -> bool) {
-        while let Some(old) = self.next() {
-            if !should_retain(old) {
-                self.delete();
-            }
-        }
-    }
 }
 
 // SAFETY: `NonNull` is not `Send`, so this cannot be derived automatically. The pointers stored
 // inside `state` are only bookkeeping pointers into the linked list owned by `entry`. Moving the
 // cursor to another thread also moves `entry`, keeping the list alive and exclusively borrowed by
 // the cursor.
-unsafe impl<V: Eq + Send + Sync, E: IndexEntry<V>> Send for Cursor<'_, V, E> {}
+unsafe impl<V: Send + Sync, E: IndexEntry<V>> Send for Cursor<'_, V, E> {}
 // SAFETY: `NonNull` is not `Sync`, so this cannot be derived automatically. Sharing a cursor does
 // not grant access to the records without `&mut self`, and `entry` keeps the list alive and
 // exclusively borrowed for the cursor's lifetime.
-unsafe impl<V: Eq + Send + Sync, E: IndexEntry<V>> Sync for Cursor<'_, V, E> {}
+unsafe impl<V: Send + Sync, E: IndexEntry<V>> Sync for Cursor<'_, V, E> {}
 
-impl<V: Eq + Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
+impl<V: Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
     fn drop(&mut self) {
         if matches!(self.state, State::EntryRemoved) {
             self.keys.dec();
@@ -257,11 +247,11 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
 }
 
 /// An immutable iterator over the values associated with a translated key.
-pub struct ImmutableCursor<'a, V: Eq + Send + Sync> {
+pub struct ImmutableCursor<'a, V: Send + Sync> {
     current: Option<&'a Record<V>>,
 }
 
-impl<'a, V: Eq + Send + Sync> ImmutableCursor<'a, V> {
+impl<'a, V: Send + Sync> ImmutableCursor<'a, V> {
     /// Creates a new [ImmutableCursor] from a [Record].
     pub(super) const fn new(record: &'a Record<V>) -> Self {
         Self {
@@ -270,7 +260,7 @@ impl<'a, V: Eq + Send + Sync> ImmutableCursor<'a, V> {
     }
 }
 
-impl<'a, V: Eq + Send + Sync> Iterator for ImmutableCursor<'a, V> {
+impl<'a, V: Send + Sync> Iterator for ImmutableCursor<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
