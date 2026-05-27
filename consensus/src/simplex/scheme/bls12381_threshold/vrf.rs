@@ -233,18 +233,6 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    fn validate_threshold<M: Faults>(&self) {
-        match &self.role {
-            Role::Signer { polynomial, .. } => {
-                polynomial.required::<M>();
-            }
-            Role::Verifier { polynomial, .. } => {
-                polynomial.required::<M>();
-            }
-            Role::CertificateVerifier { .. } => {}
-        }
-    }
-
     /// Returns the pre-computed namespaces.
     const fn namespace(&self) -> &Namespace {
         match &self.role {
@@ -801,7 +789,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         D: Digest,
         M: Faults,
     {
-        self.validate_threshold::<M>();
         let Some(cert) = certificate.get() else {
             return false;
         };
@@ -832,7 +819,6 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,
     {
-        self.validate_threshold::<M>();
         let identity = self.identity();
         let namespace = self.namespace();
 

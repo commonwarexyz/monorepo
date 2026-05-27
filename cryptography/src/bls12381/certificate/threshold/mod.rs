@@ -72,9 +72,6 @@ pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
 impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Constructs a signer instance with a private share and evaluated public polynomial.
     ///
-    /// Validates the polynomial threshold against [`N3f1`]. Use
-    /// [`Self::signer_with_faults`] for other fault models.
-    ///
     /// The participant identity keys are used for committee ordering and indexing.
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
@@ -91,22 +88,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         polynomial: Sharing<V>,
         share: Share,
     ) -> Option<Self> {
-        Self::signer_with_faults::<N3f1>(namespace, participants, polynomial, share)
-    }
-
-    /// Constructs a signer instance using a specific fault model.
-    pub fn signer_with_faults<M: Faults>(
-        namespace: &[u8],
-        participants: Set<P>,
-        polynomial: Sharing<V>,
-        share: Share,
-    ) -> Option<Self> {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
         );
-        polynomial.required::<M>();
+        polynomial.required::<N3f1>();
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
         let partial_public = polynomial
@@ -126,9 +113,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
     /// Produces a verifier that can authenticate signatures but does not hold signing state.
     ///
-    /// Validates the polynomial threshold against [`N3f1`]. Use
-    /// [`Self::verifier_with_faults`] for other fault models.
-    ///
     /// The participant identity keys are used for committee ordering and indexing.
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
@@ -137,21 +121,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
-        Self::verifier_with_faults::<N3f1>(namespace, participants, polynomial)
-    }
-
-    /// Produces a verifier using a specific fault model.
-    pub fn verifier_with_faults<M: Faults>(
-        namespace: &[u8],
-        participants: Set<P>,
-        polynomial: Sharing<V>,
-    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
             "polynomial total must equal participant len"
         );
-        polynomial.required::<M>();
+        polynomial.required::<N3f1>();
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
 
@@ -208,18 +183,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             Self::Signer { polynomial, .. } => polynomial,
             Self::Verifier { polynomial, .. } => polynomial,
             _ => panic!("can only be called for signer and verifier"),
-        }
-    }
-
-    fn validate_threshold<M: Faults>(&self) {
-        match self {
-            Self::Signer { polynomial, .. } => {
-                polynomial.required::<M>();
-            }
-            Self::Verifier { polynomial, .. } => {
-                polynomial.required::<M>();
-            }
-            Self::CertificateVerifier { .. } => {}
         }
     }
 
@@ -388,7 +351,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
         M: Faults,
     {
-        self.validate_threshold::<M>();
         let Some(signature) = certificate.get() else {
             return false;
         };
@@ -417,7 +379,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         T: Strategy,
         M: Faults,
     {
-        self.validate_threshold::<M>();
         let mut entries: Vec<_> = Vec::new();
 
         for (subject, certificate) in certificates {
@@ -574,31 +535,14 @@ macro_rules! impl_certificate_bls12381_threshold {
             V: $crate::bls12381::primitives::variant::Variant,
         > Scheme<P, V> {
             /// Creates a new signer instance with a private share and evaluated public polynomial.
-            ///
-            /// Validates the polynomial threshold against [`commonware_utils::N3f1`].
             pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
                 share: $crate::bls12381::primitives::group::Share,
             ) -> Option<Self> {
-                Self::signer_with_faults::<commonware_utils::N3f1>(
-                    namespace,
-                    participants,
-                    polynomial,
-                    share,
-                )
-            }
-
-            /// Creates a new signer instance using a specific fault model.
-            pub fn signer_with_faults<M: commonware_utils::Faults>(
-                namespace: &[u8],
-                participants: commonware_utils::ordered::Set<P>,
-                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
-                share: $crate::bls12381::primitives::group::Share,
-            ) -> Option<Self> {
                 Some(Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::signer_with_faults::<M>(
+                    generic: $crate::bls12381::certificate::threshold::Generic::signer(
                         namespace,
                         participants,
                         polynomial,
@@ -608,28 +552,13 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             /// Creates a verifier that can authenticate partial signatures.
-            ///
-            /// Validates the polynomial threshold against [`commonware_utils::N3f1`].
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
             ) -> Self {
-                Self::verifier_with_faults::<commonware_utils::N3f1>(
-                    namespace,
-                    participants,
-                    polynomial,
-                )
-            }
-
-            /// Creates a verifier that can authenticate partial signatures using a specific fault model.
-            pub fn verifier_with_faults<M: commonware_utils::Faults>(
-                namespace: &[u8],
-                participants: commonware_utils::ordered::Set<P>,
-                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
-            ) -> Self {
                 Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::verifier_with_faults::<M>(
+                    generic: $crate::bls12381::certificate::threshold::Generic::verifier(
                         namespace,
                         participants,
                         polynomial,
@@ -789,6 +718,7 @@ mod tests {
             dkg::feldman_desmedt as dkg,
             primitives::{
                 ops::threshold::sign_message,
+                sharing::{ModeVersion, Sharing},
                 variant::{MinPk, MinSig, Variant},
             },
         },
@@ -798,10 +728,10 @@ mod tests {
         Signer as _,
     };
     use bytes::Bytes;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, Faults, N3f1, TryCollect, NZU32};
+    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect, NZU32};
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -1452,24 +1382,15 @@ mod tests {
             .expect("participants are unique")
     }
 
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    struct QuorumTwo;
-
-    impl Faults for QuorumTwo {
-        fn max_faults(n: impl num_traits::ToPrimitive) -> u32 {
-            let n = n
-                .to_u32()
-                .expect("n must be a non-negative integer that fits in u32");
-            assert!(n >= 2, "n must be at least 2");
-            n - 2
-        }
-    }
-
     fn signer_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = test_rng();
         let participants = make_participants(&mut rng, 4);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V, QuorumTwo>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
+        let mut encoded = polynomial.encode().to_vec();
+        encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
+        let polynomial =
+            Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
         Scheme::<ed25519::PublicKey, V>::signer(
             NAMESPACE,
             participants,
@@ -1494,7 +1415,11 @@ mod tests {
         let mut rng = test_rng();
         let participants = make_participants(&mut rng, 4);
         let (polynomial, _) =
-            dkg::deal_anonymous::<V, QuorumTwo>(&mut rng, Default::default(), NZU32!(4));
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
+        let mut encoded = polynomial.encode().to_vec();
+        encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
+        let polynomial =
+            Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
         Scheme::<ed25519::PublicKey, V>::verifier(NAMESPACE, participants, polynomial);
     }
 
