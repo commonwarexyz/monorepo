@@ -44,20 +44,20 @@ type Error<DB, R> =
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
-pub(crate) enum NextStep<C, D: Database, T: Target> {
+pub(crate) enum NextStep<C, D> {
     /// Sync should continue with the updated client
     Continue(C),
-    /// Sync is complete with the final database and target
-    Complete(D, T),
+    /// Sync is complete with the final database
+    Complete(D),
 }
 
 /// Events that can occur during synchronization
 #[derive(Debug)]
-enum Event<T: Target, Op, E> {
+enum Event<F: Family, Op, D: Digest, E> {
     /// A target update was received
-    TargetUpdate(T),
+    TargetUpdate(Target<F, D>),
     /// A batch of operations was received
-    BatchReceived(IndexedFetchResult<T::Family, Op, T::Digest, E>),
+    BatchReceived(IndexedFetchResult<F, Op, D, E>),
     /// The target update channel was closed
     UpdateChannelClosed,
     /// A finish signal was received
@@ -105,11 +105,11 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
 
 /// Wait for the next synchronization event.
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
-async fn wait_for_event<T: Target, Op, E>(
-    update_rx: &mut Option<mpsc::Receiver<T>>,
+async fn wait_for_event<F: Family, Op, D: Digest, E>(
+    update_rx: &mut Option<mpsc::Receiver<Target<F, D>>>,
     finish_rx: &mut Option<mpsc::Receiver<()>>,
-    outstanding_requests: &mut Requests<T::Family, Op, T::Digest, E>,
-) -> Option<Event<T, Op, E>> {
+    outstanding_requests: &mut Requests<F, Op, D, E>,
+) -> Option<Event<F, Op, D, E>> {
     if outstanding_requests.len() == 0 && update_rx.is_none() && finish_rx.is_none() {
         return None;
     }
@@ -142,11 +142,10 @@ async fn wait_for_event<T: Target, Op, E>(
 }
 
 /// Configuration for creating a new Engine
-pub struct Config<DB, R, T>
+pub struct Config<DB, R>
 where
     DB: Database,
     R: DbResolver<DB>,
-    T: Target<Family = DB::Family, Digest = DB::Digest>,
     DB::Op: Encode,
 {
     /// Runtime context for creating database components
@@ -154,7 +153,7 @@ where
     /// Network resolver for fetching operations and proofs
     pub resolver: R,
     /// Sync target (root digest and operation bounds)
-    pub target: T,
+    pub target: Target<DB::Family, DB::Digest>,
     /// Maximum number of outstanding requests for operation batches
     pub max_outstanding_requests: usize,
     /// Maximum operations to fetch per batch
@@ -164,7 +163,7 @@ where
     /// Database-specific configuration
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
-    pub update_rx: Option<mpsc::Receiver<T>>,
+    pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
     /// When `None`, sync completes as soon as the target is reached.
@@ -175,18 +174,17 @@ where
     /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
-    pub reached_target_tx: Option<mpsc::Sender<T>>,
+    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
     /// Maximum number of previous roots to retain for verifying in-flight
     /// requests after target updates. Set to 0 to disable (all retained
     /// requests will be re-fetched).
     pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
-pub(crate) struct Engine<DB, R, T>
+pub(crate) struct Engine<DB, R>
 where
     DB: Database,
     R: DbResolver<DB>,
-    T: Target<Family = DB::Family, Digest = DB::Digest>,
     DB::Op: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
@@ -221,7 +219,7 @@ where
     max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)
-    target: T,
+    target: Target<DB::Family, DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
     max_outstanding_requests: usize,
@@ -248,7 +246,7 @@ where
     config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    update_rx: Option<mpsc::Receiver<T>>,
+    update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
 
     /// Channel that requests sync completion once the current target is reached.
     ///
@@ -261,7 +259,7 @@ where
     /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
-    reached_target_tx: Option<mpsc::Sender<T>>,
+    reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
 
     /// Progress gauges updated after target updates and batch application.
     progress_metrics: ProgressMetrics,
@@ -274,11 +272,10 @@ where
 }
 
 #[cfg(test)]
-impl<DB, R, T> Engine<DB, R, T>
+impl<DB, R> Engine<DB, R>
 where
     DB: Database,
     R: DbResolver<DB>,
-    T: Target<Family = DB::Family, Digest = DB::Digest>,
     DB::Op: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
@@ -286,25 +283,24 @@ where
     }
 }
 
-impl<DB, R, T> Engine<DB, R, T>
+impl<DB, R> Engine<DB, R>
 where
     DB: Database,
     R: DbResolver<DB>,
-    T: Target<Family = DB::Family, Digest = DB::Digest>,
     DB::Op: Encode,
 {
     /// Create a new sync engine with the given configuration
-    pub async fn new(config: Config<DB, R, T>) -> Result<Self, Error<DB, R>> {
-        if !config.target.range().end().is_valid() {
+    pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
+        if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.range().start(),
-                upper_bound_pos: config.target.range().end(),
+                lower_bound_pos: config.target.range.start(),
+                upper_bound_pos: config.target.range.end(),
             }));
         }
 
         // Probe for persisted local state matching the target before opening
         // any engine-owned handles.
-        let local_target_state_available = if config.target.range().start() > Location::new(0) {
+        let local_target_state_available = if config.target.range.start() > Location::new(0) {
             DB::has_local_target_state(
                 config.context.child("local_target_probe"),
                 &config.db_config,
@@ -319,7 +315,7 @@ where
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
             config.db_config.journal_config(),
-            config.target.range().clone(),
+            config.target.range.clone(),
         )
         .await?;
 
@@ -356,16 +352,16 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.range().end();
+        let target_size = self.target.range.end();
 
         // Schedule a pinned-nodes request at the lower sync bound if we don't
         // have boundary state yet and one isn't already in flight.
         if !self.has_boundary_state()
             && !self
                 .outstanding_requests
-                .contains(&self.target.range().start())
+                .contains(&self.target.range.start())
         {
-            let start_loc = self.target.range().start();
+            let start_loc = self.target.range.start();
             let resolver = self.resolver.clone();
             let (cancel_tx, cancel_rx) = oneshot::channel();
             let id = self.outstanding_requests.next_id();
@@ -400,7 +396,7 @@ where
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
-                Location::new(log_size)..self.target.range().end(),
+                Location::new(log_size)..self.target.range.end(),
                 &operation_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size,
@@ -440,12 +436,15 @@ where
     /// start. Requests at or after the new start are retained; their proofs
     /// will be verified against the saved historical root (see
     /// `retained_roots`) so the fetched operations can still be used.
-    pub async fn reset_for_target_update(mut self, new_target: T) -> Result<Self, Error<DB, R>> {
-        self.journal.resize(new_target.range().start()).await?;
+    pub async fn reset_for_target_update(
+        mut self,
+        new_target: Target<DB::Family, DB::Digest>,
+    ) -> Result<Self, Error<DB, R>> {
+        self.journal.resize(new_target.range.start()).await?;
         // Remove requests at or before the new start. The request at start
         // must be re-issued as a pinned-nodes request with the new target size.
         self.outstanding_requests
-            .remove_before(new_target.range().start().checked_add(1).unwrap());
+            .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
         self.local_target_state_available = false;
@@ -453,10 +452,10 @@ where
         // Save the current root keyed by its tree size for verifying
         // retained requests that were issued against this target.
         if self.max_retained_roots > 0 {
-            let old_target_size = self.target.range().end();
+            let old_target_size = self.target.range.end();
             assert!(
                 self.retained_roots
-                    .insert(old_target_size, self.target.ops_root())
+                    .insert(old_target_size, self.target.root)
                     .is_none(),
                 "duplicate retained root for tree size {old_target_size:?}"
             );
@@ -525,7 +524,7 @@ where
     /// Record a progress snapshot in metrics.
     async fn record_progress(&mut self) {
         self.progress_metrics
-            .record(self.journal.size().await, *self.target.range().end());
+            .record(self.journal.size().await, *self.target.range.end());
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -608,7 +607,7 @@ where
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_at_target(&mut self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
-        let target_journal_size = self.target.range().end();
+        let target_journal_size = self.target.range.end();
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {
@@ -624,7 +623,7 @@ where
 
     /// Returns whether this target needs pinned boundary nodes to reconstruct pruned state.
     fn needs_pinned_boundary(&self) -> bool {
-        self.target.range().start() > Location::new(0)
+        self.target.range.start() > Location::new(0)
     }
 
     /// Returns whether the current target has the boundary state needed for completion.
@@ -660,8 +659,8 @@ where
         let FetchResult {
             proof,
             operations,
-            success_tx,
             pinned_nodes,
+            callback,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -669,23 +668,25 @@ where
         if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
             // Invalid batch size - notify resolver of failure.
             // We will request these operations again when we scan for unfetched operations.
-            success_tx.send_lossy(false);
+            if let Some(callback) = callback {
+                callback.send_lossy(false);
+            }
             return Ok(());
         }
 
         if proof.leaves != request.target_size {
-            success_tx.send_lossy(false);
+            if let Some(callback) = callback {
+                callback.send_lossy(false);
+            }
             return Ok(());
         }
 
-        // Look up the ops-tree proof root using the tree size the request
+        // Look up the root to verify against using the tree size the request
         // asked for. Fresh requests match the current target; retained
         // requests match a historical root that was explicitly retained.
-        let is_current_target = request.target_size == self.target.range().end();
-        let current_ops_root;
-        let proof_root = if is_current_target {
-            current_ops_root = self.target.ops_root();
-            &current_ops_root
+        let is_current_target = request.target_size == self.target.range.end();
+        let target_root = if is_current_target {
+            &self.target.root
         } else {
             let Some(root) = self.retained_roots.get(&request.target_size) else {
                 // No historical root to verify against (evicted or
@@ -707,7 +708,7 @@ where
         let need_pinned = is_current_target
             && self.pinned_nodes.is_none()
             && !self.local_target_state_available
-            && start_loc == self.target.range().start();
+            && start_loc == self.target.range.start();
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
@@ -716,14 +717,16 @@ where
                 &elements,
                 start_loc,
                 nodes,
-                proof_root,
+                target_root,
             )
         } else {
-            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, proof_root)
+            proof.verify_range_inclusion(&self.hasher, &elements, start_loc, target_root)
         };
 
         // Report success or failure to the resolver.
-        success_tx.send_lossy(valid);
+        if let Some(callback) = callback {
+            callback.send_lossy(valid);
+        }
 
         if !valid {
             if need_pinned {
@@ -748,8 +751,8 @@ where
     /// Handle a sync event and return the next engine state.
     async fn handle_event(
         mut self,
-        event: Event<T, DB::Op, R::Error>,
-    ) -> Result<NextStep<Self, DB, T>, Error<DB, R>> {
+        event: Event<DB::Family, DB::Op, DB::Digest, R::Error>,
+    ) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         match event {
             Event::TargetUpdate(new_target) => {
                 validate_update(&self.target, &new_target)?;
@@ -786,13 +789,14 @@ where
     /// 3. Handles different event types (target updates, fetch results)
     /// 4. Coordinates request scheduling and operation application
     ///
-    /// Returns `NextStep::Complete(database, target)` when sync is finished, or
+    /// Returns `NextStep::Complete(database)` when sync is finished, or
     /// `NextStep::Continue(self)` when more work remains.
-    pub(crate) async fn step(self) -> Result<NextStep<Self, DB, T>, Error<DB, R>> {
+    pub(crate) async fn step(self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         Box::pin(Self::step_inner(self)).await
     }
 
-    async fn step_inner(mut self) -> Result<NextStep<Self, DB, T>, Error<DB, R>> {
+    /// Implements one sync step behind a boxed future boundary.
+    async fn step_inner(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
         // Check if sync is complete
@@ -818,14 +822,14 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.range().clone(),
+                self.target.range.clone(),
                 self.apply_batch_size,
             )
             .await?;
 
-            // Verify the final root digest matches the final target.
+            // Verify the final root digest matches the final target
             let got_root = database.root();
-            let expected_root = self.target.root();
+            let expected_root = self.target.root;
             if got_root != expected_root {
                 return Err(SyncError::Engine(EngineError::RootMismatch {
                     expected: expected_root,
@@ -833,7 +837,7 @@ where
                 }));
             }
 
-            return Ok(NextStep::Complete(database, self.target));
+            return Ok(NextStep::Complete(database));
         }
 
         // Wait for the next synchronization event
@@ -847,23 +851,18 @@ where
         self.handle_event(event).await
     }
 
-    /// Run sync to completion, returning the final database and accepted target.
+    /// Run sync to completion, returning the final database when done.
     ///
     /// This method repeatedly calls `step()` until sync is complete. The `step()` method
-    /// handles building the final database and verifying the root digest. Returning the target lets
-    /// wrappers check any metadata they attach to target updates.
-    pub(crate) async fn sync_with_target(mut self) -> Result<(DB, T), Error<DB, R>> {
+    /// handles building the final database and verifying the root digest.
+    pub async fn sync(mut self) -> Result<DB, Error<DB, R>> {
+        // Run sync loop until completion
         loop {
             match self.step().await? {
                 NextStep::Continue(new_engine) => self = new_engine,
-                NextStep::Complete(database, target) => return Ok((database, target)),
+                NextStep::Complete(database) => return Ok(database),
             }
         }
-    }
-
-    /// Run sync to completion, returning the final database.
-    pub async fn sync(self) -> Result<DB, Error<DB, R>> {
-        self.sync_with_target().await.map(|(database, _)| database)
     }
 }
 
@@ -882,16 +881,15 @@ mod tests {
         Box::pin(async move {
             IndexedFetchResult {
                 id,
-                result: Ok(FetchResult {
-                    proof: Proof {
+                result: Ok(FetchResult::new(
+                    Proof {
                         leaves: Location::new(0),
                         inactive_peaks: 0,
                         digests: vec![],
                     },
-                    operations: vec![],
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes: None,
-                }),
+                    vec![],
+                    None,
+                )),
             }
         })
     }

@@ -284,7 +284,7 @@ where
             if subscriber
                 .send(Ok(compact::FetchResult {
                     state: state.clone(),
-                    success_tx: Some(success_tx),
+                    callback: Some(success_tx),
                 }))
                 .is_err()
             {
@@ -535,7 +535,7 @@ mod tests {
                 async {
                     let fetch = subscriber_rx.await.unwrap().unwrap();
                     fetch
-                        .success_tx
+                        .callback
                         .expect("compact deliveries should include feedback")
                         .send(false)
                         .unwrap();

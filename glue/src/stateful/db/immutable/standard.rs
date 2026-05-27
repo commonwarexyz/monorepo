@@ -22,16 +22,13 @@ use commonware_storage::{
     },
     merkle::{Family, Location},
     qmdb::{
-        any::{
-            sync::Target as AnySyncTarget,
-            value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
-        },
+        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, variable, Immutable, Operation,
         },
         operation::Key,
-        sync::{self, resolver::Resolver},
+        sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
     },
     translator::Translator,

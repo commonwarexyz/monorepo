@@ -37,10 +37,66 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     pub proof: Proof<F, D>,
     /// The operations that were fetched
     pub operations: Vec<Op>,
-    /// Channel to report success/failure back to resolver
-    pub success_tx: oneshot::Sender<bool>,
     /// Pinned merkle nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
+    /// Optional callback for resolvers that observe downstream validation feedback.
+    pub callback: Option<oneshot::Sender<bool>>,
+}
+
+impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
+    /// Creates a fetch result that does not observe the validation acknowledgement.
+    pub const fn new(
+        proof: Proof<F, D>,
+        operations: Vec<Op>,
+        pinned_nodes: Option<Vec<D>>,
+    ) -> Self {
+        Self {
+            proof,
+            operations,
+            pinned_nodes,
+            callback: None,
+        }
+    }
+
+    /// Creates a fetch result using an externally managed validation callback.
+    pub const fn with_callback(
+        proof: Proof<F, D>,
+        operations: Vec<Op>,
+        pinned_nodes: Option<Vec<D>>,
+        callback: oneshot::Sender<bool>,
+    ) -> Self {
+        Self {
+            proof,
+            operations,
+            pinned_nodes,
+            callback: Some(callback),
+        }
+    }
+}
+
+/// Operations fetched from a resolver before packaging as a [`FetchResult`].
+pub struct FetchedOperations<F: Family, Op, D: Digest> {
+    /// The proof for the operations
+    pub proof: Proof<F, D>,
+    /// The operations that were fetched
+    pub operations: Vec<Op>,
+    /// Pinned merkle nodes at the start location, if requested
+    pub pinned_nodes: Option<Vec<D>>,
+}
+
+impl<F: Family, Op, D: Digest> FetchedOperations<F, Op, D> {
+    /// Creates fetched operations with optional pinned nodes.
+    pub const fn new(
+        proof: Proof<F, D>,
+        operations: Vec<Op>,
+        pinned_nodes: Option<Vec<D>>,
+    ) -> Self {
+        Self {
+            proof,
+            operations,
+            pinned_nodes,
+        }
+    }
 }
 
 impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
@@ -48,10 +104,84 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
         f.debug_struct("FetchResult")
             .field("proof", &self.proof)
             .field("operations", &self.operations)
-            .field("success_tx", &"<callback>")
             .field("pinned_nodes", &self.pinned_nodes)
+            .field("callback", &self.callback.as_ref().map(|_| "<callback>"))
             .finish()
     }
+}
+
+/// Fetch an operation range with a caller-provided callback and package it as a
+/// [`FetchResult`].
+///
+/// Use this when the source returns the proof, operations, and optional pinned nodes together,
+/// such as a network `get_operations` request.
+pub async fn fetch_operation_range<F, Op, D, Error, Fetch, FetchFuture>(
+    op_count: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+    include_pinned_nodes: bool,
+    fetch: Fetch,
+) -> Result<FetchResult<F, Op, D>, Error>
+where
+    F: Family,
+    D: Digest,
+    Fetch: FnOnce(Location<F>, Location<F>, NonZeroU64, bool) -> FetchFuture,
+    FetchFuture: Future<Output = Result<FetchedOperations<F, Op, D>, Error>>,
+{
+    let FetchedOperations {
+        proof,
+        operations,
+        pinned_nodes,
+    } = fetch(op_count, start_loc, max_ops, include_pinned_nodes).await?;
+    Ok(FetchResult::new(proof, operations, pinned_nodes))
+}
+
+/// Fetch an operation range from separate local-store callbacks and package it as a
+/// [`FetchResult`].
+///
+/// Use this for database APIs that expose `historical_proof` separately from
+/// `pinned_nodes_at`; pinned nodes are fetched only when `include_pinned_nodes` is true.
+pub async fn fetch_operations<
+    F,
+    Op,
+    D,
+    Error,
+    HistoricalProof,
+    HistoricalFuture,
+    Pins,
+    PinsFuture,
+>(
+    op_count: Location<F>,
+    start_loc: Location<F>,
+    max_ops: NonZeroU64,
+    include_pinned_nodes: bool,
+    historical_proof: HistoricalProof,
+    pinned_nodes_at: Pins,
+) -> Result<FetchResult<F, Op, D>, Error>
+where
+    F: Family,
+    D: Digest,
+    HistoricalProof: FnOnce(Location<F>, Location<F>, NonZeroU64) -> HistoricalFuture,
+    HistoricalFuture: Future<Output = Result<(Proof<F, D>, Vec<Op>), Error>>,
+    Pins: FnOnce(Location<F>) -> PinsFuture,
+    PinsFuture: Future<Output = Result<Vec<D>, Error>>,
+{
+    fetch_operation_range(
+        op_count,
+        start_loc,
+        max_ops,
+        include_pinned_nodes,
+        |op_count, start_loc, max_ops, include_pinned_nodes| async move {
+            let (proof, operations) = historical_proof(op_count, start_loc, max_ops).await?;
+            let pinned_nodes = if include_pinned_nodes {
+                Some(pinned_nodes_at(start_loc).await?)
+            } else {
+                None
+            };
+            Ok(FetchedOperations::new(proof, operations, pinned_nodes))
+        },
+    )
+    .await
 }
 
 /// Trait for network communication with the sync server.
@@ -115,19 +245,17 @@ macro_rules! impl_resolver {
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let (proof, operations) =
-                    self.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(self.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        self.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| self.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -156,18 +284,17 @@ macro_rules! impl_resolver {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -197,18 +324,17 @@ macro_rules! impl_resolver {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
     };
@@ -255,19 +381,17 @@ macro_rules! impl_resolver_immutable {
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let (proof, operations) =
-                    self.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(self.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        self.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| self.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -296,18 +420,17 @@ macro_rules! impl_resolver_immutable {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -337,18 +460,17 @@ macro_rules! impl_resolver_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
     };
@@ -384,19 +506,17 @@ macro_rules! impl_resolver_keyless {
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-                let (proof, operations) =
-                    self.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(self.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        self.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| self.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -422,18 +542,17 @@ macro_rules! impl_resolver_keyless {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let db = self.read().await;
-                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -460,18 +579,17 @@ macro_rules! impl_resolver_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
-                let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
     };
@@ -505,6 +623,33 @@ pub(crate) mod tests {
     }
 
     fn assert_resolver<R: Resolver>() {}
+
+    fn empty_proof() -> Proof<mmr::Family, ShaDigest> {
+        Proof {
+            leaves: Location::new(0),
+            inactive_peaks: 0,
+            digests: vec![],
+        }
+    }
+
+    #[test]
+    fn test_fetch_result_new_has_no_success_acknowledgement() {
+        let result = FetchResult::<mmr::Family, (), ShaDigest>::new(empty_proof(), vec![], None);
+        assert!(result.callback.is_none());
+    }
+
+    #[test]
+    fn test_fetch_result_with_callback_reports_to_external_receiver() {
+        let (success_tx, mut success_rx) = oneshot::channel();
+        let result = FetchResult::<mmr::Family, (), ShaDigest>::with_callback(
+            empty_proof(),
+            vec![],
+            None,
+            success_tx,
+        );
+        assert!(result.callback.expect("success sender").send(true).is_ok());
+        assert_eq!(success_rx.try_recv(), Ok(true));
+    }
 
     /// A resolver that always fails.
     #[derive(Clone)]

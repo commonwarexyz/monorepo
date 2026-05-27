@@ -23,15 +23,12 @@ use commonware_storage::{
     },
     merkle::{Family, Location},
     qmdb::{
-        any::{
-            sync::Target as AnySyncTarget,
-            value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
-        },
+        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, variable, Keyless, Operation,
         },
-        sync::{self, resolver::Resolver},
+        sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
     },
     Persistable,

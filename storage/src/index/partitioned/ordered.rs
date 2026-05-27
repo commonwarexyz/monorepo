@@ -13,11 +13,11 @@ use commonware_runtime::Metrics;
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
-pub struct Index<T: Translator, V: Eq + Send + Sync, const P: usize> {
+pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     partitions: Vec<OrderedIndex<T, V>>,
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let partition_count = 1 << (P * 8);
@@ -48,15 +48,13 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> super::super::Factory<T>
-    for Index<T, V, P>
-{
+impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory<T> for Index<T, V, P> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = <OrderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
@@ -94,21 +92,21 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Inde
         partition.insert(sub_key, value);
     }
 
-    fn insert_and_prune(
+    fn insert_and_retain(
         &mut self,
         key: &[u8],
         value: Self::Value,
-        predicate: impl Fn(&Self::Value) -> bool,
+        should_retain: impl Fn(&Self::Value) -> bool,
     ) {
         let (partition, sub_key) = self.get_partition_mut(key);
 
-        partition.insert_and_prune(sub_key, value, predicate);
+        partition.insert_and_retain(sub_key, value, should_retain);
     }
 
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&Self::Value) -> bool) {
+    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&Self::Value) -> bool) {
         let (partition, sub_key) = self.get_partition_mut(key);
 
-        partition.prune(sub_key, predicate);
+        partition.retain(sub_key, should_retain);
     }
 
     fn remove(&mut self, key: &[u8]) {
@@ -151,7 +149,7 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Inde
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> OrderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> OrderedTrait for Index<T, V, P> {
     type Iterator<'a>
         = <OrderedIndex<T, V> as OrderedTrait>::Iterator<'a>
     where

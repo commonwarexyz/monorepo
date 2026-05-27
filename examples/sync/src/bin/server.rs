@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     mmr,
-    qmdb::{any::sync::Target, sync::compact},
+    qmdb::sync::{compact, Target},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
@@ -220,7 +220,7 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (ops_root, sync_boundary, size) = {
+    let (root, sync_boundary, size) = {
         let database = state.database.read().await;
         (
             database.root(),
@@ -230,7 +230,7 @@ where
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
-        target: Target::new(ops_root, non_empty_range!(sync_boundary, size)),
+        target: Target::new(root, non_empty_range!(sync_boundary, size)),
     };
 
     debug!(?response, "serving target update");
@@ -399,49 +399,6 @@ where
                 wire::Message::GetSyncTargetResponse,
                 handle_get_sync_target::<DB>(state, request)
             ),
-            _ => unexpected_message(state, request_id),
-        }
-    }
-}
-
-struct CurrentFullMode;
-
-impl<E> ServeMode<current::Database<E>> for CurrentFullMode
-where
-    E: Storage + Clock + Metrics + Send + Sync + 'static,
-{
-    const LISTENING_MESSAGE: &'static str =
-        "current server listening and continuously adding operations";
-    const SHUTDOWN_MESSAGE: &'static str = "context shutdown, stopping current server";
-
-    async fn handle_message(
-        state: &State<current::Database<E>>,
-        message: wire::Message<current::Operation, Key>,
-    ) -> wire::Message<current::Operation, Key> {
-        let request_id = message.request_id();
-        match message {
-            wire::Message::GetOperationsRequest(request) => dispatch_message!(
-                state,
-                request_id,
-                wire::Message::GetOperationsResponse,
-                handle_get_operations::<current::Database<E>>(state, request)
-            ),
-            wire::Message::GetSyncTargetRequest(request) => {
-                state.request_counter.inc();
-                let database = state.database.read().await;
-                match current::current_sync_target(&*database).await {
-                    Ok(target) => {
-                        debug!(?target, "serving current sync target");
-                        wire::Message::GetCurrentSyncTargetResponse(
-                            wire::GetCurrentSyncTargetResponse {
-                                request_id: request.request_id,
-                                target,
-                            },
-                        )
-                    }
-                    Err(err) => error_message(state, request_id, err.into()),
-                }
-            }
             _ => unexpected_message(state, request_id),
         }
     }
@@ -750,18 +707,14 @@ where
 }
 
 /// Run the Current database server.
-///
-/// Uses `CurrentFullMode` to serve database-root-aware sync targets with an
-/// [OpsRootWitness](commonware_storage::qmdb::current::proof::OpsRootWitness).
-async fn run_current<E>(mut context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
+async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
     let db_config = current::create_config(&context);
     let database = current::Database::init(context.child("database"), db_config).await?;
-    let database = initialize_database(database, &config, &mut context).await?;
 
-    run_server::<current::Database<_>, E, CurrentFullMode>(context, config, database).await
+    run_helper(context, config, database).await
 }
 
 /// Run the Immutable database server.

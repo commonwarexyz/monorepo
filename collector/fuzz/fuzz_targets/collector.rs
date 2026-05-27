@@ -187,7 +187,7 @@ impl Handler for FuzzHandler {
     type Request = FuzzRequest;
     type Response = FuzzResponse;
 
-    async fn process(
+    fn process(
         &mut self,
         _origin: Self::PublicKey,
         request: Self::Request,
@@ -243,12 +243,7 @@ impl Monitor for FuzzMonitor {
     type PublicKey = PublicKey;
     type Response = FuzzResponse;
 
-    async fn collected(
-        &mut self,
-        handler: Self::PublicKey,
-        response: Self::Response,
-        count: usize,
-    ) {
+    fn collected(&mut self, handler: Self::PublicKey, response: Self::Response, count: usize) {
         self.model.lock().events.push(CollectedEvent {
             handler,
             response,

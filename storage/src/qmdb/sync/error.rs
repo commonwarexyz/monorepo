@@ -1,12 +1,14 @@
 //! Shared sync error types that can be used across different database implementations.
 
-use crate::merkle::{Family, Location};
+use crate::{
+    merkle::{Family, Location},
+    qmdb::sync::Target,
+};
 use commonware_cryptography::Digest;
-use commonware_utils::range::NonEmptyRange;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError<F: Family, D: Digest> {
-    /// Database root mismatch after sync.
+    /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
     /// Compact proof did not verify against the requested root.
@@ -36,8 +38,8 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Sync target moved backward
     #[error("sync target moved backward: {old:?} -> {new:?}")]
     SyncTargetMovedBackward {
-        old: NonEmptyRange<Location<F>>,
-        new: NonEmptyRange<Location<F>>,
+        old: Target<F, D>,
+        new: Target<F, D>,
     },
     /// Sync already completed
     #[error("sync already completed")]
@@ -51,9 +53,6 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Error extracting pinned nodes
     #[error("error extracting pinned nodes: {0}")]
     PinnedNodes(String),
-    /// Witness for the `ops_root` failed verification against the root commitment.
-    #[error("ops root witness failed verification")]
-    OpsRootWitnessInvalid,
 }
 
 /// Errors that can occur during database synchronization.

@@ -309,12 +309,12 @@ where
         for subscriber in subscribers {
             let (success_tx, success_rx) = oneshot::channel();
             if subscriber
-                .send(Ok(FetchResult {
-                    proof: decoded.proof.clone(),
-                    operations: decoded.operations.clone(),
+                .send(Ok(FetchResult::with_callback(
+                    decoded.proof.clone(),
+                    decoded.operations.clone(),
+                    decoded.pinned_nodes.clone(),
                     success_tx,
-                    pinned_nodes: decoded.pinned_nodes.clone(),
-                }))
+                )))
                 .is_err()
             {
                 continue;
@@ -619,11 +619,19 @@ mod tests {
                 actor.handle_deliver(request, encoded_fetch_payload(), ack_tx),
                 async {
                     let fetch = sub1_rx.await.unwrap().unwrap();
-                    fetch.success_tx.send(true).unwrap();
+                    fetch
+                        .callback
+                        .expect("standard deliveries should include feedback")
+                        .send(true)
+                        .unwrap();
                 },
                 async {
                     let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch.success_tx.send(false).unwrap();
+                    fetch
+                        .callback
+                        .expect("standard deliveries should include feedback")
+                        .send(false)
+                        .unwrap();
                 }
             );
 
@@ -652,7 +660,11 @@ mod tests {
                 },
                 async {
                     let fetch = sub2_rx.await.unwrap().unwrap();
-                    fetch.success_tx.send(true).unwrap();
+                    fetch
+                        .callback
+                        .expect("standard deliveries should include feedback")
+                        .send(true)
+                        .unwrap();
                 }
             );
 

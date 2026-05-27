@@ -24,7 +24,7 @@ use std::collections::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Send + Sync, V: Eq + Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
+impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -41,7 +41,7 @@ pub type Cursor<'a, K, V> = CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>;
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
-pub struct Index<T: Translator, V: Eq + Send + Sync> {
+pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
 
@@ -50,7 +50,7 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
+impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -73,13 +73,13 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> super::Factory<T> for Index<T, V> {
+impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
@@ -142,7 +142,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_prune(&mut self, key: &[u8], value: V, predicate: impl Fn(&V) -> bool) {
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
@@ -150,10 +150,11 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
 
-                // Add our new value (if not prunable).
-                if !predicate(&value) {
+                // Add the new value only if it should be retained.
+                if should_retain(&value) {
                     cursor.insert(value);
                 }
             }
@@ -163,7 +164,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&V) -> bool) {
+    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
@@ -171,7 +172,8 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
             }
             Entry::Vacant(_) => {}
         }
@@ -180,7 +182,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     fn remove(&mut self, key: &[u8]) {
         // To ensure metrics are accurate, we iterate over all conflicting values and remove them
         // one-by-one (rather than just removing the entire entry).
-        self.prune(key, |_| true);
+        self.retain(key, |_| false);
     }
 
     #[cfg(test)]
@@ -199,7 +201,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Drop for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {
