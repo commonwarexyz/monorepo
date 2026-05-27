@@ -65,10 +65,10 @@ jobs:
       run: |
         mkdir -p .cargo
         cat > .cargo/config.toml <<'EOF'
-        [profile.test.package.commonware-cryptography]
+        [profile.test.package.commonware-consensus]
         opt-level = 2
 
-        [profile.test.package.commonware-math]
+        [profile.test.package.commonware-cryptography]
         opt-level = 2
         EOF
     - name: Run slow tests
