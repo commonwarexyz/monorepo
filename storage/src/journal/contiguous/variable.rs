@@ -929,8 +929,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let stream = data.replay(section, 0, REPLAY_BUFFER_SIZE).await?;
         futures::pin_mut!(stream);
         let mut count = 0u64;
+        // Recovery is fail-fast: partial counts are not useful once replay reports corruption.
         while let Some(result) = stream.next().await {
-            // Recovery is fail-fast: partial counts are not useful once replay reports corruption.
             let (item_section, _, _, _) = result?;
             if item_section != section {
                 break;
@@ -1019,18 +1019,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
-        if offsets.length_recovery_enabled().await {
-            let initial_offsets_bounds = {
-                let offsets_reader = offsets.reader().await;
-                offsets_reader.bounds()
-            };
-            Self::recover_data_by_walking_lengths(
-                data,
-                initial_offsets_bounds.start,
-                items_per_section,
-            )
-            .await?;
-        }
+        let initial_offsets_bounds = {
+            let offsets_reader = offsets.reader().await;
+            offsets_reader.bounds()
+        };
+        Self::recover_data_by_walking_lengths(
+            data,
+            initial_offsets_bounds.start,
+            items_per_section,
+        )
+        .await?;
 
         // === Handle empty data journal case ===
         let items_in_last_section = match data.newest_section() {

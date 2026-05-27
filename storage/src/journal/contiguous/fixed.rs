@@ -481,7 +481,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .transpose()
     }
 
-    fn stage_length_recovery_metadata(
+    fn install_recovery_metadata_if_needed(
         metadata: &mut Metadata<E, u64, Vec<u8>>,
         length_recovery: &mut bool,
         recovery_size: &mut Option<u64>,
@@ -591,12 +591,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             }
             metadata_dirty = true;
         }
-        metadata_dirty |= Self::stage_length_recovery_metadata(
+        if Self::install_recovery_metadata_if_needed(
             &mut metadata,
             &mut length_recovery,
             &mut recovery_size,
             size,
-        );
+        ) {
+            metadata_dirty = true;
+        }
         if metadata_dirty {
             metadata.sync().await?;
         }
@@ -899,12 +901,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let mut length_recovery = false;
         let mut recovery_size = None;
-        metadata_dirty |= Self::stage_length_recovery_metadata(
+        // A state-synced journal starts under the no-rollover-fsync recovery model immediately.
+        // The checkpoint is the synthetic pruned size because no retained data exists before it.
+        if Self::install_recovery_metadata_if_needed(
             &mut metadata,
             &mut length_recovery,
             &mut recovery_size,
             size,
-        );
+        ) {
+            metadata_dirty = true;
+        }
         if metadata_dirty {
             metadata.sync().await?;
         }
@@ -935,10 +941,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         (section, pos_in_section)
     }
 
-    pub(crate) async fn length_recovery_enabled(&self) -> bool {
-        self.inner.read().await.length_recovery
-    }
-
     fn stage_recovery_size(inner: &mut Inner<E, A>, size: u64) {
         if inner.recovery_size == Some(size) {
             return;
@@ -955,6 +957,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 .recovery_size
                 .is_some_and(|checkpoint| checkpoint > size)
         {
+            // Persist the lowered checkpoint before destructive blob changes so recovery after a
+            // crash does not reject the intentionally shortened journal.
             inner
                 .metadata
                 .put_sync(RECOVERY_SIZE_KEY, size.to_be_bytes().to_vec())
@@ -1388,7 +1392,7 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    async fn sync_dirty_blobs<E: crate::Context>(journal: &Journal<E, Digest>) {
+    async fn sync_dirty_blobs_without_checkpoint<E: crate::Context>(journal: &Journal<E, Digest>) {
         let inner = journal.inner.read().await;
         if let Some(start) = inner.dirty_from_section {
             let tail = inner.size / journal.items_per_blob;
@@ -1419,7 +1423,7 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.child("init"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
-            assert!(journal.length_recovery_enabled().await);
+            assert!(journal.inner.read().await.length_recovery);
             journal.destroy().await.expect("failed to destroy journal");
         });
     }
@@ -1433,11 +1437,17 @@ mod tests {
                 .await
                 .expect("failed to initialize journal");
 
-            let item_count = cfg.items_per_blob.get() * 2 + 3;
-            for i in 0..item_count {
+            let checkpoint = cfg.items_per_blob.get();
+            for i in 0..checkpoint {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            sync_dirty_blobs(&journal).await;
+            journal.sync().await.expect("failed to sync checkpoint");
+
+            let item_count = checkpoint * 2 + 3;
+            for i in checkpoint..item_count {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            sync_dirty_blobs_without_checkpoint(&journal).await;
             drop(journal);
 
             let (blob, size) = context
@@ -1458,10 +1468,40 @@ mod tests {
                 "short non-tail section should truncate unsynced suffix"
             );
             assert!(
-                recovered >= cfg.items_per_blob.get(),
+                recovered >= checkpoint,
                 "recovery should keep the full prefix before the short section"
             );
             journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_length_recovery_rejects_checkpoint_violation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(7));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            let item_count = cfg.items_per_blob.get() * 2 + 3;
+            for i in 0..item_count {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .expect("failed to open section");
+            blob.resize(size - 1)
+                .await
+                .expect("failed to truncate section");
+            blob.sync().await.expect("failed to sync section");
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
@@ -2929,7 +2969,7 @@ mod tests {
             for i in 0..5u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            sync_dirty_blobs(&journal).await;
+            sync_dirty_blobs_without_checkpoint(&journal).await;
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -2991,7 +3031,7 @@ mod tests {
             for i in 0..3u64 {
                 journal.append(&test_digest(i)).await.unwrap();
             }
-            sync_dirty_blobs(&journal).await;
+            sync_dirty_blobs_without_checkpoint(&journal).await;
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -3019,7 +3059,7 @@ mod tests {
             assert_eq!(journal.size().await, 17);
             journal.prune(10).await.unwrap();
 
-            sync_dirty_blobs(&journal).await;
+            sync_dirty_blobs_without_checkpoint(&journal).await;
             drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
