@@ -28,10 +28,7 @@ impl<F: Family, D: Digest> Request<F, D> {
     }
 
     pub(super) const fn to_target(&self) -> compact::Target<F, D> {
-        compact::Target {
-            root: self.root,
-            leaf_count: self.leaf_count,
-        }
+        compact::Target::new(self.root, self.leaf_count)
     }
 }
 
@@ -93,7 +90,7 @@ impl<F: Family, D: Digest> Read for Request<F, D> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
         let leaf_count = commonware_storage::merkle::Location::<F>::read(buf)?;
-        let target = compact::Target { root, leaf_count };
+        let target = compact::Target::new(root, leaf_count);
         target.validate().map_err(|reason| {
             CodecError::Invalid(
                 "commonware_glue::stateful::db::p2p::compact::Request",

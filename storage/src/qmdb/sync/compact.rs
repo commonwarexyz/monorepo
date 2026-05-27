@@ -1086,3 +1086,16 @@ mod tests {
         });
     }
 }
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::*;
+    use crate::merkle::{mmb, mmr};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Target<mmr::Family, Sha256Digest>>,
+        CodecConformance<Target<mmb::Family, Sha256Digest>>,
+    }
+}

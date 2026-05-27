@@ -783,8 +783,8 @@ where
     /// 3. Handles different event types (target updates, fetch results)
     /// 4. Coordinates request scheduling and operation application
     ///
-    /// Returns `StepResult::Complete(database)` when sync is finished, or
-    /// `StepResult::Continue(self)` when more work remains.
+    /// Returns `NextStep::Complete(database)` when sync is finished, or
+    /// `NextStep::Continue(self)` when more work remains.
     pub(crate) async fn step(self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         Box::pin(Self::step_inner(self)).await
     }
