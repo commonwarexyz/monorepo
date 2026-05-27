@@ -72,7 +72,7 @@ impl<V: Eq + Send + Sync> Copy for State<V> {}
 ///
 /// Invariants:
 /// - `entry` owns the linked list and keeps it exclusively borrowed for the cursor's lifetime.
-/// - All pointers stored inside `state` were created from exclusive references via `record_ptr`
+/// - All pointers stored inside `state` were created from exclusive references via `NonNull::from`
 ///   and refer to nodes owned by `entry`.
 /// - In [`State::Active`], when `prev` is `Some`, `prev.next` owns the node at `current`.
 /// - After a non-head delete, the [`State::NeedNext`] `from` is the surviving predecessor;
@@ -106,12 +106,8 @@ impl<'a, V: Eq + Send + Sync, E: IndexEntry<V>> Cursor<'a, V, E> {
         }
     }
 
-    fn record_ptr(record: &mut Record<V>) -> NonNull<Record<V>> {
-        NonNull::from(record)
-    }
-
     const fn record_mut(&mut self, mut ptr: NonNull<Record<V>>) -> &mut Record<V> {
-        // SAFETY: `ptr` was created by `record_ptr` from a record owned by `entry`, which is
+        // SAFETY: `ptr` was created by `NonNull::from` from a record owned by `entry`, which is
         // exclusively borrowed through this cursor. Cursor state clears or rewinds pointers before
         // an owner is dropped.
         unsafe { ptr.as_mut() }
@@ -131,14 +127,14 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
         // Derive the next pointer from `from.next`, or the entry head when `from` is `None`.
         let next_ptr = if let Some(from) = from {
             match self.record_mut(from).next.as_deref_mut() {
-                Some(next) => Self::record_ptr(next),
+                Some(next) => NonNull::from(next),
                 None => {
                     self.state = State::Done { tail: from };
                     return None;
                 }
             }
         } else {
-            Self::record_ptr(self.entry.as_mut().unwrap().get_mut())
+            NonNull::from(self.entry.as_mut().unwrap().get_mut())
         };
 
         self.state = State::Active {
@@ -170,7 +166,7 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
                         next: current_record.next.take(),
                     });
                     current_record.next = Some(new);
-                    Self::record_ptr(current_record.next.as_deref_mut().unwrap())
+                    NonNull::from(current_record.next.as_deref_mut().unwrap())
                 };
                 // Advance past the inserted node so next() returns the element after it.
                 self.state = State::NeedNext {
@@ -184,7 +180,7 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
                 entry_record.value = v;
                 entry_record.next = None;
                 self.state = State::Done {
-                    tail: Self::record_ptr(entry_record),
+                    tail: NonNull::from(entry_record),
                 };
             }
             State::Done { tail } => {
@@ -195,7 +191,7 @@ impl<V: Eq + Send + Sync, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
                         value: v,
                         next: None,
                     }));
-                    Self::record_ptr(tail_record.next.as_deref_mut().unwrap())
+                    NonNull::from(tail_record.next.as_deref_mut().unwrap())
                 };
                 self.state = State::Done { tail: inserted };
             }
