@@ -147,7 +147,7 @@ where
     async fn from_compact_state(
         context: Self::Context,
         config: Self::Config,
-        state: sync::compact::VerifiedState<Self::Family, Self::Op, Self::Digest>,
+        state: sync::compact::ValidatedState<Self::Family, Self::Op, Self::Digest>,
     ) -> Result<Self, qmdb::Error<F>> {
         let (state, root, inactivity_floor_loc) = state.into_parts();
         let sync::compact::State {
