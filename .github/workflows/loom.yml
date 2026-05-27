@@ -27,9 +27,15 @@ jobs:
           - flags: ""
             partition: "1/1"
           - flags: "--features iouring"
-            partition: "1/2"
+            partition: "1/5"
           - flags: "--features iouring"
-            partition: "2/2"
+            partition: "2/5"
+          - flags: "--features iouring"
+            partition: "3/5"
+          - flags: "--features iouring"
+            partition: "4/5"
+          - flags: "--features iouring"
+            partition: "5/5"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
