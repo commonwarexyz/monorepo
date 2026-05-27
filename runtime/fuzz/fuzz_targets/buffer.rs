@@ -12,6 +12,7 @@ use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
 
@@ -33,7 +34,7 @@ enum FuzzOperation {
     },
     CreateAppend {
         initial_size: u16,
-        buffer_size: u16,
+        buffer_size: u32,
         cache_page_size: u16,
         cache_capacity: u16,
     },
@@ -160,7 +161,10 @@ fn fuzz(input: FuzzInput) {
                     cache_capacity,
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
-                    let cache_capacity = NZUsize!((cache_capacity as usize).clamp(1, MAX_SIZE));
+                    let cache_page_size = cache_page_size.max(1);
+                    let max_cache_capacity = (MAX_CACHE_BYTES / cache_page_size as usize).max(1);
+                    let cache_capacity =
+                        NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));
 
                     let (blob, _) = context
                         .open("test_partition", b"append_blob")
@@ -171,7 +175,6 @@ fn fuzz(input: FuzzInput) {
                     // a different page size would corrupt reads since page size is embedded
                     // in the CRC records.
                     if cache_ref.is_none() {
-                        let cache_page_size = cache_page_size.clamp(1, u16::MAX);
                         cache_ref = Some(CacheRef::from_pooler(
                             &context,
                             NZU16!(cache_page_size),
