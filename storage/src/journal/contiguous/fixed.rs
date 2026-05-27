@@ -725,8 +725,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     Some(_) => (meta_pruning_boundary, false, false), // valid mid-section metadata
                 }
             }
-            // Section-aligned metadata is normally unnecessary. During aligned destructive resets,
-            // it is also used as a temporary marker until the replacement tail exists.
+            // Section-aligned metadata is normally unnecessary. Keep accepting it as a reset
+            // compatibility marker for journals that crashed while older versions of this patch
+            // were installing aligned replacement tails.
             Some(meta_pruning_boundary) => {
                 let meta_oldest_section = meta_pruning_boundary / items_per_blob;
                 match inner.oldest_section() {
@@ -782,6 +783,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ) -> Result<bool, Error> {
         let reset_section = reset_size / items_per_blob;
         let (Some(oldest), Some(newest)) = (inner.oldest_section(), inner.newest_section()) else {
+            // No blobs is exactly the crash window that the reset marker exists to cover: the reset
+            // was durably marked, but blob clearing completed before the replacement tail survived.
             return Ok(true);
         };
         if oldest != reset_section || newest != reset_section {
@@ -1828,6 +1831,10 @@ mod tests {
                 Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
                     .await
                     .unwrap();
+            // This state cannot be produced by the current reset path, which lowers
+            // RECOVERY_SIZE before writing RESET_SIZE_KEY. It protects recovery against older WIP
+            // states and manually constructed metadata where the reset marker is the only reliable
+            // indication of the intended clear target.
             metadata
                 .put_sync(RESET_SIZE_KEY, reset_size.to_be_bytes().to_vec())
                 .await

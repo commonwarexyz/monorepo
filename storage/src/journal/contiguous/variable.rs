@@ -490,7 +490,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
-        let data = variable::Journal::init(
+        let mut data = variable::Journal::init(
             context.child("data"),
             variable::Config {
                 partition: cfg.data_partition(),
@@ -501,6 +501,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             },
         )
         .await?;
+        data.clear().await?;
 
         // Initialize offsets journal at the target size
         let offsets = fixed::Journal::init_at_size(
@@ -1155,6 +1156,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Ok((size, size));
         }
 
+        if let (Some(start_section), Some(last_section)) =
+            (data_recovery.repaired_from_section, data.newest_section())
+        {
+            for section in start_section..=last_section {
+                data.sync(section).await?;
+            }
+        }
+
         // === Handle non-empty data journal case ===
         let data_first_section = data.oldest_section().unwrap();
         let data_last_section = data.newest_section().unwrap();
@@ -1261,13 +1270,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets_bounds.start
         };
 
-        if let (Some(start_section), Some(last_section)) =
-            (data_recovery.repaired_from_section, data.newest_section())
-        {
-            for section in start_section..=last_section {
-                data.sync(section).await?;
-            }
-        }
         offsets.sync().await?;
         Ok((pruning_boundary, data_size))
     }
@@ -2820,6 +2822,45 @@ mod tests {
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 1500);
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_clears_residual_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-clears-residual-data".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                journal.append(&i).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init_at_size(context.child("second"), cfg.clone(), 7)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            let pos = journal.append(&99).await.unwrap();
+            assert_eq!(pos, 7);
+            assert_eq!(journal.read(7).await.unwrap(), 99);
             journal.destroy().await.unwrap();
         });
     }
