@@ -162,8 +162,10 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 IndexOperation::CursorInsert { key, value } => {
-                    // Just use regular insert - simpler and avoids borrow issues
-                    index.insert(key, *value);
+                    if let Some(mut cursor) = index.get_mut_or_insert(key, *value) {
+                        cursor.next();
+                        cursor.insert(*value);
+                    }
                 }
             }
         }

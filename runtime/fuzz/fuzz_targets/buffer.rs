@@ -6,14 +6,13 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, BufferPooler, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;
-const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
-const MIN_EFFECTIVE_CACHE_SLOT_BYTES: usize = 16 * 1024;
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
 
@@ -35,7 +34,7 @@ enum FuzzOperation {
     },
     CreateAppend {
         initial_size: u16,
-        buffer_size: u16,
+        buffer_size: u32,
         cache_page_size: u16,
         cache_capacity: u16,
     },
@@ -162,12 +161,14 @@ fn fuzz(input: FuzzInput) {
                     cache_capacity,
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
-                    let cache_page_size = (cache_page_size as usize).clamp(1, u16::MAX as usize);
-                    let max_cache_capacity = (MAX_CACHE_BYTES
-                        / cache_page_size
-                            .max(MIN_EFFECTIVE_CACHE_SLOT_BYTES)
-                            .next_power_of_two())
-                    .max(1);
+                    let cache_page_size = cache_page_size.max(1);
+                    // Cache slots are allocated from the storage pool, which rounds
+                    // requests up to a power-of-two size class. Cap capacity against that
+                    // actual allocation size rather than the requested page size.
+                    let cache_slot_size = (cache_page_size as usize)
+                        .max(context.storage_buffer_pool().config().min_size.get())
+                        .next_power_of_two();
+                    let max_cache_capacity = (MAX_CACHE_BYTES / cache_slot_size).max(1);
                     let cache_capacity =
                         NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));
 
