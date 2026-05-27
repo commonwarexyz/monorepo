@@ -27,9 +27,7 @@ use std::{
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
-impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
-    for BTreeOccupiedEntry<'_, K, Record<V>>
-{
+impl<K: Ord + Send + Sync, V: Send + Sync> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -46,7 +44,7 @@ pub type Cursor<'a, K, V> = CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V
 
 /// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
 /// values.
-pub struct Index<T: Translator, V: Eq + Send + Sync> {
+pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: BTreeMap<T::Key, Record<V>>,
 
@@ -55,7 +53,7 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
+impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -104,7 +102,7 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Ordered for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     type Iterator<'a>
         = ImmutableCursor<'a, V>
     where
@@ -153,13 +151,13 @@ impl<T: Translator, V: Eq + Send + Sync> Ordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> super::Factory<T> for Index<T, V> {
+impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
@@ -281,7 +279,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Drop for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {
