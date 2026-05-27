@@ -84,6 +84,8 @@ const LENGTH_RECOVERY_KEY: u64 = 2;
 /// Length-walking recovery may truncate an unsynced suffix, but it must not recover before this
 /// checkpoint. Destructive operations lower the checkpoint before mutating data.
 const RECOVERY_SIZE_KEY: u64 = 3;
+/// Metadata key marking an in-progress destructive reset to a logical size.
+const RESET_SIZE_KEY: u64 = 4;
 
 /// Return the first retained logical position in `section`.
 #[inline]
@@ -167,6 +169,15 @@ struct Inner<E: Context, A: CodecFixedShared> {
 
     /// The last logical size synced as a recovery checkpoint.
     recovery_size: Option<u64>,
+}
+
+struct RecoveredBounds {
+    pruning_boundary: u64,
+    size: u64,
+    needs_metadata_update: bool,
+    remove_reset_marker: bool,
+    recovery_size: Option<u64>,
+    repaired_from_section: Option<u64>,
 }
 
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
@@ -565,22 +576,39 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             Self::parse_metadata_u64(&metadata, PRUNING_BOUNDARY_KEY, "pruning_boundary")?;
         let mut recovery_size =
             Self::parse_metadata_u64(&metadata, RECOVERY_SIZE_KEY, "recovery_size")?;
+        let reset_size = Self::parse_metadata_u64(&metadata, RESET_SIZE_KEY, "reset_size")?;
         let mut length_recovery = metadata.get(&LENGTH_RECOVERY_KEY).is_some();
 
         // Recover bounds from metadata and/or blobs
-        let (pruning_boundary, size, needs_metadata_update) = Self::recover_bounds(
+        let recovered = Self::recover_bounds(
             &mut journal,
             items_per_blob,
             meta_pruning_boundary,
+            reset_size,
             length_recovery,
             recovery_size,
         )
         .await?;
+        let pruning_boundary = recovered.pruning_boundary;
+        let size = recovered.size;
+        recovery_size = recovered.recovery_size;
+
+        if let Some(start_section) = recovered.repaired_from_section {
+            let tail_section = size / items_per_blob;
+            for section in start_section..=tail_section {
+                journal.sync(section).await?;
+            }
+        }
+
+        // Re-establish the tail before persisting metadata cleanup. If recovery consumed a reset
+        // marker, a crash after marker removal can still recover from the replacement tail.
+        let tail_section = size / items_per_blob;
+        journal.ensure_section_exists(tail_section).await?;
 
         // Persist metadata if needed, and install length-recovery metadata after the legacy
         // recovery pass so future appends do not need an append-time metadata sync.
         let mut metadata_dirty = false;
-        if needs_metadata_update {
+        if recovered.needs_metadata_update {
             if pruning_boundary.is_multiple_of(items_per_blob) {
                 metadata.remove(&PRUNING_BOUNDARY_KEY);
             } else {
@@ -589,6 +617,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     pruning_boundary.to_be_bytes().to_vec(),
                 );
             }
+            metadata_dirty = true;
+        }
+        if recovered.remove_reset_marker {
+            metadata.remove(&RESET_SIZE_KEY);
             metadata_dirty = true;
         }
         if Self::install_recovery_metadata_if_needed(
@@ -602,12 +634,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         if metadata_dirty {
             metadata.sync().await?;
         }
-
-        // Invariant: Tail blob must exist, even if empty. This ensures we can reconstruct size on
-        // reopen even after pruning all items. The tail blob is at `size / items_per_blob` (where
-        // the next append would go).
-        let tail_section = size / items_per_blob;
-        journal.ensure_section_exists(tail_section).await?;
 
         let metrics = Metrics::new(context);
         metrics.update(size, pruning_boundary, items_per_blob);
@@ -641,11 +667,25 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         inner: &mut SegmentedJournal<E, A>,
         items_per_blob: u64,
         meta_pruning_boundary: Option<u64>,
+        reset_size: Option<u64>,
         length_recovery: bool,
         recovery_size: Option<u64>,
-    ) -> Result<(u64, u64, bool), Error> {
+    ) -> Result<RecoveredBounds, Error> {
         // Blob-based boundary is always section-aligned
         let blob_boundary = inner.oldest_section().map_or(0, |o| o * items_per_blob);
+        let remove_reset_marker = reset_size.is_some();
+        if let Some(reset_size) = reset_size {
+            if Self::reset_marker_matches(inner, items_per_blob, reset_size).await? {
+                return Ok(RecoveredBounds {
+                    pruning_boundary: reset_size,
+                    size: reset_size,
+                    needs_metadata_update: true,
+                    remove_reset_marker,
+                    recovery_size: None,
+                    repaired_from_section: None,
+                });
+            }
+        }
 
         let (pruning_boundary, needs_update, discard_recovery_size) = match meta_pruning_boundary {
             // Mid-section metadata: validate against blobs
@@ -685,13 +725,25 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     Some(_) => (meta_pruning_boundary, false, false), // valid mid-section metadata
                 }
             }
-            // Section-aligned metadata: unnecessary, use blob-based.
+            // Section-aligned metadata is normally unnecessary. During aligned destructive resets,
+            // it is also used as a temporary marker until the replacement tail exists.
             Some(meta_pruning_boundary) => {
                 let meta_oldest_section = meta_pruning_boundary / items_per_blob;
-                let discard_recovery_size = inner
-                    .oldest_section()
-                    .is_none_or(|oldest_section| meta_oldest_section > oldest_section);
-                (blob_boundary, true, discard_recovery_size)
+                match inner.oldest_section() {
+                    None => (meta_pruning_boundary, false, true),
+                    Some(oldest_section) if meta_oldest_section > oldest_section => {
+                        (blob_boundary, true, true)
+                    }
+                    Some(oldest_section) if meta_oldest_section == oldest_section => {
+                        let empty_reset_tail = inner.section_len(oldest_section).await? == 0;
+                        if empty_reset_tail {
+                            (meta_pruning_boundary, false, false)
+                        } else {
+                            (blob_boundary, true, false)
+                        }
+                    }
+                    Some(_) => (blob_boundary, true, false),
+                }
             }
             // No metadata: use blob-based, no update needed
             None => (blob_boundary, false, false),
@@ -703,14 +755,39 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             recovery_size
         };
 
-        let size = if length_recovery {
+        let (size, repaired_from_section) = if length_recovery {
             Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary, recovery_size)
                 .await?
         } else {
             Self::validate_oldest_section(inner, items_per_blob, pruning_boundary).await?;
-            Self::compute_size(inner, items_per_blob, pruning_boundary).await?
+            (
+                Self::compute_size(inner, items_per_blob, pruning_boundary).await?,
+                None,
+            )
         };
-        Ok((pruning_boundary, size, needs_update))
+        Ok(RecoveredBounds {
+            pruning_boundary,
+            size,
+            needs_metadata_update: needs_update,
+            remove_reset_marker,
+            recovery_size,
+            repaired_from_section,
+        })
+    }
+
+    async fn reset_marker_matches(
+        inner: &SegmentedJournal<E, A>,
+        items_per_blob: u64,
+        reset_size: u64,
+    ) -> Result<bool, Error> {
+        let reset_section = reset_size / items_per_blob;
+        let (Some(oldest), Some(newest)) = (inner.oldest_section(), inner.newest_section()) else {
+            return Ok(true);
+        };
+        if oldest != reset_section || newest != reset_section {
+            return Ok(false);
+        }
+        Ok(inner.section_len(reset_section).await? == 0)
     }
 
     /// Validate that the oldest section has the expected number of items.
@@ -811,13 +888,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         items_per_blob: u64,
         pruning_boundary: u64,
         recovery_size: Option<u64>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, Option<u64>), Error> {
         let oldest = inner.oldest_section();
         let newest = inner.newest_section();
 
         let (Some(oldest), Some(newest)) = (oldest, newest) else {
             Self::validate_recovery_checkpoint(pruning_boundary, recovery_size)?;
-            return Ok(pruning_boundary);
+            return Ok((pruning_boundary, None));
         };
 
         let mut size = None;
@@ -840,14 +917,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                         len, capacity, "crash repair: truncating journal after short section"
                     );
                     inner.rewind(section, byte_offset).await?;
+                    return Ok((recovered_size, Some(section)));
                 }
-                return Ok(recovered_size);
+                return Ok((recovered_size, None));
             }
         }
 
         let size = size.expect("non-empty section range should set recovered size");
         Self::validate_recovery_checkpoint(size, recovery_size)?;
-        Ok(size)
+        Ok((size, None))
     }
 
     /// Initialize a new `Journal` instance in a pruned state at a given size.
@@ -895,15 +973,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
         let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
 
-        // Clear blobs before updating metadata.
-        // This ordering is critical for crash safety:
-        // - Crash after clear: no blobs, recovery returns (0, 0), metadata ignored
-        // - Crash after create: old metadata triggers "metadata ahead" warning,
-        //   recovery falls back to blob state.
+        // The reset marker lets recovery distinguish an interrupted destructive reset from
+        // ordinary blob loss. If old data is still present, recovery ignores the marker.
+        metadata
+            .put_sync(RESET_SIZE_KEY, size.to_be_bytes().to_vec())
+            .await?;
+
+        // Clear blobs before updating pruning metadata. If a crash interrupts the reset after
+        // this point, the reset marker recovers the intended pruned size.
         journal.clear().await?;
         journal.ensure_section_exists(tail_section).await?;
 
-        let mut metadata_dirty = false;
+        let mut metadata_dirty = true;
+        metadata.remove(&RESET_SIZE_KEY);
 
         // Persist metadata if pruning_boundary is mid-section.
         if !size.is_multiple_of(items_per_blob) {
@@ -1259,13 +1341,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// If a crash occurs during this operation, `init()` will recover to a consistent state
     /// (though possibly different from the intended `new_size`).
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
-        // Clear blobs before updating metadata.
-        // This ordering is critical for crash safety:
-        // - Crash after clear: no blobs, recovery returns (0, 0), metadata ignored
-        // - Crash after create: old metadata triggers "metadata ahead" warning,
-        //   recovery falls back to blob state
         let mut inner = self.inner.write().await;
         Self::lower_recovery_size(&mut inner, new_size).await?;
+        // The reset marker lets recovery distinguish an interrupted destructive reset from
+        // ordinary blob loss. If old data is still present, recovery ignores the marker.
+        inner
+            .metadata
+            .put_sync(RESET_SIZE_KEY, new_size.to_be_bytes().to_vec())
+            .await?;
         inner.journal.clear().await?;
         let tail_section = new_size / self.items_per_blob;
         inner.journal.ensure_section_exists(tail_section).await?;
@@ -1275,11 +1358,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         inner.dirty_from_section = None;
 
         // Persist metadata only when pruning_boundary is mid-section.
+        inner.metadata.remove(&RESET_SIZE_KEY);
         if !inner.pruning_boundary.is_multiple_of(self.items_per_blob) {
             let value = inner.pruning_boundary.to_be_bytes().to_vec();
             inner.metadata.put_sync(PRUNING_BOUNDARY_KEY, value).await?;
         } else if inner.metadata.get(&PRUNING_BOUNDARY_KEY).is_some() {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
+            inner.metadata.sync().await?;
+        } else {
             inner.metadata.sync().await?;
         }
 
@@ -1622,6 +1708,148 @@ mod tests {
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert_corruption_contains(result, "recovered size");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_recovers_aligned_reset_after_clear_crash() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            for i in 0..12 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            let reset_size = 10u64;
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+                    .await
+                    .unwrap();
+            metadata
+                .put_sync(RECOVERY_SIZE_KEY, reset_size.to_be_bytes().to_vec())
+                .await
+                .unwrap();
+            metadata
+                .put_sync(RESET_SIZE_KEY, reset_size.to_be_bytes().to_vec())
+                .await
+                .unwrap();
+
+            context
+                .remove(&blob_partition(&cfg), None)
+                .await
+                .expect("failed to remove blobs");
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to recover reset journal");
+            assert_eq!(journal.bounds().await, reset_size..reset_size);
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+                .await
+                .expect("failed to reopen recovered reset journal");
+            assert_eq!(journal.bounds().await, reset_size..reset_size);
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_ignores_reset_marker_before_clear() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            for i in 0..12 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            let reset_size = 10u64;
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+                    .await
+                    .unwrap();
+            metadata
+                .put_sync(RECOVERY_SIZE_KEY, reset_size.to_be_bytes().to_vec())
+                .await
+                .unwrap();
+            metadata
+                .put_sync(RESET_SIZE_KEY, reset_size.to_be_bytes().to_vec())
+                .await
+                .unwrap();
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to ignore reset marker");
+            assert_eq!(journal.size().await, 12);
+            assert_eq!(journal.read(11).await.unwrap(), test_digest(11));
+            journal.destroy().await.expect("failed to destroy journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_recovers_reset_marker_with_old_checkpoint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+            for i in 0..12 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            let reset_size = 10u64;
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+                    .await
+                    .unwrap();
+            metadata
+                .put_sync(RESET_SIZE_KEY, reset_size.to_be_bytes().to_vec())
+                .await
+                .unwrap();
+            context
+                .remove(&blob_partition(&cfg), None)
+                .await
+                .expect("failed to remove blobs");
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to recover reset marker");
+            assert_eq!(journal.bounds().await, reset_size..reset_size);
+            journal
+                .sync()
+                .await
+                .expect("failed to sync recovered journal");
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+                .await
+                .expect("failed to reopen reset marker journal");
+            assert_eq!(journal.bounds().await, reset_size..reset_size);
+            journal.destroy().await.expect("failed to destroy journal");
         });
     }
 

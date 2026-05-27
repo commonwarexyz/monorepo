@@ -1,7 +1,8 @@
 //! Position-based journal for variable-length items.
 //!
-//! This journal enforces section fullness: all non-final sections are full and synced.
-//! On init, only the last section needs to be replayed to determine the exact size.
+//! This journal assigns appended items to fixed-capacity sections. Full sections are flushed for
+//! visibility at rollover, while `commit()` and `sync()` provide durability. On init, recovery may
+//! walk retained data sections to distinguish an unsynced suffix from checkpointed data.
 
 use super::Reader as _;
 use crate::{
@@ -68,7 +69,7 @@ pub struct Config<C> {
     /// The number of items to store in each section.
     ///
     /// Once set, this value cannot be changed across restarts.
-    /// All non-final sections will be full and persisted.
+    /// All non-final sections should be full during normal operation.
     pub items_per_section: NonZeroU64,
 
     /// Optional compression level for stored items.
@@ -196,8 +197,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 ///
 /// ## 1. Section Fullness
 ///
-/// All non-final sections are full (`items_per_section` items) and persisted. This ensures
-/// that on `init()`, we only need to replay the last section to determine the exact size.
+/// All non-final sections are full (`items_per_section` items) during normal operation. Recovery
+/// walks retained data sections to repair uncheckpointed suffixes and reject checkpoint violations.
 ///
 /// ## 2. Data Journal is Source of Truth
 ///
@@ -945,10 +946,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         offsets: &fixed::Journal<E, u64>,
         offsets_start: u64,
         items_per_section: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<u64>, Error> {
         let sections: Vec<u64> = data.sections().collect();
         if sections.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let last_section = *sections.last().expect("sections is non-empty");
 
@@ -964,7 +965,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                         section, "crash repair: truncating data journal before section gap"
                     );
                     data.rewind(previous, byte_offset).await?;
-                    return Ok(());
+                    return Ok(Some(previous));
                 }
             }
 
@@ -1003,7 +1004,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             if count < capacity {
                 offsets.validate_recovered_size(recovered_size).await?;
                 if section == last_section {
-                    return Ok(());
+                    return Ok(None);
                 }
                 let byte_offset = data.size(section).await?;
                 warn!(
@@ -1011,13 +1012,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     count, capacity, "crash repair: truncating data journal after short section"
                 );
                 data.rewind(section, byte_offset).await?;
-                return Ok(());
+                return Ok(Some(section));
             }
 
             previous = Some(section);
         }
         offsets.validate_recovered_size(recovered_size).await?;
-        Ok(())
+        Ok(None)
     }
 
     /// Align the offsets journal and data journal to be consistent in case a crash occurred
@@ -1038,7 +1039,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let offsets_reader = offsets.reader().await;
             offsets_reader.bounds()
         };
-        Self::recover_data_by_walking_lengths(
+        let repaired_from_section = Self::recover_data_by_walking_lengths(
             data,
             offsets,
             initial_offsets_bounds.start,
@@ -1201,6 +1202,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets_bounds.start
         };
 
+        if let (Some(start_section), Some(last_section)) =
+            (repaired_from_section, data.newest_section())
+        {
+            for section in start_section..=last_section {
+                data.sync(section).await?;
+            }
+        }
         offsets.sync().await?;
         Ok((pruning_boundary, data_size))
     }
@@ -1612,6 +1620,65 @@ mod tests {
 
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert_corruption_contains(result, "recovered size");
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_truncates_unsynced_short_data_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "unsynced-short-data-section".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let item_count = 25;
+            for i in 10..item_count {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            {
+                let inner = journal.inner.read().await;
+                inner.data.sync(1).await.unwrap();
+            }
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&cfg.data_partition(), &1u64.to_be_bytes())
+                .await
+                .expect("failed to open data section");
+            blob.resize(size - 1)
+                .await
+                .expect("failed to truncate data section");
+            blob.sync().await.expect("failed to sync data section");
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("failed to recover journal");
+            let recovered = journal.size().await;
+            assert!(
+                recovered >= 10,
+                "recovery should preserve synced prefix before short section"
+            );
+            assert!(
+                recovered < item_count,
+                "short unsynced data section should truncate suffix"
+            );
+            for i in 0..recovered {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            journal.destroy().await.unwrap();
         });
     }
 
