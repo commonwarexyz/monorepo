@@ -61,6 +61,12 @@ runs:
         key="${{ inputs.additional-cache-key }}"
         key="${key// /-}"
         key="${key//\//-}"
+        if [[ "$key" =~ ^(.*-part-)([0-9]+)$ ]]; then
+          partition="${BASH_REMATCH[2]}"
+          if (( partition > 8 )); then
+            key="${BASH_REMATCH[1]}$(( (partition - 1) % 8 + 1 ))"
+          fi
+        fi
         echo "key=${key}" >> "$GITHUB_OUTPUT"
     - name: Setup rust cache
       uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
