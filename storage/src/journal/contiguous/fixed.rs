@@ -647,7 +647,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // Blob-based boundary is always section-aligned
         let blob_boundary = inner.oldest_section().map_or(0, |o| o * items_per_blob);
 
-        let (pruning_boundary, needs_update) = match meta_pruning_boundary {
+        let (pruning_boundary, needs_update, discard_recovery_size) = match meta_pruning_boundary {
             // Mid-section metadata: validate against blobs
             Some(meta_pruning_boundary)
                 if !meta_pruning_boundary.is_multiple_of(items_per_blob) =>
@@ -662,14 +662,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                             meta_oldest_section,
                             "crash repair: no blobs exist, ignoring stale metadata"
                         );
-                        (blob_boundary, true)
+                        (blob_boundary, true, true)
                     }
                     Some(oldest_section) if meta_oldest_section < oldest_section => {
                         warn!(
                             meta_oldest_section,
                             oldest_section, "crash repair: metadata stale, computing from blobs"
                         );
-                        (blob_boundary, true)
+                        (blob_boundary, true, false)
                     }
                     Some(oldest_section) if meta_oldest_section > oldest_section => {
                         // Metadata references a section ahead of the oldest blob. This can happen
@@ -680,18 +680,24 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                             oldest_section,
                             "crash repair: metadata ahead of blobs, computing from blobs"
                         );
-                        (blob_boundary, true)
+                        (blob_boundary, true, true)
                     }
-                    Some(_) => (meta_pruning_boundary, false), // valid mid-section metadata
+                    Some(_) => (meta_pruning_boundary, false, false), // valid mid-section metadata
                 }
             }
-            // Section-aligned metadata: unnecessary, use blob-based
-            Some(_) => (blob_boundary, true),
+            // Section-aligned metadata: unnecessary, use blob-based.
+            Some(meta_pruning_boundary) => {
+                let meta_oldest_section = meta_pruning_boundary / items_per_blob;
+                let discard_recovery_size = inner
+                    .oldest_section()
+                    .is_none_or(|oldest_section| meta_oldest_section > oldest_section);
+                (blob_boundary, true, discard_recovery_size)
+            }
             // No metadata: use blob-based, no update needed
-            None => (blob_boundary, false),
+            None => (blob_boundary, false, false),
         };
 
-        let recovery_size = if needs_update && inner.oldest_section().is_none() {
+        let recovery_size = if discard_recovery_size {
             None
         } else {
             recovery_size
@@ -752,6 +758,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((len, capacity))
     }
 
+    fn validate_recovery_checkpoint(size: u64, recovery_size: Option<u64>) -> Result<(), Error> {
+        if let Some(checkpoint) = recovery_size {
+            if size < checkpoint {
+                return Err(Error::Corruption(format!(
+                    "recovered size {size} is before recovery checkpoint {checkpoint}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the total number of items ever appended (size), computed using legacy invariants.
     async fn compute_size(
         inner: &SegmentedJournal<E, A>,
@@ -799,26 +816,22 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let newest = inner.newest_section();
 
         let (Some(oldest), Some(newest)) = (oldest, newest) else {
+            Self::validate_recovery_checkpoint(pruning_boundary, recovery_size)?;
             return Ok(pruning_boundary);
         };
 
-        let mut size = pruning_boundary;
+        let mut size = None;
         for section in oldest..=newest {
             let (len, capacity) =
                 Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
                     .await?;
             let first = first_in_section(pruning_boundary, section, items_per_blob)?;
-            size = first.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            let recovered_size = first.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            size = Some(recovered_size);
 
             if len < capacity {
+                Self::validate_recovery_checkpoint(recovered_size, recovery_size)?;
                 if section != newest {
-                    if let Some(checkpoint) = recovery_size {
-                        if size < checkpoint {
-                            return Err(Error::Corruption(format!(
-                                "recovered size {size} is before recovery checkpoint {checkpoint}"
-                            )));
-                        }
-                    }
                     let byte_offset = len
                         .checked_mul(Self::CHUNK_SIZE_U64)
                         .ok_or(Error::OffsetOverflow)?;
@@ -828,10 +841,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     );
                     inner.rewind(section, byte_offset).await?;
                 }
-                return Ok(size);
+                return Ok(recovered_size);
             }
         }
 
+        let size = size.expect("non-empty section range should set recovered size");
+        Self::validate_recovery_checkpoint(size, recovery_size)?;
         Ok(size)
     }
 
@@ -951,6 +966,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         inner.recovery_size = Some(size);
     }
 
+    pub(crate) async fn validate_recovered_size(&self, size: u64) -> Result<(), Error> {
+        let inner = self.inner.read().await;
+        Self::validate_recovery_checkpoint(size, inner.recovery_size)
+    }
+
     async fn lower_recovery_size(inner: &mut Inner<E, A>, size: u64) -> Result<(), Error> {
         if inner.length_recovery
             && inner
@@ -989,7 +1009,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             }
         }
 
-        // Persist metadata only when pruning_boundary is mid-section.
+        // Persist pruning metadata and advance the recovery checkpoint when needed.
         let pruning_boundary = inner.pruning_boundary;
         let pruning_boundary_from_metadata = inner.metadata.get(&PRUNING_BOUNDARY_KEY).cloned();
         let metadata_update = if !pruning_boundary.is_multiple_of(self.items_per_blob) {
@@ -1415,6 +1435,17 @@ mod tests {
         format!("{}-blobs", cfg.partition)
     }
 
+    fn assert_corruption_contains<T>(result: Result<T, Error>, needle: &str) {
+        match result {
+            Err(Error::Corruption(msg)) => assert!(
+                msg.contains(needle),
+                "corruption message {msg:?} did not contain {needle:?}"
+            ),
+            Err(err) => panic!("expected corruption containing {needle:?}, got {err:?}"),
+            Ok(_) => panic!("expected corruption containing {needle:?}, got success"),
+        }
+    }
+
     #[test_traced]
     fn test_fixed_journal_init_installs_length_recovery() {
         let executor = deterministic::Runner::default();
@@ -1501,7 +1532,96 @@ mod tests {
             blob.sync().await.expect("failed to sync section");
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            assert_corruption_contains(result, "recovered size");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_length_recovery_rejects_tail_checkpoint_violation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(7));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            let item_count = cfg.items_per_blob.get() + 3;
+            for i in 0..item_count {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                .await
+                .expect("failed to open tail section");
+            blob.resize(size - 1)
+                .await
+                .expect("failed to truncate tail section");
+            blob.sync().await.expect("failed to sync tail section");
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_length_recovery_rejects_missing_synced_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(7));
+            let journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("failed to initialize journal");
+
+            for i in 0..10 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.expect("failed to sync journal");
+            drop(journal);
+
+            context
+                .remove(&blob_partition(&cfg), None)
+                .await
+                .expect("failed to remove blobs");
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_keeps_checkpoint_with_stale_pruning_metadata() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 2)
+                    .await
+                    .expect("failed to initialize journal");
+
+            for i in 0..18 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.size().await, 20);
+            journal.sync().await.expect("failed to sync journal");
+
+            journal.prune(10).await.expect("failed to prune journal");
+            assert_eq!(journal.bounds().await.start, 10);
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&blob_partition(&cfg), &2u64.to_be_bytes())
+                .await
+                .expect("failed to open stale-metadata section");
+            blob.resize(size - 1)
+                .await
+                .expect("failed to truncate section");
+            blob.sync().await.expect("failed to sync section");
+
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
         });
     }
 
@@ -1927,7 +2047,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            assert_corruption_contains(result, "recovered size");
         });
     }
 
@@ -1992,16 +2112,8 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-
-            // The truncation invalidates the last page (bad checksum), which is removed.
-            // This loses one item.
-            assert_eq!(journal.size().await, item_count - 1);
-
-            // Cleanup.
-            journal.destroy().await.expect("Failed to destroy journal");
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
         });
     }
 
@@ -2102,28 +2214,8 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-            // The truncation invalidates the last page, which is removed. This loses one item.
-            assert_eq!(journal.pruning_boundary().await, 0);
-            assert_eq!(journal.size().await, 4);
-            drop(journal);
-
-            // Delete the second blob and re-init
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
-                .await
-                .expect("Failed to remove blob");
-
-            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-            // Only the first blob remains
-            assert_eq!(journal.size().await, 3);
-
-            journal.destroy().await.unwrap();
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
         });
     }
 
@@ -2158,7 +2250,7 @@ mod tests {
             blob.sync().await.expect("failed to sync blob");
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            assert_corruption_contains(result, "recovered size");
         });
     }
 
@@ -2189,24 +2281,8 @@ mod tests {
             blob.resize(size - 1).await.expect("Failed to corrupt blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Re-initialize the journal to simulate a restart
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal");
-
-            // Since there was only a single item appended which we then corrupted, recovery should
-            // leave us in the state of an empty journal.
-            let bounds = journal.bounds().await;
-            assert_eq!(bounds.end, 0);
-            assert!(bounds.is_empty());
-            // Make sure journal still works for appending.
-            journal
-                .append(&test_digest(0))
-                .await
-                .expect("failed to append data");
-            assert_eq!(journal.size().await, 1);
-
-            journal.destroy().await.unwrap();
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
         });
     }
 
@@ -2414,34 +2490,8 @@ mod tests {
                 .expect("Failed to truncate blob");
             blob.sync().await.expect("Failed to sync blob");
 
-            // Re-initialize the journal - it should recover by truncating to valid data
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("Failed to re-initialize journal after page truncation");
-
-            // The journal should have fewer items now (those that fit in the remaining pages).
-            // With logical page size 44 and item size 32:
-            // - After truncating to (full_pages-1) physical pages, we have (full_pages-1)*44 logical bytes
-            // - Number of complete items = floor(logical_bytes / 32)
-            let remaining_logical_bytes = (full_pages - 1) * PAGE_SIZE.get() as u64;
-            let expected_items = remaining_logical_bytes / 32; // 32 = Digest::SIZE
-            assert_eq!(
-                journal.size().await,
-                expected_items,
-                "Journal should recover to {} items after truncation",
-                expected_items
-            );
-
-            // Verify we can still read the remaining items
-            for i in 0..expected_items {
-                let item = journal
-                    .read(i)
-                    .await
-                    .expect("failed to read recovered item");
-                assert_eq!(item, test_digest(i), "item {} mismatch after recovery", i);
-            }
-
-            journal.destroy().await.expect("Failed to destroy journal");
+            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
         });
     }
 

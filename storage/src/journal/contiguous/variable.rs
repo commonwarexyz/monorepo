@@ -942,24 +942,28 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     async fn recover_data_by_walking_lengths(
         data: &mut variable::Journal<E, V>,
+        offsets: &fixed::Journal<E, u64>,
         offsets_start: u64,
         items_per_section: u64,
     ) -> Result<(), Error> {
         let sections: Vec<u64> = data.sections().collect();
-        let Some(&first_section) = sections.first() else {
+        if sections.is_empty() {
             return Ok(());
-        };
+        }
+        let last_section = *sections.last().expect("sections is non-empty");
 
         let mut previous = None;
+        let mut recovered_size = offsets_start;
         for (idx, section) in sections.iter().copied().enumerate() {
             if let Some(previous) = previous {
                 if section != previous + 1 {
-                    let size = data.size(previous).await?;
+                    offsets.validate_recovered_size(recovered_size).await?;
+                    let byte_offset = data.size(previous).await?;
                     warn!(
                         previous,
                         section, "crash repair: truncating data journal before section gap"
                     );
-                    data.rewind(previous, size).await?;
+                    data.rewind(previous, byte_offset).await?;
                     return Ok(());
                 }
             }
@@ -969,7 +973,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let section_start = section
                 .checked_mul(items_per_section)
                 .ok_or(Error::OffsetOverflow)?;
-            let capacity = if idx == 0 && offsets_start > section_start {
+            let (first_position, capacity) = if idx == 0 && offsets_start > section_start {
                 let skipped = offsets_start
                     .checked_sub(section_start)
                     .ok_or(Error::OffsetOverflow)?;
@@ -978,11 +982,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                         "offsets start {offsets_start} is beyond data section {section}"
                     )));
                 }
-                items_per_section
-                    .checked_sub(skipped)
-                    .ok_or(Error::OffsetOverflow)?
+                (
+                    offsets_start,
+                    items_per_section
+                        .checked_sub(skipped)
+                        .ok_or(Error::OffsetOverflow)?,
+                )
             } else {
-                items_per_section
+                (section_start, items_per_section)
             };
             if count > capacity {
                 return Err(Error::Corruption(format!(
@@ -990,18 +997,26 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 )));
             }
 
-            if count < capacity && section != *sections.last().unwrap_or(&first_section) {
-                let size = data.size(section).await?;
+            recovered_size = first_position
+                .checked_add(count)
+                .ok_or(Error::OffsetOverflow)?;
+            if count < capacity {
+                offsets.validate_recovered_size(recovered_size).await?;
+                if section == last_section {
+                    return Ok(());
+                }
+                let byte_offset = data.size(section).await?;
                 warn!(
                     section,
                     count, capacity, "crash repair: truncating data journal after short section"
                 );
-                data.rewind(section, size).await?;
+                data.rewind(section, byte_offset).await?;
                 return Ok(());
             }
 
             previous = Some(section);
         }
+        offsets.validate_recovered_size(recovered_size).await?;
         Ok(())
     }
 
@@ -1025,6 +1040,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         };
         Self::recover_data_by_walking_lengths(
             data,
+            offsets,
             initial_offsets_bounds.start,
             items_per_section,
         )
@@ -1057,6 +1073,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 let data_first_section = data.oldest_section().unwrap();
                 let data_section_start = data_first_section * items_per_section;
                 let target_pos = data_section_start.max(offsets_bounds.start);
+                offsets.validate_recovered_size(target_pos).await?;
 
                 warn!("crash repair: clearing offsets to {target_pos} (empty section crash)");
                 offsets.clear_to_size(target_pos).await?;
@@ -1151,6 +1168,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             };
             (offsets_bounds, data_size)
         };
+        offsets.validate_recovered_size(data_size).await?;
 
         // Align sizes
         let offsets_size = offsets_bounds.end;
@@ -1390,7 +1408,8 @@ mod tests {
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Metrics as _, Runner, Storage, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Blob, Metrics as _, Runner, Storage,
+        Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
@@ -1402,6 +1421,17 @@ mod tests {
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
+
+    fn assert_corruption_contains<T>(result: Result<T, Error>, needle: &str) {
+        match result {
+            Err(Error::Corruption(msg)) => assert!(
+                msg.contains(needle),
+                "corruption message {msg:?} did not contain {needle:?}"
+            ),
+            Err(err) => panic!("expected corruption containing {needle:?}, got {err:?}"),
+            Ok(_) => panic!("expected corruption containing {needle:?}, got success"),
+        }
+    }
 
     #[test_traced]
     fn test_variable_append_many_compressed() {
@@ -1510,6 +1540,78 @@ mod tests {
             drop(reader);
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_rejects_synced_short_data_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "synced-short-data-section".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&cfg.data_partition(), &1u64.to_be_bytes())
+                .await
+                .expect("failed to open data section");
+            blob.resize(size - 1)
+                .await
+                .expect("failed to truncate data section");
+            blob.sync().await.expect("failed to sync data section");
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_rejects_synced_short_tail_data_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "synced-short-tail-data-section".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let (blob, size) = context
+                .open(&cfg.data_partition(), &1u64.to_be_bytes())
+                .await
+                .expect("failed to open data section");
+            blob.resize(size - 1)
+                .await
+                .expect("failed to truncate data section");
+            blob.sync().await.expect("failed to sync data section");
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert_corruption_contains(result, "recovered size");
         });
     }
 
