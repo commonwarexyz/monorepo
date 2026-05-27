@@ -325,16 +325,9 @@ impl<V: Variant> Sharing<V> {
         self.mode.all_scalars(self.total)
     }
 
-    /// Return the number of participants required to recover the secret
-    /// using the given fault model.
+    /// Return the number of participants required to recover the secret.
     pub fn required<M: Faults>(&self) -> u32 {
-        let required = M::quorum(self.total.get());
-        assert_eq!(
-            self.poly.required().get(),
-            required,
-            "polynomial threshold must equal quorum"
-        );
-        required
+        self.poly.required().get()
     }
 
     /// Return the total number of participants in this sharing.
@@ -548,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_required_matches_polynomial_threshold() {
+    fn test_required_matches_quorum() {
         let mut rng = StdRng::seed_from_u64(7);
         let sharing = Sharing::<MinSig>::new(
             Mode::NonZeroCounter,
@@ -559,15 +552,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "polynomial threshold must equal quorum")]
-    fn test_required_panics_on_threshold_quorum_mismatch() {
+    fn test_required_can_differ_from_quorum() {
         let mut rng = StdRng::seed_from_u64(9);
         let sharing = Sharing::<MinSig>::new(
             Mode::NonZeroCounter,
             NZU32!(4),
             Poly::commit(Poly::new(&mut rng, 1)),
         );
-        let _ = sharing.required::<N3f1>();
+        assert_eq!(N3f1::quorum(sharing.total().get()), 3);
+        assert_eq!(sharing.required::<N3f1>(), 2);
     }
 }
 

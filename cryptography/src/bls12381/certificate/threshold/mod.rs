@@ -93,7 +93,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             participants.len(),
             "polynomial total must equal participant len"
         );
-        polynomial.required::<N3f1>();
+        assert_eq!(
+            polynomial.required::<N3f1>(),
+            N3f1::quorum(participants.len()),
+            "polynomial threshold must equal quorum"
+        );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
         let partial_public = polynomial
@@ -126,7 +130,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             participants.len(),
             "polynomial total must equal participant len"
         );
-        polynomial.required::<N3f1>();
+        assert_eq!(
+            polynomial.required::<N3f1>(),
+            N3f1::quorum(participants.len()),
+            "polynomial threshold must equal quorum"
+        );
         #[cfg(feature = "std")]
         polynomial.precompute_partial_publics();
 
