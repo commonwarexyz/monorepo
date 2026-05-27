@@ -62,7 +62,7 @@ use crate::{
             FixedConfig, VariableConfig,
         },
         operation::{Committable, Key, Operation as _},
-        sync::{Database, DatabaseConfig as Config},
+        sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
     },
     translator::Translator,
     Context, Persistable,
@@ -414,7 +414,7 @@ macro_rules! impl_current_resolver {
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
-                crate::qmdb::sync::resolver::fetch_operations(
+                fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,
@@ -459,7 +459,7 @@ macro_rules! impl_current_resolver {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let db = self.read().await;
-                crate::qmdb::sync::resolver::fetch_operations(
+                fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,
@@ -505,7 +505,7 @@ macro_rules! impl_current_resolver {
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::<F>::KeyNotFound)?;
-                crate::qmdb::sync::resolver::fetch_operations(
+                fetch_operations(
                     op_count,
                     start_loc,
                     max_ops,

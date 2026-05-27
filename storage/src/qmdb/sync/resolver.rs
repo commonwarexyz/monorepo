@@ -37,7 +37,7 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     pub proof: Proof<F, D>,
     /// The operations that were fetched
     pub operations: Vec<Op>,
-    /// Optional channel to report validation success/failure back to the resolver.
+    /// Optional channel for resolvers that observe downstream validation feedback.
     pub success_tx: Option<oneshot::Sender<bool>>,
     /// Pinned merkle nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
@@ -113,7 +113,11 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
     }
 }
 
-/// Fetch an operation range with optional pinned nodes and package it as a [`FetchResult`].
+/// Fetch an operation range with a caller-provided callback and package it as a
+/// [`FetchResult`].
+///
+/// Use this when the source returns the proof, operations, and optional pinned nodes together,
+/// such as a network `get_operations` request.
 pub async fn fetch_operation_range<F, Op, D, Error, Fetch, FetchFuture>(
     op_count: Location<F>,
     start_loc: Location<F>,
@@ -135,7 +139,11 @@ where
     Ok(FetchResult::new(proof, operations, pinned_nodes))
 }
 
-/// Fetch an operation range and package it as a [`FetchResult`].
+/// Fetch an operation range from separate local-store callbacks and package it as a
+/// [`FetchResult`].
+///
+/// Use this for database APIs that expose `historical_proof` separately from
+/// `pinned_nodes_at`; pinned nodes are fetched only when `include_pinned_nodes` is true.
 pub async fn fetch_operations<
     F,
     Op,

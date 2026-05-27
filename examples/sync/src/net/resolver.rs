@@ -5,7 +5,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{
     mmr::{self, Location},
-    qmdb::sync::{self, compact},
+    qmdb::sync::{self, compact, resolver::fetch_operation_range},
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use std::num::NonZeroU64;
@@ -153,7 +153,7 @@ where
         _cancel_rx: oneshot::Receiver<()>,
     ) -> Result<sync::resolver::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
     {
-        sync::resolver::fetch_operation_range(
+        fetch_operation_range(
             op_count,
             start_loc,
             max_ops,
