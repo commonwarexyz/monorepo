@@ -216,12 +216,12 @@ jobs:
         key: ${{ steps.fuzz-corpus-restore.outputs.cache-primary-key }}
 
   Unsafe:
-    name: "Miri Tests (partition: ${{ matrix.partition }}/12)"
+    name: "Miri Tests (partition: ${{ matrix.partition }}/8)"
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -240,15 +240,15 @@ jobs:
     - name: Run miri tests for storage::index
       run: |
         cd storage
-        just miri index::tests --partition hash:${{matrix.partition}}/12
+        just miri index::tests --partition hash:${{matrix.partition}}/8
     - name: Run miri tests for runtime::iobuf
       run: |
         cd runtime
-        just miri iobuf:: --partition hash:${{matrix.partition}}/12
+        just miri iobuf:: --partition hash:${{matrix.partition}}/8
     - name: Run miri tests for runtime::buffer::paged::append
       run: |
         cd runtime
-        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/12 --no-tests=pass
+        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/8 --no-tests=pass
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

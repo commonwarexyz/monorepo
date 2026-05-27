@@ -242,7 +242,11 @@ mod tests {
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::sync::Mutex;
     use rand::Rng;
-    use std::{collections::HashMap, sync::Arc, thread};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+        thread,
+    };
 
     fn run_index_basic<I: Unordered<Value = u64>>(index: &mut I) {
         // Generate a collision and check metrics to make sure it's captured
@@ -428,18 +432,28 @@ mod tests {
         mut fill: impl FnMut(&mut [u8]),
     ) {
         let mut expected = HashMap::new();
-        const NUM_KEYS: usize = 2000;
+        let mut translated = HashSet::new();
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Miri is very slow on the atomic-heavy metrics used by partitioned indices, so
+                // keep collision coverage but reduce the generated key count.
+                const NUM_KEYS: usize = 200;
+            } else {
+                const NUM_KEYS: usize = 2000;
+            }
+        }
         while expected.len() < NUM_KEYS {
             let mut key_array = [0u8; 32];
             fill(&mut key_array);
+            translated.insert([key_array[0], key_array[1]]);
             let key = key_array.to_vec();
 
             let loc = expected.len() as u64;
             index.insert(&key, loc);
             expected.insert(key, loc);
         }
-        assert_eq!(index.keys(), 1975);
-        assert_eq!(index.items(), 2000);
+        assert_eq!(index.keys(), translated.len());
+        assert_eq!(index.items(), NUM_KEYS);
 
         for (key, loc) in expected.iter() {
             let mut values = index.get(key);
@@ -2274,7 +2288,16 @@ mod tests {
     }
 
     fn run_index_large_collision_chain_stack_overflow<I: Unordered<Value = u64>>(index: &mut I) {
-        for i in 0..50000 {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // The full native test stresses stack depth, while miri is mainly checking the
+                // same iterative drop path for memory safety.
+                const ITEMS: usize = 5_000;
+            } else {
+                const ITEMS: usize = 50_000;
+            }
+        }
+        for i in 0..ITEMS {
             index.insert(b"", i as u64);
         }
     }
