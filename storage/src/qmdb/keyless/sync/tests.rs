@@ -1384,11 +1384,11 @@ mod compact_variable_mmr {
                 states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
                     sync::compact::FetchResult {
                         state: bad_state,
-                        success_tx: Some(bad_tx),
+                        callback: Some(bad_tx),
                     },
                     sync::compact::FetchResult {
                         state: good_state,
-                        success_tx: Some(good_tx),
+                        callback: Some(good_tx),
                     },
                 ]))),
             };

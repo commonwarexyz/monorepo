@@ -192,17 +192,14 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     /// The fetched compact state.
     pub state: State<F, Op, D>,
     /// Callback used to report whether downstream accepted the state.
-    pub success_tx: Option<oneshot::Sender<bool>>,
+    pub callback: Option<oneshot::Sender<bool>>,
 }
 
 impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FetchResult")
             .field("state", &self.state)
-            .field(
-                "success_tx",
-                &self.success_tx.as_ref().map(|_| "<callback>"),
-            )
+            .field("callback", &self.callback.as_ref().map(|_| "<callback>"))
             .finish()
     }
 }
@@ -211,7 +208,7 @@ impl<F: Family, Op, D: Digest> From<State<F, Op, D>> for FetchResult<F, Op, D> {
     fn from(state: State<F, Op, D>) -> Self {
         Self {
             state,
-            success_tx: None,
+            callback: None,
         }
     }
 }
@@ -377,7 +374,7 @@ where
     target
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
-    let FetchResult { state, success_tx } = config
+    let FetchResult { state, callback } = config
         .resolver
         .get_compact_state(target.clone())
         .await
@@ -393,8 +390,8 @@ where
     {
         Ok(db) => db,
         Err(BuildError::Engine(err)) => {
-            if let Some(success_tx) = success_tx {
-                let _ = success_tx.send(false);
+            if let Some(callback) = callback {
+                let _ = callback.send(false);
             }
             return Err(Error::Engine(err));
         }
@@ -403,8 +400,8 @@ where
         }
     };
 
-    if let Some(success_tx) = success_tx {
-        let _ = success_tx.send(true);
+    if let Some(callback) = callback {
+        let _ = callback.send(true);
     }
     db.persist_compact_state().await?;
     Ok(db)
@@ -997,7 +994,7 @@ mod tests {
                         digests: Vec::new(),
                     },
                 },
-                success_tx: Some(success_tx),
+                callback: Some(success_tx),
             })
         }
     }

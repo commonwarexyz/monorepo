@@ -5,7 +5,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{
     mmr::{self, Location},
-    qmdb::sync::{self, compact},
+    qmdb::sync::{self, compact, resolver::fetch_operation_range},
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use std::num::NonZeroU64;
@@ -153,43 +153,49 @@ where
         _cancel_rx: oneshot::Receiver<()>,
     ) -> Result<sync::resolver::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
     {
-        let request_id = self.request_id_generator.next();
-        let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
-            request_id,
+        fetch_operation_range(
             op_count,
             start_loc,
             max_ops,
             include_pinned_nodes,
-        });
-        let (tx, rx) = oneshot::channel();
-        self.request_tx
-            .clone()
-            .send(io::Request {
-                request,
-                response_tx: tx,
-            })
-            .await
-            .map_err(|_| crate::Error::RequestChannelClosed)?;
-        let response = rx
-            .await
-            .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
-        let (proof, operations, pinned_nodes) = match response {
-            wire::Message::GetOperationsResponse(r) => (r.proof, r.operations, r.pinned_nodes),
-            wire::Message::Error(err) => {
-                return Err(crate::Error::Server {
-                    code: err.error_code,
-                    message: err.message,
-                })
-            }
-            _ => return Err(crate::Error::UnexpectedResponse { request_id }),
-        };
-        let (tx, _rx) = oneshot::channel();
-        Ok(sync::resolver::FetchResult {
-            proof,
-            operations,
-            success_tx: tx,
-            pinned_nodes,
-        })
+            |op_count, start_loc, max_ops, include_pinned_nodes| async move {
+                let request_id = self.request_id_generator.next();
+                let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
+                    request_id,
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                });
+                let (tx, rx) = oneshot::channel();
+                self.request_tx
+                    .clone()
+                    .send(io::Request {
+                        request,
+                        response_tx: tx,
+                    })
+                    .await
+                    .map_err(|_| crate::Error::RequestChannelClosed)?;
+                let response = rx
+                    .await
+                    .map_err(|_| crate::Error::ResponseChannelClosed { request_id })??;
+                match response {
+                    wire::Message::GetOperationsResponse(r) => {
+                        Ok(sync::resolver::FetchedOperations::new(
+                            r.proof,
+                            r.operations,
+                            r.pinned_nodes,
+                        ))
+                    }
+                    wire::Message::Error(err) => Err(crate::Error::Server {
+                        code: err.error_code,
+                        message: err.message,
+                    }),
+                    _ => Err(crate::Error::UnexpectedResponse { request_id }),
+                }
+            },
+        )
+        .await
     }
 }
 

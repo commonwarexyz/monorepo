@@ -62,7 +62,7 @@ use crate::{
             FixedConfig, VariableConfig,
         },
         operation::{Committable, Key, Operation as _},
-        sync::{Database, DatabaseConfig as Config},
+        sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
     },
     translator::Translator,
     Context, Persistable,
@@ -414,20 +414,17 @@ macro_rules! impl_current_resolver {
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, Self::Error> {
-                let (proof, operations) = self.any
-                    .historical_proof(op_count, start_loc, max_ops)
-                    .await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(self.any.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(crate::qmdb::sync::FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        self.any.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| self.any.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -462,20 +459,17 @@ macro_rules! impl_current_resolver {
                 _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let db = self.read().await;
-                let (proof, operations) = db.any
-                    .historical_proof(op_count, start_loc, max_ops)
-                    .await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.any.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(crate::qmdb::sync::FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.any.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.any.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
 
@@ -511,20 +505,17 @@ macro_rules! impl_current_resolver {
             ) -> Result<crate::qmdb::sync::FetchResult<F, Self::Op, Self::Digest>, qmdb::Error<F>> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::<F>::KeyNotFound)?;
-                let (proof, operations) = db.any
-                    .historical_proof(op_count, start_loc, max_ops)
-                    .await?;
-                let pinned_nodes = if include_pinned_nodes {
-                    Some(db.any.pinned_nodes_at(start_loc).await?)
-                } else {
-                    None
-                };
-                Ok(crate::qmdb::sync::FetchResult {
-                    proof,
-                    operations,
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes,
-                })
+                fetch_operations(
+                    op_count,
+                    start_loc,
+                    max_ops,
+                    include_pinned_nodes,
+                    |op_count, start_loc, max_ops| {
+                        db.any.historical_proof(op_count, start_loc, max_ops)
+                    },
+                    |start_loc| db.any.pinned_nodes_at(start_loc),
+                )
+                .await
             }
         }
     };
