@@ -18,10 +18,10 @@ pub struct Record<V: Eq + Send + Sync> {
     pub(super) next: Option<Box<Self>>,
 }
 
-pub(super) fn insert_front<V: Eq + Send + Sync>(record: &mut Record<V>, mut value: V) {
-    std::mem::swap(&mut record.value, &mut value);
+pub(super) fn insert_front<V: Eq + Send + Sync>(record: &mut Record<V>, value: V) {
+    let old = std::mem::replace(&mut record.value, value);
     record.next = Some(Box::new(Record {
-        value,
+        value: old,
         next: record.next.take(),
     }));
 }
