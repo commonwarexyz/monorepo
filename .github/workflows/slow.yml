@@ -60,17 +60,6 @@ jobs:
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
-    - name: Optimize hot workspace crates
-      shell: bash
-      run: |
-        mkdir -p .cargo
-        cat > .cargo/config.toml <<'EOF'
-        [profile.test.package.commonware-consensus]
-        opt-level = 2
-
-        [profile.test.package.commonware-cryptography]
-        opt-level = 2
-        EOF
     - name: Run slow tests
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/20 --verbose --profile slow
 
