@@ -117,6 +117,9 @@ struct Inner<E: Context, V: Codec> {
     ///
     /// Never decreases (pruning only moves forward).
     pruning_boundary: u64,
+
+    /// Earliest data section modified since the last successful commit or sync.
+    dirty_from_section: Option<u64>,
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
@@ -459,6 +462,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 data,
                 size,
                 pruning_boundary,
+                dirty_from_section: None,
             }),
             offsets,
             items_per_section,
@@ -508,6 +512,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 data,
                 size,
                 pruning_boundary: size,
+                dirty_from_section: None,
             }),
             offsets,
             items_per_section,
@@ -655,6 +660,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // Update our size
         inner.size = size;
+        inner.dirty_from_section = Some(
+            inner
+                .dirty_from_section
+                .map_or(discard_section, |dirty_from| {
+                    dirty_from.min(discard_section)
+                }),
+        );
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_section);
 
@@ -721,6 +733,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
         }
 
+        self.offsets.enable_length_recovery().await?;
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
@@ -738,6 +752,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
             // Append pre-encoded data to the data journal, then convert relative item starts
             // into absolute offsets.
+            if inner.dirty_from_section.is_none() {
+                inner.dirty_from_section = Some(section);
+            }
             let base_offset = inner
                 .data
                 .append_raw(section, &encoded[batch_start..batch_end])
@@ -762,20 +779,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             inner.size += batch_count as u64;
             written += batch_count;
 
-            // The section was filled and must be synced. Downgrade so readers can continue
-            // during the sync while mutators remain blocked.
             if inner.size.is_multiple_of(self.items_per_section) {
-                let inner_ref = inner.downgrade_to_upgradable();
-                futures::try_join!(inner_ref.data.sync(section), self.offsets.sync())?;
-                if written == items_count {
-                    self.metrics.update(
-                        inner_ref.size,
-                        inner_ref.pruning_boundary,
-                        self.items_per_section,
-                    );
-                    return Ok(inner_ref.size - 1);
-                }
-                inner = inner_ref.upgrade().await;
+                inner.data.flush(section).await?;
             }
         }
 
@@ -827,6 +832,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         if pruned {
             let new_oldest = (min_section * self.items_per_section).max(inner.pruning_boundary);
             inner.pruning_boundary = new_oldest;
+            if let Some(dirty_from) = inner.dirty_from_section {
+                inner.dirty_from_section = Some(dirty_from.max(min_section));
+            }
             self.offsets.prune(new_oldest).await?;
             self.metrics
                 .update(inner.size, inner.pruning_boundary, self.items_per_section);
@@ -845,8 +853,18 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
-        let section = position_to_section(inner.size, self.items_per_section);
-        inner.data.sync(section).await?;
+        if let Some(start_section) = inner.dirty_from_section {
+            let start_section = inner
+                .data
+                .oldest_section()
+                .map_or(start_section, |oldest| start_section.max(oldest));
+            let tail_section = position_to_section(inner.size, self.items_per_section);
+            for section in start_section..=tail_section {
+                inner.data.sync(section).await?;
+            }
+            let mut inner = inner.upgrade().await;
+            inner.dirty_from_section = None;
+        }
         Ok(())
     }
 
@@ -860,13 +878,21 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
-        // Persist only the current (final) section of the data journal.
-        // All non-final sections are already persisted per Invariant #1.
-        let section = position_to_section(inner.size, self.items_per_section);
-
-        // Persist both journals concurrently. These journals may not exist yet if the
-        // previous section was just filled. This is checked internally.
-        futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
+        if let Some(start_section) = inner.dirty_from_section {
+            let start_section = inner
+                .data
+                .oldest_section()
+                .map_or(start_section, |oldest| start_section.max(oldest));
+            let tail_section = position_to_section(inner.size, self.items_per_section);
+            for section in start_section..=tail_section {
+                inner.data.sync(section).await?;
+            }
+        }
+        self.offsets.sync().await?;
+        if inner.dirty_from_section.is_some() {
+            let mut inner = inner.upgrade().await;
+            inner.dirty_from_section = None;
+        }
 
         Ok(())
     }
@@ -892,8 +918,86 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.offsets.clear_to_size(new_size).await?;
         inner.size = new_size;
         inner.pruning_boundary = new_size;
+        inner.dirty_from_section = None;
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_section);
+        Ok(())
+    }
+
+    async fn count_section_items(
+        data: &variable::Journal<E, V>,
+        section: u64,
+    ) -> Result<u64, Error> {
+        let stream = data.replay(section, 0, REPLAY_BUFFER_SIZE).await?;
+        futures::pin_mut!(stream);
+        let mut count = 0u64;
+        while let Some(result) = stream.next().await {
+            let (item_section, _, _, _) = result?;
+            if item_section != section {
+                break;
+            }
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    async fn recover_data_by_walking_lengths(
+        data: &mut variable::Journal<E, V>,
+        offsets_start: u64,
+        items_per_section: u64,
+    ) -> Result<(), Error> {
+        let sections: Vec<u64> = data.sections().collect();
+        let Some(&first_section) = sections.first() else {
+            return Ok(());
+        };
+
+        let mut previous = None;
+        for (idx, section) in sections.iter().copied().enumerate() {
+            if let Some(previous) = previous {
+                if section != previous + 1 {
+                    let size = data.size(previous).await?;
+                    warn!(
+                        previous,
+                        section, "crash repair: truncating data journal before section gap"
+                    );
+                    data.rewind(previous, size).await?;
+                    return Ok(());
+                }
+            }
+
+            let count = Self::count_section_items(data, section).await?;
+
+            let section_start = section
+                .checked_mul(items_per_section)
+                .ok_or(Error::OffsetOverflow)?;
+            let capacity = if idx == 0 && offsets_start > section_start {
+                let skipped = offsets_start
+                    .checked_sub(section_start)
+                    .ok_or(Error::OffsetOverflow)?;
+                items_per_section
+                    .checked_sub(skipped)
+                    .ok_or(Error::OffsetOverflow)?
+            } else {
+                items_per_section
+            };
+            if count > capacity {
+                return Err(Error::Corruption(format!(
+                    "data section {section} has too many items: expected at most {capacity}, got {count}"
+                )));
+            }
+
+            if count < capacity && section != *sections.last().unwrap_or(&first_section) {
+                let size = data.size(section).await?;
+                warn!(
+                    section,
+                    count, capacity, "crash repair: truncating data journal after short section"
+                );
+                data.rewind(section, size).await?;
+                return Ok(());
+            }
+
+            previous = Some(section);
+        }
         Ok(())
     }
 
@@ -911,18 +1015,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
+        if offsets.length_recovery_enabled().await {
+            let initial_offsets_bounds = {
+                let offsets_reader = offsets.reader().await;
+                offsets_reader.bounds()
+            };
+            Self::recover_data_by_walking_lengths(
+                data,
+                initial_offsets_bounds.start,
+                items_per_section,
+            )
+            .await?;
+        }
+
         // === Handle empty data journal case ===
         let items_in_last_section = match data.newest_section() {
-            Some(last_section) => {
-                let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
-                futures::pin_mut!(stream);
-                let mut count = 0u64;
-                while let Some(result) = stream.next().await {
-                    result?; // Propagate replay errors (corruption, etc.)
-                    count += 1;
-                }
-                count
-            }
+            Some(last_section) => Self::count_section_items(data, last_section).await?,
             None => 0,
         };
 

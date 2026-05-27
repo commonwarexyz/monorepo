@@ -1003,10 +1003,7 @@ impl<B: Blob> Append<B> {
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
 
         // Flush any buffered data (without fsync) so the reader sees all written data.
-        {
-            let buf_guard = self.buffer.write().await;
-            self.flush_internal(buf_guard, true, false).await?;
-        }
+        self.flush().await?;
 
         // Convert buffer size (bytes) to page count
         let physical_page_size = logical_page_size + CHECKSUM_SIZE;
@@ -1047,6 +1044,16 @@ impl<B: Blob> Append<B> {
 }
 
 impl<B: Blob> Append<B> {
+    /// Flushes buffered data without making it durable.
+    ///
+    /// This makes buffered data visible through the underlying blob and page cache. Call
+    /// [`sync`](Self::sync) if the data must survive a crash.
+    pub async fn flush(&self) -> Result<(), Error> {
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, true, false).await?;
+        Ok(())
+    }
+
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there

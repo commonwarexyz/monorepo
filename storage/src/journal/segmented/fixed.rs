@@ -371,6 +371,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.sync(section).await
     }
 
+    /// Flush the given section without fsyncing it.
+    pub(crate) async fn flush(&self, section: u64) -> Result<(), Error> {
+        let Some(blob) = self.manager.get(section)? else {
+            return Ok(());
+        };
+        blob.flush().await?;
+        Ok(())
+    }
+
     /// Sync all sections to storage.
     pub async fn sync_all(&self) -> Result<(), Error> {
         self.manager.sync_all().await

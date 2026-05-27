@@ -819,6 +819,15 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.manager.sync(section).await
     }
 
+    /// Flushes data in a given `section` without fsyncing it.
+    pub(crate) async fn flush(&self, section: u64) -> Result<(), Error> {
+        let Some(blob) = self.manager.get(section)? else {
+            return Ok(());
+        };
+        blob.flush().await?;
+        Ok(())
+    }
+
     /// Syncs all open sections.
     pub async fn sync_all(&self) -> Result<(), Error> {
         self.manager.sync_all().await
@@ -847,6 +856,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Returns the number of sections.
     pub fn num_sections(&self) -> usize {
         self.manager.num_sections()
+    }
+
+    /// Returns an iterator over all section numbers.
+    pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.manager.sections()
     }
 
     /// Removes any underlying blobs created by the journal.
