@@ -37,10 +37,10 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
     pub proof: Proof<F, D>,
     /// The operations that were fetched
     pub operations: Vec<Op>,
-    /// Optional channel for resolvers that observe downstream validation feedback.
-    pub success_tx: Option<oneshot::Sender<bool>>,
     /// Pinned merkle nodes at the start location, if requested
     pub pinned_nodes: Option<Vec<D>>,
+    /// Optional channel for resolvers that observe downstream validation feedback.
+    pub success_tx: Option<oneshot::Sender<bool>>,
 }
 
 impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
@@ -53,8 +53,8 @@ impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
         Self {
             proof,
             operations,
-            success_tx: None,
             pinned_nodes,
+            success_tx: None,
         }
     }
 
@@ -62,14 +62,14 @@ impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
     pub const fn with_success_tx(
         proof: Proof<F, D>,
         operations: Vec<Op>,
-        success_tx: oneshot::Sender<bool>,
         pinned_nodes: Option<Vec<D>>,
+        success_tx: oneshot::Sender<bool>,
     ) -> Self {
         Self {
             proof,
             operations,
-            success_tx: Some(success_tx),
             pinned_nodes,
+            success_tx: Some(success_tx),
         }
     }
 }
@@ -104,11 +104,11 @@ impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<
         f.debug_struct("FetchResult")
             .field("proof", &self.proof)
             .field("operations", &self.operations)
+            .field("pinned_nodes", &self.pinned_nodes)
             .field(
                 "success_tx",
                 &self.success_tx.as_ref().map(|_| "<callback>"),
             )
-            .field("pinned_nodes", &self.pinned_nodes)
             .finish()
     }
 }
@@ -647,8 +647,8 @@ pub(crate) mod tests {
         let result = FetchResult::<mmr::Family, (), ShaDigest>::with_success_tx(
             empty_proof(),
             vec![],
-            success_tx,
             None,
+            success_tx,
         );
         assert!(result
             .success_tx

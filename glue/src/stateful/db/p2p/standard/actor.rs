@@ -312,8 +312,8 @@ where
                 .send(Ok(FetchResult::with_success_tx(
                     decoded.proof.clone(),
                     decoded.operations.clone(),
-                    success_tx,
                     decoded.pinned_nodes.clone(),
+                    success_tx,
                 )))
                 .is_err()
             {

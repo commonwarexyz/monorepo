@@ -659,8 +659,8 @@ where
         let FetchResult {
             proof,
             operations,
-            success_tx,
             pinned_nodes,
+            success_tx,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
