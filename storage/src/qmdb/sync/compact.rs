@@ -443,6 +443,11 @@ where
         return Err(BuildError::InvalidPeer(EngineError::InvalidProof));
     }
 
+    // This intentionally uses a disposable `merkle::mem::Mem` rather than constructing the
+    // compact database first. The proof authenticates the final commit, while this check
+    // authenticates the frontier pins as peer data and can therefore be reported through resolver
+    // feedback. The real compact database still has to build its storage-backed Merkle state and
+    // DB witness cache below, so `db.root()` is re-checked before persistence.
     validate_compact_frontier::<DB>(target, &state).map_err(BuildError::InvalidPeer)?;
 
     let db = DB::from_compact_state(context, db_config, state)
