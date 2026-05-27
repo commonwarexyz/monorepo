@@ -103,12 +103,6 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
         partition.insert_and_retain(sub_key, value, should_retain);
     }
 
-    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&Self::Value) -> bool) {
-        let (partition, sub_key) = self.get_partition_mut(key);
-
-        partition.retain(sub_key, should_retain);
-    }
-
     fn remove(&mut self, key: &[u8]) {
         let (partition, sub_key) = self.get_partition_mut(key);
 
