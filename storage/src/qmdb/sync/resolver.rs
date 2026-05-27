@@ -45,7 +45,11 @@ pub struct FetchResult<F: Family, Op, D: Digest> {
 
 impl<F: Family, Op, D: Digest> FetchResult<F, Op, D> {
     /// Creates a fetch result that does not observe the validation acknowledgement.
-    pub const fn new(proof: Proof<F, D>, operations: Vec<Op>, pinned_nodes: Option<Vec<D>>) -> Self {
+    pub const fn new(
+        proof: Proof<F, D>,
+        operations: Vec<Op>,
+        pinned_nodes: Option<Vec<D>>,
+    ) -> Self {
         Self {
             proof,
             operations,
