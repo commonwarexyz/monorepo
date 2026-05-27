@@ -58,7 +58,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, Faults, N3f1};
+use commonware_utils::{ordered::Set, Faults};
 use rand::{rngs::StdRng, SeedableRng};
 use rand_core::CryptoRngCore;
 use std::{
@@ -317,10 +317,10 @@ where
         namespace,
         n,
         |namespace, participants, polynomial, share| {
-            Scheme::signer::<N3f1>(namespace, participants, polynomial, share)
+            Scheme::signer::<commonware_utils::N3f1>(namespace, participants, polynomial, share)
         },
         |namespace, participants, polynomial| {
-            Scheme::verifier::<N3f1>(namespace, participants, polynomial)
+            Scheme::verifier::<commonware_utils::N3f1>(namespace, participants, polynomial)
         },
     )
 }

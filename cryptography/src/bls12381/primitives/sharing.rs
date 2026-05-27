@@ -568,7 +568,7 @@ mod tests {
 mod fuzz {
     use super::*;
     use arbitrary::Arbitrary;
-    use commonware_utils::{N3f1, NZU32};
+    use commonware_utils::{Faults, N3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     impl<'a> Arbitrary<'a> for Mode {
