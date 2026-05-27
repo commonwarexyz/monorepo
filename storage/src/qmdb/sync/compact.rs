@@ -181,9 +181,12 @@ pub struct State<F: Family, Op, D: Digest> {
 /// should use these values instead of re-deriving them from peer-provided state.
 #[derive(Clone, Debug)]
 pub struct ValidatedState<F: Family, Op, D: Digest> {
-    state: State<F, Op, D>,
-    root: D,
-    inactivity_floor: Location<F>,
+    /// The compact state fetched from a peer after validation.
+    pub state: State<F, Op, D>,
+    /// The target root that `state` was validated against.
+    pub root: D,
+    /// The inactivity floor derived from the final commit operation.
+    pub inactivity_floor: Location<F>,
 }
 
 impl<F: Family, Op, D: Digest> ValidatedState<F, Op, D> {
@@ -193,11 +196,6 @@ impl<F: Family, Op, D: Digest> ValidatedState<F, Op, D> {
             root,
             inactivity_floor,
         }
-    }
-
-    /// Consume the validated compact state.
-    pub fn into_parts(self) -> (State<F, Op, D>, D, Location<F>) {
-        (self.state, self.root, self.inactivity_floor)
     }
 }
 
@@ -340,8 +338,8 @@ pub trait Database: Sized + Send {
 
     /// Build a database from authenticated state in memory.
     ///
-    /// The caller has already verified `last_commit_proof` and the compact frontier against the
-    /// requested target root and passes the derived verification artifacts with the state. This
+    /// The caller has already validated `last_commit_proof` and the compact frontier against the
+    /// requested target root and passes the derived validation artifacts with the state. This
     /// constructor must not durably persist anything; persistence happens only after the caller
     /// re-checks that `Self::root()` matches the target root.
     fn from_compact_state(
@@ -404,6 +402,7 @@ where
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
 
+    // A resolver with feedback can discard a rejected peer response and return a fresh candidate.
     loop {
         let FetchResult { state, callback } = config
             .resolver
@@ -411,22 +410,28 @@ where
             .await
             .map_err(Error::Resolver)?;
 
-        let db = match try_build_compact_db::<DB>(
-            config.context.child("compact"),
-            config.db_config.clone(),
-            &target,
-            state,
-        )
-        .await
-        {
-            Ok(db) => db,
-            Err(BuildError::InvalidPeer(err)) => {
+        // Validation failures describe a bad compact response. If the resolver supplied feedback,
+        // reject this response and ask it for another one.
+        let validated_state = match validate_compact_state::<DB>(&target, state) {
+            Ok(state) => state,
+            Err(err) => {
                 if let Some(callback) = callback {
                     let _ = callback.send(false);
                     continue;
                 }
                 return Err(Error::Engine(err));
             }
+        };
+
+        let db = match try_build_compact_db::<DB>(
+            config.context.child("compact"),
+            config.db_config.clone(),
+            &target,
+            validated_state,
+        )
+        .await
+        {
+            Ok(db) => db,
             Err(BuildError::Engine(err)) => {
                 return Err(Error::Engine(err));
             }
@@ -447,37 +452,12 @@ async fn try_build_compact_db<DB>(
     context: DB::Context,
     db_config: DB::Config,
     target: &Target<DB::Family, DB::Digest>,
-    state: State<DB::Family, DB::Op, DB::Digest>,
+    state: ValidatedState<DB::Family, DB::Op, DB::Digest>,
 ) -> Result<DB, BuildError<DB::Family, DB::Digest>>
 where
     DB: Database,
 {
-    if state.leaf_count != target.leaf_count {
-        return Err(BuildError::InvalidPeer(EngineError::UnexpectedLeafCount {
-            expected: target.leaf_count,
-            actual: state.leaf_count,
-        }));
-    }
-
-    let hasher = qmdb::hasher::<DB::Hasher>();
-    let last_commit_loc = Location::new(*state.leaf_count - 1);
-    if !verify_proof(
-        &hasher,
-        &state.last_commit_proof,
-        last_commit_loc,
-        std::slice::from_ref(&state.last_commit_op),
-        &target.root,
-    ) {
-        return Err(BuildError::InvalidPeer(EngineError::InvalidProof));
-    }
-
-    // Peer validation stops here: invalid proofs or frontier pins are retryable when resolver
-    // feedback exists. The DB constructor consumes these verified artifacts to initialize its
-    // storage-backed Merkle state and witness cache, and any constructor failure is local/terminal.
-    let verified_state =
-        validate_compact_frontier::<DB>(target, state).map_err(BuildError::InvalidPeer)?;
-
-    let db = DB::from_compact_state(context, db_config, verified_state)
+    let db = DB::from_compact_state(context, db_config, state)
         .await
         .map_err(BuildError::Database)?;
     let actual = db.root();
@@ -491,11 +471,43 @@ where
     Ok(db)
 }
 
+/// Validate the peer-provided compact state before constructing local database storage.
+fn validate_compact_state<DB>(
+    target: &Target<DB::Family, DB::Digest>,
+    state: State<DB::Family, DB::Op, DB::Digest>,
+) -> CompactFrontierValidation<DB>
+where
+    DB: Database,
+{
+    if state.leaf_count != target.leaf_count {
+        return Err(EngineError::UnexpectedLeafCount {
+            expected: target.leaf_count,
+            actual: state.leaf_count,
+        });
+    }
+
+    let hasher = qmdb::hasher::<DB::Hasher>();
+    let last_commit_loc = Location::new(*state.leaf_count - 1);
+    if !verify_proof(
+        &hasher,
+        &state.last_commit_proof,
+        last_commit_loc,
+        std::slice::from_ref(&state.last_commit_op),
+        &target.root,
+    ) {
+        return Err(EngineError::InvalidProof);
+    }
+
+    validate_compact_frontier::<DB>(target, state)
+}
+
+/// Result of validating a peer-provided compact frontier.
 type CompactFrontierValidation<DB> = Result<
     ValidatedState<<DB as Database>::Family, <DB as Database>::Op, <DB as Database>::Digest>,
     EngineError<<DB as Database>::Family, <DB as Database>::Digest>,
 >;
 
+/// Validate that a peer-provided compact frontier authenticates the requested target root.
 fn validate_compact_frontier<DB>(
     target: &Target<DB::Family, DB::Digest>,
     state: State<DB::Family, DB::Op, DB::Digest>,
@@ -503,6 +515,8 @@ fn validate_compact_frontier<DB>(
 where
     DB: Database,
 {
+    // The final commit is the only operation carried in compact state. Its floor determines which
+    // peaks are inactive when authenticating the compact frontier root.
     let last_commit_loc = Location::new(*state.leaf_count - 1);
     let Some(inactivity_floor_loc) = DB::inactivity_floor(&state.last_commit_op) else {
         return Err(EngineError::InvalidProof);
@@ -511,12 +525,14 @@ where
         return Err(EngineError::InvalidProof);
     }
 
+    // Rebuild a disposable Merkle view from the pinned frontier before opening any database
+    // storage. Invalid pin counts or inactive peak layouts are treated as bad peer proofs.
     let mem = crate::merkle::mem::Mem::<DB::Family, DB::Digest>::init(crate::merkle::mem::Config {
         nodes: Vec::new(),
         pruning_boundary: state.leaf_count,
         pinned_nodes: state.pinned_nodes.clone(),
     })
-    .map_err(compact_merkle_error_to_engine)?;
+    .map_err(|_| EngineError::InvalidProof)?;
     let hasher = qmdb::hasher::<DB::Hasher>();
     let inactive_peaks = DB::Family::inactive_peaks(
         DB::Family::location_to_position(state.leaf_count),
@@ -524,7 +540,7 @@ where
     );
     let actual = mem
         .root(&hasher, inactive_peaks)
-        .map_err(compact_merkle_error_to_engine)?;
+        .map_err(|_| EngineError::InvalidProof)?;
     if actual != target.root {
         return Err(EngineError::RootMismatch {
             expected: target.root,
@@ -539,16 +555,9 @@ where
     ))
 }
 
-fn compact_merkle_error_to_engine<F: Family, D: Digest>(
-    _err: crate::merkle::Error<F>,
-) -> EngineError<F, D> {
-    EngineError::InvalidProof
-}
-
 enum BuildError<F: Family, D: Digest> {
     Database(qmdb::Error<F>),
     Engine(EngineError<F, D>),
-    InvalidPeer(EngineError<F, D>),
 }
 
 async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(

@@ -1409,12 +1409,10 @@ mod compact_variable_mmr {
     fn test_compact_sync_rejects_leaf_count_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-leaf-count-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.child("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
@@ -1887,13 +1885,14 @@ mod compact_variable_mmb {
     #[test_traced("WARN")]
     fn test_compact_sync_rejects_leaf_count_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-immutable-mmb-bad-leaf-count-{}", context.next_u64());
-            let mut source = SourceDb::init(
-                context.child("source"),
-                source_config(&suffix, &context),
-            )
-            .await
-            .unwrap();
+            let suffix = format!(
+                "compact-immutable-mmb-bad-leaf-count-{}",
+                context.next_u64()
+            );
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
             let batch = source
                 .new_batch()
                 .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])

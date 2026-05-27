@@ -1310,10 +1310,11 @@ mod compact_variable_mmr {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source
-                .new_batch()
-                .append(vec![7, 8, 9])
-                .merkleize(&source, Some(vec![1]), Location::new(1));
+            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
+                &source,
+                Some(vec![1]),
+                Location::new(1),
+            );
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -1852,10 +1853,11 @@ mod compact_variable_mmb {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source
-                .new_batch()
-                .append(vec![7, 8, 9])
-                .merkleize(&source, Some(vec![1]), Location::new(1));
+            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
+                &source,
+                Some(vec![1]),
+                Location::new(1),
+            );
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 

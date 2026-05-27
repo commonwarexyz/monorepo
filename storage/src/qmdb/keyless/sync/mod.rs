@@ -149,7 +149,11 @@ where
         config: Self::Config,
         state: sync::compact::ValidatedState<Self::Family, Self::Op, Self::Digest>,
     ) -> Result<Self, qmdb::Error<F>> {
-        let (state, root, inactivity_floor_loc) = state.into_parts();
+        let sync::compact::ValidatedState {
+            state,
+            root,
+            inactivity_floor: inactivity_floor_loc,
+        } = state;
         let sync::compact::State {
             leaf_count,
             pinned_nodes,
@@ -163,7 +167,7 @@ where
         };
         if op_inactivity_floor_loc != inactivity_floor_loc {
             return Err(qmdb::Error::DataCorrupted(
-                "verified compact state floor mismatch",
+                "validated compact state floor mismatch",
             ));
         }
         let commit_codec_config = config.commit_codec_config.clone();
