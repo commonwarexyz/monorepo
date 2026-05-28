@@ -3234,6 +3234,16 @@ mod tests {
                 .unwrap();
             assert_eq!(journal.bounds().await, 0..1);
             assert_eq!(journal.read(0).await.unwrap(), test_digest(10));
+            drop(journal);
+
+            // Recovery should remove the empty trailing sections, leaving only the durable prefix's
+            // section and the recreated tail.
+            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert_eq!(blobs.len(), 2);
+
+            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
+                .await
+                .unwrap();
             assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 1);
             assert_eq!(journal.read(1).await.unwrap(), test_digest(42));
             journal.destroy().await.unwrap();
@@ -3255,10 +3265,26 @@ mod tests {
             assert_eq!(journal.append(&test_digest(20)).await.unwrap(), 1);
             drop(journal);
 
+            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert!(
+                blobs.len() > 1,
+                "expected multiple empty sections, got {}",
+                blobs.len()
+            );
+
             let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(journal.bounds().await, 0..0);
+            drop(journal);
+
+            // Recovery should remove the extra empty sections, leaving only the recreated tail.
+            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert_eq!(blobs.len(), 1);
+
+            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
+                .await
+                .unwrap();
             assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 0);
             assert_eq!(journal.read(0).await.unwrap(), test_digest(42));
             journal.destroy().await.unwrap();
