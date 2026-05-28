@@ -97,7 +97,10 @@ use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard};
 use futures::{stream::Stream, StreamExt};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::warn;
 
 /// Metadata key for a mid-section pruning boundary.
@@ -611,6 +614,70 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(true)
     }
 
+    /// Open the metadata partition for `cfg`.
+    async fn open_metadata(context: &E, cfg: &Config) -> Result<Metadata<E, u64, Vec<u8>>, Error> {
+        let meta_cfg = MetadataConfig {
+            partition: format!("{}-metadata", cfg.partition),
+            codec_config: ((0..).into(), ()),
+        };
+        Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Stage a clear target in already-open metadata before external data is deleted.
+    async fn stage_clear_to_size_metadata(
+        metadata: &mut Metadata<E, u64, Vec<u8>>,
+        size: u64,
+    ) -> Result<(), Error> {
+        // Lower the watermark before staging the clear intent so external consumers never see a
+        // persisted recovery checkpoint beyond the eventual clear target.
+        Self::update_metadata_watermark_before_clear(metadata, size)?;
+        metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
+        metadata.sync().await.map_err(Into::into)
+    }
+
+    /// Initialize while allowing a caller to clear external data before a staged clear is consumed.
+    pub(crate) async fn init_with_external_clear<F, Fut>(
+        context: E,
+        cfg: Config,
+        reset_target: Option<u64>,
+        external_clear: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        let items_per_blob = cfg.items_per_blob.get();
+        let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
+        let mut metadata = Self::open_metadata(&context, &cfg).await?;
+
+        if let Some(reset_target) = reset_target {
+            Self::stage_clear_to_size_metadata(&mut metadata, reset_target).await?;
+            external_clear().await?;
+        } else if let Some(clear_target) =
+            Self::parse_metadata_u64(&metadata, CLEAR_TARGET_KEY, "clear_target")?
+        {
+            warn!(
+                clear_target,
+                "crash repair: clearing external data for interrupted reset"
+            );
+            external_clear().await?;
+        }
+        Self::init_opened(context, cfg, items_per_blob, blob_partition, metadata).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_stage_clear_to_size_in_partition(
+        context: &E,
+        cfg: &Config,
+        size: u64,
+    ) -> Result<(), Error> {
+        Self::select_blob_partition(context, cfg).await?;
+        let mut metadata = Self::open_metadata(context, cfg).await?;
+        Self::stage_clear_to_size_metadata(&mut metadata, size).await
+    }
+
     /// Scan a partition and return blob names, treating a missing partition as empty.
     async fn scan_partition(context: &E, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(partition).await {
@@ -689,6 +756,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let items_per_blob = cfg.items_per_blob.get();
 
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
+        let metadata = Self::open_metadata(&context, &cfg).await?;
+
+        Self::init_opened(context, cfg, items_per_blob, blob_partition, metadata).await
+    }
+
+    /// Finish initialization from an already-selected blob partition and open metadata handle.
+    async fn init_opened(
+        context: E,
+        cfg: Config,
+        items_per_blob: u64,
+        blob_partition: String,
+        mut metadata: Metadata<E, u64, Vec<u8>>,
+    ) -> Result<Self, Error> {
         let segmented_cfg = SegmentedConfig {
             partition: blob_partition,
             page_cache: cfg.page_cache,
@@ -696,13 +776,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
 
         let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
-        let meta_cfg = MetadataConfig {
-            partition: format!("{}-metadata", cfg.partition),
-            codec_config: ((0..).into(), ()),
-        };
-
-        let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
 
         // Complete any interrupted clear before recovering bounds. `complete_clear_to_size` also
         // resets the recovery watermark to the clear target, so the subsequent bounds recovery
@@ -1021,23 +1094,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// either still in its prior state, or has bounds `size..size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
-        // Fail before writing clear intent if existing blob partitions are already inconsistent.
-        Self::select_blob_partition(&context, &cfg).await?;
-
-        let meta_cfg = MetadataConfig {
-            partition: format!("{}-metadata", cfg.partition),
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.child("intent"), meta_cfg).await?;
-        // Lower the watermark before staging the clear intent so external consumers never see a
-        // persisted recovery checkpoint beyond the eventual clear target.
-        Self::update_metadata_watermark_before_clear(&mut metadata, size)?;
-        metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
-        metadata.sync().await?;
-        drop(metadata);
-
-        Self::init(context, cfg).await
+        Self::init_with_external_clear(context, cfg, Some(size), || async { Ok(()) }).await
     }
 
     /// Convert a global position to (section, position_in_section).
@@ -1325,16 +1382,41 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
-        let _op_guard = self.op_lock.lock().await;
-        let mut inner = self.inner.write().await;
+        self.clear_to_size_with_external_clear(new_size, || async { Ok(()) })
+            .await
+    }
 
+    /// Stage a clear target while the caller holds the operation lock and write guard.
+    async fn stage_clear_to_size_locked(
+        inner: &mut Inner<E, A>,
+        new_size: u64,
+    ) -> Result<(), Error> {
         // Lower the watermark in-memory and stage the clear intent in the same metadata sync, so
         // external consumers never see a persisted recovery checkpoint beyond `new_size`.
-        Self::lower_recovery_watermark(&mut inner, new_size)?;
+        Self::lower_recovery_watermark(inner, new_size)?;
         inner
             .metadata
             .put(CLEAR_TARGET_KEY, new_size.to_be_bytes().to_vec());
-        inner.metadata.sync().await?;
+        inner.metadata.sync().await.map_err(Into::into)
+    }
+
+    /// Clear this journal, allowing a caller to clear dependent state after the intent is durable.
+    pub(crate) async fn clear_to_size_with_external_clear<F, Fut>(
+        &self,
+        new_size: u64,
+        external_clear: F,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        let _op_guard = self.op_lock.lock().await;
+        {
+            let mut inner = self.inner.write().await;
+            Self::stage_clear_to_size_locked(&mut inner, new_size).await?;
+        }
+        external_clear().await?;
+        let mut inner = self.inner.write().await;
         let Inner {
             journal, metadata, ..
         } = &mut *inner;
