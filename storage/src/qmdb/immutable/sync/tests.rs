@@ -1357,6 +1357,71 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
+    fn test_compact_sync_recovers_after_tampered_commit_floor() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-bad-floor-{}", context.next_u64());
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1));
+            source.apply_batch(batch).await.unwrap();
+            source.commit().await.unwrap();
+
+            let bounds = source.bounds().await;
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: bounds.end,
+            };
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+            let mut bad_state = good_state.clone();
+            let immutable::variable::Operation::Commit(metadata, _) = bad_state.last_commit_op
+            else {
+                panic!("compact state should carry a commit operation");
+            };
+            bad_state.last_commit_op =
+                immutable::variable::Operation::Commit(metadata, Location::new(0));
+
+            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
+            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver: SequenceResolver {
+                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        sync::compact::FetchResult {
+                            state: bad_state,
+                            callback: Some(bad_tx),
+                        },
+                        sync::compact::FetchResult {
+                            state: good_state,
+                            callback: Some(good_tx),
+                        },
+                    ]))),
+                },
+                target: target.clone(),
+                db_config: client_config(&suffix),
+            })
+            .await
+            .unwrap();
+
+            assert!(!bad_rx.await.unwrap());
+            assert!(good_rx.await.unwrap());
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-bad-pins-{}", context.next_u64());
@@ -1839,6 +1904,71 @@ mod compact_variable_mmb {
             })
             .await
             .unwrap();
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_compact_sync_recovers_after_tampered_commit_floor() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-mmb-bad-floor-{}", context.next_u64());
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([3; 32]), vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1));
+            source.apply_batch(batch).await.unwrap();
+            source.commit().await.unwrap();
+
+            let bounds = source.bounds().await;
+            let target = sync::compact::Target {
+                root: source.root(),
+                leaf_count: bounds.end,
+            };
+            let source = Arc::new(source);
+            let good_state = sync::compact::Resolver::get_compact_state(&source, target.clone())
+                .await
+                .unwrap()
+                .state;
+            let mut bad_state = good_state.clone();
+            let immutable::variable::Operation::Commit(metadata, _) = bad_state.last_commit_op
+            else {
+                panic!("compact state should carry a commit operation");
+            };
+            bad_state.last_commit_op =
+                immutable::variable::Operation::Commit(metadata, Location::new(0));
+
+            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
+            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
+            let client: ClientDb = sync::compact::sync(sync::compact::Config {
+                context: context.child("client"),
+                resolver: SequenceResolver {
+                    states: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from([
+                        sync::compact::FetchResult {
+                            state: bad_state,
+                            callback: Some(bad_tx),
+                        },
+                        sync::compact::FetchResult {
+                            state: good_state,
+                            callback: Some(good_tx),
+                        },
+                    ]))),
+                },
+                target: target.clone(),
+                db_config: client_config(&suffix),
+            })
+            .await
+            .unwrap();
+
+            assert!(!bad_rx.await.unwrap());
+            assert!(good_rx.await.unwrap());
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
 

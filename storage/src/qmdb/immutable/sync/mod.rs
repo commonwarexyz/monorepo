@@ -186,15 +186,9 @@ where
             last_commit_proof,
         } = state;
         let last_commit_loc = Location::new(*leaf_count - 1);
-        let Operation::Commit(last_commit_metadata, op_inactivity_floor_loc) = last_commit_op
-        else {
+        let Operation::Commit(last_commit_metadata, _) = last_commit_op else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
-        if op_inactivity_floor_loc != inactivity_floor_loc {
-            return Err(Error::DataCorrupted(
-                "validated compact state floor mismatch",
-            ));
-        }
         let commit_codec_config = config.commit_codec_config.clone();
         let last_commit_op_bytes =
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)

@@ -402,8 +402,8 @@ where
         .validate()
         .map_err(|reason| Error::Engine(EngineError::InvalidCompactTarget(reason)))?;
 
-    // Keep fetching until a compact response validates, like standard sync reschedules invalid
-    // operation fetches. Feedback is only an optional signal to the resolver.
+    // Compact sync has no request scheduler, so this loop is its retry boundary for bad peer
+    // responses. Resolver errors and local construction failures remain terminal.
     loop {
         let FetchResult { state, callback } = config
             .resolver
