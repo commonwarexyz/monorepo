@@ -490,12 +490,17 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Initialize an empty [Journal] at the given logical `size`.
     ///
+    /// This discards any existing data and offsets. The data journal is cleared before the offsets
+    /// journal is reset because normal recovery treats data as the source of truth; stale data must
+    /// not be replayed against freshly reset offsets.
+    ///
     /// Returns a journal with journal.bounds() == Range{start: size, end: size}
     /// and next append at position `size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        // Initialize empty data journal
-        let data = variable::Journal::init(
+        // Initialize and clear the data journal. Offsets alone are not enough to reset the
+        // journal because stale data sections can otherwise break the next recovery.
+        let mut data = variable::Journal::init(
             context.child("data"),
             variable::Config {
                 partition: cfg.data_partition(),
@@ -506,6 +511,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             },
         )
         .await?;
+        data.clear().await?;
 
         // Initialize offsets journal at the target size
         let offsets = fixed::Journal::init_at_size(
@@ -903,6 +909,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    /// The data journal is cleared before the offsets journal is reset to preserve the recovery
+    /// rule that data is the source of truth.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
@@ -3010,6 +3018,105 @@ mod tests {
             let pos = journal.append(&1500).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 1500);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_clears_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-clears-existing".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                journal.append(&(100 + i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            assert_eq!(journal.append(&700).await.unwrap(), 7);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..8);
+            assert_eq!(journal.read(7).await.unwrap(), 700);
+            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
+            assert!(matches!(
+                journal.read(8).await,
+                Err(Error::ItemOutOfRange(8))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_discards_same_section_stale_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-discards-same-section-stale-data".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 5)
+                .await
+                .unwrap();
+            for i in 0..4u64 {
+                assert_eq!(journal.append(&(500 + i)).await.unwrap(), 5 + i);
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
+                .await
+                .unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("after_reset"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            assert!(matches!(
+                journal.read(7).await,
+                Err(Error::ItemOutOfRange(7))
+            ));
+
+            assert_eq!(journal.append(&700).await.unwrap(), 7);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("after_append"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..8);
+            assert_eq!(journal.read(7).await.unwrap(), 700);
+            assert!(matches!(
+                journal.read(8).await,
+                Err(Error::ItemOutOfRange(8))
+            ));
 
             journal.destroy().await.unwrap();
         });
