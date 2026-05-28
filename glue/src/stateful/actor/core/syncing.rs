@@ -467,47 +467,29 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "sync anchor digest")]
     fn anchor_height_block_with_conflicting_digest_panics() {
-        let panic = std::panic::catch_unwind(|| {
-            deterministic::Runner::default().start(|context| async move {
-                let mut harness = TestHarness::new(context, anchor(7, 9)).await;
-                let (acknowledgement, _waiter) = Exact::handle();
-                let _ = harness
-                    .syncing
-                    .process_finalized(TestBlock::new(7, 10), acknowledgement)
-                    .await;
-            });
-        })
-        .expect_err("conflicting anchor digest should panic");
-
-        let panic = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&'static str>().copied())
-            .expect("panic should be a string");
-        assert!(panic.contains("sync anchor digest"));
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = harness
+                .syncing
+                .process_finalized(TestBlock::new(7, 10), acknowledgement)
+                .await;
+        });
     }
 
     #[test]
+    #[should_panic(expected = "next finalized block")]
     fn non_anchor_non_next_block_panics() {
-        let panic = std::panic::catch_unwind(|| {
-            deterministic::Runner::default().start(|context| async move {
-                let mut harness = TestHarness::new(context, anchor(7, 9)).await;
-                let (acknowledgement, _waiter) = Exact::handle();
-                let _ = harness
-                    .syncing
-                    .process_finalized(TestBlock::new(9, 10), acknowledgement)
-                    .await;
-            });
-        })
-        .expect_err("unexpected finalized height should panic");
-
-        let panic = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&'static str>().copied())
-            .expect("panic should be a string");
-        assert!(panic.contains("next finalized block"));
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = harness
+                .syncing
+                .process_finalized(TestBlock::new(9, 10), acknowledgement)
+                .await;
+        });
     }
 
     #[test]
