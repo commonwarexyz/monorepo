@@ -933,8 +933,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
-        let items_in_last_section = match data.newest_section() {
-            Some(last_section) => {
+        // Count the newest data section, removing any empty trailing sections
+        // left by a crash before append buffers became durable.
+        let items_in_last_section = loop {
+            let Some(last_section) = data.newest_section() else {
+                break 0;
+            };
+
+            let items_in_last_section = {
                 let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
                 futures::pin_mut!(stream);
                 let mut count = 0u64;
@@ -943,20 +949,34 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     count += 1;
                 }
                 count
-            }
-            None => 0,
-        };
-        if items_in_last_section > items_per_section {
-            return Err(Error::Corruption(format!(
-                "data section has too many items: expected at most {items_per_section}, got {items_in_last_section}"
-            )));
-        }
+            };
 
-        // Data journal is empty if there are no sections or if there is one section and it has no items.
-        // The latter should only occur if a crash occured after opening a data journal blob but
-        // before writing to it.
-        let data_empty =
-            data.is_empty() || (data.num_sections() == 1 && items_in_last_section == 0);
+            if items_in_last_section > items_per_section {
+                return Err(Error::Corruption(format!(
+                    "data section has too many items: expected at most {items_per_section}, got {items_in_last_section}"
+                )));
+            }
+
+            // Stop once we find replayable data or only one empty section
+            // remains for the existing empty-data repair path.
+            if items_in_last_section > 0 || data.num_sections() == 1 {
+                break items_in_last_section;
+            }
+
+            let previous_section = last_section.checked_sub(1).ok_or_else(|| {
+                Error::Corruption("multiple data sections with no previous section".into())
+            })?;
+            let previous_size = data.size(previous_section).await?;
+            warn!(
+                section = last_section,
+                "crash repair: removing empty trailing data section"
+            );
+            data.rewind(previous_section, previous_size).await?;
+        };
+
+        // After trimming empty trailing sections, a zero item count means the data journal is
+        // empty: either no sections remain, or one empty section remains for repair below.
+        let data_empty = data.is_empty() || items_in_last_section == 0;
         if data_empty {
             let offsets_bounds = {
                 let offsets_reader = offsets.reader().await;
