@@ -16,7 +16,8 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     index::{
-        unordered::Index as UnorderedIdx, Ordered as OrderedIndex, Unordered as UnorderedIndex,
+        ordered::Index as OrderedIdx, unordered::Index as UnorderedIdx, Ordered as OrderedIndex,
+        Unordered as UnorderedIndex,
     },
     journal::contiguous::{
         fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Contiguous, Mutable,
@@ -407,6 +408,97 @@ where
     }
 }
 
+/// Implement [`ManagedDb`] for ordered current QMDB databases with fixed-size values.
+impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
+    for Db<
+        F,
+        E,
+        FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, FixedEncoding<V>>,
+        N,
+        S,
+    >
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: value::FixedValue + 'static,
+    H: Hasher + 'static,
+    T: Translator,
+    S: Strategy,
+{
+    type Unmerkleized = CurrentUnmerkleized<
+        F,
+        E,
+        FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, FixedEncoding<V>>,
+        N,
+        S,
+    >;
+    type Merkleized = CurrentMerkleized<
+        F,
+        E,
+        FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, FixedEncoding<V>>,
+        N,
+        S,
+    >;
+    type Error = Error<F>;
+    type Config = FixedConfig<T, S>;
+    type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
+        <Self>::init(context, config).await
+    }
+
+    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
+        CurrentUnmerkleized {
+            batch: inner.new_batch(),
+            db: db.clone(),
+            metadata: None,
+        }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.ops_root() == target.root
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+    }
+
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).await?;
+        self.sync().await?;
+        Ok(())
+    }
+
+    async fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds().await;
+        CurrentSyncTarget::new(
+            self.ops_root(),
+            non_empty_range!(self.sync_boundary(), bounds.end),
+        )
+    }
+
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
+        self.rewind(target.range.end()).await?;
+        self.sync().await?;
+
+        let rewound_target = self.sync_target().await;
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
+        Ok(())
+    }
+}
+
 /// Workaround for <https://github.com/rust-lang/rust/issues/115188>.
 ///
 /// Inside a `ManagedDb` trait impl, `<Self>::init(...)` in a non-async `fn`
@@ -425,10 +517,12 @@ mod open {
         qmdb::{
             any::{
                 operation::Operation,
-                unordered,
+                ordered, unordered,
                 value::{VariableEncoding, VariableValue},
             },
-            current::{unordered::variable::Db, VariableConfig},
+            current::{
+                ordered::variable::Db as OrderedVariableDb, unordered::variable::Db, VariableConfig,
+            },
             Error,
         },
     };
@@ -439,6 +533,8 @@ mod open {
         <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
         S,
     >;
+    type OrderedVConfig<T, F, K, V, S> =
+        VariableConfig<T, <Operation<F, ordered::Update<K, VariableEncoding<V>>> as Read>::Cfg, S>;
 
     pub(super) async fn variable<F, E, K, V, H, T, const N: usize, S>(
         context: E,
@@ -455,6 +551,23 @@ mod open {
         Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     {
         Db::init(context, config).await
+    }
+
+    pub(super) async fn ordered_variable<F, E, K, V, H, T, const N: usize, S>(
+        context: E,
+        config: OrderedVConfig<T, F, K, V, S>,
+    ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
+    where
+        F: Graftable,
+        E: Storage + Clock + Metrics,
+        K: commonware_storage::qmdb::operation::Key,
+        V: VariableValue + 'static,
+        H: Hasher,
+        T: commonware_storage::translator::Translator,
+        S: Strategy,
+        Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
+    {
+        OrderedVariableDb::init(context, config).await
     }
 }
 
@@ -510,6 +623,102 @@ where
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         open::variable(context, config).await
+    }
+
+    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
+        CurrentUnmerkleized {
+            batch: inner.new_batch(),
+            db: db.clone(),
+            metadata: None,
+        }
+    }
+
+    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+        batch.ops_root() == target.root
+            && *target.range.start() == batch.sync_boundary()
+            && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
+    }
+
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
+        self.apply_batch(batch.inner).await?;
+        self.sync().await?;
+        Ok(())
+    }
+
+    async fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds().await;
+        CurrentSyncTarget::new(
+            self.ops_root(),
+            non_empty_range!(self.sync_boundary(), bounds.end),
+        )
+    }
+
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
+        self.rewind(target.range.end()).await?;
+        self.sync().await?;
+
+        let rewound_target = self.sync_target().await;
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
+        Ok(())
+    }
+}
+
+/// Implement [`ManagedDb`] for ordered current QMDB databases with variable-size values.
+impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
+    for Db<
+        F,
+        E,
+        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, VariableEncoding<V>>,
+        N,
+        S,
+    >
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: value::VariableValue + 'static,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
+{
+    type Unmerkleized = CurrentUnmerkleized<
+        F,
+        E,
+        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, VariableEncoding<V>>,
+        N,
+        S,
+    >;
+    type Merkleized = CurrentMerkleized<
+        F,
+        E,
+        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, VariableEncoding<V>>,
+        N,
+        S,
+    >;
+    type Error = Error<F>;
+    type Config = VariableConfig<
+        T,
+        <Operation<F, ordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
+        S,
+    >;
+    type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
+        open::ordered_variable(context, config).await
     }
 
     async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
@@ -612,6 +821,60 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
         E,
+        FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, FixedEncoding<V>>,
+        N,
+        S,
+    >
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: value::FixedValue + 'static,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    R: Resolver<
+        Family = F,
+        Op = Operation<F, ordered::Update<K, FixedEncoding<V>>>,
+        Digest = H::Digest,
+    >,
+{
+    type SyncError = sync::Error<F, R::Error, H::Digest>;
+
+    async fn sync_db(
+        context: E,
+        config: Self::Config,
+        resolver: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
+    ) -> Result<Self, Self::SyncError> {
+        sync::sync(sync::engine::Config {
+            context,
+            resolver,
+            target,
+            max_outstanding_requests: sync_config.max_outstanding_requests,
+            fetch_batch_size: sync_config.fetch_batch_size,
+            apply_batch_size: sync_config.apply_batch_size,
+            db_config: config,
+            update_rx: Some(tip_updates),
+            finish_rx: finish,
+            reached_target_tx: reached_target,
+            max_retained_roots: sync_config.max_retained_roots,
+        })
+        .await
+    }
+}
+
+impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
+    for Db<
+        F,
+        E,
         VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
         UnorderedIdx<T, Location<F>>,
         H,
@@ -663,6 +926,61 @@ where
     }
 }
 
+impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
+    for Db<
+        F,
+        E,
+        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
+        OrderedIdx<T, Location<F>>,
+        H,
+        ordered::Update<K, VariableEncoding<V>>,
+        N,
+        S,
+    >
+where
+    F: Graftable,
+    E: Storage + Clock + Metrics,
+    K: Key,
+    V: value::VariableValue + 'static,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+    Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
+    R: Resolver<
+        Family = F,
+        Op = Operation<F, ordered::Update<K, VariableEncoding<V>>>,
+        Digest = H::Digest,
+    >,
+{
+    type SyncError = sync::Error<F, R::Error, H::Digest>;
+
+    async fn sync_db(
+        context: E,
+        config: Self::Config,
+        resolver: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
+    ) -> Result<Self, Self::SyncError> {
+        sync::sync(sync::engine::Config {
+            context,
+            resolver,
+            target,
+            max_outstanding_requests: sync_config.max_outstanding_requests,
+            fetch_batch_size: sync_config.fetch_batch_size,
+            apply_batch_size: sync_config.apply_batch_size,
+            db_config: config,
+            update_rx: Some(tip_updates),
+            finish_rx: finish,
+            reached_target_tx: reached_target,
+            max_retained_roots: sync_config.max_retained_roots,
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,15 +990,40 @@ mod tests {
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
+        journal::contiguous::{
+            fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+        },
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::current::unordered::fixed,
+        qmdb::current::{
+            ordered::{fixed as ordered_fixed, variable as ordered_variable},
+            unordered::fixed,
+        },
         translator::TwoCap,
     };
     use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type FixedDb = fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        64,
+        Sequential,
+    >;
+    type OrderedFixedDb = ordered_fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        64,
+        Sequential,
+    >;
+    type OrderedVariableDb = ordered_variable::Db<
         mmr::Family,
         deterministic::Context,
         Digest,
@@ -714,6 +1057,141 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
         }
+    }
+
+    fn variable_config(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        VariableConfig {
+            merkle_config: MerkleConfig {
+                journal_partition: format!("stateful-current-journal-{suffix}"),
+                metadata_partition: format!("stateful-current-metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: VariableJournalConfig {
+                partition: format!("stateful-current-log-{suffix}"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config: ((), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
+            grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
+            translator: TwoCap,
+        }
+    }
+
+    fn assert_managed_db<T: ManagedDb<deterministic::Context>>() {}
+
+    fn assert_state_sync_db<T, R>()
+    where
+        T: StateSyncDb<deterministic::Context, R>,
+    {
+    }
+
+    fn assert_database_set<T: crate::stateful::db::DatabaseSet<deterministic::Context>>() {}
+
+    #[test]
+    fn ordered_current_db_trait_impls_compile() {
+        assert_managed_db::<OrderedFixedDb>();
+        assert_managed_db::<OrderedVariableDb>();
+        assert_state_sync_db::<OrderedFixedDb, Arc<OrderedFixedDb>>();
+        assert_state_sync_db::<OrderedVariableDb, Arc<OrderedVariableDb>>();
+        assert_database_set::<Arc<AsyncRwLock<OrderedFixedDb>>>();
+        assert_database_set::<Arc<AsyncRwLock<OrderedVariableDb>>>();
+    }
+
+    #[test]
+    fn ordered_fixed_managed_db_finalizes_batch_and_proves_exclusion() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("ordered-fixed-managed-db", &context);
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+            let key = Sha256::hash(b"key");
+            let value = Sha256::hash(b"value");
+            let metadata = Sha256::hash(b"metadata");
+            let missing = Sha256::hash(b"missing");
+
+            let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key, Some(value))
+                .with_metadata(metadata);
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+            let expected_root = merkleized.root();
+
+            {
+                let mut guard = db.write().await;
+                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                    .await
+                    .unwrap();
+            }
+
+            let guard = db.read().await;
+            assert_eq!(guard.root(), expected_root);
+            assert_eq!(guard.get(&key).await.unwrap(), Some(value));
+
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            let proof = guard.exclusion_proof(&hasher, &missing).await.unwrap();
+            assert!(OrderedFixedDb::verify_exclusion_proof(
+                &hasher,
+                &missing,
+                &proof,
+                &guard.root(),
+            ));
+        });
+    }
+
+    #[test]
+    fn ordered_variable_managed_db_finalizes_batch_and_proves_exclusion() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = variable_config("ordered-variable-managed-db", &context);
+            let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+            let key = Sha256::hash(b"key");
+            let value = Sha256::hash(b"value");
+            let metadata = Sha256::hash(b"metadata");
+            let missing = Sha256::hash(b"missing");
+
+            let batch = <OrderedVariableDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key, Some(value))
+                .with_metadata(metadata);
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+            let expected_root = merkleized.root();
+
+            {
+                let mut guard = db.write().await;
+                <OrderedVariableDb as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                    .await
+                    .unwrap();
+            }
+
+            let guard = db.read().await;
+            assert_eq!(guard.root(), expected_root);
+            assert_eq!(guard.get(&key).await.unwrap(), Some(value));
+
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            let proof = guard.exclusion_proof(&hasher, &missing).await.unwrap();
+            assert!(OrderedVariableDb::verify_exclusion_proof(
+                &hasher,
+                &missing,
+                &proof,
+                &guard.root(),
+            ));
+        });
     }
 
     #[test]
