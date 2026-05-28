@@ -15,7 +15,9 @@ explicit part of each actor's API instead of being spread across ad hoc channel
 wrappers.
 
 Users will see this in `p2p`, `resolver`, `broadcast`, `collector`, `simplex`,
-`marshal`, and the examples. Public handles now return `Feedback` values:
+`marshal`, and the examples. Many public handles that previously returned
+futures or response oneshots now synchronously enqueue work and return
+`Feedback` values:
 
 - `Ok`: accepted within ready capacity.
 - `Backoff`: handled through overflow, but the caller is applying pressure.
@@ -168,8 +170,12 @@ the type system and batch API:
 - Commit operations carry inactivity floors. The floor is authenticated in the
   operation log and governs what can be pruned and what must be replayed during
   reconstruction.
-- `get_many` and related batch-read paths reduce repeated storage lookups for
-  callers that need multiple locations or keys.
+- Merkle and QMDB configuration now carries an explicit
+  `commonware_parallel::Strategy`. Use `Sequential` for previous serial
+  behavior, or a parallel strategy such as `Rayon` to parallelize batch work.
+- Storage journals and QMDB variants gained `read_many` and `get_many` paths
+  that reduce repeated storage lookups for callers that need multiple positions,
+  locations, or keys.
 - QMDB metrics were expanded around state, reads, operations, sync, and
   durability behavior.
 - Lower-level storage indexes moved to retain-style predicates. The public API
@@ -256,7 +262,8 @@ verification where the chosen `commonware-parallel` strategy supports it.
 ### Codec, Formatting, And Utilities
 
 - `commonware-formatting` is now a dedicated crate for formatting and parsing
-  encoded data, including allocation-free hex display wrappers.
+  encoded data, including the hex helpers previously exposed from
+  `commonware-utils` and allocation-free hex display wrappers.
 - `commonware-codec` gained byte-container specialization hooks so generic
   container implementations can bulk-copy byte-oriented data without abandoning
   generic fallbacks.
