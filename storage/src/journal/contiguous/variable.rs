@@ -454,16 +454,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
+        // If offsets has a pending reset from a prior crashed `init_at_size` or `clear_to_size`,
+        // CLEAR_TARGET_KEY is present in its metadata. Clear data first so the staged clear that
+        // `init_with_metadata` runs (via `complete_clear_to_size`) reconciles both sides.
+        // Metadata stays open and is handed to `init_with_metadata` so we only open it once.
         let offsets_cfg = fixed::Config {
             partition: offsets_partition,
             items_per_blob: cfg.items_per_section,
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
-        // If offsets has a pending reset from a prior crashed `init_at_size` or `clear_to_size`,
-        // CLEAR_TARGET_KEY is present in its metadata. Clear data first so the staged clear that
-        // `init_with_metadata` runs (via `complete_clear_to_size`) reconciles both sides.
-        // Metadata stays open and is handed to `init_with_metadata` so we only open it once.
         let offsets_ctx = context.child("offsets");
         let offsets_metadata =
             fixed::Journal::<E, u64>::open_metadata(&offsets_ctx, &offsets_cfg).await?;
@@ -526,6 +526,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             },
         )
         .await?;
+
         // Stage the offsets reset intent durably before clearing data. Lower the recovery
         // watermark first so external consumers never see a persisted checkpoint beyond `size`.
         // After data is cleared, `init_with_metadata` detects CLEAR_TARGET_KEY and completes the
@@ -938,6 +939,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
+
         // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
         // `clear_to_size` re-stages the same target idempotently before completing.
         self.offsets.stage_clear_intent(new_size).await?;

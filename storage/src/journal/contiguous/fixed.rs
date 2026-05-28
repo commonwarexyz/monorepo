@@ -611,10 +611,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(true)
     }
 
-    /// Open the metadata partition for `cfg`. Callers inspect or mutate it directly (via
-    /// `metadata.get(&CLEAR_TARGET_KEY)` or `update_metadata_watermark_before_clear` + `put` +
-    /// `sync`) and then hand it to `init_with_metadata` to finish initialization without
-    /// re-opening.
+    /// Open the metadata partition for `cfg`.
     pub(crate) async fn open_metadata(
         context: &E,
         cfg: &Config,
@@ -708,7 +705,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Finish initialization using an already-open metadata handle. Callers use this after
-    /// `open_metadata` + `stage_reset` / `pending_reset` so metadata is opened exactly once.
+    /// `open_metadata` so the metadata partition is opened exactly once.
     pub(crate) async fn init_with_metadata(
         context: E,
         cfg: Config,
@@ -1367,13 +1364,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(())
     }
 
-    /// Runtime equivalent of `stage_reset`: durably stage `CLEAR_TARGET_KEY` so callers can clear
-    /// dependent sibling state before invoking `clear_to_size` to finish the operation. The
-    /// subsequent `clear_to_size` re-stages the same intent idempotently and then completes.
+    /// Durably stage a clear to `new_size` without completing it.
+    ///
+    /// This lowers the recovery watermark and persists `CLEAR_TARGET_KEY`, leaving a recoverable
+    /// intent so a caller can clear dependent sibling state before calling `clear_to_size` to
+    /// finish. If a crash interrupts the sequence, the next `init` completes the staged clear.
+    /// The follow-up `clear_to_size` re-stages the same target idempotently.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn stage_clear_intent(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
+
         Self::lower_recovery_watermark(&mut inner, new_size)?;
         inner
             .metadata
