@@ -402,9 +402,17 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                                     new_size = state.valid_offset,
                                                     "trailing bytes detected: truncating"
                                                 );
+                                                // Tail repair is exceptional; make it durable
+                                                // immediately so callers do not need to track
+                                                // replay-time repaired sections separately.
                                                 if let Err(err) =
                                                     state.blob.resize(state.valid_offset).await
                                                 {
+                                                    batch.push(Err(err.into()));
+                                                    state.done = true;
+                                                    return Some((batch, state));
+                                                }
+                                                if let Err(err) = state.blob.sync().await {
                                                     batch.push(Err(err.into()));
                                                     state.done = true;
                                                     return Some((batch, state));
@@ -435,6 +443,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         "incomplete item at end: truncating"
                                     );
                                     if let Err(err) = state.blob.resize(state.valid_offset).await {
+                                        batch.push(Err(err.into()));
+                                        state.done = true;
+                                        return Some((batch, state));
+                                    }
+                                    if let Err(err) = state.blob.sync().await {
                                         batch.push(Err(err.into()));
                                         state.done = true;
                                         return Some((batch, state));

@@ -81,9 +81,7 @@ impl<E: Context, V: CodecShared> Writer<E, V> {
 
     /// Append an item without committing, returning its position. The item
     /// is immediately visible to the reader but is **not durable** until
-    /// [Self::commit] is called or the underlying journal auto-syncs at a
-    /// section boundary (see [`variable::Journal`](crate::journal::contiguous::variable::Journal)
-    /// invariant 1).
+    /// [Self::commit] or [Self::sync] is called.
     ///
     /// # Errors
     ///

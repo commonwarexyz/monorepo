@@ -150,8 +150,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
 
     /// Append an item without persisting. Call [Self::commit] or [Self::sync]
     /// afterwards to make it durable. The item is readable immediately but
-    /// is not guaranteed to survive a crash until committed or the journal
-    /// auto-syncs at a section boundary (see [`variable::Journal`] invariant 1).
+    /// is not guaranteed to survive a crash until committed or synced.
     ///
     /// # Errors
     ///

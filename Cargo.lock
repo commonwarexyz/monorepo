@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-actor"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-bridge"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "clap",
  "commonware-actor",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "commonware-actor",
  "commonware-codec",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-broadcast-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-broadcast",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-chat"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-coding-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "commonware-actor",
  "commonware-codec",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-collector-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-actor",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "commonware-conformance-macros",
  "commonware-formatting",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-conformance-macros"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1439,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-deployer"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-estimator"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "clap",
  "colored",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-flood"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -1604,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-formatting"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "commonware-macros",
  "const-hex",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-glue"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-invariants"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-formatting",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1679,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "commonware-macros-impl",
  "futures",
@@ -1691,7 +1691,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros-impl"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-math"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-math-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-math",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-actor",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-parallel"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-reshare"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "axum",
@@ -1897,7 +1897,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-runtime",
@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime-macros"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-codec",
@@ -1964,7 +1964,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "chacha20poly1305",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-sync"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "clap",
  "commonware-codec",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
