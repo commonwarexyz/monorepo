@@ -5,7 +5,7 @@ use crate::stateful::{
             processing::Processing,
         },
         processor::{FinalizeStatus, Processor, ProcessorMetrics},
-        syncer::{self, SyncResult},
+        syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
     Application,
@@ -24,12 +24,14 @@ use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, Storage};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
+    sync::AsyncMutex,
     Acknowledgement,
 };
 use rand::Rng;
+use std::sync::Arc;
 use tracing::{debug, error};
 
-/// Verify request buffered while startup sync is still in progress.
+/// Verify request buffered while state sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
     context: C,
     ancestry: ErasedAncestorStream<B>,
@@ -62,8 +64,8 @@ where
     /// Marshal actor mailbox.
     pub(super) marshal: MarshalMailbox<S, V>,
 
-    /// Prefix for durable state-sync metadata.
-    pub(super) partition_prefix: String,
+    /// Durable state-sync metadata.
+    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
 
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
@@ -77,7 +79,7 @@ where
     /// The cached [`SyncResult`], populated when sync completes.
     pub(super) artifact: Option<SyncResult<E, A>>,
 
-    /// The state sync resolvers used for startup sync fetching and post-bootstrap
+    /// The state sync resolvers used for state sync fetching and post-bootstrap
     /// serving.
     pub(super) resolvers: R,
 
@@ -212,7 +214,7 @@ where
     }
 
     /// Transitions to [`Processing`] state once the database set has converged
-    /// on the startup-sync [`Anchor`].
+    /// on the state sync [`Anchor`].
     async fn transition(mut self, handoff: Option<(A::Block, Exact)>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
@@ -224,6 +226,12 @@ where
             artifact.anchor,
             metrics,
         );
+
+        self.sync_metadata
+            .lock()
+            .await
+            .set_complete(synced_height)
+            .await;
 
         if let Some((handoff_finalized, acknowledgement)) = handoff {
             if let FinalizeStatus::Persisted { height } = processor
@@ -237,13 +245,6 @@ where
             }
             acknowledgement.acknowledge();
         }
-
-        syncer::set_sync_height(
-            self.context.as_present(),
-            self.partition_prefix.as_str(),
-            synced_height,
-        )
-        .await;
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs.
@@ -287,7 +288,7 @@ where
 mod tests {
     use super::Syncing;
     use crate::stateful::{
-        actor::syncer::{self, SyncResult},
+        actor::syncer::{self, StateSyncMetadata, SyncResult},
         db::{Anchor, AttachableResolver},
         tests::mocks::{anchor, test_databases, TestApp, TestBlock, TestScheme, TestVariant},
     };
@@ -295,7 +296,7 @@ mod tests {
     use commonware_consensus::{
         marshal::{self, core::Actor as MarshalActor},
         simplex::mocks::scheme as scheme_mocks,
-        types::{FixedEpocher, ViewDelta},
+        types::{FixedEpocher, Height, ViewDelta},
         Heightable,
     };
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
@@ -305,10 +306,12 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        acknowledgement::Exact, channel::oneshot, sync::AsyncRwLock, Acknowledgement, NZUsize,
-        NZU16, NZU64,
+        acknowledgement::Exact,
+        channel::oneshot,
+        sync::{AsyncMutex, AsyncRwLock},
+        Acknowledgement, NZUsize, NZU16, NZU64,
     };
-    use futures::FutureExt;
+    use futures::{pin_mut, poll, FutureExt};
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -337,7 +340,9 @@ mod tests {
                     application: TestApp,
                     input_provider: (),
                     marshal: init_marshal_mailbox(context.child("marshal")).await,
-                    partition_prefix: "syncing-test".to_string(),
+                    sync_metadata: Arc::new(AsyncMutex::new(
+                        StateSyncMetadata::init(&context, "syncing-test").await,
+                    )),
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
                     database_subscribers: Vec::new(),
@@ -457,46 +462,62 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "sync anchor digest")]
     fn anchor_height_block_with_conflicting_digest_panics() {
-        let panic = std::panic::catch_unwind(|| {
-            deterministic::Runner::default().start(|context| async move {
-                let mut harness = TestHarness::new(context, anchor(7, 9)).await;
-                let (acknowledgement, _waiter) = Exact::handle();
-                let _ = harness
-                    .syncing
-                    .process_finalized(TestBlock::new(7, 10), acknowledgement)
-                    .await;
-            });
-        })
-        .expect_err("conflicting anchor digest should panic");
-
-        let panic = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&'static str>().copied())
-            .expect("panic should be a string");
-        assert!(panic.contains("sync anchor digest"));
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = harness
+                .syncing
+                .process_finalized(TestBlock::new(7, 10), acknowledgement)
+                .await;
+        });
     }
 
     #[test]
+    #[should_panic(expected = "next finalized block")]
     fn non_anchor_non_next_block_panics() {
-        let panic = std::panic::catch_unwind(|| {
-            deterministic::Runner::default().start(|context| async move {
-                let mut harness = TestHarness::new(context, anchor(7, 9)).await;
-                let (acknowledgement, _waiter) = Exact::handle();
-                let _ = harness
-                    .syncing
-                    .process_finalized(TestBlock::new(9, 10), acknowledgement)
-                    .await;
-            });
-        })
-        .expect_err("unexpected finalized height should panic");
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
+            let (acknowledgement, _waiter) = Exact::handle();
+            let _ = harness
+                .syncing
+                .process_finalized(TestBlock::new(9, 10), acknowledgement)
+                .await;
+        });
+    }
 
-        let panic = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&'static str>().copied())
-            .expect("panic should be a string");
-        assert!(panic.contains("next finalized block"));
+    #[test]
+    fn transition_marks_sync_complete_before_handoff_acknowledgement() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let sync_metadata = harness.syncing.sync_metadata.clone();
+            let metadata_guard = sync_metadata.lock().await;
+            let (acknowledgement, mut waiter) = Exact::handle();
+
+            let transition = harness
+                .syncing
+                .transition(Some((TestBlock::new(8, 10), acknowledgement)));
+            pin_mut!(transition);
+            assert!(
+                poll!(&mut transition).is_pending(),
+                "transition must wait for sync-complete metadata"
+            );
+            assert!(
+                poll!(&mut waiter).is_pending(),
+                "handoff must not be acknowledged while sync-complete metadata is blocked",
+            );
+
+            drop(metadata_guard);
+            transition.await;
+            waiter
+                .await
+                .expect("handoff acknowledgement should complete");
+
+            assert_eq!(
+                sync_metadata.lock().await.sync_height(),
+                Some(Height::new(7)),
+            );
+        });
     }
 }

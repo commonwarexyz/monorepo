@@ -322,7 +322,9 @@ pub(crate) struct MultiDbEngine {
     participants: Vec<ed25519::PublicKey>,
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
+    sync_config: SyncEngineConfig,
     marshal_mailboxes: Arc<Mutex<BTreeMap<ed25519::PublicKey, MarshalMailbox>>>,
+    sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
 
@@ -339,13 +341,33 @@ impl MultiDbEngine {
             participants,
             schemes,
             enable_state_sync: false,
+            sync_config: SyncEngineConfig {
+                fetch_batch_size: NZU64!(16),
+                apply_batch_size: 64,
+                max_outstanding_requests: 8,
+                update_channel_size: NZUsize!(256),
+                max_retained_roots: 32,
+            },
             marshal_mailboxes: Arc::new(Mutex::new(BTreeMap::new())),
+            sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
             sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
     pub(crate) fn with_state_sync(mut self) -> Self {
         self.enable_state_sync = true;
+        self
+    }
+
+    /// Forces state sync to progress in the smallest possible batches.
+    pub(crate) fn with_slow_state_sync(mut self) -> Self {
+        self.sync_config = SyncEngineConfig {
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: 1,
+            max_outstanding_requests: 1,
+            update_channel_size: NZUsize!(4),
+            max_retained_roots: 32,
+        };
         self
     }
 }
@@ -502,9 +524,14 @@ impl EngineDefinition for MultiDbEngine {
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
-        let startup_sync_height = if self.enable_state_sync && plan.may_state_sync() {
+        let state_sync_height = if self.enable_state_sync && plan.may_state_sync() {
             match fetch_majority_sync_floor(&self.marshal_mailboxes, &context, public_key).await {
                 Some((finalization, height)) => {
+                    *self
+                        .sync_entries
+                        .lock()
+                        .entry(public_key.clone())
+                        .or_insert(0) += 1;
                     self.sync_heights
                         .lock()
                         .insert(public_key.clone(), height.get());
@@ -601,13 +628,7 @@ impl EngineDefinition for MultiDbEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
-                    apply_batch_size: 64,
-                    max_outstanding_requests: 8,
-                    update_channel_size: NZUsize!(256),
-                    max_retained_roots: 32,
-                },
+                sync_config: self.sync_config,
             },
         );
 
@@ -661,7 +682,13 @@ impl EngineDefinition for MultiDbEngine {
             handle,
             MockValidatorState {
                 marshal: marshal_mailbox,
-                startup_sync_height,
+                state_sync_entries: self
+                    .sync_entries
+                    .lock()
+                    .get(public_key)
+                    .copied()
+                    .unwrap_or(0),
+                state_sync_height,
             },
         )
     }
