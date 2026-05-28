@@ -50,7 +50,7 @@ fn fuzz(input: FuzzInput) {
             block_on(async {
                 let (sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(100);
 
-                for (batch, d) in batches.iter().zip(data.iter()) {
+                for (batch, d) in batches.iter().zip(data.iter()).take(100) {
                     let _ = sender.send(*batch, d.clone()).await;
                 }
 
