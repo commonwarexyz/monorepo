@@ -457,17 +457,17 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // If a prior `init_at_size`/`clear_to_size` crashed mid-reset, the offsets journal carries
         // a staged clear. `init_cleared` discards data before finishing that reset so the two sides
         // are reconciled and stale data is never replayed past the reset size.
-        let offsets_cfg = fixed::Config {
-            partition: offsets_partition,
-            items_per_blob: cfg.items_per_section,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.write_buffer,
-        };
-        let mut offsets =
-            fixed::Journal::<E, u64>::init_cleared(context.child("offsets"), offsets_cfg, || {
-                data.clear()
-            })
-            .await?;
+        let mut offsets = fixed::Journal::<E, u64>::init_cleared(
+            context.child("offsets"),
+            fixed::Config {
+                partition: offsets_partition,
+                items_per_blob: cfg.items_per_section,
+                page_cache: cfg.page_cache,
+                write_buffer: cfg.write_buffer,
+            },
+            || data.clear(),
+        )
+        .await?;
 
         // Validate and align offsets journal to match data journal
         let (pruning_boundary, size) =
