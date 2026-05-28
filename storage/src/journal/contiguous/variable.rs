@@ -460,14 +460,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
-        // Initialize offsets journal
-        let mut offsets = fixed::Journal::init_with_external_clear(
-            context.child("offsets"),
-            offsets_cfg,
-            None,
-            || async { data.clear().await },
-        )
-        .await?;
+        // If offsets has a pending reset from a prior crashed `init_at_size` or `clear_to_size`,
+        // clear data first so the staged clear inside offsets init reconciles both sides.
+        if fixed::Journal::<E, u64>::pending_reset(context.child("offsets"), &offsets_cfg)
+            .await?
+            .is_some()
+        {
+            data.clear().await?;
+        }
+        let mut offsets = fixed::Journal::init(context.child("offsets"), offsets_cfg).await?;
 
         // Validate and align offsets journal to match data journal
         let (pruning_boundary, size) =
@@ -518,13 +519,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             },
         )
         .await?;
-        let offsets = fixed::Journal::<E, u64>::init_with_external_clear(
-            context.child("offsets"),
-            offsets_cfg,
-            Some(size),
-            || async { data.clear().await },
-        )
-        .await?;
+        // Stage the offsets reset, then clear data, then let offsets init complete the clear. A
+        // crash at any point leaves the staged intent for `init` to finish.
+        fixed::Journal::<E, u64>::stage_reset(context.child("offsets"), &offsets_cfg, size).await?;
+        data.clear().await?;
+        let offsets = fixed::Journal::<E, u64>::init(context.child("offsets"), offsets_cfg).await?;
 
         let items_per_section = cfg.items_per_section.get();
         let metrics = Metrics::new(context);
@@ -915,9 +914,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
-        self.offsets
-            .clear_to_size_with_dependent_clear(new_size, || async { inner.data.clear().await })
-            .await?;
+        // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
+        // `clear_to_size` re-stages the same target idempotently before completing.
+        self.offsets.stage_clear_intent(new_size).await?;
+        inner.data.clear().await?;
+        self.offsets.clear_to_size(new_size).await?;
         inner.size = new_size;
         inner.pruning_boundary = new_size;
         inner.dirty_from_section = None;
@@ -3160,7 +3161,7 @@ mod tests {
                     page_cache: cfg.page_cache.clone(),
                     write_buffer: cfg.write_buffer,
                 };
-                fixed::Journal::<_, u64>::test_stage_clear_to_size_in_partition(
+                fixed::Journal::<_, u64>::stage_reset(
                     context.child("intent").with_attribute("index", index),
                     &offsets_cfg,
                     7,
