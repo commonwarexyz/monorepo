@@ -463,12 +463,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
-        let mut offsets = fixed::Journal::<E, u64>::init_cleared(
-            context.child("offsets"),
-            offsets_cfg,
-            || data.clear(),
-        )
-        .await?;
+        let mut offsets =
+            fixed::Journal::<E, u64>::init_cleared(context.child("offsets"), offsets_cfg, || {
+                data.clear()
+            })
+            .await?;
 
         // Validate and align offsets journal to match data journal
         let (pruning_boundary, size) =
@@ -3236,9 +3235,8 @@ mod tests {
                 fixed::Journal::<_, u64>::update_metadata_watermark_before_clear(
                     &mut intent_metadata,
                     7,
-                )
-                .unwrap();
-                intent_metadata.put(fixed::CLEAR_TARGET_KEY, 7u64.to_be_bytes().to_vec());
+                );
+                intent_metadata.put(fixed::CLEAR_TARGET_KEY, 7u64.into());
                 intent_metadata.sync().await.unwrap();
                 drop(intent_metadata);
 
@@ -3318,9 +3316,11 @@ mod tests {
                 fixed::Journal::<_, u64>::open_metadata(stale_ctx.child("meta"), &offsets_cfg)
                     .await
                     .unwrap();
-            fixed::Journal::<_, u64>::update_metadata_watermark_before_clear(&mut stale_metadata, 5)
-                .unwrap();
-            stale_metadata.put(fixed::CLEAR_TARGET_KEY, 5u64.to_be_bytes().to_vec());
+            fixed::Journal::<_, u64>::update_metadata_watermark_before_clear(
+                &mut stale_metadata,
+                5,
+            );
+            stale_metadata.put(fixed::CLEAR_TARGET_KEY, 5u64.into());
             stale_metadata.sync().await.unwrap();
             drop(stale_metadata);
 
