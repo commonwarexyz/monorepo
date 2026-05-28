@@ -2198,13 +2198,69 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
                 ..cfg
             };
-            let journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
+            let journal = Journal::<_, u64>::init(context.child("recovered"), cfg.clone())
                 .await
                 .unwrap();
             assert_eq!(journal.bounds().await, 0..1);
             assert_eq!(journal.read(0).await.unwrap(), 10);
             assert_eq!(journal.append(&42).await.unwrap(), 1);
             assert_eq!(journal.read(1).await.unwrap(), 42);
+            drop(journal);
+
+            // Recovery should have removed the empty trailing sections, leaving
+            // only the durable prefix's section and the one written above.
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+
+            let journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
+                .await
+                .unwrap();
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_handles_empty_data_with_no_durable_items() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "recovery-empty-data-no-items".into(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append across multiple section boundaries without ever syncing. Each
+            // append opens a fresh section blob, but no item bytes (and no offsets)
+            // become durable, so recovery sees multiple empty sections and no
+            // durable data.
+            assert_eq!(journal.append(&10).await.unwrap(), 0);
+            assert_eq!(journal.append(&20).await.unwrap(), 1);
+            drop(journal);
+
+            let data_partition = cfg.data_partition();
+            let data_blobs = context.scan(&data_partition).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+            for name in &data_blobs {
+                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                assert_eq!(size, 0);
+            }
+
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..0);
+            assert_eq!(journal.append(&42).await.unwrap(), 0);
+            assert_eq!(journal.read(0).await.unwrap(), 42);
             journal.destroy().await.unwrap();
         });
     }

@@ -3205,6 +3205,66 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_fixed_recovery_handles_multiple_empty_data_tail_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(1));
+            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Persist a prefix, then append across multiple section boundaries without syncing. The
+            // unsynced item bytes are lost on drop, but their section blobs remain visible.
+            assert_eq!(journal.append(&test_digest(10)).await.unwrap(), 0);
+            journal.sync().await.unwrap();
+            assert_eq!(journal.append(&test_digest(20)).await.unwrap(), 1);
+            assert_eq!(journal.append(&test_digest(30)).await.unwrap(), 2);
+            drop(journal);
+
+            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert!(
+                blobs.len() > 2,
+                "expected multiple empty trailing sections, got {}",
+                blobs.len()
+            );
+
+            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(10));
+            assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 1);
+            assert_eq!(journal.read(1).await.unwrap(), test_digest(42));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_recovery_handles_empty_data_with_no_durable_items() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(1));
+            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append across multiple section boundaries without ever syncing. No item bytes become
+            // durable, so recovery sees multiple empty sections and no durable data.
+            assert_eq!(journal.append(&test_digest(10)).await.unwrap(), 0);
+            assert_eq!(journal.append(&test_digest(20)).await.unwrap(), 1);
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..0);
+            assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 0);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(42));
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test the contiguous fixed journal with items_per_blob: 1.
     ///
     /// This is an edge case where each item creates its own blob, and the
