@@ -23,7 +23,7 @@ use commonware_utils::{
 use futures::SinkExt;
 use rand::Rng;
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::debug;
 
 /// Configuration for [`Syncer`].
 pub struct Config<E, A, R, S, V>
@@ -167,7 +167,6 @@ where
                         state_sync_task = None.into();
                     }
                     Err(err) => {
-                        error!(?err, "state sync task failed");
                         panic!("state sync task failed: {err:?}");
                     }
                 }
@@ -200,7 +199,6 @@ where
                                 state_sync_task = None.into();
                             }
                             Err(err) => {
-                                error!(?err, "state sync task failed");
                                 panic!("state sync task failed: {err:?}");
                             }
                         }
