@@ -1031,6 +1031,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Callers that key dependent state off this journal use this to discard that state atomically
     /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
     /// [Self::init_cleared]) finishes.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn init_at_size_cleared<F, Fut>(
         context: E,
         cfg: Config,
