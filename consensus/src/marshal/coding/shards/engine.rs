@@ -485,17 +485,17 @@ where
 
                 match message {
                     Message::Proposed { block, round } => {
-                        self.broadcast_shards(&mut sender, round, block);
+                        self.broadcast_shards(&mut sender, round, block).await;
                     }
                     Message::Discovered {
                         commitment,
                         leader,
                         round,
                     } => {
-                        self.handle_external_proposal(&mut sender, commitment, leader, round);
+                        self.handle_external_proposal(&mut sender, commitment, leader, round).await;
                     }
                     Message::Notarized { commitment, round } => {
-                        self.handle_notarized_commitment(&mut sender, commitment, round);
+                        self.handle_notarized_commitment(&mut sender, commitment, round).await;
                     }
                     Message::GetByCommitment {
                         commitment,
@@ -546,13 +546,13 @@ where
                 debug!("receiver closed, stopping shard engine");
                 return;
             } => {
-                self.handle_network_shard(&mut sender, peer, shard);
+                self.handle_network_shard(&mut sender, peer, shard).await;
             },
         }
     }
 
     /// Handles a decoded shard received from the network.
-    fn handle_network_shard<Sr: Sender<PublicKey = P>>(
+    async fn handle_network_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         peer: P,
@@ -591,22 +591,42 @@ where
                 }
             }
 
-            let state = self
-                .state
-                .get_mut(&commitment)
-                .expect("state checked as present");
-            let progressed = state.on_network_shard(
-                peer,
-                shard,
-                InsertCtx::new(scheme.as_ref(), &self.strategy),
-                &mut self.blocker,
-            );
+            let progressed = self
+                .handle_state_network_shard(commitment, peer, shard, scheme)
+                .await;
             if progressed {
-                self.try_advance(sender, commitment);
+                self.try_advance(sender, commitment).await;
             }
         } else {
             self.buffer_peer_shard(peer, shard);
         }
+    }
+
+    async fn handle_state_network_shard(
+        &mut self,
+        commitment: Commitment,
+        peer: P,
+        shard: Shard<C, H>,
+        scheme: std::sync::Arc<S::Scheme>,
+    ) -> bool {
+        let Some(mut state) = self.state.remove(&commitment) else {
+            return false;
+        };
+        let participants_len = u64::try_from(scheme.participants().len())
+            .expect("participant count impossibly out of bounds");
+        let progressed = state.on_network_shard(
+            peer,
+            shard,
+            InsertCtx::new(scheme.as_ref()),
+            &mut self.blocker,
+        );
+        if progressed {
+            state = self
+                .try_transition_state(commitment, participants_len, state)
+                .await;
+        }
+        self.state.insert(commitment, state);
+        progressed
     }
 
     /// Returns whether an incoming network shard should still be processed.
@@ -637,30 +657,44 @@ where
     /// - `Ok(None)` if reconstruction could not be attempted due to insufficient checked shards.
     /// - `Err(_)` if reconstruction was attempted but failed.
     #[allow(clippy::type_complexity)]
-    fn try_reconstruct(
+    async fn try_reconstruct(
         &mut self,
         commitment: Commitment,
     ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
         }
-        let Some(state) = self.state.get_mut(&commitment) else {
+        let Some(state) = self.state.remove(&commitment) else {
             return Ok(None);
         };
         let round = state.round();
         if state.checked_shards().len() < usize::from(commitment.config().minimum_shards.get()) {
             debug!(%commitment, "not enough checked shards to reconstruct block");
+            self.state.insert(commitment, state);
             return Ok(None);
         }
         // Attempt to reconstruct the encoded blob
         let start = self.context.current();
-        let blob = C::decode(
-            &commitment.config(),
-            &commitment.root(),
-            state.checked_shards().iter(),
-            &self.strategy,
-        )
-        .map_err(Error::Coding)?;
+        let handle = self
+            .context
+            .child("erasure_decode")
+            .with_attribute("round", round)
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let blob = C::decode(
+                        &commitment.config(),
+                        &commitment.root(),
+                        state.checked_shards().iter(),
+                        &strategy,
+                    );
+                    (state, blob)
+                }
+            });
+        let (state, blob) = handle.await.expect("strategy task failed");
+        self.state.insert(commitment, state);
+        let blob = blob.map_err(Error::Coding)?;
         self.metrics
             .erasure_decode_duration
             .observe_between(start, self.context.current());
@@ -703,7 +737,7 @@ where
     }
 
     /// Handles leader announcements for a commitment and advances reconstruction.
-    fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
+    async fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
@@ -754,9 +788,9 @@ where
                 ReconstructionState::new(Some(leader), round, participants_len),
             );
         }
-        let buffered_progress = self.ingest_buffered_shards(commitment);
+        let buffered_progress = self.ingest_buffered_shards(commitment).await;
         if buffered_progress {
-            self.try_advance(sender, commitment);
+            self.try_advance(sender, commitment).await;
         }
     }
 
@@ -765,7 +799,7 @@ where
     /// This is intentionally narrower than leader discovery: it may reconstruct
     /// the block from sender-indexed gossip shards, but it cannot mark the
     /// local assigned shard as verified.
-    fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
+    async fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
@@ -775,9 +809,9 @@ where
             return;
         }
         if self.state.contains_key(&commitment) {
-            let buffered_progress = self.ingest_buffered_shards(commitment);
+            let buffered_progress = self.ingest_buffered_shards(commitment).await;
             if buffered_progress {
-                self.try_advance(sender, commitment);
+                self.try_advance(sender, commitment).await;
             }
             return;
         }
@@ -791,9 +825,9 @@ where
             commitment,
             ReconstructionState::new(None, round, participants_len),
         );
-        let buffered_progress = self.ingest_buffered_shards(commitment);
+        let buffered_progress = self.ingest_buffered_shards(commitment).await;
         if buffered_progress {
-            self.try_advance(sender, commitment);
+            self.try_advance(sender, commitment).await;
         }
     }
 
@@ -828,7 +862,7 @@ where
     /// reconstruct from many peer-gossiped shards. The local assigned shard is
     /// different: it is only valid when it came from the leader, and the leader's
     /// identity is needed before it can be accepted as assigned-shard evidence.
-    fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
+    async fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let state = self
             .state
             .get(&commitment)
@@ -867,19 +901,53 @@ where
             }
         }
 
-        let state = self
+        let mut state = self
             .state
-            .get_mut(&commitment)
+            .remove(&commitment)
             .expect("reconstruction state checked before buffered shard drain");
 
         // Ingest buffered shards into the active reconstruction state. Batch verification
         // will be triggered if there are enough shards to meet the quorum threshold.
         let mut progressed = false;
-        let ctx = InsertCtx::new(scheme.as_ref(), &self.strategy);
+        let participants_len = u64::try_from(scheme.participants().len())
+            .expect("participant count impossibly out of bounds");
+        let ctx = InsertCtx::new(scheme.as_ref());
         for (peer, shard) in buffered {
             progressed |= state.on_network_shard(peer, shard, ctx, &mut self.blocker);
         }
+        if progressed {
+            state = self
+                .try_transition_state(commitment, participants_len, state)
+                .await;
+        }
+        self.state.insert(commitment, state);
         progressed
+    }
+
+    async fn try_transition_state(
+        &mut self,
+        commitment: Commitment,
+        participants_len: u64,
+        state: ReconstructionState<P, C, H>,
+    ) -> ReconstructionState<P, C, H> {
+        let handle = self
+            .context
+            .child("transition_reconstruction")
+            .with_attribute("round", state.round())
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut state = state;
+                    let to_block = state.try_transition(commitment, participants_len, &strategy);
+                    (state, to_block)
+                }
+            });
+        let (state, to_block) = handle.await.expect("strategy task failed");
+        for peer in to_block {
+            commonware_p2p::block!(self.blocker, peer, "invalid shard received");
+        }
+        state
     }
 
     /// Cache a block and notify all subscribers waiting on it.
@@ -899,7 +967,7 @@ where
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
-    fn broadcast_shards<Sr: Sender<PublicKey = P>>(
+    async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
@@ -920,7 +988,19 @@ where
             return;
         };
 
-        let shard_count = block.shards(&self.strategy).len();
+        let handle = self
+            .context
+            .child("count_shards")
+            .with_attribute("round", round)
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let shard_count = block.shards(&strategy).len();
+                    (block, shard_count)
+                }
+            });
+        let (block, shard_count) = handle.await.expect("strategy task failed");
         if shard_count != participants.len() {
             warn!(
                 %commitment,
@@ -992,7 +1072,7 @@ where
     /// Broadcasts any pending validated shard for the given commitment and attempts
     /// reconstruction. If reconstruction succeeds or fails, the state is cleaned
     /// up and subscribers are notified.
-    fn try_advance<Sr: Sender<PublicKey = P>>(
+    async fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: Commitment,
@@ -1010,7 +1090,7 @@ where
             }
         }
 
-        match self.try_reconstruct(commitment) {
+        match self.try_reconstruct(commitment).await {
             Ok(Some(block)) => {
                 // Do not prune other reconstruction state here. A Byzantine
                 // leader can equivocate by proposing multiple commitments in
@@ -1362,17 +1442,16 @@ where
     H: Hasher,
 {
     /// Check whether quorum is met and, if so, batch-validate all pending
-    /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
+    /// shards in parallel.
     fn try_transition(
         &mut self,
         commitment: Commitment,
         participants_len: u64,
         strategy: &impl Strategy,
-        blocker: &mut impl Blocker<PublicKey = P>,
-    ) -> Option<ReadyState<P, C, H>> {
+    ) -> (Option<ReadyState<P, C, H>>, Vec<P>) {
         let minimum = usize::from(commitment.config().minimum_shards.get());
         if self.common.checked_shards.len() + self.pending_shards.len() < minimum {
-            return None;
+            return (None, Vec::new());
         }
 
         // Batch-validate all pending weak shards in parallel.
@@ -1388,16 +1467,13 @@ where
                 (peer, checked.ok())
             });
 
-        for peer in to_block {
-            commonware_p2p::block!(blocker, peer, "invalid shard received");
-        }
         for checked in new_checked {
             self.common.checked_shards.push(checked);
         }
 
         // After validation, some may have failed; recheck threshold.
         if self.common.checked_shards.len() < minimum {
-            return None;
+            return (None, to_block);
         }
 
         // Transition to Ready.
@@ -1407,38 +1483,29 @@ where
             &mut self.common,
             CommonState::new(leader, round, participants_len),
         );
-        Some(ReadyState { common })
+        (Some(ReadyState { common }), to_block)
     }
 }
 
 /// Context required for processing incoming network shards.
-struct InsertCtx<'a, Sch, S>
+struct InsertCtx<'a, Sch>
 where
     Sch: CertificateScheme,
-    S: Strategy,
 {
     scheme: &'a Sch,
-    strategy: &'a S,
-    participants_len: u64,
 }
 
-impl<Sch: CertificateScheme, S: Strategy> Clone for InsertCtx<'_, Sch, S> {
+impl<Sch: CertificateScheme> Clone for InsertCtx<'_, Sch> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<Sch: CertificateScheme, S: Strategy> Copy for InsertCtx<'_, Sch, S> {}
+impl<Sch: CertificateScheme> Copy for InsertCtx<'_, Sch> {}
 
-impl<'a, Sch: CertificateScheme, S: Strategy> InsertCtx<'a, Sch, S> {
-    fn new(scheme: &'a Sch, strategy: &'a S) -> Self {
-        let participants_len = u64::try_from(scheme.participants().len())
-            .expect("participant count impossibly out of bounds");
-        Self {
-            scheme,
-            strategy,
-            participants_len,
-        }
+impl<'a, Sch: CertificateScheme> InsertCtx<'a, Sch> {
+    const fn new(scheme: &'a Sch) -> Self {
+        Self { scheme }
     }
 }
 
@@ -1494,6 +1561,23 @@ where
     /// Return the proposal round associated with this state.
     const fn round(&self) -> Round {
         self.common().round
+    }
+
+    /// Transition to `Ready` when enough shards have been collected.
+    fn try_transition(
+        &mut self,
+        commitment: Commitment,
+        participants_len: u64,
+        strategy: &impl Strategy,
+    ) -> Vec<P> {
+        let Self::AwaitingQuorum(state) = self else {
+            return Vec::new();
+        };
+        let (ready, to_block) = state.try_transition(commitment, participants_len, strategy);
+        if let Some(ready) = ready {
+            *self = Self::Ready(ready);
+        }
+        to_block
     }
 
     /// Returns all verified shards accumulated for reconstruction.
@@ -1554,16 +1638,15 @@ where
     /// - Before a reconstruction state exists, shards are buffered at the
     ///   engine level in bounded per-peer queues until [`Mailbox::discovered`]
     ///   or [`Mailbox::notarized`] creates state for this commitment.
-    fn on_network_shard<Sch, S, X>(
+    fn on_network_shard<Sch, X>(
         &mut self,
         sender: P,
         shard: Shard<C, H>,
-        ctx: InsertCtx<'_, Sch, S>,
+        ctx: InsertCtx<'_, Sch>,
         blocker: &mut X,
     ) -> bool
     where
         Sch: CertificateScheme<PublicKey = P>,
-        S: Strategy,
         X: Blocker<PublicKey = P>,
     {
         let Some(sender_index) = ctx.scheme.participants().index(&sender) else {
@@ -1621,27 +1704,13 @@ where
         // even after transitioning to Ready. This ensures we broadcast
         // our own shard to help slower peers reach quorum.
         if is_from_leader && !self.common().assigned_shard_verified {
-            let progressed = self.common_mut().verify_assigned_shard(
+            return self.common_mut().verify_assigned_shard(
                 sender,
                 commitment,
                 indexed,
                 ctx.scheme.me().is_some(),
                 blocker,
             );
-
-            if progressed {
-                if let Self::AwaitingQuorum(state) = self {
-                    if let Some(ready) = state.try_transition(
-                        commitment,
-                        ctx.participants_len,
-                        ctx.strategy,
-                        blocker,
-                    ) {
-                        *self = Self::Ready(ready);
-                    }
-                }
-            }
-            return progressed;
         }
 
         // Non-leader shards are only accepted while awaiting quorum.
@@ -1656,11 +1725,6 @@ where
             .insert(indexed.index, indexed.data.clone());
         state.common.contributed.set(u64::from(indexed.index), true);
         state.pending_shards.insert(sender, indexed);
-        if let Some(ready) =
-            state.try_transition(commitment, ctx.participants_len, ctx.strategy, blocker)
-        {
-            *self = Self::Ready(ready);
-        }
 
         true
     }

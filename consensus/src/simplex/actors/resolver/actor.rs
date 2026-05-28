@@ -22,7 +22,7 @@ use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
@@ -34,7 +34,7 @@ pub struct Actor<
     T: Strategy,
 > {
     context: ContextCell<E>,
-    scheme: S,
+    scheme: Arc<S>,
     blocker: Option<B>,
     strategy: T,
 
@@ -60,7 +60,7 @@ impl<
         (
             Self {
                 context: ContextCell::new(context),
-                scheme: cfg.scheme,
+                scheme: Arc::new(cfg.scheme),
                 blocker: Some(cfg.blocker),
                 strategy: cfg.strategy,
 
@@ -143,13 +143,13 @@ impl<
                 if message.response_closed() {
                     continue;
                 }
-                self.handle_resolver(message, &mut voter, &mut resolver);
+                self.handle_resolver(message, &mut voter, &mut resolver).await;
             },
         }
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
-    fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
+    async fn validate(&mut self, view: View, data: Bytes) -> Option<Certificate<S, D>> {
         // Decode message
         let incoming =
             Certificate::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
@@ -177,7 +177,22 @@ impl<
                     );
                     return None;
                 }
-                if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
+                let scheme = self.scheme.clone();
+                let handle = self
+                    .context
+                    .child("verify_notarization")
+                    .with_attribute("epoch", self.epoch)
+                    .with_attribute("view", view)
+                    .shared(true)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let valid = notarization.verify(&mut context, &scheme, &strategy);
+                            (notarization, valid)
+                        }
+                    });
+                let (notarization, valid) = handle.await.expect("strategy task failed");
+                if !valid {
                     debug!(%view, "notarization failed verification");
                     return None;
                 }
@@ -197,7 +212,22 @@ impl<
                     );
                     return None;
                 }
-                if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
+                let scheme = self.scheme.clone();
+                let handle = self
+                    .context
+                    .child("verify_finalization")
+                    .with_attribute("epoch", self.epoch)
+                    .with_attribute("view", view)
+                    .shared(true)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let valid = finalization.verify(&mut context, &scheme, &strategy);
+                            (finalization, valid)
+                        }
+                    });
+                let (finalization, valid) = handle.await.expect("strategy task failed");
+                if !valid {
                     debug!(%view, "finalization failed verification");
                     return None;
                 }
@@ -217,11 +247,23 @@ impl<
                     );
                     return None;
                 }
-                if !nullification.verify::<_, D>(
-                    self.context.as_mut(),
-                    &self.scheme,
-                    &self.strategy,
-                ) {
+                let scheme = self.scheme.clone();
+                let handle = self
+                    .context
+                    .child("verify_nullification")
+                    .with_attribute("epoch", self.epoch)
+                    .with_attribute("view", view)
+                    .shared(true)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let valid =
+                                nullification.verify::<_, D>(&mut context, &scheme, &strategy);
+                            (nullification, valid)
+                        }
+                    });
+                let (nullification, valid) = handle.await.expect("strategy task failed");
+                if !valid {
                     debug!(%view, "nullification failed verification");
                     return None;
                 }
@@ -232,7 +274,7 @@ impl<
     }
 
     /// Handles a message from the [p2p::Engine].
-    fn handle_resolver(
+    async fn handle_resolver(
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
@@ -245,7 +287,7 @@ impl<
                 response,
             } => {
                 // Validate incoming message
-                let Some(parsed) = self.validate(view, data) else {
+                let Some(parsed) = self.validate(view, data).await else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
                     response.send_lossy(false);

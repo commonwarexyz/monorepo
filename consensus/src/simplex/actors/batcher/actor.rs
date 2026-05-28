@@ -6,7 +6,7 @@ use crate::{
         interesting,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
-        types::{Activity, Certificate, Proposal, Vote},
+        types::{Activity, Certificate, Finalization, Notarization, Nullification, Proposal, Vote},
         Plan,
     },
     types::{Epoch, Participant, View, ViewDelta},
@@ -27,7 +27,7 @@ use commonware_runtime::{
 };
 use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::Future, sync::Arc};
 use tracing::{debug, trace};
 
 /// Tracks the current view, its leader, and whether the voter has
@@ -37,6 +37,9 @@ struct Current {
     leader: Option<Participant>,
     timed_out: bool,
 }
+
+type VerifiedVotes<S, D> = (Vec<Vote<S, D>>, Vec<Participant>);
+type RoundOutput<S, B, D, Re, T> = (Round<S, B, D, Re>, Option<T>);
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
 where
@@ -51,7 +54,7 @@ where
     context: ContextCell<E>,
 
     participants: Set<S::PublicKey>,
-    scheme: S,
+    scheme: Arc<S>,
 
     blocker: B,
     reporter: Re,
@@ -86,7 +89,8 @@ where
     T: Strategy,
 {
     pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
-        let participants = cfg.scheme.participants().clone();
+        let scheme = Arc::new(cfg.scheme);
+        let participants = scheme.participants().clone();
         let participant_count = participants.len();
         let added = context.counter("added", "number of messages added to the verifier");
         let verified = context.counter("verified", "number of messages verified");
@@ -117,7 +121,7 @@ where
                 context: ContextCell::new(context),
 
                 participants,
-                scheme: cfg.scheme,
+                scheme,
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
@@ -151,6 +155,102 @@ where
             self.blocker.clone(),
             self.reporter.clone(),
         )
+    }
+
+    fn verify_round(
+        &self,
+        view: View,
+        round: Round<S, B, D, Re>,
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, VerifiedVotes<S, D>>> + Send + 'static {
+        let handle = self
+            .context
+            .child("verify_round")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |mut context| async move {
+                    let mut round = round;
+                    let verified = if round.ready_notarizes() {
+                        Some(round.verify_notarizes(&mut context, &strategy))
+                    } else if round.ready_nullifies() {
+                        Some(round.verify_nullifies(&mut context, &strategy))
+                    } else if round.ready_finalizes() {
+                        Some(round.verify_finalizes(&mut context, &strategy))
+                    } else {
+                        None
+                    };
+                    (round, verified)
+                }
+            });
+        async move { handle.await.expect("strategy task failed") }
+    }
+
+    fn try_construct_notarization(
+        &self,
+        view: View,
+        round: Round<S, B, D, Re>,
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, Notarization<S, D>>> + Send + 'static {
+        let handle = self
+            .context
+            .child("construct_notarization")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut round = round;
+                    let notarization = round.try_construct_notarization(&strategy);
+                    (round, notarization)
+                }
+            });
+        async move { handle.await.expect("strategy task failed") }
+    }
+
+    fn try_construct_nullification(
+        &self,
+        view: View,
+        round: Round<S, B, D, Re>,
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, Nullification<S>>> + Send + 'static {
+        let handle = self
+            .context
+            .child("construct_nullification")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut round = round;
+                    let nullification = round.try_construct_nullification(&strategy);
+                    (round, nullification)
+                }
+            });
+        async move { handle.await.expect("strategy task failed") }
+    }
+
+    fn try_construct_finalization(
+        &self,
+        view: View,
+        round: Round<S, B, D, Re>,
+    ) -> impl Future<Output = RoundOutput<S, B, D, Re, Finalization<S, D>>> + Send + 'static {
+        let handle = self
+            .context
+            .child("construct_finalization")
+            .with_attribute("epoch", self.epoch)
+            .with_attribute("view", view)
+            .shared(true)
+            .spawn({
+                let strategy = self.strategy.clone();
+                move |_| async move {
+                    let mut round = round;
+                    let finalization = round.try_construct_finalization(&strategy);
+                    (round, finalization)
+                }
+            });
+        async move { handle.await.expect("strategy task failed") }
     }
 
     /// Records the latest view message received from a participant.
@@ -534,24 +634,24 @@ where
                 }
 
                 // Process the updated view (if any)
-                let Some(round) = work.get_mut(&updated_view) else {
+                let Some(round) = work.remove(&updated_view) else {
                     continue;
                 };
 
                 // Batch verify votes if ready
-                let timer = self.verify_latency.timer(self.context.as_ref());
-                let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
-                } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
-                } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
+                let (mut round, verified) = if round.ready_notarizes()
+                    || round.ready_nullifies()
+                    || round.ready_finalizes()
+                {
+                    let timer = self.verify_latency.timer(self.context.as_ref());
+                    let (round, verified) = self.verify_round(updated_view, round).await;
+                    (round, verified.map(|verified| (timer, verified)))
                 } else {
-                    None
+                    (round, None)
                 };
 
                 // Process batch verification results
-                if let Some((voters, failed)) = verified {
+                if let Some((timer, (voters, failed))) = verified {
                     timer.observe(self.context.as_ref());
 
                     // Process verified votes
@@ -584,32 +684,49 @@ where
                 }
 
                 // Try to construct and forward certificates
-                if let Some(notarization) =
-                    self.recover_latency.time_some(self.context.as_ref(), || {
-                        round.try_construct_notarization(&self.scheme, &self.strategy)
-                    })
-                {
-                    debug!(view = %updated_view, "constructed notarization, forwarding to voter");
+                let round = if round.ready_construct_notarization() {
+                    let timer = self.recover_latency.timer(self.context.as_ref());
+                    let (round, notarization) =
+                        self.try_construct_notarization(updated_view, round).await;
+                    if let Some(notarization) = notarization {
+                        timer.observe(self.context.as_ref());
+                        debug!(view = %updated_view, "constructed notarization, forwarding to voter");
 
-                    // Forward notarization to voter
-                    voter.recovered(Certificate::Notarization(notarization));
-                }
-                if let Some(nullification) =
-                    self.recover_latency.time_some(self.context.as_ref(), || {
-                        round.try_construct_nullification(&self.scheme, &self.strategy)
-                    })
-                {
-                    debug!(view = %updated_view, "constructed nullification, forwarding to voter");
-                    voter.recovered(Certificate::Nullification(nullification));
-                }
-                if let Some(finalization) =
-                    self.recover_latency.time_some(self.context.as_ref(), || {
-                        round.try_construct_finalization(&self.scheme, &self.strategy)
-                    })
-                {
-                    debug!(view = %updated_view, "constructed finalization, forwarding to voter");
-                    voter.recovered(Certificate::Finalization(finalization));
-                }
+                        // Forward notarization to voter
+                        voter.recovered(Certificate::Notarization(notarization));
+                    }
+                    round
+                } else {
+                    round
+                };
+                let round = if round.ready_construct_nullification() {
+                    let timer = self.recover_latency.timer(self.context.as_ref());
+                    let (round, nullification) =
+                        self.try_construct_nullification(updated_view, round).await;
+                    if let Some(nullification) = nullification {
+                        timer.observe(self.context.as_ref());
+                        debug!(view = %updated_view, "constructed nullification, forwarding to voter");
+                        voter.recovered(Certificate::Nullification(nullification));
+                    }
+                    round
+                } else {
+                    round
+                };
+                let round = if round.ready_construct_finalization() {
+                    let timer = self.recover_latency.timer(self.context.as_ref());
+                    let (round, finalization) =
+                        self.try_construct_finalization(updated_view, round).await;
+                    if let Some(finalization) = finalization {
+                        timer.observe(self.context.as_ref());
+                        debug!(view = %updated_view, "constructed finalization, forwarding to voter");
+                        voter.recovered(Certificate::Finalization(finalization));
+                    }
+                    round
+                } else {
+                    round
+                };
+
+                work.insert(updated_view, round);
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {

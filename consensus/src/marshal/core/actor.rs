@@ -17,7 +17,7 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Finalization, Notarization, Subject},
+        types::{verify_certificates, Finalization, Notarization},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Epochable, Heightable, Reporter,
@@ -1353,59 +1353,71 @@ where
             return false;
         }
 
-        // Extract (subject, certificate) pairs for batch verification.
-        let certs: Vec<_> = delivers
-            .iter()
-            .map(|item| match item {
-                PendingVerification::Finalized { finalization, .. } => (
-                    Subject::Finalize {
-                        proposal: &finalization.proposal,
-                    },
-                    &finalization.certificate,
-                ),
-                PendingVerification::Notarized { notarization, .. } => (
-                    Subject::Notarize {
-                        proposal: &notarization.proposal,
-                    },
-                    &notarization.certificate,
-                ),
-            })
-            .collect();
-
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
         let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(
-                self.context.as_mut(),
-                scheme.as_ref(),
-                &certs,
-                &self.strategy,
-            )
+            let handle = self
+                .context
+                .child("verify_deliveries")
+                .with_attribute("count", delivers.len())
+                .shared(true)
+                .spawn({
+                    let strategy = self.strategy.clone();
+                    move |mut context| async move {
+                        let cert_refs: Vec<_> = delivers
+                            .iter()
+                            .map(PendingVerification::as_subject_and_certificate)
+                            .collect();
+                        let verified = verify_certificates(
+                            &mut context,
+                            scheme.as_ref(),
+                            &cert_refs,
+                            &strategy,
+                        );
+                        (delivers, verified)
+                    }
+                });
+            let (returned, verified) = handle.await.expect("strategy task failed");
+            delivers = returned;
+            verified
         } else {
             let mut verified = vec![false; delivers.len()];
 
             // Group indices by epoch.
             let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-            for (i, item) in delivers.iter().enumerate() {
-                let epoch = match item {
-                    PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                    PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-                };
-                by_epoch.entry(epoch).or_default().push(i);
+            for (i, cert) in delivers.iter().enumerate() {
+                by_epoch.entry(cert.epoch()).or_default().push(i);
             }
 
             // Batch verify each epoch group.
-            for (epoch, indices) in &by_epoch {
-                let Some(scheme) = self.provider.scoped(*epoch) else {
+            for (epoch, indices) in by_epoch {
+                let Some(scheme) = self.provider.scoped(epoch) else {
                     continue;
                 };
-                let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results = verify_certificates(
-                    self.context.as_mut(),
-                    scheme.as_ref(),
-                    &group,
-                    &self.strategy,
-                );
+                let handle = self
+                    .context
+                    .child("verify_epoch_deliveries")
+                    .with_attribute("epoch", epoch)
+                    .with_attribute("count", indices.len())
+                    .shared(true)
+                    .spawn({
+                        let strategy = self.strategy.clone();
+                        move |mut context| async move {
+                            let group_refs: Vec<_> = indices
+                                .iter()
+                                .map(|&i| delivers[i].as_subject_and_certificate())
+                                .collect();
+                            let results = verify_certificates(
+                                &mut context,
+                                scheme.as_ref(),
+                                &group_refs,
+                                &strategy,
+                            );
+                            (delivers, indices, results)
+                        }
+                    });
+                let (returned, indices, results) = handle.await.expect("strategy task failed");
+                delivers = returned;
                 for (j, &idx) in indices.iter().enumerate() {
                     verified[idx] = results[j];
                 }

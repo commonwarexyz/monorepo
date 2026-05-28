@@ -8,6 +8,7 @@ use crate::{
 use commonware_cryptography::{certificate::Verification, Digest};
 use commonware_parallel::Strategy;
 use rand_core::CryptoRngCore;
+use std::sync::Arc;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
@@ -26,7 +27,7 @@ use rand_core::CryptoRngCore;
 /// [secp256r1]: crate::simplex::scheme::secp256r1
 pub struct Verifier<S: Scheme<D>, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
-    scheme: S,
+    scheme: Arc<S>,
 
     /// Required quorum size.
     quorum: usize,
@@ -53,6 +54,11 @@ pub struct Verifier<S: Scheme<D>, D: Digest> {
 }
 
 impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
+    /// Returns the scheme used by this verifier.
+    pub(super) fn scheme(&self) -> &S {
+        self.scheme.as_ref()
+    }
+
     /// Creates a new `Verifier`.
     ///
     /// # Arguments
@@ -61,9 +67,9 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
     ///   required to reach a quorum. If `None`, batch verification readiness
     ///   checks based on quorum size are skipped.
-    pub const fn new(scheme: S, quorum: u32) -> Self {
+    pub fn new(scheme: impl Into<Arc<S>>, quorum: u32) -> Self {
         Self {
-            scheme,
+            scheme: scheme.into(),
 
             // Store quorum as usize to simplify comparisons against queue lengths.
             quorum: quorum as usize,

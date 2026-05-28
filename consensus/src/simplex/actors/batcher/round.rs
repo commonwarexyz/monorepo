@@ -18,6 +18,7 @@ use commonware_utils::{
     N3f1,
 };
 use rand_core::CryptoRngCore;
+use std::sync::Arc;
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -58,7 +59,7 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<S, B, D, R>
 {
-    pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
+    pub fn new(participants: Set<S::PublicKey>, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
         let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {
@@ -393,12 +394,17 @@ impl<
         }
     }
 
+    /// Returns true if a notarization can be constructed from verified votes.
+    pub fn ready_construct_notarization(&self) -> bool {
+        !self.has_notarization()
+            && self.verified_votes.len_notarizes() >= self.participants.quorum::<N3f1>()
+    }
+
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
     pub fn try_construct_notarization(
         &mut self,
-        scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Notarization<S, D>> {
         if self.has_notarization() {
@@ -407,10 +413,19 @@ impl<
         if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let notarization =
-            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
+        let notarization = Notarization::from_notarizes(
+            self.verifier.scheme(),
+            self.verified_votes.iter_notarizes(),
+            strategy,
+        )?;
         self.set_notarization(notarization.clone());
         Some(notarization)
+    }
+
+    /// Returns true if a nullification can be constructed from verified votes.
+    pub fn ready_construct_nullification(&self) -> bool {
+        !self.has_nullification()
+            && self.verified_votes.len_nullifies() >= self.participants.quorum::<N3f1>()
     }
 
     /// Attempts to construct a nullification certificate from verified votes.
@@ -418,7 +433,6 @@ impl<
     /// Returns the certificate if we have quorum and haven't already constructed one.
     pub fn try_construct_nullification(
         &mut self,
-        scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Nullification<S>> {
         if self.has_nullification() {
@@ -427,10 +441,19 @@ impl<
         if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let nullification =
-            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
+        let nullification = Nullification::from_nullifies(
+            self.verifier.scheme(),
+            self.verified_votes.iter_nullifies(),
+            strategy,
+        )?;
         self.set_nullification(nullification.clone());
         Some(nullification)
+    }
+
+    /// Returns true if a finalization can be constructed from verified votes.
+    pub fn ready_construct_finalization(&self) -> bool {
+        !self.has_finalization()
+            && self.verified_votes.len_finalizes() >= self.participants.quorum::<N3f1>()
     }
 
     /// Attempts to construct a finalization certificate from verified votes.
@@ -438,7 +461,6 @@ impl<
     /// Returns the certificate if we have quorum and haven't already constructed one.
     pub fn try_construct_finalization(
         &mut self,
-        scheme: &S,
         strategy: &impl Strategy,
     ) -> Option<Finalization<S, D>> {
         if self.has_finalization() {
@@ -447,8 +469,11 @@ impl<
         if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let finalization =
-            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
+        let finalization = Finalization::from_finalizes(
+            self.verifier.scheme(),
+            self.verified_votes.iter_finalizes(),
+            strategy,
+        )?;
         self.set_finalization(finalization.clone());
         Some(finalization)
     }
