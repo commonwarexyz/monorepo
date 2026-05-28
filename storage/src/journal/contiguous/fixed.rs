@@ -552,8 +552,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         recovery_watermark: u64,
     ) -> Result<(), Error> {
         Self::update_metadata_entries(inner, items_per_blob, pruning_boundary, recovery_watermark);
-        inner.metadata.sync().await?;
-        Ok(())
+        inner.metadata.sync().await.map_err(Into::into)
     }
 
     /// Stage a recovery watermark no greater than `limit`.
@@ -675,8 +674,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Self::stage_pruning_boundary_metadata(metadata, items_per_blob, size);
         metadata.put(RECOVERY_WATERMARK_KEY, size.into());
         metadata.remove(&CLEAR_TARGET_KEY);
-        metadata.sync().await?;
-        Ok(())
+        metadata.sync().await.map_err(Into::into)
     }
 
     /// Initialize a new `Journal` instance.
@@ -1431,8 +1429,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub(crate) async fn test_set_recovery_watermark(&self, watermark: u64) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
         inner.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
-        inner.metadata.sync().await?;
-        Ok(())
+        inner.metadata.sync().await.map_err(Into::into)
     }
 }
 
