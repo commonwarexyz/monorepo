@@ -286,12 +286,12 @@ where
     DB::Op: Encode,
 {
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        Self::new_with_boundary_probe(config, true).await
+        Box::pin(Self::new_with_boundary_probe(config, true)).await
     }
 
     /// Create a new sync engine for a durable state-sync resume.
     pub async fn new_without_local_boundary(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        Self::new_with_boundary_probe(config, false).await
+        Box::pin(Self::new_with_boundary_probe(config, false)).await
     }
 
     async fn new_with_boundary_probe(
