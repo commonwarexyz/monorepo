@@ -663,9 +663,14 @@ where
 {
     /// Destroy the authenticated journal, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        // `try_join!` contains an await boundary, so destructure first to avoid
+        // stack growth from retaining the entire `self` in the future.
+        let Self {
+            journal, merkle, ..
+        } = self;
         try_join!(
-            self.journal.destroy().map_err(Error::Journal),
-            self.merkle.destroy().map_err(Error::Merkle),
+            journal.destroy().map_err(Error::Journal),
+            merkle.destroy().map_err(Error::Merkle),
         )?;
 
         Ok(())
