@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
-pub trait SectionBuffer: Clone + Send + Sync {
+pub trait SectionBuffer: Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> impl Future<Output = u64> + Send;
 
@@ -213,6 +213,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
 
         Ok(self.blobs.get_mut(&section).unwrap())
+    }
+
+    /// Resize an existing section. Panics if the section is absent.
+    pub(crate) async fn resize(&self, section: u64, len: u64) -> Result<(), RError> {
+        self.blobs
+            .get(&section)
+            .expect("resize called with unknown section")
+            .resize(len)
+            .await
     }
 
     /// Sync the given section to storage.

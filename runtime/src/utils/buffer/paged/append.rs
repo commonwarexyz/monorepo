@@ -133,7 +133,6 @@ impl<B: Blob> BlobState<B> {
 
 /// A [Blob] wrapper that supports write-cached appending of data, with checksums for data integrity
 /// and page cache managed caching.
-#[derive(Clone)]
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
     blob_state: Arc<AsyncRwLock<BlobState<B>>>,
