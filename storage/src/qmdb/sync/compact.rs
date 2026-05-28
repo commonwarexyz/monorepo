@@ -25,7 +25,7 @@
 //! The servable compact state advances only on durable persistence:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
-//! - [`Database::from_compact_state`] reconstructs the already-validated state in memory only.
+//! - [`Database::from_validated_state`] reconstructs the already-validated state in memory only.
 //! - Compact db-local commits persist the frontier and witness together during `sync`/`commit`.
 //! - `rewind` restores both the frontier and the witness from the previous slot together.
 //!
@@ -342,7 +342,7 @@ pub trait Database: Sized + Send {
     /// requested target root and passes the derived validation artifacts with the state. This
     /// constructor must not durably persist anything; persistence happens only after the caller
     /// re-checks that `Self::root()` matches the target root.
-    fn from_compact_state(
+    fn from_validated_state(
         context: Self::Context,
         config: Self::Config,
         state: ValidatedState<Self::Family, Self::Op, Self::Digest>,
@@ -427,7 +427,7 @@ where
         // The peer response has already authenticated the final commit and frontier. From here,
         // construction should only fail for local database/storage reasons; a root mismatch is a
         // bug in this path.
-        let db = DB::from_compact_state(
+        let db = DB::from_validated_state(
             config.context.child("compact"),
             config.db_config.clone(),
             validated_state,
@@ -1022,7 +1022,7 @@ mod tests {
         type Context = deterministic::Context;
         type Hasher = Sha256;
 
-        async fn from_compact_state(
+        async fn from_validated_state(
             _context: Self::Context,
             (root, constructions): Self::Config,
             _state: super::ValidatedState<Self::Family, Self::Op, Self::Digest>,

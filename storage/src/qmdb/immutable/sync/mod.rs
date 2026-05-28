@@ -169,7 +169,7 @@ where
     type Context = E;
     type Hasher = H;
 
-    async fn from_compact_state(
+    async fn from_validated_state(
         context: Self::Context,
         config: Self::Config,
         state: sync::compact::ValidatedState<Self::Family, Self::Op, Self::Digest>,
