@@ -20,7 +20,7 @@ use commonware_utils::{
 };
 #[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
-use futures::{stream, Stream, StreamExt as _};
+use futures::{future::try_join_all, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 #[commonware_macros::stability(ALPHA)]
 use tracing::debug;
@@ -120,8 +120,8 @@ struct Inner<E: Context, V: Codec> {
 
     /// Earliest data section modified since the last `commit()` or `sync()`.
     ///
-    /// Tracks which sections need fsyncing. Reset by both `commit()` and `sync()` so
-    /// that repeated commit-without-sync cycles only fsync newly dirtied sections.
+    /// Tracks which sections need syncing. Reset by both `commit()` and `sync()` so
+    /// that repeated commit-without-sync cycles only sync newly dirtied sections.
     dirty_from_section: Option<u64>,
 }
 
@@ -856,8 +856,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(pruned)
     }
 
-    /// Fsync dirty data sections under the read lock, allowing concurrent reads.
-    async fn fsync_dirty_data(&self) -> Result<(), Error> {
+    /// Flush dirty data sections to storage under the read lock, allowing concurrent reads.
+    ///
+    /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
+    /// data, so committed sections are never at risk, and recovery replays the data journal as the
+    /// source of truth and truncates at the first short or missing section, so a crash that leaves a
+    /// gap still recovers a contiguous prefix no shorter than the last completed commit.
+    async fn flush_dirty_data(&self) -> Result<(), Error> {
         let inner = self.inner.read().await;
         if let Some(start_section) = inner.dirty_from_section {
             let tail_section = position_to_section(inner.size, self.items_per_section);
@@ -868,9 +873,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 // With no retained data blobs, any earlier dirty section was cleared or pruned.
                 // Syncing the tail section is harmless when it does not exist.
                 .unwrap_or(tail_section);
-            for section in start_section..=tail_section {
-                inner.data.sync(section).await?;
-            }
+            try_join_all((start_section..=tail_section).map(|section| inner.data.sync(section)))
+                .await?;
         }
         Ok(())
     }
@@ -880,7 +884,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         let _op_guard = self.op_lock.lock().await;
-        self.fsync_dirty_data().await?;
+        self.flush_dirty_data().await?;
         self.offsets.commit().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
@@ -892,7 +896,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         let _op_guard = self.op_lock.lock().await;
-        self.fsync_dirty_data().await?;
+        self.flush_dirty_data().await?;
         self.offsets.sync().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
@@ -2268,7 +2272,7 @@ mod tests {
     /// Test that a durable data section above the sync watermark, sitting beyond an empty
     /// intermediate section, is rolled back to the contiguous boundary during recovery.
     ///
-    /// Since #3790 removed the append-time fsync when crossing blob boundaries, a process crash can
+    /// Since #3790 removed the append-time sync when crossing blob boundaries, a process crash can
     /// leave a later data section incidentally durable (its page-cache writes survived) while an
     /// earlier section stayed buffered and was lost, producing a physical gap. Recovery anchors at
     /// the durable watermark and replays the data forward with a strict section-contiguity check, so
@@ -2296,7 +2300,7 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            // Append sections 1 and 2 without committing. Manually fsync only section 2's data blob
+            // Append sections 1 and 2 without committing. Manually sync only section 2's data blob
             // to mimic its page-cache writes surviving a crash, while section 1 stays buffered and
             // the offsets journal is never advanced past position 10.
             for i in 10..30u64 {
@@ -2352,13 +2356,13 @@ mod tests {
         });
     }
 
-    /// Test that a crash partway through the ascending per-section sync loop leaves a contiguous
-    /// durable prefix that recovery preserves.
+    /// Test that a crash partway through a multi-section sync leaves a contiguous durable prefix
+    /// that recovery preserves.
     ///
-    /// `fsync_dirty_data` syncs dirty data sections in ascending order before syncing offsets, and
-    /// all mutating operations serialize on `op_lock` so no concurrent sync can interleave. This
-    /// reproduces a crash after sections 0 and 1 were fsynced but before section 2 and the offsets
-    /// journal were, then asserts recovery keeps exactly the contiguous prefix 0..20.
+    /// `flush_dirty_data` syncs dirty data sections before syncing offsets, and all mutating
+    /// operations serialize on `op_lock` so no concurrent sync can interleave. This reproduces a
+    /// crash after sections 0 and 1 were synced but before section 2 and the offsets journal were,
+    /// then asserts recovery keeps exactly the contiguous prefix 0..20.
     #[test_traced]
     fn test_variable_recovery_partial_sync_loop_keeps_contiguous_prefix() {
         let executor = deterministic::Runner::default();
@@ -2382,8 +2386,8 @@ mod tests {
                 journal.append(&(i * 100)).await.unwrap();
             }
 
-            // Replicate `fsync_dirty_data`'s ascending loop, crashing after sections 0 and 1 are
-            // durable but before section 2 (and before offsets) are synced.
+            // Sync sections 0 and 1 but not section 2 (and not offsets), simulating a crash after
+            // part of a multi-section sync became durable.
             {
                 let inner = journal.inner.write().await;
                 inner.data.sync(0).await.unwrap();
