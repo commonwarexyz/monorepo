@@ -12,6 +12,7 @@ use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
+use commonware_p2p::Recipients;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use commonware_utils::channel::{
     fallible::{FallibleExt, OneshotExt},
@@ -43,6 +44,7 @@ pub enum Message<D: Digest, P: PublicKey> {
     },
     Broadcast {
         payload: D,
+        plan: Plan<P>,
     },
 }
 
@@ -100,8 +102,8 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type PublicKey = P;
     type Plan = Plan<P>;
 
-    fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) -> Feedback {
-        if self.sender.send_lossy(Message::Broadcast { payload }) {
+    fn broadcast(&mut self, payload: Self::Digest, plan: Plan<P>) -> Feedback {
+        if self.sender.send_lossy(Message::Broadcast { payload, plan }) {
             Feedback::Ok
         } else {
             Feedback::Closed
@@ -185,6 +187,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     should_certify: Certifier<H::Digest>,
 
     pending: HashMap<H::Digest, Bytes>,
+    seen: HashMap<H::Digest, Bytes>,
 
     verified: HashSet<H::Digest>,
 
@@ -240,6 +243,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 should_certify: cfg.should_certify,
 
                 pending: HashMap::new(),
+                seen: HashMap::new(),
                 verified: HashSet::new(),
                 propose_observer: None,
                 verify_observer: None,
@@ -383,9 +387,30 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         }
     }
 
-    fn broadcast(&mut self, payload: H::Digest) {
-        let contents = self.pending.remove(&payload).expect("missing payload");
-        self.relay.broadcast(&self.me, (payload, contents));
+    fn broadcast(&mut self, payload: H::Digest, plan: Plan<P>) {
+        let (contents, recipients) = match plan {
+            Plan::Propose { .. } => {
+                let contents = self.pending.remove(&payload).expect("missing payload");
+                self.seen.insert(payload, contents.clone());
+                (contents, Recipients::All)
+            }
+            Plan::Forward { recipients, .. } => {
+                let contents = match self.seen.get(&payload).cloned() {
+                    Some(contents) => contents,
+                    None => {
+                        let Some(contents) = self.pending.get(&payload).cloned() else {
+                            debug!("payload not found for forwarding");
+                            return;
+                        };
+                        self.seen.insert(payload, contents.clone());
+                        contents
+                    }
+                };
+                (contents, recipients)
+            }
+        };
+        self.relay
+            .broadcast(&self.me, recipients, (payload, contents));
     }
 
     pub fn start(mut self) -> Handle<()> {
@@ -399,7 +424,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             H::Digest,
             Vec<(Context<H::Digest, P>, oneshot::Sender<bool>)>,
         > = HashMap::new();
-        let mut seen: HashMap<H::Digest, Bytes> = HashMap::new();
 
         // Handle actions
         select_loop! {
@@ -434,7 +458,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         if self.drop_verifications {
                             continue;
                         }
-                        if let Some(contents) = seen.get(&payload) {
+                        if let Some(contents) = self.seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
                             response.send_lossy(verified);
                         } else {
@@ -449,7 +473,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         payload,
                         response,
                     } => {
-                        let contents = seen.get(&payload).cloned().unwrap_or_default();
+                        let contents = self.seen.get(&payload).cloned().unwrap_or_default();
                         if let Some(certified) = self.certify(round, payload, contents).await {
                             response.send_lossy(certified);
                         } else if matches!(self.should_certify, Certifier::Pending) {
@@ -460,14 +484,14 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         }
                         // Cancel: drop sender -> immediate RecvError on receiver.
                     }
-                    Message::Broadcast { payload } => {
-                        self.broadcast(payload);
+                    Message::Broadcast { payload, plan } => {
+                        self.broadcast(payload, plan);
                     }
                 }
             },
             Some((digest, contents)) = self.broadcast.recv() else break => {
                 // Record digest for future use
-                seen.insert(digest, contents.clone());
+                self.seen.insert(digest, contents.clone());
 
                 // Check if we have a waiter
                 if let Some(waiters) = waiters.remove(&digest) {

@@ -806,6 +806,41 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
+    pub(crate) async fn test_immutable_commit_after_sync_recovery<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.child("first")).await;
+        let k1 = Sha256::fill(1u8);
+        let k2 = Sha256::fill(2u8);
+        let v1 = Sha256::fill(3u8);
+        let v2 = Sha256::fill(4u8);
+
+        // Commit and sync the first key so recovery has an older persisted boundary.
+        commit_sets(&mut db, [(k1, v1)], None).await;
+        db.sync().await.unwrap();
+
+        // Commit a second key without syncing; reopen must replay it from journal data.
+        commit_sets(&mut db, [(k2, v2)], None).await;
+        let committed_bounds = db.bounds().await;
+        let committed_root = db.root();
+        drop(db);
+
+        let db = open_db(context.child("second")).await;
+        assert_eq!(db.bounds().await, committed_bounds);
+        assert_eq!(db.root(), committed_root);
+        assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
+        assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
+
+        db.destroy().await.unwrap();
+    }
+
     pub(crate) async fn test_immutable_build_basic<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(

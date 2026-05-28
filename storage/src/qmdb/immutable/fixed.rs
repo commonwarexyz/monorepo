@@ -267,6 +267,14 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_fixed_commit_after_sync_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_commit_after_sync_recovery(ctx, open::<mmr::Family>).await;
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_fixed_build_basic() {
         let executor = deterministic::Runner::default();

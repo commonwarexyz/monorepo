@@ -747,6 +747,50 @@ pub mod tests {
         assert_eq!(state1, state2);
     }
 
+    /// Run `test_commit_after_sync_recovery` against a database factory.
+    pub fn test_commit_after_sync_recovery<M, C, F, Fut>(mut open_db: F)
+    where
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
+        C::Key: TestKey,
+        <C as DbAny<M>>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        let executor = deterministic::Runner::default();
+        let mut open_db_clone = open_db.clone();
+        executor.start(|context| async move {
+            let partition = "commit-after-sync".to_string();
+            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+            let key0 = <<C as DbAny<M>>::Key as TestKey>::from_seed(0);
+            let key1 = <<C as DbAny<M>>::Key as TestKey>::from_seed(1);
+            let value0 = <C as DbAny<M>>::Value::from_seed(100);
+            let value1 = <C as DbAny<M>>::Value::from_seed(200);
+
+            // Establish a synced baseline so metadata and journal recovery start from it.
+            commit_writes::<M, C>(&mut db, [(key0, Some(value0.clone()))])
+                .await
+                .unwrap();
+            db.sync().await.unwrap();
+
+            // Commit a later batch without syncing metadata; reopen must rebuild it from the log.
+            commit_writes::<M, C>(&mut db, [(key1, Some(value1.clone()))])
+                .await
+                .unwrap();
+            let committed_root = db.root();
+            let committed_size = db.size().await;
+            drop(db);
+
+            let db: C = open_db(context.child("second"), partition).await;
+            assert_eq!(db.root(), committed_root);
+            assert_eq!(db.size().await, committed_size);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Run `test_simulate_write_failures` against a database factory.
     ///
     /// This test builds a random database and simulates recovery from different types of
@@ -1487,6 +1531,15 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_context| async move {
             for_all_variants!(simple: test_sync_persists_bitmap_pruning_boundary);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_commit_after_sync_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_commit_after_sync_recovery);
         });
     }
 

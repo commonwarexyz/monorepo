@@ -454,8 +454,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
-        // Initialize offsets journal
-        let mut offsets = fixed::Journal::init(
+        // If a prior `init_at_size`/`clear_to_size` crashed mid-reset, the offsets journal carries
+        // a staged clear. `init_cleared` discards data before finishing that reset so the two sides
+        // are reconciled and stale data is never replayed past the reset size.
+        let mut offsets = fixed::Journal::<E, u64>::init_cleared(
             context.child("offsets"),
             fixed::Config {
                 partition: offsets_partition,
@@ -463,6 +465,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
+            || data.clear(),
         )
         .await?;
 
@@ -490,12 +493,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Initialize an empty [Journal] at the given logical `size`.
     ///
+    /// This discards any existing data and offsets. The offsets reset intent is staged before the
+    /// data journal is cleared so recovery can complete the requested reset if a crash interrupts
+    /// the operation.
+    ///
     /// Returns a journal with journal.bounds() == Range{start: size, end: size}
     /// and next append at position `size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        // Initialize empty data journal
-        let data = variable::Journal::init(
+        let mut data = variable::Journal::init(
             context.child("data"),
             variable::Config {
                 partition: cfg.data_partition(),
@@ -507,16 +513,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
-        // Initialize offsets journal at the target size
-        let offsets = fixed::Journal::init_at_size(
+        // `init_at_size_cleared` durably stages the offsets reset, clears data, then completes the
+        // reset. A crash at any point leaves a staged clear that the next `init` (via
+        // `init_cleared`) finishes, so stale data can never outlive the reset.
+        let offsets = fixed::Journal::<E, u64>::init_at_size_cleared(
             context.child("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
-                page_cache: cfg.page_cache,
+                page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             },
             size,
+            || data.clear(),
         )
         .await?;
 
@@ -903,12 +912,17 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    /// The offsets reset intent is staged before the data journal is cleared so recovery can
+    /// complete the requested reset if a crash interrupts the operation.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
-        inner.data.clear().await?;
 
+        // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
+        // `clear_to_size` re-stages the same target idempotently before completing.
+        self.offsets.stage_clear_intent(new_size).await?;
+        inner.data.clear().await?;
         self.offsets.clear_to_size(new_size).await?;
         inner.size = new_size;
         inner.pruning_boundary = new_size;
@@ -3080,6 +3094,440 @@ mod tests {
             let pos = journal.append(&1500).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), 1500);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_clears_existing_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-clears-existing".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                journal.append(&(100 + i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            assert_eq!(journal.append(&700).await.unwrap(), 7);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..8);
+            assert_eq!(journal.read(7).await.unwrap(), 700);
+            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
+            assert!(matches!(
+                journal.read(8).await,
+                Err(Error::ItemOutOfRange(8))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_stages_reset_before_clearing_data() {
+        let partition = "init-at-size-stage-before-clear-failure".to_string();
+        let executor = deterministic::Runner::default();
+        let ((), checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            |context| async move {
+                let cfg = Config {
+                    partition,
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(1024),
+                };
+
+                let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..12u64 {
+                    journal.append(&(100 + i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+                drop(journal);
+
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    sync_rate: Some(1.0),
+                    ..Default::default()
+                };
+                assert!(
+                    Journal::<_, u64>::init_at_size(context.child("reset"), cfg, 7)
+                        .await
+                        .is_err()
+                );
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = Config {
+                partition,
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..12);
+            for i in 0..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), 100 + i);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_clear_to_size_stages_reset_before_clearing_data() {
+        let partition = "clear-to-size-stage-before-clear-failure".to_string();
+        let executor = deterministic::Runner::default();
+        let ((), checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            |context| async move {
+                let cfg = Config {
+                    partition,
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(1024),
+                };
+
+                let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..12u64 {
+                    journal.append(&(100 + i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+
+                // Fail the offsets metadata sync inside `stage_clear_intent` so `clear_to_size`
+                // aborts before any data is cleared. The reset intent never becomes durable.
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    sync_rate: Some(1.0),
+                    ..Default::default()
+                };
+                assert!(journal.clear_to_size(7).await.is_err());
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = Config {
+                partition,
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..12);
+            for i in 0..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), 100 + i);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_clear_to_size_crash_after_staging_completes_on_init() {
+        let partition = "clear-to-size-crash-after-staging".to_string();
+        let executor = deterministic::Runner::default();
+        let ((), checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            |context| async move {
+                let cfg = Config {
+                    partition,
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(1024),
+                };
+
+                let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..12u64 {
+                    journal.append(&(100 + i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+
+                // Let `stage_clear_intent` (a metadata sync) persist the reset intent, but fail the
+                // subsequent `data.clear()` (a blob remove) so `clear_to_size` aborts after the
+                // intent is durable but before the data is cleared.
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    remove_rate: Some(1.0),
+                    ..Default::default()
+                };
+                assert!(journal.clear_to_size(7).await.is_err());
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = Config {
+                partition,
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // `init` finds the staged intent, discards the stale data, and completes the reset.
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            assert_eq!(journal.append(&700).await.unwrap(), 7);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen: the completed reset persists and no stale data was replayed.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..8);
+            assert_eq!(journal.read(7).await.unwrap(), 700);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_recovers_staged_reset_crash_points() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (index, clear_data) in [false, true].into_iter().enumerate() {
+                let cfg = Config {
+                    partition: format!("init-at-size-staged-reset-crash-{index}"),
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(1024),
+                };
+
+                let journal = Journal::<_, u64>::init(
+                    context.child("first").with_attribute("index", index),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
+                for i in 0..12u64 {
+                    journal.append(&(100 + i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+                drop(journal);
+
+                let offsets_cfg = fixed::Config {
+                    partition: cfg.offsets_partition(),
+                    items_per_blob: cfg.items_per_section,
+                    page_cache: cfg.page_cache.clone(),
+                    write_buffer: cfg.write_buffer,
+                };
+                // Simulate a crash mid-`init_at_size`: stage CLEAR_TARGET_KEY in offsets metadata
+                // but leave data untouched (clear_data=false) or also clear data (clear_data=true)
+                // so we cover both crash points.
+                let intent_ctx = context.child("intent").with_attribute("index", index);
+                let mut intent_metadata =
+                    fixed::Journal::<_, u64>::open_metadata(intent_ctx.child("meta"), &offsets_cfg)
+                        .await
+                        .unwrap();
+                fixed::Journal::<_, u64>::update_metadata_watermark_before_clear(
+                    &mut intent_metadata,
+                    7,
+                );
+                intent_metadata.put(fixed::CLEAR_TARGET_KEY, 7u64.into());
+                intent_metadata.sync().await.unwrap();
+                drop(intent_metadata);
+
+                if clear_data {
+                    let mut data = variable::Journal::<_, u64>::init(
+                        context.child("data").with_attribute("index", index),
+                        variable::Config {
+                            partition: cfg.data_partition(),
+                            compression: cfg.compression,
+                            codec_config: cfg.codec_config,
+                            page_cache: cfg.page_cache.clone(),
+                            write_buffer: cfg.write_buffer,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    data.clear().await.unwrap();
+                }
+
+                let journal = Journal::<_, u64>::init(
+                    context.child("recover").with_attribute("index", index),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(journal.bounds().await, 7..7);
+                assert_eq!(journal.append(&700).await.unwrap(), 7);
+                journal.sync().await.unwrap();
+                drop(journal);
+
+                let journal = Journal::<_, u64>::init(
+                    context.child("reopen").with_attribute("index", index),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(journal.bounds().await, 7..8);
+                assert_eq!(journal.read(7).await.unwrap(), 700);
+
+                journal.destroy().await.unwrap();
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_overwrites_pending_clear_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-overwrites-pending-target".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                journal.append(&(100 + i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Simulate a prior `clear_to_size(5)` that crashed after staging its intent: the offsets
+            // metadata carries CLEAR_TARGET_KEY=5 while the data journal still holds all 12 items.
+            let offsets_cfg = fixed::Config {
+                partition: cfg.offsets_partition(),
+                items_per_blob: cfg.items_per_section,
+                page_cache: cfg.page_cache.clone(),
+                write_buffer: cfg.write_buffer,
+            };
+            let stale_ctx = context.child("stale");
+            let mut stale_metadata =
+                fixed::Journal::<_, u64>::open_metadata(stale_ctx.child("meta"), &offsets_cfg)
+                    .await
+                    .unwrap();
+            fixed::Journal::<_, u64>::update_metadata_watermark_before_clear(
+                &mut stale_metadata,
+                5,
+            );
+            stale_metadata.put(fixed::CLEAR_TARGET_KEY, 5u64.into());
+            stale_metadata.sync().await.unwrap();
+            drop(stale_metadata);
+
+            // init_at_size(10) overwrites the pending target of 5 and resets to 10.
+            let journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 10)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 10..10);
+            assert_eq!(journal.append(&700).await.unwrap(), 10);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen: target 10 (not 5) persisted and no stale data was replayed.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 10..11);
+            assert_eq!(journal.read(10).await.unwrap(), 700);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_discards_same_section_stale_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-discards-same-section-stale-data".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 5)
+                .await
+                .unwrap();
+            for i in 0..4u64 {
+                assert_eq!(journal.append(&(500 + i)).await.unwrap(), 5 + i);
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
+                .await
+                .unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("after_reset"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            assert!(matches!(
+                journal.read(7).await,
+                Err(Error::ItemOutOfRange(7))
+            ));
+
+            assert_eq!(journal.append(&700).await.unwrap(), 7);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("after_append"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..8);
+            assert_eq!(journal.read(7).await.unwrap(), 700);
+            assert!(matches!(
+                journal.read(8).await,
+                Err(Error::ItemOutOfRange(8))
+            ));
 
             journal.destroy().await.unwrap();
         });
