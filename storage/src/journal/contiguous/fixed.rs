@@ -111,7 +111,7 @@ const PRUNING_BOUNDARY_KEY: u64 = 1;
 ///
 /// This key is synced before destructive reset work starts. If recovery sees it, recovery
 /// completes the reset to the recorded target before normal bounds recovery.
-const CLEAR_TARGET_KEY: u64 = 2;
+pub(crate) const CLEAR_TARGET_KEY: u64 = 2;
 
 /// Metadata key for storing the recovery watermark.
 const RECOVERY_WATERMARK_KEY: u64 = 3;
@@ -594,7 +594,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Stage a recovery-watermark entry no greater than `limit` in raw metadata.
     ///
     /// This is used by `init_at_size` before it clears existing blobs, before an `Inner` exists.
-    fn update_metadata_watermark_before_clear(
+    pub(crate) fn update_metadata_watermark_before_clear(
         metadata: &mut Metadata<E, u64, Vec<u8>>,
         limit: u64,
     ) -> Result<bool, Error> {
@@ -610,8 +610,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(true)
     }
 
-    /// Open the metadata partition for `cfg`.
-    async fn open_metadata(context: &E, cfg: &Config) -> Result<Metadata<E, u64, Vec<u8>>, Error> {
+    /// Open the metadata partition for `cfg`. Callers inspect or mutate it directly (via
+    /// `metadata.get(&CLEAR_TARGET_KEY)` or `update_metadata_watermark_before_clear` + `put` +
+    /// `sync`) and then hand it to `init_with_metadata` to finish initialization without
+    /// re-opening.
+    pub(crate) async fn open_metadata(
+        context: &E,
+        cfg: &Config,
+    ) -> Result<Metadata<E, u64, Vec<u8>>, Error> {
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
             codec_config: ((0..).into(), ()),
@@ -619,27 +625,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
             .await
             .map_err(Into::into)
-    }
-
-    /// Durably stage a reset intent without opening the journal. The next `init` call will detect
-    /// the staged `CLEAR_TARGET_KEY` and complete the clear. Callers that own dependent state may
-    /// clear it between this call and the subsequent `init`; if a crash interrupts that window,
-    /// the same recovery path runs on restart.
-    pub(crate) async fn stage_reset(context: E, cfg: &Config, size: u64) -> Result<(), Error> {
-        // Fail before writing intent if existing blob partitions are already inconsistent.
-        Self::select_blob_partition(&context, cfg).await?;
-        let mut metadata = Self::open_metadata(&context, cfg).await?;
-        // Lower the watermark before staging the clear intent so external consumers never see a
-        // persisted recovery checkpoint beyond the eventual clear target.
-        Self::update_metadata_watermark_before_clear(&mut metadata, size)?;
-        metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
-        metadata.sync().await.map_err(Into::into)
-    }
-
-    /// Returns `Some(target)` when a `stage_reset` intent is durably staged for `cfg`.
-    pub(crate) async fn pending_reset(context: E, cfg: &Config) -> Result<Option<u64>, Error> {
-        let metadata = Self::open_metadata(&context, cfg).await?;
-        Self::parse_metadata_u64(&metadata, CLEAR_TARGET_KEY, "clear_target")
     }
 
     /// Scan a partition and return blob names, treating a missing partition as empty.
@@ -717,10 +702,20 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+        let metadata = Self::open_metadata(&context, &cfg).await?;
+        Self::init_with_metadata(context, cfg, metadata).await
+    }
+
+    /// Finish initialization using an already-open metadata handle. Callers use this after
+    /// `open_metadata` + `stage_reset` / `pending_reset` so metadata is opened exactly once.
+    pub(crate) async fn init_with_metadata(
+        context: E,
+        cfg: Config,
+        mut metadata: Metadata<E, u64, Vec<u8>>,
+    ) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
 
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
-        let mut metadata = Self::open_metadata(&context, &cfg).await?;
         let segmented_cfg = SegmentedConfig {
             partition: blob_partition,
             page_cache: cfg.page_cache,
@@ -1046,8 +1041,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// either still in its prior state, or has bounds `size..size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
-        Self::stage_reset(context.child("intent"), &cfg, size).await?;
-        Self::init(context, cfg).await
+        // Fail before writing intent if existing blob partitions are already inconsistent.
+        Self::select_blob_partition(&context, &cfg).await?;
+
+        // Stage the reset intent durably. Lower the recovery watermark first so external
+        // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
+        // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
+        // recovering bounds.
+        let mut metadata = Self::open_metadata(&context, &cfg).await?;
+        Self::update_metadata_watermark_before_clear(&mut metadata, size)?;
+        metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
+        metadata.sync().await?;
+
+        Self::init_with_metadata(context, cfg, metadata).await
     }
 
     /// Convert a global position to (section, position_in_section).

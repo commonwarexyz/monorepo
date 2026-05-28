@@ -461,14 +461,18 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             write_buffer: cfg.write_buffer,
         };
         // If offsets has a pending reset from a prior crashed `init_at_size` or `clear_to_size`,
-        // clear data first so the staged clear inside offsets init reconciles both sides.
-        if fixed::Journal::<E, u64>::pending_reset(context.child("offsets"), &offsets_cfg)
-            .await?
-            .is_some()
-        {
+        // CLEAR_TARGET_KEY is present in its metadata. Clear data first so the staged clear that
+        // `init_with_metadata` runs (via `complete_clear_to_size`) reconciles both sides.
+        // Metadata stays open and is handed to `init_with_metadata` so we only open it once.
+        let offsets_ctx = context.child("offsets");
+        let offsets_metadata =
+            fixed::Journal::<E, u64>::open_metadata(&offsets_ctx, &offsets_cfg).await?;
+        if offsets_metadata.get(&fixed::CLEAR_TARGET_KEY).is_some() {
             data.clear().await?;
         }
-        let mut offsets = fixed::Journal::init(context.child("offsets"), offsets_cfg).await?;
+        let mut offsets =
+            fixed::Journal::<E, u64>::init_with_metadata(offsets_ctx, offsets_cfg, offsets_metadata)
+                .await?;
 
         // Validate and align offsets journal to match data journal
         let (pruning_boundary, size) =
@@ -519,11 +523,28 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             },
         )
         .await?;
-        // Stage the offsets reset, then clear data, then let offsets init complete the clear. A
-        // crash at any point leaves the staged intent for `init` to finish.
-        fixed::Journal::<E, u64>::stage_reset(context.child("offsets"), &offsets_cfg, size).await?;
+        // Stage the offsets reset intent durably before clearing data. Lower the recovery
+        // watermark first so external consumers never see a persisted checkpoint beyond `size`.
+        // After data is cleared, `init_with_metadata` detects CLEAR_TARGET_KEY and completes the
+        // clear. A crash at any point in this sequence leaves a durable intent that the next
+        // `init` (via `init_with_metadata`) will finish. Metadata stays open across stage / clear
+        // / init so it's only opened once.
+        let offsets_ctx = context.child("offsets");
+        let mut offsets_metadata =
+            fixed::Journal::<E, u64>::open_metadata(&offsets_ctx, &offsets_cfg).await?;
+        fixed::Journal::<E, u64>::update_metadata_watermark_before_clear(
+            &mut offsets_metadata,
+            size,
+        )?;
+        offsets_metadata.put(fixed::CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
+        offsets_metadata.sync().await?;
         data.clear().await?;
-        let offsets = fixed::Journal::<E, u64>::init(context.child("offsets"), offsets_cfg).await?;
+        let offsets = fixed::Journal::<E, u64>::init_with_metadata(
+            offsets_ctx,
+            offsets_cfg,
+            offsets_metadata,
+        )
+        .await?;
 
         let items_per_section = cfg.items_per_section.get();
         let metrics = Metrics::new(context);
@@ -3161,13 +3182,22 @@ mod tests {
                     page_cache: cfg.page_cache.clone(),
                     write_buffer: cfg.write_buffer,
                 };
-                fixed::Journal::<_, u64>::stage_reset(
-                    context.child("intent").with_attribute("index", index),
-                    &offsets_cfg,
+                // Simulate a crash mid-`init_at_size`: stage CLEAR_TARGET_KEY in offsets metadata
+                // but leave data untouched (clear_data=false) or also clear data (clear_data=true)
+                // so we cover both crash points.
+                let intent_ctx = context.child("intent").with_attribute("index", index);
+                let mut intent_metadata =
+                    fixed::Journal::<_, u64>::open_metadata(&intent_ctx, &offsets_cfg)
+                        .await
+                        .unwrap();
+                fixed::Journal::<_, u64>::update_metadata_watermark_before_clear(
+                    &mut intent_metadata,
                     7,
                 )
-                .await
                 .unwrap();
+                intent_metadata.put(fixed::CLEAR_TARGET_KEY, 7u64.to_be_bytes().to_vec());
+                intent_metadata.sync().await.unwrap();
+                drop(intent_metadata);
 
                 if clear_data {
                     let mut data = variable::Journal::<_, u64>::init(
