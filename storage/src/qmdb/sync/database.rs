@@ -58,8 +58,13 @@ pub trait Database: Sized + Send {
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return locally available boundary nodes for the target, if the local database can
+    /// Return locally available boundary nodes for the target, if persisted local state can
     /// authenticate them.
+    ///
+    /// Databases can override this to let a completed sync journal reuse boundary nodes from an
+    /// on-disk database instead of fetching them from peers. Simple append-only variants may verify
+    /// only the persisted tree size and root. Variants with additional pruning-dependent state
+    /// should also ensure their persisted lower bound still covers `target.range.start()`.
     fn local_boundary_nodes(
         _context: Self::Context,
         _config: &Self::Config,
