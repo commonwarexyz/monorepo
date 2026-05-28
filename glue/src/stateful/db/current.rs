@@ -763,6 +763,7 @@ where
     }
 }
 
+/// Implement [`StateSyncDb`] for unordered current QMDB databases with fixed-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
@@ -817,6 +818,7 @@ where
     }
 }
 
+/// Implement [`StateSyncDb`] for ordered current QMDB databases with fixed-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
@@ -871,6 +873,7 @@ where
     }
 }
 
+/// Implement [`StateSyncDb`] for unordered current QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
@@ -926,6 +929,7 @@ where
     }
 }
 
+/// Implement [`StateSyncDb`] for ordered current QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
     for Db<
         F,
@@ -1191,6 +1195,127 @@ mod tests {
                 &proof,
                 &guard.root(),
             ));
+        });
+    }
+
+    #[test]
+    fn ordered_managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("ordered-matches-sync-target", &context);
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
+                .await
+                .unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+
+            let key = Sha256::hash(b"key");
+            let value = Sha256::hash(b"value");
+            let metadata = Sha256::hash(b"metadata");
+
+            let batch = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key, Some(value))
+                .with_metadata(metadata);
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+
+            let mut verification_db =
+                <OrderedFixedDb as ManagedDb<_>>::init(context.child("verification_db"), config)
+                    .await
+                    .unwrap();
+            verification_db
+                .apply_batch(merkleized.inner.clone())
+                .await
+                .unwrap();
+            verification_db.sync().await.unwrap();
+
+            let valid_target =
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db).await;
+            assert!(<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
+
+            let mut wrong_root = valid_target.clone();
+            wrong_root.root = Sha256::hash(b"wrong ops root");
+            assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_root,
+            ));
+
+            let mut wrong_range = valid_target.clone();
+            wrong_range.range = non_empty_range!(
+                mmr::Location::new(*valid_target.range.start()),
+                mmr::Location::new(*valid_target.range.end() + 1)
+            );
+            assert!(!<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_range,
+            ));
+        });
+    }
+
+    #[test]
+    fn ordered_managed_db_rewind_to_target_round_trips() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("ordered-rewind-round-trip", &context);
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+                .await
+                .unwrap();
+            let db = Arc::new(AsyncRwLock::new(db));
+
+            let key1 = Sha256::hash(b"key1");
+            let value1 = Sha256::hash(b"value1");
+            let metadata1 = Sha256::hash(b"metadata1");
+            let batch1 = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key1, Some(value1))
+                .with_metadata(metadata1);
+            let merkleized1 = crate::stateful::db::Unmerkleized::merkleize(batch1)
+                .await
+                .unwrap();
+            {
+                let mut guard = db.write().await;
+                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized1)
+                    .await
+                    .unwrap();
+            }
+            let target_after_first = {
+                let guard = db.read().await;
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard).await
+            };
+
+            let key2 = Sha256::hash(b"key2");
+            let value2 = Sha256::hash(b"value2");
+            let metadata2 = Sha256::hash(b"metadata2");
+            let batch2 = <OrderedFixedDb as ManagedDb<_>>::new_batch(&db)
+                .await
+                .write(key2, Some(value2))
+                .with_metadata(metadata2);
+            let merkleized2 = crate::stateful::db::Unmerkleized::merkleize(batch2)
+                .await
+                .unwrap();
+            {
+                let mut guard = db.write().await;
+                <OrderedFixedDb as ManagedDb<_>>::finalize(&mut *guard, merkleized2)
+                    .await
+                    .unwrap();
+            }
+
+            {
+                let mut guard = db.write().await;
+                <OrderedFixedDb as ManagedDb<_>>::rewind_to_target(
+                    &mut *guard,
+                    target_after_first.clone(),
+                )
+                .await
+                .unwrap();
+            }
+            let target_after_rewind = {
+                let guard = db.read().await;
+                <OrderedFixedDb as ManagedDb<_>>::sync_target(&*guard).await
+            };
+            assert_eq!(target_after_rewind, target_after_first);
         });
     }
 
