@@ -501,12 +501,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// and next append at position `size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        let offsets_cfg = fixed::Config {
-            partition: cfg.offsets_partition(),
-            items_per_blob: cfg.items_per_section,
-            page_cache: cfg.page_cache.clone(),
-            write_buffer: cfg.write_buffer,
-        };
         let mut data = variable::Journal::init(
             context.child("data"),
             variable::Config {
@@ -524,7 +518,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // `init_cleared`) finishes, so stale data can never outlive the reset.
         let offsets = fixed::Journal::<E, u64>::init_at_size_cleared(
             context.child("offsets"),
-            offsets_cfg,
+            fixed::Config {
+                partition: cfg.offsets_partition(),
+                items_per_blob: cfg.items_per_section,
+                page_cache: cfg.page_cache.clone(),
+                write_buffer: cfg.write_buffer,
+            },
             size,
             || data.clear(),
         )
