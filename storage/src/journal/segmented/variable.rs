@@ -81,10 +81,13 @@
 //! ```
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
-use crate::journal::Error;
+use crate::journal::{
+    variable_format::{decode_item, decode_length_prefix, find_item, ItemInfo},
+    Error,
+};
 use commonware_codec::{
     varint::{UInt, MAX_U32_VARINT_SIZE},
-    Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
+    Codec, CodecShared, EncodeSize, Write as CodecWrite,
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
@@ -93,7 +96,7 @@ use commonware_runtime::{
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
-use zstd::{bulk::compress, decode_all};
+use zstd::bulk::compress;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -115,65 +118,6 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Decodes a varint length prefix from a buffer.
-/// Returns (item_size, varint_len).
-#[inline]
-fn decode_length_prefix(buf: &mut impl Buf) -> Result<(usize, usize), Error> {
-    let initial = buf.remaining();
-    let size = UInt::<u32>::read(buf)?.0 as usize;
-    let varint_len = initial - buf.remaining();
-    Ok((size, varint_len))
-}
-
-/// Result of finding an item in a buffer (offsets/lengths, not slices).
-enum ItemInfo {
-    /// All item data is available in the buffer.
-    Complete {
-        /// Length of the varint prefix.
-        varint_len: usize,
-        /// Length of the item data.
-        data_len: usize,
-    },
-    /// Only some item data is available.
-    Incomplete {
-        /// Length of the varint prefix.
-        varint_len: usize,
-        /// Bytes of item data available in buffer.
-        prefix_len: usize,
-        /// Full size of the item.
-        total_len: usize,
-    },
-}
-
-/// Find an item in a buffer by decoding its length prefix.
-///
-/// Returns (next_offset, item_info). The buffer is advanced past the varint.
-fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> {
-    let available = buf.remaining();
-    let (size, varint_len) = decode_length_prefix(buf)?;
-    let next_offset = offset
-        .checked_add(varint_len as u64)
-        .ok_or(Error::OffsetOverflow)?
-        .checked_add(size as u64)
-        .ok_or(Error::OffsetOverflow)?;
-    let buffered = available.saturating_sub(varint_len);
-
-    let item = if buffered >= size {
-        ItemInfo::Complete {
-            varint_len,
-            data_len: size,
-        }
-    } else {
-        ItemInfo::Incomplete {
-            varint_len,
-            prefix_len: buffered,
-            total_len: size,
-        }
-    };
-
-    Ok((next_offset, item))
-}
-
 /// State for replaying a single section's blob.
 struct ReplayState<B: Blob, C> {
     section: u64,
@@ -185,17 +129,6 @@ struct ReplayState<B: Blob, C> {
     codec_config: C,
     compressed: bool,
     done: bool,
-}
-
-/// Decode item data with optional decompression.
-fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) -> Result<V, Error> {
-    if compressed {
-        let decompressed =
-            decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
-        V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
-    } else {
-        V::decode_cfg(item_data, cfg).map_err(Error::Codec)
-    }
 }
 
 /// A segmented journal with variable-size entries.
@@ -625,86 +558,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             let (_, _, item) = Self::read(compressed, cfg, blob, offset).await?;
             items.push(item);
         }
-        Ok(items)
-    }
-
-    /// Read consecutive items from the same section. `offsets` must be sorted in strictly
-    /// ascending order and identify items that are adjacent in the section.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::OffsetDataMismatch`] if the on-disk varint at any offset reports a size
-    /// inconsistent with the gap to the next offset. This indicates either on-disk corruption or a
-    /// caller violation of the byte-adjacency precondition.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `offsets` is not strictly increasing.
-    pub(crate) async fn get_many_consecutive(
-        &self,
-        section: u64,
-        offsets: &[u64],
-    ) -> Result<Vec<V>, Error> {
-        if offsets.len() <= 1 {
-            return self.get_many(section, offsets).await;
-        }
-        let blob = self
-            .manager
-            .get(section)?
-            .ok_or(Error::SectionOutOfRange(section))?;
-
-        let start = offsets[0];
-        let end = offsets[offsets.len() - 1];
-        if end <= start {
-            return self.get_many(section, offsets).await;
-        }
-        let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = blob.read_at(start, range_len).await?.coalesce();
-        let bytes = bytes.as_ref();
-
-        let compressed = self.compression.is_some();
-        let cfg = &self.codec_config;
-        let mut items = Vec::with_capacity(offsets.len());
-        let mut local_offset = 0usize;
-
-        for window in offsets.windows(2) {
-            let offset = window[0];
-            let next_offset = window[1];
-            assert!(offset < next_offset, "offsets must be strictly increasing");
-
-            let item_len =
-                usize::try_from(next_offset - offset).map_err(|_| Error::OffsetOverflow)?;
-
-            let mut cursor = Cursor::new(&bytes[local_offset..]);
-            let (size, varint_len) = decode_length_prefix(&mut cursor)?;
-            let actual_len = size + varint_len;
-            if actual_len != item_len {
-                return Err(Error::OffsetDataMismatch {
-                    section,
-                    offset,
-                    expected_len: item_len,
-                    actual_len,
-                });
-            }
-
-            let data_start = local_offset
-                .checked_add(varint_len)
-                .ok_or(Error::OffsetOverflow)?;
-            let data_end = local_offset
-                .checked_add(item_len)
-                .ok_or(Error::OffsetOverflow)?;
-
-            items.push(decode_item::<V>(
-                &bytes[data_start..data_end],
-                cfg,
-                compressed,
-            )?);
-
-            local_offset = data_end;
-        }
-
-        let (_, _, item) = Self::read(compressed, cfg, blob, end).await?;
-        items.push(item);
         Ok(items)
     }
 

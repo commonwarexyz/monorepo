@@ -33,8 +33,8 @@ mod read;
 
 pub use append::Append;
 pub use cache::CacheRef;
-pub use read::Replay;
-use tracing::{debug, error};
+pub use read::{Replay, Sealed};
+use tracing::{debug, error, warn};
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
@@ -76,6 +76,78 @@ async fn get_page_with_checksum_from_blob(
     let (len, _) = record.get_crc();
 
     Ok((page.freeze().slice(..len as usize), record))
+}
+
+/// Result of scanning a blob backwards for the last valid page.
+struct LastValidPage {
+    /// Logical bytes and CRC record of the last page if it is partial (fewer than `page_size`
+    /// logical bytes). `None` if the last valid page is full or no valid page exists.
+    partial: Option<(IoBuf, Checksum)>,
+    /// Number of pages up to and including the last valid page found. Pages earlier in the blob
+    /// may still be invalid since the scan stops at the first valid page from the tail.
+    pages: u64,
+}
+
+/// Scan the blob backwards for the last valid page, truncating any trailing invalid bytes.
+///
+/// If trailing invalid bytes are found, the blob is resized to the end of the last valid page and
+/// synced. Returns the validated-page state.
+async fn read_and_trim<B: Blob>(
+    blob: &B,
+    blob_size: u64,
+    page_size: u64,
+) -> Result<(LastValidPage, bool), Error> {
+    let physical_page_size = page_size + CHECKSUM_SIZE;
+    let partial_bytes = blob_size % physical_page_size;
+    let mut last_page_end = blob_size - partial_bytes;
+
+    // If the last physical page in the blob is truncated, it can't have a valid CRC record and
+    // must be invalid.
+    let mut invalid_data_found = partial_bytes != 0;
+
+    let result = loop {
+        if last_page_end == 0 {
+            break LastValidPage {
+                partial: None,
+                pages: 0,
+            };
+        }
+        let page_start = last_page_end - physical_page_size;
+        let buf = blob
+            .read_at(page_start, physical_page_size as usize)
+            .await?
+            .coalesce()
+            .freeze();
+
+        match Checksum::validate_page(buf.as_ref()) {
+            Some(crc_record) => {
+                let (len, _) = crc_record.get_crc();
+                let pages = last_page_end / physical_page_size;
+                let partial = if (len as u64) != page_size {
+                    Some((buf.slice(..len as usize), crc_record))
+                } else {
+                    None
+                };
+                break LastValidPage { partial, pages };
+            }
+            None => {
+                last_page_end = page_start;
+                invalid_data_found = true;
+            }
+        }
+    };
+
+    if invalid_data_found {
+        let new_blob_size = result.pages * physical_page_size;
+        warn!(
+            blob_size,
+            new_blob_size, "truncating blob to remove invalid data"
+        );
+        blob.resize(new_blob_size).await?;
+        blob.sync().await?;
+    }
+
+    Ok((result, invalid_data_found))
 }
 
 /// Describes a CRC record stored at the end of a page.

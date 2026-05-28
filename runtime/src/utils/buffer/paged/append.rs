@@ -25,13 +25,16 @@
 //! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
 //! recovery, and are not covered by [Append]'s [`Blob::write_at_sync`] fast paths.
 
-use super::read::{PageReader, Replay};
+use super::{
+    read::{PageReader, Replay},
+    read_and_trim,
+};
 use crate::{
     buffer::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs,
+    Blob, Error, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
@@ -172,27 +175,19 @@ impl<B: Blob> Append<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
-        if invalid_data_found {
-            // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (cache_ref.page_size() + CHECKSUM_SIZE);
-            warn!(
-                original_blob_size,
-                new_blob_size, "truncating blob to remove invalid data"
-            );
-            blob.resize(new_blob_size).await?;
-            blob.sync().await?;
-        }
+        let (last, trimmed) =
+            read_and_trim(&blob, original_blob_size, cache_ref.page_size()).await?;
 
         let capacity = capacity_with_floor(capacity, cache_ref.page_size());
-        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
+        // If we trimmed and synced, the wrapped blob is already durable. Otherwise pending writes
+        // need to be synced on the next call.
+        let needs_sync = !trimmed;
 
-        let (blob_state, partial_data) = match partial_page_state {
+        let (blob_state, partial_data) = match last.partial {
             Some((partial_page, crc_record)) => (
                 BlobState {
                     blob,
-                    current_page: pages - 1,
+                    current_page: last.pages - 1,
                     partial_page_state: Some(crc_record),
                     needs_sync,
                 },
@@ -201,7 +196,7 @@ impl<B: Blob> Append<B> {
             None => (
                 BlobState {
                     blob,
-                    current_page: pages,
+                    current_page: last.pages,
                     partial_page_state: None,
                     needs_sync,
                 },
@@ -222,74 +217,6 @@ impl<B: Blob> Append<B> {
             cache_ref,
             buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
-    }
-
-    /// Scans backwards from the end of the blob, stopping when it finds a valid page.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(partial_page, page_count, invalid_data_found)`:
-    ///
-    /// - `partial_page`: If the last valid page is partial (contains fewer than `page_size` logical
-    ///   bytes), returns `Some((data, crc_record))` containing the logical data and its CRC record.
-    ///   Returns `None` if the last valid page is full or if no valid pages exist.
-    ///
-    /// - `page_count`: The number of pages in the blob up to and including the last valid page
-    ///   found (whether or not it's partial). Note that it's possible earlier pages may be invalid
-    ///   since this function stops scanning when it finds one valid page.
-    ///
-    /// - `invalid_data_found`: `true` if there are any bytes in the blob that follow the last valid
-    ///   page. Typically the blob should be resized to eliminate them since their integrity cannot
-    ///   be guaranteed.
-    async fn read_last_valid_page(
-        blob: &B,
-        blob_size: u64,
-        page_size: u64,
-    ) -> Result<(Option<(IoBuf, Checksum)>, u64, bool), Error> {
-        let physical_page_size = page_size + CHECKSUM_SIZE;
-        let partial_bytes = blob_size % physical_page_size;
-        let mut last_page_end = blob_size - partial_bytes;
-
-        // If the last physical page in the blob is truncated, it can't have a valid CRC record and
-        // must be invalid.
-        let mut invalid_data_found = partial_bytes != 0;
-
-        while last_page_end != 0 {
-            // Read the last page and parse its CRC record.
-            let page_start = last_page_end - physical_page_size;
-            let buf = blob
-                .read_at(page_start, physical_page_size as usize)
-                .await?
-                .coalesce()
-                .freeze();
-
-            match Checksum::validate_page(buf.as_ref()) {
-                Some(crc_record) => {
-                    // Found a valid page.
-                    let (len, _) = crc_record.get_crc();
-                    let len = len as u64;
-                    if len != page_size {
-                        // The page is partial (logical data doesn't fill the page).
-                        let logical_bytes = buf.slice(..len as usize);
-                        return Ok((
-                            Some((logical_bytes, crc_record)),
-                            last_page_end / physical_page_size,
-                            invalid_data_found,
-                        ));
-                    }
-                    // The page is full.
-                    return Ok((None, last_page_end / physical_page_size, invalid_data_found));
-                }
-                None => {
-                    // The page is invalid.
-                    last_page_end = page_start;
-                    invalid_data_found = true;
-                }
-            }
-        }
-
-        // No valid page exists in the blob.
-        Ok((None, 0, invalid_data_found))
     }
 
     /// Append all bytes in `buf` to the tip of the blob.
@@ -616,6 +543,10 @@ impl<B: Blob> Append<B> {
         if offsets.is_empty() {
             return Ok(());
         }
+        assert!(
+            offsets.is_sorted(),
+            "read_many_into requires offsets to be sorted in ascending order"
+        );
 
         let last_end = offsets[offsets.len() - 1]
             .checked_add(item_size as u64)
@@ -1213,6 +1144,51 @@ impl<B: Blob> Append<B> {
         blob_guard.partial_page_state = Some(final_record);
 
         Ok(())
+    }
+
+    /// Consume this writable handle and return a read-only [`super::Sealed`] view of the same
+    /// blob.
+    ///
+    /// `seal` first makes all buffered data durable, then constructs a `Sealed` that shares this
+    /// blob's page-cache identity, so any pages already cached remain hot. The partial last page's
+    /// logical bytes (if any) are captured in memory because the page cache only stores full pages.
+    ///
+    /// # Concurrency
+    ///
+    /// `Append<B>` is `Clone`. Consuming `self` does not prevent other clones from continuing to
+    /// mutate the blob. Callers must arrange that no other writable handle remains live for this
+    /// blob once it has been sealed; the resulting `Sealed` cannot defend itself against concurrent
+    /// writes.
+    pub async fn seal(self) -> Result<super::Sealed<B>, Error> {
+        // Make all buffered data durable so the sealed view sees a fully committed blob.
+        self.sync().await?;
+
+        let logical_page_size = self.cache_ref.page_size();
+        let buffer = self.buffer.read().await;
+        let blob_state = self.blob_state.read().await;
+
+        let full_pages = blob_state.current_page;
+        let partial_page = if blob_state.partial_page_state.is_some() {
+            // After sync, the tip buffer holds the partial page's logical bytes starting at the
+            // full-page boundary.
+            debug_assert_eq!(buffer.offset, full_pages * logical_page_size);
+            Some(buffer.slice(..buffer.len()))
+        } else {
+            debug_assert!(buffer.is_empty());
+            None
+        };
+
+        let partial_len = partial_page.as_ref().map_or(0, |p| p.len() as u64);
+        let size = full_pages * logical_page_size + partial_len;
+        let blob = blob_state.blob.clone();
+
+        Ok(super::Sealed::from_parts(
+            blob,
+            size,
+            partial_page,
+            self.cache_ref.clone(),
+            self.id,
+        ))
     }
 }
 

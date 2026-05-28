@@ -11,7 +11,9 @@ use tracing::warn;
 
 pub mod fixed;
 mod metrics;
+mod sections;
 pub mod variable;
+mod variable_data;
 
 #[cfg(test)]
 mod tests;

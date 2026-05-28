@@ -6,8 +6,13 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::{fixed, metrics::VariableMetrics as Metrics, Contiguous, Many, Mutable},
-        segmented::variable,
+        contiguous::{
+            fixed,
+            metrics::VariableMetrics as Metrics,
+            variable_data::{Config as VariableDataConfig, VariableData},
+            Contiguous, Many, Mutable,
+        },
+        segmented::variable as seg_var,
         Error,
     },
     Context, Persistable,
@@ -98,8 +103,9 @@ impl<C> Config<C> {
 
 /// Inner journal state protected by a lock for interior mutability.
 struct Inner<E: Context, V: Codec> {
-    /// The underlying variable-length data journal.
-    data: variable::Journal<E, V>,
+    /// Typed sealed/tail variable-length data store. Historical sections are `Sealed`; only the
+    /// current tail can mutate.
+    data: VariableData<E, V>,
 
     /// The next position to be assigned on append (total items appended).
     ///
@@ -423,9 +429,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let offsets_partition = cfg.offsets_partition();
 
         // Initialize underlying variable data journal
-        let mut data = variable::Journal::init(
+        let mut data = VariableData::init(
             context.child("data"),
-            variable::Config {
+            VariableDataConfig {
                 partition: data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
@@ -474,9 +480,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
-        let data = variable::Journal::init(
+        let data = VariableData::init(
             context.child("data"),
-            variable::Config {
+            VariableDataConfig {
                 partition: cfg.data_partition(),
                 compression: cfg.compression,
                 codec_config: cfg.codec_config.clone(),
@@ -704,7 +710,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let mut item_starts = Vec::with_capacity(items_count);
         let mut encode = |item: &V| {
             item_starts.push(encoded.len());
-            variable::Journal::<E, V>::encode_item_into(self.compression, item, &mut encoded)
+            seg_var::Journal::<E, V>::encode_item_into(self.compression, item, &mut encoded)
         };
         match &items {
             Many::Flat(items) => {
@@ -907,7 +913,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns `(pruning_boundary, size)` for the contiguous journal.
     async fn align_journals(
-        data: &mut variable::Journal<E, V>,
+        data: &mut VariableData<E, V>,
         offsets: &mut fixed::Journal<E, u64>,
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
@@ -1088,7 +1094,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// - Panics if data journal is empty
     /// - Panics if `offsets_size` >= `data.size()`
     async fn add_missing_offsets(
-        data: &variable::Journal<E, V>,
+        data: &VariableData<E, V>,
         offsets: &mut fixed::Journal<E, u64>,
         offsets_size: u64,
         items_per_section: u64,
