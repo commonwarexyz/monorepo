@@ -111,7 +111,7 @@ const PRUNING_BOUNDARY_KEY: u64 = 1;
 ///
 /// This key is synced before destructive reset work starts. If recovery sees it, recovery
 /// completes the reset to the recorded target before normal bounds recovery.
-pub(crate) const CLEAR_TARGET_KEY: u64 = 2;
+pub(super) const CLEAR_TARGET_KEY: u64 = 2;
 
 /// Metadata key for storing the recovery watermark.
 const RECOVERY_WATERMARK_KEY: u64 = 3;
@@ -595,7 +595,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// This is used by `init_at_size` before it clears existing blobs, before an `Inner` exists.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn update_metadata_watermark_before_clear(
+    pub(super) fn update_metadata_watermark_before_clear(
         metadata: &mut Metadata<E, u64, Vec<u8>>,
         limit: u64,
     ) -> Result<bool, Error> {
@@ -612,7 +612,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Open the metadata partition for `cfg`.
-    pub(crate) async fn open_metadata(
+    pub(super) async fn open_metadata(
         context: &E,
         cfg: &Config,
     ) -> Result<Metadata<E, u64, Vec<u8>>, Error> {
@@ -706,7 +706,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Finish initialization using an already-open metadata handle. Callers use this after
     /// `open_metadata` so the metadata partition is opened exactly once.
-    pub(crate) async fn init_with_metadata(
+    pub(super) async fn init_with_metadata(
         context: E,
         cfg: Config,
         mut metadata: Metadata<E, u64, Vec<u8>>,
@@ -1371,7 +1371,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// finish. If a crash interrupts the sequence, the next `init` completes the staged clear.
     /// The follow-up `clear_to_size` re-stages the same target idempotently.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn stage_clear_intent(&self, new_size: u64) -> Result<(), Error> {
+    pub(super) async fn stage_clear_intent(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
 
