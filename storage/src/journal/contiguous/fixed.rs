@@ -100,11 +100,21 @@ use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
-/// Metadata key for storing the pruning boundary.
+/// Metadata key for a mid-section pruning boundary.
+///
+/// This key is present only when the oldest retained item is not section-aligned. It is persisted
+/// after the blob state it describes exists, so recovery treats it as stale if it no longer matches
+/// the oldest retained section.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
 
+/// Metadata key for an in-progress clear/reset target.
+///
+/// This key is synced before destructive reset work starts. If recovery sees it, recovery
+/// completes the reset to the recorded target before normal bounds recovery.
+const CLEAR_TARGET_KEY: u64 = 2;
+
 /// Metadata key for storing the recovery watermark.
-const RECOVERY_WATERMARK_KEY: u64 = 2;
+const RECOVERY_WATERMARK_KEY: u64 = 3;
 
 /// Return the first retained logical position in `section`.
 #[inline]
@@ -175,7 +185,8 @@ struct Inner<E: Context, A: CodecFixedShared> {
     size: u64,
 
     /// Stores the recovery watermark and, when the pruning boundary is mid-section, the exact
-    /// pruning boundary. Otherwise, the pruning-boundary entry is omitted.
+    /// pruning boundary. Also stores an in-progress `CLEAR_TARGET_KEY` while a clear/reset is
+    /// running.
     ///
     /// Metadata that advances the pruning boundary or recovery watermark is persisted only after
     /// the blob state it describes is durable. A lower recovery watermark is always safe to persist
@@ -635,6 +646,41 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
     }
 
+    /// Stage `PRUNING_BOUNDARY_KEY` in metadata, putting the mid-section boundary or removing the
+    /// entry when section-aligned.
+    fn stage_pruning_boundary_metadata(
+        metadata: &mut Metadata<E, u64, Vec<u8>>,
+        items_per_blob: u64,
+        pruning_boundary: u64,
+    ) {
+        if !pruning_boundary.is_multiple_of(items_per_blob) {
+            metadata.put(
+                PRUNING_BOUNDARY_KEY,
+                pruning_boundary.to_be_bytes().to_vec(),
+            );
+        } else {
+            metadata.remove(&PRUNING_BOUNDARY_KEY);
+        }
+    }
+
+    /// Clear blobs, recreate the tail section, reset metadata to `size`, and remove the in-progress
+    /// `CLEAR_TARGET_KEY`. Called both by `clear_to_size`/`init_at_size` and during init-time
+    /// crash recovery when `CLEAR_TARGET_KEY` is present.
+    async fn complete_clear_to_size(
+        journal: &mut SegmentedJournal<E, A>,
+        metadata: &mut Metadata<E, u64, Vec<u8>>,
+        items_per_blob: u64,
+        size: u64,
+    ) -> Result<(), Error> {
+        journal.clear().await?;
+        journal.ensure_section_exists(size / items_per_blob).await?;
+        Self::stage_pruning_boundary_metadata(metadata, items_per_blob, size);
+        metadata.put(RECOVERY_WATERMARK_KEY, size.to_be_bytes().to_vec());
+        metadata.remove(&CLEAR_TARGET_KEY);
+        metadata.sync().await?;
+        Ok(())
+    }
+
     /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
@@ -655,7 +701,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             codec_config: ((0..).into(), ()),
         };
 
-        let metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
+        let mut metadata =
+            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
+
+        // Complete any interrupted clear before recovering bounds. `complete_clear_to_size` also
+        // resets the recovery watermark to the clear target, so the subsequent bounds recovery
+        // sees fully consistent metadata.
+        if let Some(clear_target) =
+            Self::parse_metadata_u64(&metadata, CLEAR_TARGET_KEY, "clear_target")?
+        {
+            warn!(clear_target, "crash repair: completing interrupted clear");
+            Self::complete_clear_to_size(&mut journal, &mut metadata, items_per_blob, clear_target)
+                .await?;
+        }
 
         let meta_pruning_boundary =
             Self::parse_metadata_u64(&metadata, PRUNING_BOUNDARY_KEY, "pruning_boundary")?;
@@ -710,6 +768,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Recover `(pruning_boundary, size, recovery_watermark, repair)` from metadata and blob state.
+    ///
+    /// Any in-progress `CLEAR_TARGET_KEY` is completed by the caller before this runs, so the
+    /// remaining staleness modes are limited to mismatched pruning metadata. The `repair` is a
+    /// blob truncation the caller applies after persisting the lowered checkpoint.
     async fn recover_bounds(
         inner: &mut SegmentedJournal<E, A>,
         items_per_blob: u64,
@@ -955,52 +1017,27 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// - `bounds.start` equals `size` (no data exists)
     ///
     /// # Crash Safety
-    /// If a crash occurs during this operation, `init()` will recover to a consistent state
-    /// (though possibly different from the intended `size`).
+    /// In the event of a crash during this call, upon restart recovery will ensure the journal is
+    /// either still in its prior state, or has bounds `size..size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
-        let items_per_blob = cfg.items_per_blob.get();
-        let tail_section = size / items_per_blob;
-
-        let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
-        let segmented_cfg = SegmentedConfig {
-            partition: blob_partition,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.write_buffer,
-        };
+        // Fail before writing clear intent if existing blob partitions are already inconsistent.
+        Self::select_blob_partition(&context, &cfg).await?;
 
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
-        let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
+            Metadata::<_, u64, Vec<u8>>::init(context.child("intent"), meta_cfg).await?;
+        // Lower the watermark before staging the clear intent so external consumers never see a
+        // persisted recovery checkpoint beyond the eventual clear target.
+        Self::update_metadata_watermark_before_clear(&mut metadata, size)?;
+        metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
+        metadata.sync().await?;
+        drop(metadata);
 
-        if Self::update_metadata_watermark_before_clear(&mut metadata, size)? {
-            metadata.sync().await?;
-        }
-        journal.clear().await?;
-        journal.ensure_section_exists(tail_section).await?;
-
-        let mut inner = Inner {
-            journal,
-            size,
-            metadata,
-            pruning_boundary: size,
-            dirty_from_section: None,
-        };
-        Self::persist_metadata_entries(&mut inner, items_per_blob, size, size).await?;
-
-        let metrics = Metrics::new(context);
-        metrics.update(size, size, items_per_blob);
-
-        Ok(Self {
-            inner: AsyncRwLock::new(inner),
-            op_lock: AsyncMutex::new(()),
-            items_per_blob,
-            metrics,
-        })
+        Self::init(context, cfg).await
     }
 
     /// Convert a global position to (section, position_in_section).
@@ -1280,33 +1317,32 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Clear all data and reset the journal to a new starting position.
     ///
-    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
-    /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused. After clearing, the
+    /// journal will behave as if initialized with `init_at_size(new_size)`.
     ///
     /// # Crash Safety
-    /// If a crash occurs during this operation, `init()` will recover to a consistent state
-    /// (though possibly different from the intended `new_size`).
+    ///
+    /// In the event of a crash during this call, upon restart recovery will ensure the journal is
+    /// either still in its prior state, or has bounds `new_size..new_size`.
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
 
-        let should_sync_metadata = Self::lower_recovery_watermark(&mut inner, new_size)?;
-        drop(inner);
-
-        if should_sync_metadata {
-            let inner = self.inner.read().await;
-            inner.metadata.sync().await?;
-        }
-
-        let mut inner = self.inner.write().await;
-        inner.journal.clear().await?;
-        let tail_section = new_size / self.items_per_blob;
-        inner.journal.ensure_section_exists(tail_section).await?;
+        // Lower the watermark in-memory and stage the clear intent in the same metadata sync, so
+        // external consumers never see a persisted recovery checkpoint beyond `new_size`.
+        Self::lower_recovery_watermark(&mut inner, new_size)?;
+        inner
+            .metadata
+            .put(CLEAR_TARGET_KEY, new_size.to_be_bytes().to_vec());
+        inner.metadata.sync().await?;
+        let Inner {
+            journal, metadata, ..
+        } = &mut *inner;
+        Self::complete_clear_to_size(journal, metadata, self.items_per_blob, new_size).await?;
 
         inner.size = new_size;
         inner.pruning_boundary = new_size;
         inner.dirty_from_section = None;
-        Self::persist_metadata_entries(&mut inner, self.items_per_blob, new_size, new_size).await?;
 
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_blob);
@@ -3940,12 +3976,23 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Crash Scenario 1: After clear(), before blob creation
-            // Simulate by manually removing all blobs but leaving metadata
+            // Crash Scenario 1: after clear intent is synced and blobs are removed, but before
+            // the new tail blob is created.
             let blob_part = blob_partition(&cfg);
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, u64, Vec<u8>>::init(context.child("intent_meta"), meta_cfg.clone())
+                    .await
+                    .unwrap();
+            metadata.put(CLEAR_TARGET_KEY, 12u64.to_be_bytes().to_vec());
+            metadata.sync().await.unwrap();
+            drop(metadata);
             context.remove(&blob_part, None).await.unwrap();
 
-            // Recovery should see no blobs and return empty journal, ignoring metadata
+            // Recovery should complete the interrupted init_at_size(12).
             let journal = Journal::<_, Digest>::init(
                 context.child("crash").with_attribute("index", 1),
                 cfg.clone(),
@@ -3953,40 +4000,27 @@ mod tests {
             .await
             .expect("init failed after clear crash");
             let bounds = journal.bounds().await;
-            assert_eq!(bounds.end, 0);
-            assert_eq!(bounds.start, 0);
+            assert_eq!(bounds.end, 12);
+            assert_eq!(bounds.start, 12);
             drop(journal);
 
             // Restore metadata for next scenario (it might have been removed by init)
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
-            };
             let mut metadata =
                 Metadata::<_, u64, Vec<u8>>::init(context.child("restore_meta"), meta_cfg.clone())
                     .await
                     .unwrap();
-            metadata
-                .put_sync(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec())
-                .await
-                .unwrap();
+            metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
+            metadata.put(CLEAR_TARGET_KEY, 2u64.to_be_bytes().to_vec());
+            metadata.sync().await.unwrap();
+            drop(metadata);
 
-            // Crash Scenario 2: After ensure_section_exists(), before metadata update
-            // Target: init_at_size(12) -> should be section 2 (starts at 10)
-            // State: Blob at section 2, Metadata says 7 (section 1)
-            // Wait, old metadata (7) is BEHIND new blob (12/5 = 2).
-            // recover_bounds treats "meta < blob" as stale -> uses blob.
-
-            // Let's try init_at_size(2) -> section 0.
-            // Old metadata says 7 (section 1).
-            // State: Blob at section 0, Metadata says 7 (section 1).
-            // recover_bounds sees "meta (1) > blob (0)" -> metadata ahead -> uses blob.
-
-            // Simulate: Create blob at section 0 (tail for init_at_size(2))
+            // Crash Scenario 2: after the new tail blob is created, but before final metadata
+            // replaces the clear intent.
             let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap(); // Ensure it exists
+            drop(blob);
 
-            // Recovery should warn "metadata ahead" and use blob state (0, 0)
+            // Recovery should complete the interrupted init_at_size(2).
             let journal = Journal::<_, Digest>::init(
                 context.child("crash").with_attribute("index", 2),
                 cfg.clone(),
@@ -3994,11 +4028,9 @@ mod tests {
             .await
             .expect("init failed after create crash");
 
-            // Should recover to blob state (section 0 aligned)
             let bounds = journal.bounds().await;
-            assert_eq!(bounds.start, 0);
-            // Size is 0 because blob is empty
-            assert_eq!(bounds.end, 0);
+            assert_eq!(bounds.start, 2);
+            assert_eq!(bounds.end, 2);
             journal.destroy().await.unwrap();
         });
     }
@@ -4018,29 +4050,114 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Crash Scenario: clear_to_size(2) [Section 0]
-            // We want to simulate crash after blob 0 created, but metadata still 12.
+            // Crash Scenario: clear_to_size(2) after the intent is synced and blob 0 is created,
+            // but before final metadata replaces the clear intent.
 
-            // manually clear blobs
             let blob_part = blob_partition(&cfg);
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+                .await
+                .unwrap();
+            metadata.put(CLEAR_TARGET_KEY, 2u64.to_be_bytes().to_vec());
+            metadata.sync().await.unwrap();
+            drop(metadata);
+
             context.remove(&blob_part, None).await.unwrap();
 
-            // manually create section 0
             let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap();
-
-            // Metadata is still 12 (from setup)
-            // Blob is Section 0
-            // Metadata (12 -> sec 2) > Blob (sec 0) -> Ahead warning
 
             let journal = Journal::<_, Digest>::init(context.child("crash_clear"), cfg.clone())
                 .await
                 .expect("init failed after clear_to_size crash");
 
-            // Should fallback to blobs
             let bounds = journal.bounds().await;
-            assert_eq!(bounds.start, 0);
-            assert_eq!(bounds.end, 0);
+            assert_eq!(bounds.start, 2);
+            assert_eq!(bounds.end, 2);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size_crash_after_intent_before_blobs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+                .await
+                .unwrap();
+            metadata.put(CLEAR_TARGET_KEY, 100u64.to_be_bytes().to_vec());
+            metadata.sync().await.unwrap();
+            drop(metadata);
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("init failed after clear intent crash");
+            assert_eq!(journal.bounds().await, 100..100);
+            let pos = journal.append(&test_digest(100)).await.unwrap();
+            assert_eq!(pos, 100);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size_crash_after_mid_section_intent_with_old_blobs_present() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let journal =
+                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
+
+            for i in 0..6u64 {
+                let pos = journal.append(&test_digest(i)).await.unwrap();
+                assert_eq!(pos, 10 + i);
+            }
+            journal.sync().await.unwrap();
+
+            let meta_cfg = MetadataConfig {
+                partition: format!("{}-metadata", cfg.partition),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+                .await
+                .unwrap();
+            metadata.put(CLEAR_TARGET_KEY, 15u64.to_be_bytes().to_vec());
+            metadata.sync().await.unwrap();
+            drop(metadata);
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("init failed after mid-section clear intent crash");
+            assert_eq!(journal.bounds().await, 15..15);
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+                .await
+                .expect("init failed after completing mid-section clear intent");
+            assert_eq!(journal.bounds().await, 15..15);
+            assert!(matches!(journal.read(14).await, Err(Error::ItemPruned(14))));
+            let pos = journal.append(&test_digest(100)).await.unwrap();
+            assert_eq!(pos, 15);
+            assert_eq!(journal.read(15).await.unwrap(), test_digest(100));
             journal.destroy().await.unwrap();
         });
     }
