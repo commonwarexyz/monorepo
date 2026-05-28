@@ -95,9 +95,15 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
-use commonware_utils::sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard};
+use commonware_utils::{
+    sequence::VecU64,
+    sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
+};
 use futures::{stream::Stream, StreamExt};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::warn;
 
 /// Metadata key for a mid-section pruning boundary.
@@ -111,7 +117,7 @@ const PRUNING_BOUNDARY_KEY: u64 = 1;
 ///
 /// This key is synced before destructive reset work starts. If recovery sees it, recovery
 /// completes the reset to the recorded target before normal bounds recovery.
-const CLEAR_TARGET_KEY: u64 = 2;
+pub(super) const CLEAR_TARGET_KEY: u64 = 2;
 
 /// Metadata key for storing the recovery watermark.
 const RECOVERY_WATERMARK_KEY: u64 = 3;
@@ -192,8 +198,7 @@ struct Inner<E: Context, A: CodecFixedShared> {
     /// the blob state it describes is durable. A lower recovery watermark is always safe to persist
     /// because it only expands the suffix external consumers may replay. If pruning metadata
     /// disagrees with the oldest blob during recovery, the blob state wins.
-    // TODO(#2939): Remove metadata
-    metadata: Metadata<E, u64, Vec<u8>>,
+    metadata: Metadata<E, u64, VecU64>,
 
     /// The position before which all items have been pruned.
     pruning_boundary: u64,
@@ -503,23 +508,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         );
     }
 
-    /// Parse an optional u64 value from metadata.
-    fn parse_metadata_u64(
-        metadata: &Metadata<E, u64, Vec<u8>>,
-        key: u64,
-        label: &'static str,
-    ) -> Result<Option<u64>, Error> {
-        match metadata.get(&key) {
-            Some(bytes) => Ok(Some(u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::Corruption(format!("invalid {label} metadata")))?,
-            ))),
-            None => Ok(None),
-        }
-    }
-
     /// Update pruning-boundary and recovery-watermark entries in metadata's in-memory state.
     ///
     /// Call `inner.metadata.sync()` separately to persist the updated entries.
@@ -528,33 +516,32 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         items_per_blob: u64,
         pruning_boundary: u64,
         recovery_watermark: u64,
-    ) -> Result<(), Error> {
-        let current_pruning =
-            Self::parse_metadata_u64(&inner.metadata, PRUNING_BOUNDARY_KEY, "pruning_boundary")?;
+    ) {
+        let current_pruning = inner
+            .metadata
+            .get(&PRUNING_BOUNDARY_KEY)
+            .copied()
+            .map(u64::from);
         if !pruning_boundary.is_multiple_of(items_per_blob) {
             if current_pruning != Some(pruning_boundary) {
-                inner.metadata.put(
-                    PRUNING_BOUNDARY_KEY,
-                    pruning_boundary.to_be_bytes().to_vec(),
-                );
+                inner
+                    .metadata
+                    .put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
             }
         } else if current_pruning.is_some() {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
 
-        let current_watermark = Self::parse_metadata_u64(
-            &inner.metadata,
-            RECOVERY_WATERMARK_KEY,
-            "recovery_watermark",
-        )?;
+        let current_watermark = inner
+            .metadata
+            .get(&RECOVERY_WATERMARK_KEY)
+            .copied()
+            .map(u64::from);
         if current_watermark != Some(recovery_watermark) {
-            inner.metadata.put(
-                RECOVERY_WATERMARK_KEY,
-                recovery_watermark.to_be_bytes().to_vec(),
-            );
+            inner
+                .metadata
+                .put(RECOVERY_WATERMARK_KEY, recovery_watermark.into());
         }
-
-        Ok(())
     }
 
     /// Update and persist pruning-boundary and recovery-watermark metadata entries.
@@ -564,51 +551,64 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         pruning_boundary: u64,
         recovery_watermark: u64,
     ) -> Result<(), Error> {
-        Self::update_metadata_entries(inner, items_per_blob, pruning_boundary, recovery_watermark)?;
-        inner.metadata.sync().await?;
-        Ok(())
+        Self::update_metadata_entries(inner, items_per_blob, pruning_boundary, recovery_watermark);
+        inner.metadata.sync().await.map_err(Into::into)
     }
 
     /// Stage a recovery watermark no greater than `limit`.
     ///
     /// This is used before blob state moves backward so external consumers never see a persisted
     /// recovery checkpoint beyond the rewind/clear target.
-    fn lower_recovery_watermark(inner: &mut Inner<E, A>, limit: u64) -> Result<bool, Error> {
-        let current_watermark = Self::parse_metadata_u64(
-            &inner.metadata,
-            RECOVERY_WATERMARK_KEY,
-            "recovery_watermark",
-        )?;
-        let Some(current) = current_watermark else {
-            return Ok(false);
+    fn lower_recovery_watermark(inner: &mut Inner<E, A>, limit: u64) -> bool {
+        let Some(current) = inner
+            .metadata
+            .get(&RECOVERY_WATERMARK_KEY)
+            .copied()
+            .map(u64::from)
+        else {
+            return false;
         };
         if current <= limit {
-            return Ok(false);
+            return false;
         }
-        inner
-            .metadata
-            .put(RECOVERY_WATERMARK_KEY, limit.to_be_bytes().to_vec());
-        Ok(true)
+        inner.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
+        true
     }
 
     /// Stage a recovery-watermark entry no greater than `limit` in raw metadata.
     ///
     /// This is used by `init_at_size` before it clears existing blobs, before an `Inner` exists.
     #[commonware_macros::stability(ALPHA)]
-    fn update_metadata_watermark_before_clear(
-        metadata: &mut Metadata<E, u64, Vec<u8>>,
+    pub(super) fn update_metadata_watermark_before_clear(
+        metadata: &mut Metadata<E, u64, VecU64>,
         limit: u64,
-    ) -> Result<bool, Error> {
-        let Some(current_watermark) =
-            Self::parse_metadata_u64(metadata, RECOVERY_WATERMARK_KEY, "recovery_watermark")?
+    ) -> bool {
+        let Some(current_watermark) = metadata
+            .get(&RECOVERY_WATERMARK_KEY)
+            .copied()
+            .map(u64::from)
         else {
-            return Ok(false);
+            return false;
         };
         if current_watermark <= limit {
-            return Ok(false);
+            return false;
         }
-        metadata.put(RECOVERY_WATERMARK_KEY, limit.to_be_bytes().to_vec());
-        Ok(true)
+        metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
+        true
+    }
+
+    /// Open the metadata partition for `cfg`.
+    pub(super) async fn open_metadata(
+        context: E,
+        cfg: &Config,
+    ) -> Result<Metadata<E, u64, VecU64>, Error> {
+        let meta_cfg = MetadataConfig {
+            partition: format!("{}-metadata", cfg.partition),
+            codec_config: (),
+        };
+        Metadata::<_, u64, VecU64>::init(context, meta_cfg)
+            .await
+            .map_err(Into::into)
     }
 
     /// Scan a partition and return blob names, treating a missing partition as empty.
@@ -649,15 +649,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Stage `PRUNING_BOUNDARY_KEY` in metadata, putting the mid-section boundary or removing the
     /// entry when section-aligned.
     fn stage_pruning_boundary_metadata(
-        metadata: &mut Metadata<E, u64, Vec<u8>>,
+        metadata: &mut Metadata<E, u64, VecU64>,
         items_per_blob: u64,
         pruning_boundary: u64,
     ) {
         if !pruning_boundary.is_multiple_of(items_per_blob) {
-            metadata.put(
-                PRUNING_BOUNDARY_KEY,
-                pruning_boundary.to_be_bytes().to_vec(),
-            );
+            metadata.put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
         } else {
             metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
@@ -668,17 +665,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash recovery when `CLEAR_TARGET_KEY` is present.
     async fn complete_clear_to_size(
         journal: &mut SegmentedJournal<E, A>,
-        metadata: &mut Metadata<E, u64, Vec<u8>>,
+        metadata: &mut Metadata<E, u64, VecU64>,
         items_per_blob: u64,
         size: u64,
     ) -> Result<(), Error> {
         journal.clear().await?;
         journal.ensure_section_exists(size / items_per_blob).await?;
         Self::stage_pruning_boundary_metadata(metadata, items_per_blob, size);
-        metadata.put(RECOVERY_WATERMARK_KEY, size.to_be_bytes().to_vec());
+        metadata.put(RECOVERY_WATERMARK_KEY, size.into());
         metadata.remove(&CLEAR_TARGET_KEY);
-        metadata.sync().await?;
-        Ok(())
+        metadata.sync().await.map_err(Into::into)
     }
 
     /// Initialize a new `Journal` instance.
@@ -686,6 +682,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
+        let metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
+        Self::init_with_metadata(context, cfg, metadata).await
+    }
+
+    /// Finish initialization using an already-open metadata handle. Callers use this after
+    /// `open_metadata` so the metadata partition is opened exactly once.
+    pub(super) async fn init_with_metadata(
+        context: E,
+        cfg: Config,
+        mut metadata: Metadata<E, u64, VecU64>,
+    ) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
 
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
@@ -696,29 +703,21 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         };
 
         let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
-        let meta_cfg = MetadataConfig {
-            partition: format!("{}-metadata", cfg.partition),
-            codec_config: ((0..).into(), ()),
-        };
-
-        let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg).await?;
 
         // Complete any interrupted clear before recovering bounds. `complete_clear_to_size` also
         // resets the recovery watermark to the clear target, so the subsequent bounds recovery
         // sees fully consistent metadata.
-        if let Some(clear_target) =
-            Self::parse_metadata_u64(&metadata, CLEAR_TARGET_KEY, "clear_target")?
-        {
+        if let Some(clear_target) = metadata.get(&CLEAR_TARGET_KEY).copied().map(u64::from) {
             warn!(clear_target, "crash repair: completing interrupted clear");
             Self::complete_clear_to_size(&mut journal, &mut metadata, items_per_blob, clear_target)
                 .await?;
         }
 
-        let meta_pruning_boundary =
-            Self::parse_metadata_u64(&metadata, PRUNING_BOUNDARY_KEY, "pruning_boundary")?;
-        let meta_recovery_watermark =
-            Self::parse_metadata_u64(&metadata, RECOVERY_WATERMARK_KEY, "recovery_watermark")?;
+        let meta_pruning_boundary = metadata.get(&PRUNING_BOUNDARY_KEY).copied().map(u64::from);
+        let meta_recovery_watermark = metadata
+            .get(&RECOVERY_WATERMARK_KEY)
+            .copied()
+            .map(u64::from);
 
         let (pruning_boundary, size, recovery_watermark, repair) = Self::recover_bounds(
             &mut journal,
@@ -1021,23 +1020,60 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// either still in its prior state, or has bounds `size..size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
-        // Fail before writing clear intent if existing blob partitions are already inconsistent.
+        // Fail before writing intent if existing blob partitions are already inconsistent.
         Self::select_blob_partition(&context, &cfg).await?;
+        Self::init_at_size_cleared(context, cfg, size, || async { Ok(()) }).await
+    }
 
-        let meta_cfg = MetadataConfig {
-            partition: format!("{}-metadata", cfg.partition),
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata =
-            Metadata::<_, u64, Vec<u8>>::init(context.child("intent"), meta_cfg).await?;
-        // Lower the watermark before staging the clear intent so external consumers never see a
-        // persisted recovery checkpoint beyond the eventual clear target.
-        Self::update_metadata_watermark_before_clear(&mut metadata, size)?;
-        metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
+    /// Like [Self::init_at_size], but awaits `clear_dependents` after the reset intent is durably
+    /// staged and before it completes.
+    ///
+    /// Callers that key dependent state off this journal use this to discard that state atomically
+    /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
+    /// [Self::init_cleared]) finishes.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn init_at_size_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        size: u64,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        // Stage the reset intent durably. Lower the recovery watermark first so external
+        // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
+        // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
+        // recovering bounds.
+        let mut metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
+        Self::update_metadata_watermark_before_clear(&mut metadata, size);
+        metadata.put(CLEAR_TARGET_KEY, size.into());
         metadata.sync().await?;
-        drop(metadata);
+        clear_dependents().await?;
+        Self::init_with_metadata(context, cfg, metadata).await
+    }
 
-        Self::init(context, cfg).await
+    /// Like [Self::init], but awaits `clear_dependents` before completing a staged clear.
+    ///
+    /// If a prior (possibly crashed) [Self::init_at_size_cleared] or
+    /// [Self::stage_clear_intent] staged a `CLEAR_TARGET_KEY` reset, `clear_dependents` runs before
+    /// recovery so callers can discard dependent state that the staged clear must reconcile against.
+    /// With no staged reset this behaves exactly like [Self::init].
+    pub(super) async fn init_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        let metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
+        if metadata.get(&CLEAR_TARGET_KEY).is_some() {
+            clear_dependents().await?;
+        }
+        Self::init_with_metadata(context, cfg, metadata).await
     }
 
     /// Convert a global position to (section, position_in_section).
@@ -1097,7 +1133,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         inner.dirty_from_section = None;
         let pruning_boundary = inner.pruning_boundary;
         let size = inner.size;
-        Self::update_metadata_entries(&mut inner, self.items_per_blob, pruning_boundary, size)?;
+        Self::update_metadata_entries(&mut inner, self.items_per_blob, pruning_boundary, size);
         drop(inner);
 
         let inner = self.inner.read().await;
@@ -1118,13 +1154,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Return the recovery watermark.
     pub(crate) async fn recovery_watermark(&self) -> u64 {
         let inner = self.inner.read().await;
-        Self::parse_metadata_u64(
-            &inner.metadata,
-            RECOVERY_WATERMARK_KEY,
-            "recovery_watermark",
-        )
-        .expect("valid recovery watermark metadata")
-        .expect("recovery watermark must exist after init")
+        inner
+            .metadata
+            .get(&RECOVERY_WATERMARK_KEY)
+            .copied()
+            .map(u64::from)
+            .expect("recovery watermark must exist after init")
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
@@ -1239,7 +1274,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .checked_mul(Self::CHUNK_SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
 
-        let should_sync_metadata = Self::lower_recovery_watermark(&mut inner, size)?;
+        let should_sync_metadata = Self::lower_recovery_watermark(&mut inner, size);
         drop(inner);
 
         if should_sync_metadata {
@@ -1330,11 +1365,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Lower the watermark in-memory and stage the clear intent in the same metadata sync, so
         // external consumers never see a persisted recovery checkpoint beyond `new_size`.
-        Self::lower_recovery_watermark(&mut inner, new_size)?;
-        inner
-            .metadata
-            .put(CLEAR_TARGET_KEY, new_size.to_be_bytes().to_vec());
+        Self::lower_recovery_watermark(&mut inner, new_size);
+        inner.metadata.put(CLEAR_TARGET_KEY, new_size.into());
         inner.metadata.sync().await?;
+
         let Inner {
             journal, metadata, ..
         } = &mut *inner;
@@ -1347,6 +1381,22 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_blob);
         Ok(())
+    }
+
+    /// Durably stage a clear to `new_size` without completing it.
+    ///
+    /// This lowers the recovery watermark and persists `CLEAR_TARGET_KEY`, leaving a recoverable
+    /// intent so a caller can clear dependent sibling state before calling `clear_to_size` to
+    /// finish. If a crash interrupts the sequence, the next `init` completes the staged clear.
+    /// The follow-up `clear_to_size` re-stages the same target idempotently.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn stage_clear_intent(&self, new_size: u64) -> Result<(), Error> {
+        let _op_guard = self.op_lock.lock().await;
+        let mut inner = self.inner.write().await;
+
+        Self::lower_recovery_watermark(&mut inner, new_size);
+        inner.metadata.put(CLEAR_TARGET_KEY, new_size.into());
+        inner.metadata.sync().await.map_err(Into::into)
     }
 
     /// Test helper: Read the item at the given position.
@@ -1379,11 +1429,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     #[cfg(test)]
     pub(crate) async fn test_set_recovery_watermark(&self, watermark: u64) -> Result<(), Error> {
         let mut inner = self.inner.write().await;
-        inner
-            .metadata
-            .put(RECOVERY_WATERMARK_KEY, watermark.to_be_bytes().to_vec());
-        inner.metadata.sync().await?;
-        Ok(())
+        inner.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
+        inner.metadata.sync().await.map_err(Into::into)
     }
 }
 
@@ -2328,9 +2375,7 @@ mod tests {
 
             {
                 let mut inner = journal.inner.write().await;
-                inner
-                    .metadata
-                    .put(RECOVERY_WATERMARK_KEY, 6u64.to_be_bytes().to_vec());
+                inner.metadata.put(RECOVERY_WATERMARK_KEY, 6u64.into());
                 inner
                     .metadata
                     .sync()
@@ -2394,9 +2439,7 @@ mod tests {
                     .sync(2)
                     .await
                     .expect("failed to sync shortened anchored section");
-                inner
-                    .metadata
-                    .put(RECOVERY_WATERMARK_KEY, 12u64.to_be_bytes().to_vec());
+                inner.metadata.put(RECOVERY_WATERMARK_KEY, 12u64.into());
                 inner
                     .metadata
                     .sync()
@@ -2518,16 +2561,16 @@ mod tests {
 
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
-            let metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+            let metadata = Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
                 .await
                 .expect("failed to reopen metadata");
-            let raw_watermark = metadata
+            let persisted_watermark = metadata
                 .get(&RECOVERY_WATERMARK_KEY)
+                .copied()
+                .map(u64::from)
                 .expect("missing recovery watermark after legacy recovery");
-            let persisted_watermark =
-                u64::from_be_bytes(raw_watermark.as_slice().try_into().unwrap());
             assert_eq!(persisted_watermark, 12);
             drop(metadata);
 
@@ -2548,34 +2591,32 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(5));
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
             let mut metadata =
-                Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+                Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
                     .await
                     .expect("failed to initialize metadata");
-            metadata.put(RECOVERY_WATERMARK_KEY, 7u64.to_be_bytes().to_vec());
+            metadata.put(RECOVERY_WATERMARK_KEY, 7u64.into());
 
             let changed =
-                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 9)
-                    .expect("failed to update metadata watermark");
+                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 9);
             assert!(!changed);
-            let raw_watermark = metadata
+            let persisted_watermark = metadata
                 .get(&RECOVERY_WATERMARK_KEY)
+                .copied()
+                .map(u64::from)
                 .expect("missing recovery watermark");
-            let persisted_watermark =
-                u64::from_be_bytes(raw_watermark.as_slice().try_into().unwrap());
             assert_eq!(persisted_watermark, 7);
 
             let changed =
-                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 5)
-                    .expect("failed to update metadata watermark");
+                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 5);
             assert!(changed);
-            let raw_watermark = metadata
+            let persisted_watermark = metadata
                 .get(&RECOVERY_WATERMARK_KEY)
+                .copied()
+                .map(u64::from)
                 .expect("missing recovery watermark");
-            let persisted_watermark =
-                u64::from_be_bytes(raw_watermark.as_slice().try_into().unwrap());
             assert_eq!(persisted_watermark, 5);
         });
     }
@@ -2606,9 +2647,9 @@ mod tests {
 
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
-            let metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+            let metadata = Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
                 .await
                 .expect("failed to reopen metadata");
             assert!(metadata.get(&PRUNING_BOUNDARY_KEY).is_none());
@@ -2975,16 +3016,16 @@ mod tests {
 
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
-            let metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("metadata"), meta_cfg)
+            let metadata = Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
                 .await
                 .expect("failed to reopen metadata");
-            let raw_watermark = metadata
+            let persisted_watermark = metadata
                 .get(&RECOVERY_WATERMARK_KEY)
+                .copied()
+                .map(u64::from)
                 .expect("missing recovery watermark after rewind");
-            let persisted_watermark =
-                u64::from_be_bytes(raw_watermark.as_slice().try_into().unwrap());
             assert_eq!(persisted_watermark, 7);
             drop(metadata);
 
@@ -3014,9 +3055,7 @@ mod tests {
 
             {
                 let mut inner = journal.inner.write().await;
-                inner
-                    .metadata
-                    .put(RECOVERY_WATERMARK_KEY, 7u64.to_be_bytes().to_vec());
+                inner.metadata.put(RECOVERY_WATERMARK_KEY, 7u64.into());
                 inner
                     .metadata
                     .sync()
@@ -3981,13 +4020,13 @@ mod tests {
             let blob_part = blob_partition(&cfg);
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
             let mut metadata =
-                Metadata::<_, u64, Vec<u8>>::init(context.child("intent_meta"), meta_cfg.clone())
+                Metadata::<_, u64, VecU64>::init(context.child("intent_meta"), meta_cfg.clone())
                     .await
                     .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 12u64.to_be_bytes().to_vec());
+            metadata.put(CLEAR_TARGET_KEY, 12u64.into());
             metadata.sync().await.unwrap();
             drop(metadata);
             context.remove(&blob_part, None).await.unwrap();
@@ -4006,11 +4045,11 @@ mod tests {
 
             // Restore metadata for next scenario (it might have been removed by init)
             let mut metadata =
-                Metadata::<_, u64, Vec<u8>>::init(context.child("restore_meta"), meta_cfg.clone())
+                Metadata::<_, u64, VecU64>::init(context.child("restore_meta"), meta_cfg.clone())
                     .await
                     .unwrap();
-            metadata.put(PRUNING_BOUNDARY_KEY, 7u64.to_be_bytes().to_vec());
-            metadata.put(CLEAR_TARGET_KEY, 2u64.to_be_bytes().to_vec());
+            metadata.put(PRUNING_BOUNDARY_KEY, 7u64.into());
+            metadata.put(CLEAR_TARGET_KEY, 2u64.into());
             metadata.sync().await.unwrap();
             drop(metadata);
 
@@ -4056,12 +4095,12 @@ mod tests {
             let blob_part = blob_partition(&cfg);
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
-            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+            let mut metadata = Metadata::<_, u64, VecU64>::init(context.child("meta"), meta_cfg)
                 .await
                 .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 2u64.to_be_bytes().to_vec());
+            metadata.put(CLEAR_TARGET_KEY, 2u64.into());
             metadata.sync().await.unwrap();
             drop(metadata);
 
@@ -4096,12 +4135,12 @@ mod tests {
 
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
-            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+            let mut metadata = Metadata::<_, u64, VecU64>::init(context.child("meta"), meta_cfg)
                 .await
                 .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 100u64.to_be_bytes().to_vec());
+            metadata.put(CLEAR_TARGET_KEY, 100u64.into());
             metadata.sync().await.unwrap();
             drop(metadata);
             drop(journal);
@@ -4134,12 +4173,12 @@ mod tests {
 
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
-                codec_config: ((0..).into(), ()),
+                codec_config: (),
             };
-            let mut metadata = Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+            let mut metadata = Metadata::<_, u64, VecU64>::init(context.child("meta"), meta_cfg)
                 .await
                 .unwrap();
-            metadata.put(CLEAR_TARGET_KEY, 15u64.to_be_bytes().to_vec());
+            metadata.put(CLEAR_TARGET_KEY, 15u64.into());
             metadata.sync().await.unwrap();
             drop(metadata);
             drop(journal);

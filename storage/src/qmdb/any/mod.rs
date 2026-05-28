@@ -472,6 +472,54 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// Test that a commit after an older sync boundary is recovered without another sync.
+    pub(crate) async fn test_any_db_commit_after_sync_recovery<F: Family, D, V>(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        V: Clone + CodecShared + Eq + std::fmt::Debug,
+    {
+        let key0 = Sha256::hash(&0u64.to_be_bytes());
+        let key1 = Sha256::hash(&1u64.to_be_bytes());
+        let value0 = make_value(100);
+        let value1 = make_value(200);
+
+        // Establish a synced baseline so recovery starts before the later commit.
+        let merkleized = db
+            .new_batch()
+            .write(key0, Some(value0.clone()))
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+        db.sync().await.unwrap();
+
+        // Commit a second batch without syncing; reopen must replay it from the journal.
+        let merkleized = db
+            .new_batch()
+            .write(key1, Some(value1.clone()))
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+        let committed_root = db.root();
+        let committed_size = db.size().await;
+        drop(db);
+
+        let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
+        assert_eq!(db.root(), committed_root);
+        assert_eq!(db.size().await, committed_size);
+        assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+
+        db.destroy().await.unwrap();
+    }
+
     /// Test rewinding to a prior committed state and recovering that state after reopen.
     pub(crate) async fn test_any_db_rewind_recovery<D, V>(
         context: Context,
@@ -1414,6 +1462,12 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_all_variants_empty_recovery() {
         for_all_variants!("er", with_reopen: test_any_db_empty_recovery);
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_commit_after_sync_recovery() {
+        for_all_variants!("casr", with_reopen: test_any_db_commit_after_sync_recovery);
     }
 
     #[test_group("slow")]
