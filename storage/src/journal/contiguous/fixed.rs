@@ -594,6 +594,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Stage a recovery-watermark entry no greater than `limit` in raw metadata.
     ///
     /// This is used by `init_at_size` before it clears existing blobs, before an `Inner` exists.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn update_metadata_watermark_before_clear(
         metadata: &mut Metadata<E, u64, Vec<u8>>,
         limit: u64,
@@ -1369,6 +1370,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Runtime equivalent of `stage_reset`: durably stage `CLEAR_TARGET_KEY` so callers can clear
     /// dependent sibling state before invoking `clear_to_size` to finish the operation. The
     /// subsequent `clear_to_size` re-stages the same intent idempotently and then completes.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn stage_clear_intent(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
