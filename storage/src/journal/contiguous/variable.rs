@@ -20,7 +20,7 @@ use commonware_utils::{
 };
 #[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
-use futures::{stream, Stream, StreamExt as _};
+use futures::{future::try_join_all, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 #[commonware_macros::stability(ALPHA)]
 use tracing::debug;
@@ -120,8 +120,8 @@ struct Inner<E: Context, V: Codec> {
 
     /// Earliest data section modified since the last `commit()` or `sync()`.
     ///
-    /// Tracks which sections need fsyncing. Reset by both `commit()` and `sync()` so
-    /// that repeated commit-without-sync cycles only fsync newly dirtied sections.
+    /// Tracks which sections need syncing. Reset by both `commit()` and `sync()` so
+    /// that repeated commit-without-sync cycles only sync newly dirtied sections.
     dirty_from_section: Option<u64>,
 }
 
@@ -856,8 +856,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(pruned)
     }
 
-    /// Fsync dirty data sections under the read lock, allowing concurrent reads.
-    async fn fsync_dirty_data(&self) -> Result<(), Error> {
+    /// Flush dirty data sections to storage under the read lock, allowing concurrent reads.
+    ///
+    /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
+    /// data, so committed sections are never at risk, and recovery replays the data journal as the
+    /// source of truth and truncates at the first short or missing section, so a crash that leaves a
+    /// gap still recovers a contiguous prefix no shorter than the last completed commit.
+    async fn flush_dirty_data(&self) -> Result<(), Error> {
         let inner = self.inner.read().await;
         if let Some(start_section) = inner.dirty_from_section {
             let tail_section = position_to_section(inner.size, self.items_per_section);
@@ -868,9 +873,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 // With no retained data blobs, any earlier dirty section was cleared or pruned.
                 // Syncing the tail section is harmless when it does not exist.
                 .unwrap_or(tail_section);
-            for section in start_section..=tail_section {
-                inner.data.sync(section).await?;
-            }
+            try_join_all((start_section..=tail_section).map(|section| inner.data.sync(section)))
+                .await?;
         }
         Ok(())
     }
@@ -880,7 +884,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         let _op_guard = self.op_lock.lock().await;
-        self.fsync_dirty_data().await?;
+        self.flush_dirty_data().await?;
         self.offsets.commit().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
@@ -892,7 +896,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         let _op_guard = self.op_lock.lock().await;
-        self.fsync_dirty_data().await?;
+        self.flush_dirty_data().await?;
         self.offsets.sync().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
@@ -947,8 +951,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         items_per_section: u64,
     ) -> Result<(u64, u64), Error> {
         // === Handle empty data journal case ===
-        let items_in_last_section = match data.newest_section() {
-            Some(last_section) => {
+        // Count the newest data section, removing any empty trailing sections
+        // left by a crash before append buffers became durable.
+        let items_in_last_section = loop {
+            let Some(last_section) = data.newest_section() else {
+                break 0;
+            };
+
+            let items_in_last_section = {
                 let stream = data.replay(last_section, 0, REPLAY_BUFFER_SIZE).await?;
                 futures::pin_mut!(stream);
                 let mut count = 0u64;
@@ -957,20 +967,34 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     count += 1;
                 }
                 count
-            }
-            None => 0,
-        };
-        if items_in_last_section > items_per_section {
-            return Err(Error::Corruption(format!(
-                "data section has too many items: expected at most {items_per_section}, got {items_in_last_section}"
-            )));
-        }
+            };
 
-        // Data journal is empty if there are no sections or if there is one section and it has no items.
-        // The latter should only occur if a crash occured after opening a data journal blob but
-        // before writing to it.
-        let data_empty =
-            data.is_empty() || (data.num_sections() == 1 && items_in_last_section == 0);
+            if items_in_last_section > items_per_section {
+                return Err(Error::Corruption(format!(
+                    "data section has too many items: expected at most {items_per_section}, got {items_in_last_section}"
+                )));
+            }
+
+            // Stop once we find replayable data or only one empty section
+            // remains for the existing empty-data repair path.
+            if items_in_last_section > 0 || data.num_sections() == 1 {
+                break items_in_last_section;
+            }
+
+            let previous_section = last_section
+                .checked_sub(1)
+                .expect("num_sections >= 2 implies newest_section >= 1");
+            let previous_size = data.size(previous_section).await?;
+            warn!(
+                section = last_section,
+                "crash repair: removing empty trailing data section"
+            );
+            data.rewind(previous_section, previous_size).await?;
+        };
+
+        // After trimming empty trailing sections, a zero item count means the data journal is
+        // empty: either no sections remain, or one empty section remains for repair below.
+        let data_empty = data.is_empty() || items_in_last_section == 0;
         if data_empty {
             let offsets_bounds = {
                 let offsets_reader = offsets.reader().await;
@@ -2136,6 +2160,277 @@ mod tests {
 
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_handles_multiple_empty_data_tail_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "recovery-empty-data-tail".into(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // First persist a prefix, then append across multiple section
+            // boundaries without syncing. The unsynced item bytes are lost when
+            // the journal is dropped, but their section blobs remain visible.
+            assert_eq!(journal.append(&10).await.unwrap(), 0);
+            journal.sync().await.unwrap();
+            assert_eq!(journal.append(&20).await.unwrap(), 1);
+            assert_eq!(journal.append(&30).await.unwrap(), 2);
+            drop(journal);
+
+            let data_partition = cfg.data_partition();
+            let data_blobs = context.scan(&data_partition).await.unwrap();
+            assert_eq!(data_blobs.len(), 3);
+            for name in &data_blobs[1..] {
+                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                assert_eq!(size, 0);
+            }
+
+            // Recovery should trim only the empty trailing sections, preserving
+            // the durable prefix.
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("recovered"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), 10);
+            assert_eq!(journal.append(&42).await.unwrap(), 1);
+            assert_eq!(journal.read(1).await.unwrap(), 42);
+            drop(journal);
+
+            // Recovery should have removed the empty trailing sections, leaving
+            // only the durable prefix's section and the one written above.
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+
+            let journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
+                .await
+                .unwrap();
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_handles_empty_data_with_no_durable_items() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "recovery-empty-data-no-items".into(),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Append across multiple section boundaries without ever syncing. Each
+            // append opens a fresh section blob, but no item bytes (and no offsets)
+            // become durable, so recovery sees multiple empty sections and no
+            // durable data.
+            assert_eq!(journal.append(&10).await.unwrap(), 0);
+            assert_eq!(journal.append(&20).await.unwrap(), 1);
+            drop(journal);
+
+            let data_partition = cfg.data_partition();
+            let data_blobs = context.scan(&data_partition).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+            for name in &data_blobs {
+                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                assert_eq!(size, 0);
+            }
+
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                ..cfg
+            };
+            let journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..0);
+            assert_eq!(journal.append(&42).await.unwrap(), 0);
+            assert_eq!(journal.read(0).await.unwrap(), 42);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that a durable data section above the sync watermark, sitting beyond an empty
+    /// intermediate section, is rolled back to the contiguous boundary during recovery.
+    ///
+    /// Since #3790 removed the append-time sync when crossing blob boundaries, a process crash can
+    /// leave a later data section incidentally durable (its page-cache writes survived) while an
+    /// earlier section stayed buffered and was lost, producing a physical gap. Recovery anchors at
+    /// the durable watermark and replays the data forward with a strict section-contiguity check, so
+    /// the post-gap section is truncated and recovery returns only the synced prefix.
+    #[test_traced]
+    fn test_variable_recovery_rolls_back_durable_section_after_gap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-rollback-after-gap".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Durably commit section 0 (positions 0..10), advancing the recovery watermark to 10.
+            for i in 0..10u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Append sections 1 and 2 without committing. Manually sync only section 2's data blob
+            // to mimic its page-cache writes surviving a crash, while section 1 stays buffered and
+            // the offsets journal is never advanced past position 10.
+            for i in 10..30u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            {
+                let inner = journal.inner.write().await;
+                inner.data.sync(2).await.unwrap();
+            }
+            drop(journal);
+
+            // Durable state: section 0 (10 items), section 1 (empty, lost), section 2 (10 items).
+            let data_partition = cfg.data_partition();
+            let mut names = context.scan(&data_partition).await.unwrap();
+            names.sort();
+            assert_eq!(names.len(), 3);
+            let sizes = {
+                let mut sizes = Vec::new();
+                for name in &names {
+                    let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                    sizes.push(size);
+                }
+                sizes
+            };
+            assert!(sizes[0] > 0, "section 0 should be durable");
+            assert_eq!(sizes[1], 0, "section 1 should be the gap");
+            assert!(sizes[2] > 0, "section 2 should be incidentally durable");
+
+            // Recovery rolls back to the watermark boundary: only the synced prefix survives and the
+            // gapped section 2 is truncated away.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(10).await,
+                Err(Error::ItemOutOfRange(10))
+            ));
+
+            // The orphaned section 2 is gone. The repair truncates section 1 in place, so its
+            // emptied blob remains as the recovered tail.
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+
+            // Appends resume cleanly from the recovered boundary.
+            assert_eq!(journal.append(&1234).await.unwrap(), 10);
+            assert_eq!(journal.read(10).await.unwrap(), 1234);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that a crash partway through a multi-section sync leaves a contiguous durable prefix
+    /// that recovery preserves.
+    ///
+    /// `flush_dirty_data` syncs dirty data sections before syncing offsets, and all mutating
+    /// operations serialize on `op_lock` so no concurrent sync can interleave. This reproduces a
+    /// crash after sections 0 and 1 were synced but before section 2 and the offsets journal were,
+    /// then asserts recovery keeps exactly the contiguous prefix 0..20.
+    #[test_traced]
+    fn test_variable_recovery_partial_sync_loop_keeps_contiguous_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-partial-sync-loop".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Fill sections 0 and 1 and partially fill section 2 (positions 20..25). Nothing is
+            // synced yet, so only the created section blobs are durable, all still empty.
+            for i in 0..25u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // Sync sections 0 and 1 but not section 2 (and not offsets), simulating a crash after
+            // part of a multi-section sync became durable.
+            {
+                let inner = journal.inner.write().await;
+                inner.data.sync(0).await.unwrap();
+                inner.data.sync(1).await.unwrap();
+            }
+            drop(journal);
+
+            // The durable data is exactly the contiguous prefix: sections 0 and 1 hold items,
+            // section 2 is an empty trailing blob, and offsets never synced.
+            let data_partition = cfg.data_partition();
+            let mut names = context.scan(&data_partition).await.unwrap();
+            names.sort();
+            assert_eq!(names.len(), 3);
+            for (section, name) in names.iter().enumerate() {
+                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                if section < 2 {
+                    assert!(size > 0, "section {section} should be durable");
+                } else {
+                    assert_eq!(size, 0, "section {section} should be empty");
+                }
+            }
+
+            // Recovery trims the empty trailing section, rebuilds offsets from the durable data, and
+            // exposes exactly the contiguous prefix 0..20.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..20);
+            for i in 0..20u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(20).await,
+                Err(Error::ItemOutOfRange(20))
+            ));
+
+            // The trailing section is gone and appends continue from the recovered tail.
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+            assert_eq!(journal.append(&2000).await.unwrap(), 20);
+            assert_eq!(journal.read(20).await.unwrap(), 2000);
+
+            journal.destroy().await.unwrap();
         });
     }
 
