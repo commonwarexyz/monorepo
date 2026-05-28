@@ -183,10 +183,10 @@ fn fuzz(input: FuzzInput) {
                     if cache_ref.is_none() {
                         cache_ref = Some(CacheRef::from_pooler(
                             &context,
-                            NZU16!(cache_page_size as u16),
+                            NZU16!(cache_page_size),
                             cache_capacity,
                         ));
-                        cache_page_size_ref = Some(cache_page_size as u16);
+                        cache_page_size_ref = Some(cache_page_size);
                     }
 
                     if let Some(ref cache) = cache_ref {
