@@ -90,6 +90,8 @@
 //! (e.g., `10.<region-index>.<az-index>.0/24`), linked to a shared route table with an internet gateway.
 //! Each instance is placed in an AZ that supports its instance type, distributed round-robin across
 //! eligible AZs, with automatic fallback to other AZs on capacity errors.
+//! Instances that set the same `availability_zone_group` are launched in one mutually-supported AZ.
+//! A group must reside in a single region; spanning regions is rejected.
 //!
 //! ### VPC Peering
 //!
@@ -517,6 +519,14 @@ cfg_if::cfg_if! {
             UnsupportedInstanceType(String),
             #[error("no subnets available")]
             NoSubnetsAvailable,
+            #[error("availability zone group '{group}' in region '{region}' has no mutually-supported AZ for instance types {instance_types:?}")]
+            AvailabilityZoneGroupUnsupported {
+                region: String,
+                group: String,
+                instance_types: Vec<String>,
+            },
+            #[error("availability zone group '{group}' spans multiple regions {regions:?}; a group must reside in a single region")]
+            AvailabilityZoneGroupMultiRegion { group: String, regions: Vec<String> },
             #[error("metadata not found for deployment: {0}")]
             MetadataNotFound(String),
             #[error("must specify either --config or --tag")]
@@ -584,6 +594,10 @@ pub struct InstanceConfig {
 
     /// AWS region where the instance is deployed
     pub region: String,
+
+    /// Optional group whose instances must launch in the same availability zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_zone_group: Option<String>,
 
     /// Instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64)
     pub instance_type: String,
