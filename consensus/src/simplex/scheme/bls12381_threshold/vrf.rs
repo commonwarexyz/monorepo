@@ -903,7 +903,6 @@ mod tests {
             primitives::{
                 group::Scalar,
                 ops::threshold,
-                sharing::{ModeVersion, Sharing},
                 variant::{MinPk, MinSig, Variant},
             },
         },
@@ -915,7 +914,7 @@ mod tests {
     };
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, NZU32};
+    use commonware_utils::{test_rng, Faults, N3f1, N5f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -970,11 +969,7 @@ mod tests {
         let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, shares) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
-        let mut encoded = polynomial.encode().to_vec();
-        encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
-        let polynomial =
-            Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::signer::<N3f1>(
             NAMESPACE,
             participants.keys().clone(),
@@ -999,11 +994,7 @@ mod tests {
         let mut rng = test_rng();
         let participants = ed25519_participants(&mut rng, 4);
         let (polynomial, _) =
-            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(2));
-        let mut encoded = polynomial.encode().to_vec();
-        encoded[1..5].copy_from_slice(&4u32.to_be_bytes());
-        let polynomial =
-            Sharing::<V>::decode_cfg(&encoded[..], &(NZU32!(4), ModeVersion::v0())).unwrap();
+            dkg::deal_anonymous::<V, N5f1>(&mut rng, Default::default(), NZU32!(4));
         Scheme::<V>::verifier::<N3f1>(NAMESPACE, participants.keys().clone(), polynomial);
     }
 
