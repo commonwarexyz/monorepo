@@ -2265,6 +2265,171 @@ mod tests {
         });
     }
 
+    /// Test that a durable data section above the sync watermark, sitting beyond an empty
+    /// intermediate section, is rolled back to the contiguous boundary during recovery.
+    ///
+    /// Since #3790 removed the append-time fsync when crossing blob boundaries, a process crash can
+    /// leave a later data section incidentally durable (its page-cache writes survived) while an
+    /// earlier section stayed buffered and was lost, producing a physical gap. Recovery anchors at
+    /// the durable watermark and replays the data forward with a strict section-contiguity check, so
+    /// the post-gap section is truncated and recovery returns only the synced prefix.
+    #[test_traced]
+    fn test_variable_recovery_rolls_back_durable_section_after_gap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-rollback-after-gap".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Durably commit section 0 (positions 0..10), advancing the recovery watermark to 10.
+            for i in 0..10u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Append sections 1 and 2 without committing. Manually fsync only section 2's data blob
+            // to mimic its page-cache writes surviving a crash, while section 1 stays buffered and
+            // the offsets journal is never advanced past position 10.
+            for i in 10..30u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            {
+                let inner = journal.inner.write().await;
+                inner.data.sync(2).await.unwrap();
+            }
+            drop(journal);
+
+            // Durable state: section 0 (10 items), section 1 (empty, lost), section 2 (10 items).
+            let data_partition = cfg.data_partition();
+            let mut names = context.scan(&data_partition).await.unwrap();
+            names.sort();
+            assert_eq!(names.len(), 3);
+            let sizes = {
+                let mut sizes = Vec::new();
+                for name in &names {
+                    let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                    sizes.push(size);
+                }
+                sizes
+            };
+            assert!(sizes[0] > 0, "section 0 should be durable");
+            assert_eq!(sizes[1], 0, "section 1 should be the gap");
+            assert!(sizes[2] > 0, "section 2 should be incidentally durable");
+
+            // Recovery rolls back to the watermark boundary: only the synced prefix survives and the
+            // gapped section 2 is truncated away.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..10);
+            for i in 0..10u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(10).await,
+                Err(Error::ItemOutOfRange(10))
+            ));
+
+            // The orphaned section 2 is gone. The repair truncates section 1 in place, so its
+            // emptied blob remains as the recovered tail.
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+
+            // Appends resume cleanly from the recovered boundary.
+            assert_eq!(journal.append(&1234).await.unwrap(), 10);
+            assert_eq!(journal.read(10).await.unwrap(), 1234);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test that a crash partway through the ascending per-section sync loop leaves a contiguous
+    /// durable prefix that recovery preserves.
+    ///
+    /// `fsync_dirty_data` syncs dirty data sections in ascending order before syncing offsets, and
+    /// all mutating operations serialize on `op_lock` so no concurrent sync can interleave. This
+    /// reproduces a crash after sections 0 and 1 were fsynced but before section 2 and the offsets
+    /// journal were, then asserts recovery keeps exactly the contiguous prefix 0..20.
+    #[test_traced]
+    fn test_variable_recovery_partial_sync_loop_keeps_contiguous_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-partial-sync-loop".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Fill sections 0 and 1 and partially fill section 2 (positions 20..25). Nothing is
+            // synced yet, so only the created section blobs are durable, all still empty.
+            for i in 0..25u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // Replicate `fsync_dirty_data`'s ascending loop, crashing after sections 0 and 1 are
+            // durable but before section 2 (and before offsets) are synced.
+            {
+                let inner = journal.inner.write().await;
+                inner.data.sync(0).await.unwrap();
+                inner.data.sync(1).await.unwrap();
+            }
+            drop(journal);
+
+            // The durable data is exactly the contiguous prefix: sections 0 and 1 hold items,
+            // section 2 is an empty trailing blob, and offsets never synced.
+            let data_partition = cfg.data_partition();
+            let mut names = context.scan(&data_partition).await.unwrap();
+            names.sort();
+            assert_eq!(names.len(), 3);
+            for (section, name) in names.iter().enumerate() {
+                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                if section < 2 {
+                    assert!(size > 0, "section {section} should be durable");
+                } else {
+                    assert_eq!(size, 0, "section {section} should be empty");
+                }
+            }
+
+            // Recovery trims the empty trailing section, rebuilds offsets from the durable data, and
+            // exposes exactly the contiguous prefix 0..20.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..20);
+            for i in 0..20u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(20).await,
+                Err(Error::ItemOutOfRange(20))
+            ));
+
+            // The trailing section is gone and appends continue from the recovered tail.
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+            assert_eq!(journal.append(&2000).await.unwrap(), 20);
+            assert_eq!(journal.read(20).await.unwrap(), 2000);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test recovery from multiple prune operations with crash.
     #[test_traced]
     fn test_variable_recovery_multiple_prunes_crash() {
