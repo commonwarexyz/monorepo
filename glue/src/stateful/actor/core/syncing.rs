@@ -302,8 +302,7 @@ mod tests {
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock as _, ContextCell, Runner as _, Spawner as _,
-        Supervisor as _,
+        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -312,14 +311,8 @@ mod tests {
         sync::{AsyncMutex, AsyncRwLock},
         Acknowledgement, NZUsize, NZU16, NZU64,
     };
-    use futures::FutureExt;
-    use std::{
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        },
-        time::Duration,
-    };
+    use futures::{pin_mut, poll, FutureExt};
+    use std::sync::Arc;
 
     #[derive(Clone)]
     struct NoopResolver;
@@ -500,38 +493,26 @@ mod tests {
             let harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             let sync_metadata = harness.syncing.sync_metadata.clone();
             let metadata_guard = sync_metadata.lock().await;
-            let (acknowledgement, waiter) = Exact::handle();
-            let acknowledged = Arc::new(AtomicBool::new(false));
-            let waiter_handle = context.child("waiter").spawn({
-                let acknowledged = acknowledged.clone();
-                move |_context| async move {
-                    waiter
-                        .await
-                        .expect("handoff acknowledgement should complete");
-                    acknowledged.store(true, Ordering::SeqCst);
-                }
-            });
+            let (acknowledgement, mut waiter) = Exact::handle();
 
-            let transition_handle = context
-                .child("transition")
-                .spawn(move |_context| async move {
-                    harness
-                        .syncing
-                        .transition(Some((TestBlock::new(8, 10), acknowledgement)))
-                        .await;
-                });
-
-            context.sleep(Duration::from_millis(1)).await;
+            let transition = harness
+                .syncing
+                .transition(Some((TestBlock::new(8, 10), acknowledgement)));
+            pin_mut!(transition);
             assert!(
-                !acknowledged.load(Ordering::SeqCst),
+                poll!(&mut transition).is_pending(),
+                "transition must wait for sync-complete metadata"
+            );
+            assert!(
+                poll!(&mut waiter).is_pending(),
                 "handoff must not be acknowledged while sync-complete metadata is blocked",
             );
 
             drop(metadata_guard);
-            transition_handle
+            transition.await;
+            waiter
                 .await
-                .expect("transition task should complete");
-            waiter_handle.await.expect("waiter task should complete");
+                .expect("handoff acknowledgement should complete");
 
             assert_eq!(
                 sync_metadata.lock().await.sync_height(),
