@@ -454,27 +454,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
-        // If offsets has a pending reset from a prior crashed `init_at_size` or `clear_to_size`,
-        // CLEAR_TARGET_KEY is present in its metadata. Clear data first so the staged clear that
-        // `init_with_metadata` runs (via `complete_clear_to_size`) reconciles both sides.
-        // Metadata stays open and is handed to `init_with_metadata` so we only open it once.
+        // If a prior `init_at_size`/`clear_to_size` crashed mid-reset, the offsets journal carries
+        // a staged clear. `init_cleared` discards data before finishing that reset so the two sides
+        // are reconciled and stale data is never replayed past the reset size.
         let offsets_cfg = fixed::Config {
             partition: offsets_partition,
             items_per_blob: cfg.items_per_section,
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
-        let offsets_ctx = context.child("offsets");
-        let offsets_metadata =
-            fixed::Journal::<E, u64>::open_metadata(offsets_ctx.child("meta"), &offsets_cfg)
-                .await?;
-        if offsets_metadata.get(&fixed::CLEAR_TARGET_KEY).is_some() {
-            data.clear().await?;
-        }
-        let mut offsets = fixed::Journal::<E, u64>::init_with_metadata(
-            offsets_ctx,
+        let mut offsets = fixed::Journal::<E, u64>::init_cleared(
+            context.child("offsets"),
             offsets_cfg,
-            offsets_metadata,
+            || data.clear(),
         )
         .await?;
 
@@ -528,27 +520,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?;
 
-        // Stage the offsets reset intent durably before clearing data. Lower the recovery
-        // watermark first so external consumers never see a persisted checkpoint beyond `size`.
-        // After data is cleared, `init_with_metadata` detects CLEAR_TARGET_KEY and completes the
-        // clear. A crash at any point in this sequence leaves a durable intent that the next
-        // `init` (via `init_with_metadata`) will finish. Metadata stays open across stage / clear
-        // / init so it's only opened once.
-        let offsets_ctx = context.child("offsets");
-        let mut offsets_metadata =
-            fixed::Journal::<E, u64>::open_metadata(offsets_ctx.child("meta"), &offsets_cfg)
-                .await?;
-        fixed::Journal::<E, u64>::update_metadata_watermark_before_clear(
-            &mut offsets_metadata,
-            size,
-        )?;
-        offsets_metadata.put(fixed::CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
-        offsets_metadata.sync().await?;
-        data.clear().await?;
-        let offsets = fixed::Journal::<E, u64>::init_with_metadata(
-            offsets_ctx,
+        // `init_at_size_cleared` durably stages the offsets reset, clears data, then completes the
+        // reset. A crash at any point leaves a staged clear that the next `init` (via
+        // `init_cleared`) finishes, so stale data can never outlive the reset.
+        let offsets = fixed::Journal::<E, u64>::init_at_size_cleared(
+            context.child("offsets"),
             offsets_cfg,
-            offsets_metadata,
+            size,
+            || data.clear(),
         )
         .await?;
 

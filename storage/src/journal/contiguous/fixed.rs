@@ -97,7 +97,10 @@ use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard};
 use futures::{stream::Stream, StreamExt};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::warn;
 
 /// Metadata key for a mid-section pruning boundary.
@@ -1041,7 +1044,25 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Fail before writing intent if existing blob partitions are already inconsistent.
         Self::select_blob_partition(&context, &cfg).await?;
+        Self::init_at_size_cleared(context, cfg, size, || async { Ok(()) }).await
+    }
 
+    /// Like [Self::init_at_size], but awaits `clear_dependents` after the reset intent is durably
+    /// staged and before it completes.
+    ///
+    /// Callers that key dependent state off this journal use this to discard that state atomically
+    /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
+    /// [Self::init_cleared]) finishes.
+    pub(super) async fn init_at_size_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        size: u64,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
         // Stage the reset intent durably. Lower the recovery watermark first so external
         // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
         // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
@@ -1050,7 +1071,29 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Self::update_metadata_watermark_before_clear(&mut metadata, size)?;
         metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
         metadata.sync().await?;
+        clear_dependents().await?;
+        Self::init_with_metadata(context, cfg, metadata).await
+    }
 
+    /// Like [Self::init], but awaits `clear_dependents` before completing a staged clear.
+    ///
+    /// If a prior (possibly crashed) [Self::init_at_size_cleared] or
+    /// [Self::stage_clear_intent] staged a `CLEAR_TARGET_KEY` reset, `clear_dependents` runs before
+    /// recovery so callers can discard dependent state that the staged clear must reconcile against.
+    /// With no staged reset this behaves exactly like [Self::init].
+    pub(super) async fn init_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        let metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
+        if metadata.get(&CLEAR_TARGET_KEY).is_some() {
+            clear_dependents().await?;
+        }
         Self::init_with_metadata(context, cfg, metadata).await
     }
 
