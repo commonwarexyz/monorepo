@@ -3192,6 +3192,72 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_clear_to_size_crash_after_staging_completes_on_init() {
+        let partition = "clear-to-size-crash-after-staging".to_string();
+        let executor = deterministic::Runner::default();
+        let ((), checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            |context| async move {
+                let cfg = Config {
+                    partition,
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(1024),
+                };
+
+                let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..12u64 {
+                    journal.append(&(100 + i)).await.unwrap();
+                }
+                journal.sync().await.unwrap();
+
+                // Let `stage_clear_intent` (a metadata sync) persist the reset intent, but fail the
+                // subsequent `data.clear()` (a blob remove) so `clear_to_size` aborts after the
+                // intent is durable but before the data is cleared.
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    remove_rate: Some(1.0),
+                    ..Default::default()
+                };
+                assert!(journal.clear_to_size(7).await.is_err());
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = Config {
+                partition,
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // `init` finds the staged intent, discards the stale data, and completes the reset.
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..7);
+            assert_eq!(journal.append(&700).await.unwrap(), 7);
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen: the completed reset persists and no stale data was replayed.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..8);
+            assert_eq!(journal.read(7).await.unwrap(), 700);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_init_at_size_recovers_staged_reset_crash_points() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
