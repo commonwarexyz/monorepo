@@ -147,6 +147,8 @@ impl<E: Storage + Metrics> SectionsInit<E> {
 
     /// Consume the builder, removing every existing blob and installing a fresh empty tail at
     /// `tail_section`.
+    // Only caller (`fixed::Journal::init_at_size`) is `#[stability(ALPHA)]`; this becomes dead
+    // when the stability lint strips ALPHA items.
     #[allow(dead_code)]
     pub(super) async fn reset(mut self, tail_section: u64) -> Result<Sections<E>, Error> {
         for (section, blob) in take(&mut self.pending) {

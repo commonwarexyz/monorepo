@@ -30,10 +30,12 @@ use commonware_cryptography::{crc32, Crc32};
 mod append;
 mod cache;
 mod read;
+mod sealed;
 
 pub use append::Append;
 pub use cache::CacheRef;
-pub use read::{Replay, Sealed};
+pub use read::Replay;
+pub use sealed::Sealed;
 use tracing::{debug, error, warn};
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.

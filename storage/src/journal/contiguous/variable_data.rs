@@ -193,6 +193,8 @@ impl<E: crate::Context, V: CodecShared> VariableData<E, V> {
     }
 
     /// Clear all sections, resetting to empty.
+    // Only caller (`variable::Journal::clear_to_size`) is `#[stability(ALPHA)]`; this becomes
+    // dead when the stability lint strips ALPHA items.
     #[allow(dead_code)]
     pub(super) async fn clear(&mut self) -> Result<(), Error> {
         self.sections.clear().await
