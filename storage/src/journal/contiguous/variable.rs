@@ -466,7 +466,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         };
         let offsets_ctx = context.child("offsets");
         let offsets_metadata =
-            fixed::Journal::<E, u64>::open_metadata(&offsets_ctx, &offsets_cfg).await?;
+            fixed::Journal::<E, u64>::open_metadata(offsets_ctx.child("meta"), &offsets_cfg)
+                .await?;
         if offsets_metadata.get(&fixed::CLEAR_TARGET_KEY).is_some() {
             data.clear().await?;
         }
@@ -535,7 +536,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // / init so it's only opened once.
         let offsets_ctx = context.child("offsets");
         let mut offsets_metadata =
-            fixed::Journal::<E, u64>::open_metadata(&offsets_ctx, &offsets_cfg).await?;
+            fixed::Journal::<E, u64>::open_metadata(offsets_ctx.child("meta"), &offsets_cfg)
+                .await?;
         fixed::Journal::<E, u64>::update_metadata_watermark_before_clear(
             &mut offsets_metadata,
             size,
@@ -3192,7 +3194,7 @@ mod tests {
                 // so we cover both crash points.
                 let intent_ctx = context.child("intent").with_attribute("index", index);
                 let mut intent_metadata =
-                    fixed::Journal::<_, u64>::open_metadata(&intent_ctx, &offsets_cfg)
+                    fixed::Journal::<_, u64>::open_metadata(intent_ctx.child("meta"), &offsets_cfg)
                         .await
                         .unwrap();
                 fixed::Journal::<_, u64>::update_metadata_watermark_before_clear(

@@ -613,14 +613,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Open the metadata partition for `cfg`.
     pub(super) async fn open_metadata(
-        context: &E,
+        context: E,
         cfg: &Config,
     ) -> Result<Metadata<E, u64, Vec<u8>>, Error> {
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
             codec_config: ((0..).into(), ()),
         };
-        Metadata::<_, u64, Vec<u8>>::init(context.child("meta"), meta_cfg)
+        Metadata::<_, u64, Vec<u8>>::init(context, meta_cfg)
             .await
             .map_err(Into::into)
     }
@@ -700,7 +700,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// All backing blobs are opened but not read during initialization. The `replay` method can be
     /// used to iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        let metadata = Self::open_metadata(&context, &cfg).await?;
+        let metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
         Self::init_with_metadata(context, cfg, metadata).await
     }
 
@@ -1046,7 +1046,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
         // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
         // recovering bounds.
-        let mut metadata = Self::open_metadata(&context, &cfg).await?;
+        let mut metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
         Self::update_metadata_watermark_before_clear(&mut metadata, size)?;
         metadata.put(CLEAR_TARGET_KEY, size.to_be_bytes().to_vec());
         metadata.sync().await?;
