@@ -962,8 +962,11 @@ where
         let contents = self
             .strategy
             .mutate_resolver_bytes(&mut self.context, &[0u8]);
-        self.relay
-            .broadcast(&sender, (proposal.payload, contents.into()))
+        self.relay.broadcast(
+            &sender,
+            Recipients::All,
+            (proposal.payload, contents.into()),
+        )
     }
 
     async fn send_notarize_vote(&mut self, signer_idx: usize) {
@@ -1051,7 +1054,8 @@ where
         };
         let rand = self.context.gen::<u64>();
         let contents = (proposal.round, parent_payload, rand).encode();
-        self.relay.broadcast(&sender, (proposal.payload, contents));
+        self.relay
+            .broadcast(&sender, Recipients::All, (proposal.payload, contents));
 
         self.send_notarize_vote_for_proposal(signer_idx, proposal)
             .await;
