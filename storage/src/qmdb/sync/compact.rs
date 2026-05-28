@@ -387,7 +387,7 @@ where
 /// 2. Verify the final commit proof against `target.root`.
 /// 3. Rebuild the compact frontier in memory and compare its root against `target.root`.
 /// 4. Build the compact db from that already-validated state.
-/// 5. Re-check the db root and persist only after both checks succeed.
+/// 5. Assert the db root still matches and persist the state.
 ///
 /// Any failure leaves the local compact db unopened or unchanged on disk.
 pub async fn sync<DB, R>(
@@ -424,22 +424,21 @@ where
             }
         };
 
-        let db = match try_build_compact_db::<DB>(
+        // The peer response has already authenticated the final commit and frontier. From here,
+        // construction should only fail for local database/storage reasons; a root mismatch is a
+        // bug in this path.
+        let db = DB::from_compact_state(
             config.context.child("compact"),
             config.db_config.clone(),
-            &target,
             validated_state,
         )
         .await
-        {
-            Ok(db) => db,
-            Err(BuildError::Engine(err)) => {
-                return Err(Error::Engine(err));
-            }
-            Err(BuildError::Database(err)) => {
-                return Err(Error::Database(err));
-            }
-        };
+        .map_err(Error::Database)?;
+        assert_eq!(
+            db.root(),
+            target.root,
+            "validated compact state reconstructed unexpected root",
+        );
 
         if let Some(callback) = callback {
             let _ = callback.send(true);
@@ -447,29 +446,6 @@ where
         db.persist_compact_state().await?;
         return Ok(db);
     }
-}
-
-async fn try_build_compact_db<DB>(
-    context: DB::Context,
-    db_config: DB::Config,
-    target: &Target<DB::Family, DB::Digest>,
-    state: ValidatedState<DB::Family, DB::Op, DB::Digest>,
-) -> Result<DB, BuildError<DB::Family, DB::Digest>>
-where
-    DB: Database,
-{
-    let db = DB::from_compact_state(context, db_config, state)
-        .await
-        .map_err(BuildError::Database)?;
-    let actual = db.root();
-    if actual != target.root {
-        return Err(BuildError::Engine(EngineError::RootMismatch {
-            expected: target.root,
-            actual,
-        }));
-    }
-
-    Ok(db)
 }
 
 /// Validate the peer-provided compact state before constructing local database storage.
@@ -554,11 +530,6 @@ where
         target.root,
         inactivity_floor_loc,
     ))
-}
-
-enum BuildError<F: Family, D: Digest> {
-    Database(qmdb::Error<F>),
-    Engine(EngineError<F, D>),
 }
 
 async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(

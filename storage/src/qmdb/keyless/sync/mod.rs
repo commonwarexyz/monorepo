@@ -161,9 +161,10 @@ where
             last_commit_proof,
         } = state;
         let last_commit_loc = Location::new(*leaf_count - 1);
-        let Operation::Commit(last_commit_metadata, _) = last_commit_op else {
+        let Operation::Commit(last_commit_metadata, op_floor) = last_commit_op else {
             return Err(qmdb::Error::UnexpectedData(last_commit_loc));
         };
+        assert_eq!(op_floor, inactivity_floor_loc, "inactivity floor mismatch");
         let commit_codec_config = config.commit_codec_config.clone();
         let last_commit_op_bytes =
             Operation::<F, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
