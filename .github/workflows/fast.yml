@@ -52,9 +52,10 @@ jobs:
         tool: just@1.43.0
     - name: Install Dylint
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
-      run: |
-        cargo install cargo-dylint --version 6.0.0 --locked
-        cargo install dylint-link --version 6.0.0 --locked
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: cargo-dylint@6.0.1,dylint-link@6.0.1
+        fallback: cargo-install
     - name: Fmt
       run: just check-fmt
     - name: Lint
