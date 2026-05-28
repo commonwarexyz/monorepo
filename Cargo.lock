@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-actor-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "commonware-actor",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-resolver-fuzz"
-version = "2026.4.0"
+version = "2026.5.0"
 dependencies = [
  "arbitrary",
  "bytes",
