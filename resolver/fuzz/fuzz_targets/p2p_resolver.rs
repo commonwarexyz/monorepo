@@ -70,7 +70,7 @@ const DEFAULT_MAILBOX_SIZE: usize = MAX_MAILBOX_SIZE;
 const DEFAULT_QUOTA_PER_SECOND: u32 = MAX_QUOTA_PER_SECOND;
 const DEFAULT_FETCH_TIMEOUT_MS: u64 = MAX_FETCH_TIMEOUT_MS;
 // Keep in sync with the match arms in Operation::arbitrary.
-const OPERATION_VARIANTS: u8 = 12;
+const OPERATION_VARIANTS: u8 = 13;
 
 #[derive(Clone, Debug)]
 struct Item {
@@ -133,6 +133,10 @@ enum Operation {
         key: u8,
         settle_ms: u64,
     },
+    Burst {
+        peer: usize,
+        key: u8,
+    },
 }
 
 #[derive(Arbitrary, Clone, Debug)]
@@ -151,6 +155,7 @@ struct FuzzInput {
     jitter_ms: u64,
     success_rate_percent: u8,
     mailbox_size: usize,
+    small_mailbox: bool,
     quota_per_second: u32,
     fetch_initial_ms: u64,
     fetch_timeout_ms: u64,
@@ -276,10 +281,14 @@ impl<'a> Arbitrary<'a> for Operation {
                 id: arbitrary_track_id(u)?,
                 primary_mask: u.arbitrary()?,
             }),
-            _ => Ok(Self::CompleteFetch {
+            11 => Ok(Self::CompleteFetch {
                 peer: arbitrary_peer(u)?,
                 key: u.arbitrary()?,
                 settle_ms: arbitrary_completion_window(u)?,
+            }),
+            _ => Ok(Self::Burst {
+                peer: arbitrary_peer(u)?,
+                key: u.arbitrary()?,
             }),
         }
     }
@@ -321,6 +330,9 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         } else {
             u.int_in_range(MIN_MAILBOX_SIZE..=MAX_MAILBOX_SIZE)?
         };
+        // Bias toward a size-1 mailbox so bursts overflow into the ingress
+        // policy instead of resting in the ready queue.
+        let small_mailbox = !u.is_empty() && u.arbitrary()?;
         let quota_per_second = if u.is_empty() {
             DEFAULT_QUOTA_PER_SECOND
         } else {
@@ -364,6 +376,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             jitter_ms,
             success_rate_percent,
             mailbox_size,
+            small_mailbox,
             quota_per_second,
             fetch_initial_ms,
             fetch_timeout_ms,
@@ -521,6 +534,11 @@ fn run(input: FuzzInput) -> String {
                 }
             }
         }
+        let mailbox_size = if input.small_mailbox {
+            MIN_MAILBOX_SIZE
+        } else {
+            input.mailbox_size
+        };
         let mut mailboxes = Vec::with_capacity(peers.len());
         let mut outputs = Vec::with_capacity(peers.len());
         let mut handles = Vec::with_capacity(peers.len());
@@ -544,7 +562,7 @@ fn run(input: FuzzInput) -> String {
                     blocker: oracle.control(scheme.public_key()),
                     consumer,
                     producer: producers[index].clone(),
-                    mailbox_size: NonZeroUsize::new(input.mailbox_size).unwrap(),
+                    mailbox_size: NonZeroUsize::new(mailbox_size).unwrap(),
                     me: Some(scheme.public_key()),
                     initial: Duration::from_millis(input.fetch_initial_ms),
                     timeout: Duration::from_millis(input.fetch_timeout_ms),
@@ -726,6 +744,43 @@ fn run(input: FuzzInput) -> String {
                         oracle_window[index].contains(&key),
                         "missing oracle delivery: index={index}, holder={holder}, key={key:?}"
                     );
+                }
+                Operation::Burst { peer, key } => {
+                    // Synchronously enqueue without yielding so messages pile into the ingress
+                    // overflow policy. Pre-filling the ready queue with same-key fetches forces
+                    // the scripted fetches below to overflow regardless of mailbox size; reusing
+                    // `key` keeps the actor's eventual fetch work to a single coalesced key.
+                    let index = peer % mailboxes.len();
+                    // Bias the coalesced burst key toward an existing key so the single resulting
+                    // fetch resolves instead of retrying indefinitely as background work.
+                    let base = expected
+                        .keys()
+                        .nth(key as usize % expected.len())
+                        .cloned()
+                        .unwrap_or(Key(key));
+                    let mut overlapping = NonEmptyVec::new(peers[0].clone());
+                    overlapping.push(peers[1].clone());
+                    let mailbox = &mut mailboxes[index];
+                    for _ in 0..mailbox_size {
+                        assert!(mailbox.fetch(base.clone()).accepted());
+                    }
+                    // Same-key targeted/untargeted fetches drive every metadata-merge branch.
+                    assert!(mailbox
+                        .fetch_targeted(base.clone(), NonEmptyVec::new(peers[0].clone()))
+                        .accepted());
+                    assert!(mailbox.fetch_targeted(base.clone(), overlapping).accepted());
+                    assert!(mailbox.fetch(base.clone()).accepted());
+                    assert!(mailbox
+                        .fetch_targeted(base.clone(), NonEmptyVec::new(peers[0].clone()))
+                        .accepted());
+                    // Extra keys keep the overflow non-empty so the drain re-push paths run, and
+                    // the two retains exercise retain-on-overflow (keep and drop) plus push_front.
+                    assert!(mailbox.fetch(Key(key.wrapping_add(1))).accepted());
+                    assert!(mailbox.fetch(Key(key.wrapping_add(2))).accepted());
+                    assert!(mailbox.fetch(Key(key.wrapping_add(3))).accepted());
+                    let dropped = Key(key.wrapping_add(2));
+                    assert!(mailbox.retain(move |k, _| k != &dropped).accepted());
+                    assert!(mailbox.retain(|_, _| true).accepted());
                 }
             }
             drain_outputs(&mut outputs, &expected, &mut delivered);
