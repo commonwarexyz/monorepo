@@ -2,7 +2,7 @@
 
 ## v2026.5.0
 
-### Actor Mailboxes
+### Bounded Actor Ingress
 
 The new `commonware-actor` crate provides a bounded mailbox abstraction with
 caller-defined overflow handling and is now used by many actor-style
@@ -31,7 +31,7 @@ Actor ingress behavior is now uniform, bounded, and inspectable. Application
 code that previously assumed fire-and-forget sends should now check whether
 submission was accepted.
 
-### Runtime Contexts And Observability
+### Runtime Identity and Observability
 
 Runtime context identity now exposes the existing supervision tree more directly:
 
@@ -62,7 +62,7 @@ The runtime trait surface was also split more clearly:
 This is a user-visible migration point for code that used `with_label`,
 `with_scope`, or relied on context cloning to imply a new child task identity.
 
-### Shared Stateful Application Glue
+### Stateful Consensus Glue
 
 The new `commonware-glue` crate provides default constructions that span
 multiple primitives. Its first major component is `glue::stateful`, a wrapper
@@ -86,7 +86,7 @@ and simulation support for multi-validator stateful tests. This gives
 application authors a concrete path for combining consensus, marshal, QMDB, and
 state sync without hand-wiring all of the lifecycle edges.
 
-### Consensus And Marshal
+### Consensus Startup and Recovery
 
 Marshal now has a unified core actor shared by the standard full-block path and
 the coded shard path. Variant-specific logic is expressed through `Variant` and
@@ -126,7 +126,7 @@ from other validators. Simplex also syncs votes and certificates before
 broadcasting them, and journals certification outcomes so restart can replay
 them instead of asking the application to re-certify the same view.
 
-### Resolver And P2P Demand Tracking
+### Subscriber-Aware Fetching
 
 The resolver API is now subscriber-aware. A single peer-visible fetch key can
 serve multiple local subscribers, and the resolver retains a fetch while at
@@ -152,7 +152,7 @@ Resolver demand is now more composable: duplicate requests can be coalesced,
 late subscribers can attach to in-flight validation, and stale subscribers can
 be pruned without tearing down unrelated demand for the same key.
 
-### Storage, QMDB, And Merkle Structures
+### Authenticated Storage and Sync
 
 Merkle structures are now family-generic. Shared `Position<F>` and
 `Location<F>` types, plus the `Family` trait, allow MMR and MMB implementations
@@ -213,7 +213,7 @@ retain or serve past operations. Compact sync lets a node join at a proven
 committed root, materialize only the append frontier, and continue from there
 without downloading or storing the full operation history.
 
-### Runtime I/O
+### Runtime I/O Durability
 
 - `Blob::write_at_sync` writes bytes at an offset and durably persists that
   specific write. This is not a global durability barrier for earlier unsynced
@@ -233,7 +233,7 @@ without downloading or storing the full operation history.
 Durability, cancellation, and buffer ownership are more explicit at the runtime
 boundary.
 
-### Cryptography
+### Cryptography Building Blocks
 
 The BLS12-381 DKG module now separates the original Feldman-Desmedt construction
 from a new Golden DKG implementation:
@@ -259,7 +259,7 @@ material, and lets the batch verifier reuse pre-decompressed verification keys.
 The generic `BatchVerifier` API is now strategy-aware, enabling parallel batch
 verification where the chosen `commonware-parallel` strategy supports it.
 
-### Codec, Formatting, And Utilities
+### Encoding, Formatting, and Utilities
 
 - `commonware-formatting` is now a dedicated crate for formatting and parsing
   encoded data, including the hex helpers previously exposed from
