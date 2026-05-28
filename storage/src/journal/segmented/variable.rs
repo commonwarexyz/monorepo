@@ -7,7 +7,7 @@
 //! # Format
 //!
 //! Data stored in `Journal` is persisted in one of many Blobs within a caller-provided `partition`.
-//! The particular [Blob] in which data is stored is identified by a `section` number (`u64`).
+//! The particular `Blob` in which data is stored is identified by a `section` number (`u64`).
 //! Within a `section`, data is appended as an `item` with the following format:
 //!
 //! ```text
@@ -88,7 +88,7 @@ use commonware_codec::{
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
-    Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
+    Buf, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
@@ -175,10 +175,10 @@ fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> 
 }
 
 /// State for replaying a single section's blob.
-struct ReplayState<B: Blob, C> {
+struct ReplayState<'a, E: Storage + Metrics, C> {
     section: u64,
-    blob: Append<B>,
-    replay: Replay<B>,
+    manager: &'a Manager<E, AppendFactory>,
+    replay: Replay<E::Blob>,
     skip_bytes: u64,
     offset: u64,
     valid_offset: u64,
@@ -209,7 +209,7 @@ fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) ->
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
+/// underlying `Blob` will be truncated to the last valid item). Repair occurs during
 /// replay (not init) because any blob could have trailing bytes.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
@@ -303,14 +303,15 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         mut start_offset: u64,
         buffer: NonZeroUsize,
     ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send + '_, Error> {
-        // Collect all blobs to replay (keeping blob reference for potential resize)
+        // Collect all blobs to replay. The replay state borrows the manager so it can apply
+        // any in-line corruption truncations through the manager-owned [`Append`] handle.
         let codec_config = self.codec_config.clone();
         let compressed = self.compression.is_some();
+        let manager = &self.manager;
         let mut blobs = Vec::new();
-        for (&section, blob) in self.manager.sections_from(start_section) {
+        for (&section, blob) in manager.sections_from(start_section) {
             blobs.push((
                 section,
-                blob.clone(),
                 blob.replay(buffer).await?,
                 codec_config.clone(),
                 compressed,
@@ -318,8 +319,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         }
 
         // Stream items as they are read to avoid occupying too much memory
-        Ok(stream::iter(blobs).flat_map(
-            move |(section, blob, replay, codec_config, compressed)| {
+        Ok(
+            stream::iter(blobs).flat_map(move |(section, replay, codec_config, compressed)| {
                 // Calculate initial skip bytes for first blob
                 let skip_bytes = if section == start_section {
                     start_offset
@@ -331,7 +332,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 stream::unfold(
                     ReplayState {
                         section,
-                        blob,
+                        manager,
                         replay,
                         skip_bytes,
                         offset: 0,
@@ -402,8 +403,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                                     new_size = state.valid_offset,
                                                     "trailing bytes detected: truncating"
                                                 );
-                                                if let Err(err) =
-                                                    state.blob.resize(state.valid_offset).await
+                                                if let Err(err) = state
+                                                    .manager
+                                                    .resize(state.section, state.valid_offset)
+                                                    .await
                                                 {
                                                     batch.push(Err(err.into()));
                                                     state.done = true;
@@ -434,7 +437,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                                         new_size = state.valid_offset,
                                         "incomplete item at end: truncating"
                                     );
-                                    if let Err(err) = state.blob.resize(state.valid_offset).await {
+                                    if let Err(err) = state
+                                        .manager
+                                        .resize(state.section, state.valid_offset)
+                                        .await
+                                    {
                                         batch.push(Err(err.into()));
                                         state.done = true;
                                         return Some((batch, state));
@@ -497,8 +504,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                     },
                 )
                 .flat_map(stream::iter)
-            },
-        ))
+            }),
+        )
     }
 
     /// Encode an item.
