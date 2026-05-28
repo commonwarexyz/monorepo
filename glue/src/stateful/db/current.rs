@@ -7,7 +7,7 @@
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, StateSyncMode, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, Read as CodecRead};
@@ -590,7 +590,7 @@ where
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
-        resuming: bool,
+        mode: StateSyncMode,
     ) -> Result<Self, Self::SyncError> {
         let config = sync::engine::Config {
             context,
@@ -605,10 +605,9 @@ where
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
         };
-        if resuming {
-            sync::resume(config).await
-        } else {
-            sync::sync(config).await
+        match mode {
+            StateSyncMode::New => sync::sync(config).await,
+            StateSyncMode::Resume => sync::resume(config).await,
         }
     }
 }
@@ -650,7 +649,7 @@ where
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
-        resuming: bool,
+        mode: StateSyncMode,
     ) -> Result<Self, Self::SyncError> {
         let config = sync::engine::Config {
             context,
@@ -665,10 +664,9 @@ where
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
         };
-        if resuming {
-            sync::resume(config).await
-        } else {
-            sync::sync(config).await
+        match mode {
+            StateSyncMode::New => sync::sync(config).await,
+            StateSyncMode::Resume => sync::resume(config).await,
         }
     }
 }

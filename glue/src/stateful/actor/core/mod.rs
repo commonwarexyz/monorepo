@@ -235,7 +235,7 @@ mod tests {
     use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
+        db::{AttachableResolver, StateSyncDb, StateSyncMode, SyncEngineConfig},
         tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
     };
     use commonware_consensus::{
@@ -279,7 +279,7 @@ mod tests {
             _finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _resuming: bool,
+            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
         }

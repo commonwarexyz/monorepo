@@ -134,11 +134,9 @@ where
     pub async fn run(mut self) {
         let resolved_floor =
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
-        let resuming_state_sync = {
+        let sync_mode = {
             let mut sync_metadata = self.sync_metadata.lock().await;
-            let resuming = sync_metadata.in_progress();
-            sync_metadata.set_in_progress(resolved_floor.marker).await;
-            resuming
+            sync_metadata.begin_sync(resolved_floor.marker).await
         };
 
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
@@ -150,7 +148,7 @@ where
             resolved_floor.targets,
             tip_updates_rx,
             self.sync_config,
-            resuming_state_sync,
+            sync_mode,
         ))));
 
         select_loop! {
