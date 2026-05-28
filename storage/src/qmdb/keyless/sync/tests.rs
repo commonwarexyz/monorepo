@@ -1079,15 +1079,6 @@ mod compact_variable_mmr {
     }
 
     #[derive(Clone)]
-    struct StaticResolver {
-        state: sync::compact::State<
-            mmr::Family,
-            variable::Operation<mmr::Family, Vec<u8>>,
-            sha256::Digest,
-        >,
-    }
-
-    #[derive(Clone)]
     struct SequenceResolver {
         states: Arc<commonware_utils::sync::Mutex<VecDeque<CompactFetchResult>>>,
     }
@@ -1097,21 +1088,6 @@ mod compact_variable_mmr {
         variable::Operation<mmr::Family, Vec<u8>>,
         sha256::Digest,
     >;
-
-    impl sync::compact::Resolver for StaticResolver {
-        type Family = mmr::Family;
-        type Digest = sha256::Digest;
-        type Op = variable::Operation<mmr::Family, Vec<u8>>;
-        type Error = qmdb::Error<mmr::Family>;
-
-        async fn get_compact_state(
-            &self,
-            _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
-        {
-            Ok(self.state.clone().into())
-        }
-    }
 
     impl sync::compact::Resolver for SequenceResolver {
         type Family = mmr::Family;
@@ -1659,15 +1635,6 @@ mod compact_variable_mmb {
     }
 
     #[derive(Clone)]
-    struct StaticResolver {
-        state: sync::compact::State<
-            mmb::Family,
-            variable::Operation<mmb::Family, Vec<u8>>,
-            sha256::Digest,
-        >,
-    }
-
-    #[derive(Clone)]
     struct SequenceResolver {
         states: Arc<commonware_utils::sync::Mutex<VecDeque<CompactFetchResult>>>,
     }
@@ -1677,21 +1644,6 @@ mod compact_variable_mmb {
         variable::Operation<mmb::Family, Vec<u8>>,
         sha256::Digest,
     >;
-
-    impl sync::compact::Resolver for StaticResolver {
-        type Family = mmb::Family;
-        type Digest = sha256::Digest;
-        type Op = variable::Operation<mmb::Family, Vec<u8>>;
-        type Error = qmdb::Error<mmb::Family>;
-
-        async fn get_compact_state(
-            &self,
-            _target: sync::compact::Target<Self::Family, Self::Digest>,
-        ) -> Result<sync::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
-        {
-            Ok(self.state.clone().into())
-        }
-    }
 
     impl sync::compact::Resolver for SequenceResolver {
         type Family = mmb::Family;
