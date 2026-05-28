@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
+use commonware_p2p::Recipients;
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{error, warn};
@@ -45,17 +46,37 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         receiver
     }
 
-    /// Broadcasts a payload to all registered recipients.
-    pub fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
-        // Send to all recipients
+    /// Broadcasts a payload to selected recipients.
+    pub fn broadcast(&self, sender: &P, recipients: Recipients<P>, (payload, data): (D, Bytes)) {
         let channels = {
             let mut channels = Vec::new();
-            let recipients = self.recipients.lock();
-            for (public_key, channel) in recipients.iter() {
-                if public_key == sender {
-                    continue;
+            let registered = self.recipients.lock();
+            match recipients {
+                Recipients::All => {
+                    for (public_key, channel) in registered.iter() {
+                        if public_key == sender {
+                            continue;
+                        }
+                        channels.push((public_key.clone(), channel.clone()));
+                    }
                 }
-                channels.push((public_key.clone(), channel.clone()));
+                Recipients::Some(peers) => {
+                    for public_key in peers {
+                        if &public_key == sender {
+                            continue;
+                        }
+                        if let Some(channel) = registered.get(&public_key) {
+                            channels.push((public_key, channel.clone()));
+                        }
+                    }
+                }
+                Recipients::One(public_key) => {
+                    if public_key != *sender {
+                        if let Some(channel) = registered.get(&public_key) {
+                            channels.push((public_key, channel.clone()));
+                        }
+                    }
+                }
             }
             channels
         };

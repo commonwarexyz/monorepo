@@ -81,7 +81,10 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
-    use commonware_p2p::simulated::{Config as NConfig, Link, Network, Oracle};
+    use commonware_p2p::{
+        simulated::{Config as NConfig, Link, Network, Oracle},
+        Recipients,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
@@ -2812,7 +2815,7 @@ mod tests {
                     .as_slice(),
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal);
 
             // Wait for nullify vote for target_view. Since timeouts are 10s, receiving it
@@ -3365,7 +3368,7 @@ mod tests {
                 7u64,
             )
                 .encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal);
 
             // With 10s timeouts, seeing nullify within 1s proves we fast-pathed on dropped verify.
@@ -3780,7 +3783,11 @@ mod tests {
                 11u64,
             )
                 .encode();
-            relay.broadcast(&target_leader, (proposal.payload, contents));
+            relay.broadcast(
+                &target_leader,
+                Recipients::All,
+                (proposal.payload, contents),
+            );
             mailbox.proposal(proposal);
 
             // We should still broadcast for target_view (typically a nullify after timeout).
@@ -3966,7 +3973,7 @@ mod tests {
 
             // Broadcast payload and send proposal
             let contents = (proposal3.round, proposal2.payload, 0u64).encode();
-            relay.broadcast(&me, (digest3, contents));
+            relay.broadcast(&me, Recipients::All, (digest3, contents));
             mailbox.proposal(proposal3.clone());
 
             // Send notarization
@@ -4930,7 +4937,7 @@ mod tests {
                 Sha256::hash(b"follower_proposal"),
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader_pk, (proposal.payload, contents));
+            relay.broadcast(&leader_pk, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Wait for our local notarize (journaled) so replay has something to restore.
@@ -5830,7 +5837,7 @@ mod tests {
 
             // Broadcast payload
             let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
-            relay.broadcast(&me, (digest5, contents));
+            relay.broadcast(&me, Recipients::All, (digest5, contents));
 
             // Send proposal to verify
             mailbox.proposal(proposal5.clone());
@@ -6014,7 +6021,7 @@ mod tests {
 
             // Broadcast payload
             let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
-            relay.broadcast(&me, (digest5, contents));
+            relay.broadcast(&me, Recipients::All, (digest5, contents));
 
             // Send proposal and notarization
             mailbox.proposal(proposal5.clone());
@@ -6361,7 +6368,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Wait for notarize vote
@@ -6647,7 +6654,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
-                .broadcast(&leader, (proposal.payload, contents));
+                .broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Build and send notarization so the voter tries to certify
@@ -6839,7 +6846,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
@@ -7062,7 +7069,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal_4.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal_4.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal_4.payload, contents));
             mailbox.proposal(proposal_4.clone());
 
             let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
@@ -7256,7 +7263,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Wait for notarize vote first (verification passes)
@@ -7389,7 +7396,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Wait for notarize vote (verification passes).
@@ -7537,7 +7544,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Ensure proposal verification path ran.
@@ -7960,7 +7967,7 @@ mod tests {
                 Sha256::hash(b"first_view_progress_without_timeout"),
             );
             let contents = (proposal.round, genesis, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // The voter should notarize view 1 and must not nullify it.
@@ -8179,7 +8186,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Send notarization to trigger certification.
@@ -8448,7 +8455,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
 
             // Send notarization to trigger certification.
@@ -8956,7 +8963,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, Sha256::hash(b"genesis"), 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents));
+            relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.resolved(Certificate::Notarization(notarization));
