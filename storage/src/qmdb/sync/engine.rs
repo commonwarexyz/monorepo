@@ -595,8 +595,6 @@ where
     {
         for op in operations {
             self.journal.append(op).await?;
-            // No need to sync here -- the journal will periodically sync its storage
-            // and we will also sync when we're done applying all operations.
         }
         Ok(())
     }

@@ -646,8 +646,7 @@ mod test {
             let fetched_value = db.get(&key).await.unwrap();
             assert_eq!(fetched_value.unwrap(), value);
 
-            // Simulate commit failure: drop without commit. The small batch fits in a single
-            // journal section so it is not auto-synced.
+            // Simulate commit failure: drop without commit.
             drop(db);
 
             // Re-open the store

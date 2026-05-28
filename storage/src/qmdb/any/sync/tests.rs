@@ -2290,6 +2290,7 @@ mod harnesses {
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }
@@ -2355,6 +2356,7 @@ mod harnesses {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }
@@ -2413,6 +2415,7 @@ mod harnesses {
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }
@@ -2483,6 +2486,7 @@ mod harnesses {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }
@@ -2563,6 +2567,7 @@ mod harnesses {
             db.apply_batch(merkleized).await.unwrap();
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }
@@ -2650,6 +2655,7 @@ mod harnesses {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }
@@ -2730,6 +2736,7 @@ mod harnesses {
             db.apply_batch(merkleized).await.unwrap();
             let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }
@@ -2820,6 +2827,7 @@ mod harnesses {
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
             db
         }
     }

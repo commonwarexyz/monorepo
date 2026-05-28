@@ -105,6 +105,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                     "trailing bytes detected: truncating"
                 );
                 manager.rewind_section(section, valid_size).await?;
+                // Startup repair is exceptional; make it durable immediately so callers do not
+                // need to track repaired sections separately.
+                manager.sync(section).await?;
             }
         }
 
