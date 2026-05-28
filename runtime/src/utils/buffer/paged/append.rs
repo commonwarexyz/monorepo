@@ -17,9 +17,9 @@
 //! # Blob Semantics
 //!
 //! [Append] owns the physical page layout, read cache, and durability bookkeeping for the wrapped
-//! [Blob]. Cloned [Append] handles share that state and are safe to use concurrently. Raw [Blob]
-//! handles cloned before wrapping operate on physical bytes, including checksum records, rather
-//! than [Append]'s logical view, and they do not observe buffered data until it is flushed.
+//! [Blob]. Raw [Blob] handles cloned before wrapping operate on physical bytes, including checksum
+//! records, rather than [Append]'s logical view, and they do not observe buffered data until it is
+//! flushed.
 //!
 //! Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while an
 //! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
@@ -1147,17 +1147,6 @@ impl<B: Blob> Append<B> {
 
     /// Consume this writable handle and return a read-only [`super::Sealed`] view of the same
     /// blob.
-    ///
-    /// `seal` first makes all buffered data durable, then constructs a `Sealed` that shares this
-    /// blob's page-cache identity, so any pages already cached remain hot. The partial last page's
-    /// logical bytes (if any) are captured in memory because the page cache only stores full pages.
-    ///
-    /// # Concurrency
-    ///
-    /// `Append<B>` is `Clone`. Consuming `self` does not prevent other clones from continuing to
-    /// mutate the blob. Callers must arrange that no other writable handle remains live for this
-    /// blob once it has been sealed; the resulting `Sealed` cannot defend itself against concurrent
-    /// writes.
     pub async fn seal(self) -> Result<super::Sealed<B>, Error> {
         // Make all buffered data durable so the sealed view sees a fully committed blob.
         self.sync().await?;
