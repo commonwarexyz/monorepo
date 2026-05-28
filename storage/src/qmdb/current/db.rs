@@ -791,8 +791,11 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.metadata.into_inner().destroy().await?;
-        self.any.destroy().await
+        // Destructure before the await boundary to avoid stack growth from
+        // retaining the entire `self` in the future.
+        let Self { any, metadata, .. } = self;
+        metadata.into_inner().destroy().await?;
+        any.destroy().await
     }
 }
 
