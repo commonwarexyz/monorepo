@@ -18,7 +18,7 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_codec::FixedSize;
 use commonware_cryptography::{sha256, Hasher as CryptoHasher};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, BufferPooler};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     mmr::{self, full::Config as MmrConfig, Location, Proof},
@@ -28,6 +28,7 @@ use commonware_storage::{
         current::{self, FixedConfig as Config},
         operation::Committable,
     },
+    Context as StorageContext,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -76,7 +77,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
 
 impl<E> super::ExampleDatabase for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
 {
     type Family = mmr::Family;
     type Operation = Operation;
@@ -157,7 +158,7 @@ where
 
 impl<E> super::Syncable for Database<E>
 where
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
 {
     async fn size(&self) -> Location {
         self.bounds().await.end

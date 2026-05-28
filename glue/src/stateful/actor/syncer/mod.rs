@@ -13,8 +13,11 @@ use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{self, Metadata};
+use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
+use commonware_storage::{
+    metadata::{self, Metadata},
+    Context as StorageContext,
+};
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand::Rng;
 
@@ -215,7 +218,7 @@ where
 /// Durable state-sync metadata.
 pub(crate) struct StateSyncMetadata<E, C>
 where
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     C: Digest,
 {
     partition_prefix: String,
@@ -224,7 +227,7 @@ where
 
 impl<E, C> StateSyncMetadata<E, C>
 where
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     C: Digest,
 {
     /// Load the durable state-sync metadata partition, creating it if needed.
@@ -381,7 +384,7 @@ pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     mut sync_metadata: StateSyncMetadata<E, V::Commitment>,
 ) -> StartupResult<E, A>
 where
-    E: Rng + Storage + Spawner + Clock + Metrics,
+    E: Rng + Spawner + StorageContext,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,

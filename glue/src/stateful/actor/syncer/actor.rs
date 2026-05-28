@@ -13,7 +13,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
+use commonware_storage::Context as StorageContext;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
@@ -28,7 +29,7 @@ use tracing::debug;
 /// Configuration for [`Syncer`].
 pub struct Config<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + StorageContext,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
@@ -61,7 +62,7 @@ where
 
 pub struct Syncer<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + StorageContext,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
@@ -100,7 +101,7 @@ where
 
 impl<E, A, R, S, V> Syncer<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock + Storage,
+    E: Rng + Spawner + StorageContext,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     R: Send + Sync + 'static,

@@ -15,11 +15,11 @@ use crate::{
         Error, ROOT_BAGGING,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Type alias for a variable-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
@@ -40,15 +40,8 @@ pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
 /// Configuration for a variable-size compact immutable db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
-impl<
-        F: Family,
-        E: Storage + Clock + Metrics,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, S>
+impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
+    Db<F, E, K, V, H, T, S>
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -70,7 +63,7 @@ impl<
 
 impl<
         F: Family,
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: VariableValue,
         H: Hasher,

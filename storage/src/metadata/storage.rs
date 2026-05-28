@@ -4,7 +4,7 @@ use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufMut, Error as RError,
+    Blob, BufMut, Error as RError, IoBufMut,
 };
 use commonware_utils::{sync::AsyncMutex, Span};
 use futures::future::try_join_all;
@@ -33,12 +33,12 @@ struct Wrapper<B: Blob, K: Span> {
     version: u64,
     lengths: HashMap<K, Info>,
     modified: BTreeSet<K>,
-    data: Vec<u8>,
+    data: IoBufMut,
 }
 
 impl<B: Blob, K: Span> Wrapper<B, K> {
     /// Create a new [Wrapper].
-    const fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
+    const fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: IoBufMut) -> Self {
         Self {
             blob,
             version,
@@ -55,7 +55,7 @@ impl<B: Blob, K: Span> Wrapper<B, K> {
             version: 0,
             lengths: HashMap::new(),
             modified: BTreeSet::new(),
-            data: Vec::new(),
+            data: IoBufMut::default(),
         }
     }
 }
@@ -90,9 +90,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Find latest blob (check which includes a hash of the other)
         let (left_map, left_wrapper) =
-            Self::load(&cfg.codec_config, 0, left_blob, left_len).await?;
+            Self::load(&context, &cfg.codec_config, 0, left_blob, left_len).await?;
         let (right_map, right_wrapper) =
-            Self::load(&cfg.codec_config, 1, right_blob, right_len).await?;
+            Self::load(&context, &cfg.codec_config, 1, right_blob, right_len).await?;
 
         // Choose latest blob
         let mut map = left_map;
@@ -135,6 +135,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     }
 
     async fn load(
+        context: &E,
         codec_config: &V::Cfg,
         index: usize,
         blob: E::Blob,
@@ -148,7 +149,10 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
 
         // Read blob
         let len: usize = len.try_into().expect("blob too large for platform");
-        let buf = blob.read_at(0, len).await?.coalesce();
+        let buf = blob
+            .read_at(0, len)
+            .await?
+            .coalesce_with_pool(context.storage_buffer_pool());
 
         // Verify integrity.
         //
@@ -208,10 +212,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Return info
-        Ok((
-            data,
-            Wrapper::new(blob, version, lengths, buf.freeze().into()),
-        ))
+        Ok((data, Wrapper::new(blob, version, lengths, buf)))
     }
 
     /// Get a value from [Metadata] (if it exists).
@@ -367,21 +368,20 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         // Get a mutable reference to the target blob.
         let target = &mut state.blobs[target_cursor];
 
-        // Determine if we can overwrite existing data in place, and prepare the list of data to
-        // write in that event.
+        // Determine if we can overwrite existing data in place, updating the in-memory mirror for
+        // equal-size values as we go.
         let mut overwrite = true;
-        let mut writes = vec![];
         if key_order_changed < past_version {
-            let write_capacity = target.modified.len() + 2;
-            writes.reserve(write_capacity);
             for key in target.modified.iter() {
                 let info = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
                 if info.length == new_value.encode_size() {
                     // Overwrite existing value
-                    let encoded = new_value.encode_mut();
-                    target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
-                    writes.push(target.blob.write_at(info.start as u64, encoded));
+                    let start = info.start;
+                    let end = start + info.length;
+                    let mut buf = &mut target.data.as_mut()[start..end];
+                    new_value.write(&mut buf);
+                    assert!(buf.is_empty(), "write() did not write expected bytes");
                 } else {
                     // Rewrite all
                     overwrite = false;
@@ -393,52 +393,92 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             overwrite = false;
         }
 
-        // Clear modified keys to avoid writing the same data
-        target.modified.clear();
-
         // Overwrite existing data
         if overwrite {
             // Update version
-            let version = next_version.to_be_bytes();
-            target.data[0..8].copy_from_slice(&version);
-            writes.push(target.blob.write_at(0, version.as_slice().into()));
+            (&mut target.data.as_mut()[0..u64::SIZE]).put_u64(next_version);
 
             // Update checksum
             let checksum_index = target.data.len() - crc32::Digest::SIZE;
-            let checksum = Crc32::checksum(&target.data[..checksum_index]).to_be_bytes();
-            target.data[checksum_index..].copy_from_slice(&checksum);
-            writes.push(
-                target
-                    .blob
-                    .write_at(checksum_index as u64, checksum.as_slice().into()),
-            );
+            let checksum = Crc32::checksum(&target.data.as_ref()[..checksum_index]);
+            (&mut target.data.as_mut()[checksum_index..]).put_u32(checksum);
 
-            // Persist changes
+            // Freeze the mirror so async writes can hold zero-copy slices, then recover the
+            // mutable mirror after all writes complete.
+            let data = std::mem::take(&mut target.data).freeze();
+            let writes = target
+                .modified
+                .iter()
+                .map(|key| {
+                    let info = target.lengths.get(key).expect("key must exist");
+                    let range = info.start..info.start + info.length;
+                    target.blob.write_at(range.start as u64, data.slice(range))
+                })
+                .chain([
+                    target.blob.write_at(0, data.slice(0..u64::SIZE)),
+                    target.blob.write_at(
+                        checksum_index as u64,
+                        data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
+                    ),
+                ]);
             try_join_all(writes).await?;
             target.blob.sync().await?;
 
+            // Clear modified keys to avoid writing the same data
+            target.modified.clear();
+
             // Update state
             target.version = next_version;
+            target.data = data.into_mut_with_pool(self.context.storage_buffer_pool());
             self.sync_overwrites.inc();
             return Ok(());
         }
 
+        // Clear modified keys to avoid writing the same data
+        target.modified.clear();
+
         // Since we can't overwrite in place, we rewrite the entire blob.
-        let mut lengths = HashMap::new();
-        let mut next_data = Vec::with_capacity(target.data.len());
+        // Pooled buffers do not grow, so compute the final encoded length before
+        // selecting a destination buffer.
+        let mut lengths = HashMap::with_capacity(self.map.len());
+        let mut next_data_len = u64::SIZE + crc32::Digest::SIZE;
+        for (key, value) in &self.map {
+            let value_len = value.encode_size();
+            lengths.insert(key.clone(), Info::new(0, value_len));
+            next_data_len += key.encode_size() + value_len;
+        }
+
+        // Capture the old length before reusing this buffer so shrinking
+        // rewrites still resize the persisted blob.
+        let target_data_len = target.data.len();
+
+        // Reuse the existing blob mirror when its allocation is already large enough.
+        let mut next_data = if target.data.capacity() >= next_data_len {
+            let mut data = std::mem::take(&mut target.data);
+            data.clear();
+            data
+        } else {
+            self.context.storage_buffer_pool().alloc(next_data_len)
+        };
         next_data.put_u64(next_version);
 
         // Build new data
         for (key, value) in &self.map {
             key.write(&mut next_data);
-            let start = next_data.len();
+            let info = lengths.get_mut(key).expect("key must exist");
+            info.start = next_data.len();
             value.write(&mut next_data);
-            lengths.insert(key.clone(), Info::new(start, value.encode_size()));
         }
-        next_data.put_u32(Crc32::checksum(&next_data[..]));
+        assert_eq!(
+            next_data.len(),
+            next_data_len - crc32::Digest::SIZE,
+            "write() did not write expected bytes"
+        );
+        next_data.put_u32(Crc32::checksum(next_data.as_ref()));
 
         // Shrinking rewrites must also persist the resize, so they need a full sync.
-        if next_data.len() < target.data.len() {
+        let next_data = next_data.freeze();
+        if next_data.len() < target_data_len {
             target.blob.write_at(0, next_data.clone()).await?;
             target.blob.resize(next_data.len() as u64).await?;
             target.blob.sync().await?;
@@ -451,7 +491,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         // Update blob state
         target.version = next_version;
         target.lengths = lengths;
-        target.data = next_data;
+        target.data = next_data.into_mut_with_pool(self.context.storage_buffer_pool());
 
         self.sync_rewrites.inc();
         Ok(())

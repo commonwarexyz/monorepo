@@ -12,7 +12,6 @@ use crate::stateful::db::{
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::{
         fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
@@ -29,7 +28,7 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
-};
+    Context as StorageContext, };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
@@ -41,7 +40,7 @@ type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -59,7 +58,7 @@ where
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -78,7 +77,7 @@ where
 impl<F, E, K, V, C, H, T, S> ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -128,7 +127,7 @@ where
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -144,7 +143,7 @@ where
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -163,7 +162,7 @@ where
 impl<F, E, K, V, C, H, T, S> ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -190,7 +189,7 @@ where
 impl<F, E, K, V, C, H, T, S> UnmerkleizedTrait for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -219,7 +218,7 @@ where
 impl<F, E, K, V, C, H, T, S> MerkleizedTrait for ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
@@ -248,7 +247,7 @@ where
 impl<F, E, K, V, H, T, S> ManagedDb<E> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -332,7 +331,7 @@ where
 impl<F, E, K, V, H, T, S> ManagedDb<E> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,
@@ -417,7 +416,7 @@ where
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for fixed::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher + 'static,
@@ -457,7 +456,7 @@ where
 impl<F, E, K, V, H, T, R, S> StateSyncDb<E, R> for variable::Db<F, E, K, V, H, T, S>
 where
     F: Family,
-    E: Storage + Clock + Metrics,
+    E: StorageContext,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher + 'static,

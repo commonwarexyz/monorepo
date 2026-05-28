@@ -14,11 +14,11 @@ use crate::{
         operation::Committable,
         Error, ROOT_BAGGING,
     },
+    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 /// Keyless operation for variable-length values.
 pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
@@ -39,9 +39,7 @@ pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
 /// Configuration for a variable-size [keyless](super) compact db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
-impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: Strategy>
-    Db<F, E, V, H, S>
-{
+impl<F: Family, E: Context, V: VariableValue, H: Hasher, S: Strategy> Db<F, E, V, H, S> {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
@@ -62,7 +60,7 @@ impl<F: Family, E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, S: St
 
 impl<
         F: Family,
-        E: Storage + Clock + Metrics,
+        E: Context,
         V: VariableValue,
         H: Hasher,
         C: Clone + Send + Sync + 'static,
