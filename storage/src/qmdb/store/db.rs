@@ -975,6 +975,38 @@ mod test {
         });
     }
 
+    #[test_traced("WARN")]
+    pub fn test_store_commit_after_sync_recovers_without_second_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
+            let key0 = Blake3::hash(&0u64.to_be_bytes());
+            let key1 = Blake3::hash(&1u64.to_be_bytes());
+            let value0 = vec![0, 1, 2];
+            let value1 = vec![3, 4, 5, 6];
+
+            // Commit and sync an initial update so restart recovery has an older watermark.
+            apply_entries(&mut db, [(key0, Some(value0.clone()))]).await;
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+
+            // Persist a later commit without syncing; recovery must replay it after reopen.
+            apply_entries(&mut db, [(key1, Some(value1.clone()))]).await;
+            db.commit().await.unwrap();
+            let committed_end = db.bounds().await.end;
+            let committed_floor = db.inactivity_floor_loc();
+            drop(db);
+
+            let db = create_test_store(context.child("store").with_attribute("index", 1)).await;
+            assert_eq!(db.bounds().await.end, committed_end);
+            assert_eq!(db.inactivity_floor_loc(), committed_floor);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("DEBUG")]
     fn test_store_batch() {
         let executor = deterministic::Runner::default();

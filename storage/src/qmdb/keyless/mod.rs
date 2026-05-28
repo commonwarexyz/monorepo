@@ -641,6 +641,56 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    pub(crate) async fn test_keyless_db_commit_after_sync_recovery<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        context: deterministic::Context,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let value0 = V::Value::make(10);
+        let value1 = V::Value::make(20);
+
+        // Commit and sync the first append so recovery has an older durable boundary.
+        let first_loc = Location::new(1);
+        let merkleized =
+            db.new_batch()
+                .append(value0.clone())
+                .merkleize(&db, None, db.inactivity_floor_loc());
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+        db.sync().await.unwrap();
+
+        // Commit the next append without syncing; reopen must replay it from the journal.
+        let second_loc = db.bounds().await.end;
+        let merkleized =
+            db.new_batch()
+                .append(value1.clone())
+                .merkleize(&db, None, db.inactivity_floor_loc());
+        db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap();
+        let committed_bounds = db.bounds().await;
+        let committed_root = db.root();
+        drop(db);
+
+        let db = reopen(context.child("db").with_attribute("index", 2)).await;
+        assert_eq!(db.bounds().await, committed_bounds);
+        assert_eq!(db.root(), committed_root);
+        assert_eq!(db.get(first_loc).await.unwrap(), Some(value0));
+        assert_eq!(db.get(second_loc).await.unwrap(), Some(value1));
+
+        db.destroy().await.unwrap();
+    }
+
     pub(crate) async fn test_keyless_db_build_basic<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
