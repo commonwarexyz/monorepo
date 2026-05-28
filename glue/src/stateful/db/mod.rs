@@ -318,7 +318,7 @@ pub struct SyncEngineConfig {
     pub max_retained_roots: usize,
 }
 
-/// A [`ManagedDb`] with a startup state-sync entrypoint.
+/// A [`ManagedDb`] with a state-sync entrypoint.
 pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// Error returned by the state-sync engine for this database.
     type SyncError: Debug + Send;
@@ -413,10 +413,10 @@ pub trait StateSyncSet<E, R, D>: DatabaseSet<E>
 where
     D: Digest,
 {
-    /// Error returned if any database in the set fails startup state-sync.
+    /// Error returned if any database in the set fails state sync.
     type Error: Debug + Send;
 
-    /// Run one-time startup state-sync and return the initialized set
+    /// Run one-time state sync and return the initialized set
     /// together with the anchor all databases converged on.
     #[allow(clippy::too_many_arguments)]
     fn sync(

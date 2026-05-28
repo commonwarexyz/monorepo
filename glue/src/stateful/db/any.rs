@@ -541,7 +541,7 @@ where
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        let config = sync::engine::Config {
+        sync::sync(sync::engine::Config {
             context,
             resolver,
             target,
@@ -553,8 +553,8 @@ where
             finish_rx: finish,
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
-        };
-        sync::sync(config).await
+        })
+        .await
     }
 }
 
@@ -596,7 +596,7 @@ where
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        let config = sync::engine::Config {
+        sync::sync(sync::engine::Config {
             context,
             resolver,
             target,
@@ -608,7 +608,7 @@ where
             finish_rx: finish,
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
-        };
-        sync::sync(config).await
+        })
+        .await
     }
 }

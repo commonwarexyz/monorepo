@@ -58,8 +58,8 @@ pub trait Database: Sized + Send {
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return locally available boundary nodes for the target, if the local database already
-    /// authenticates the target state.
+    /// Return locally available boundary nodes for the target, if the local database can
+    /// authenticate them.
     fn local_boundary_nodes(
         _context: Self::Context,
         _config: &Self::Config,

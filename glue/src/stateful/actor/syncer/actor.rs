@@ -167,7 +167,7 @@ where
                         state_sync_task = None.into();
                     }
                     Err(err) => {
-                        error!(?err, "critical: state sync task failed");
+                        error!(?err, "state sync task failed");
                         panic!("state sync task failed: {err:?}");
                     }
                 }
@@ -200,7 +200,7 @@ where
                                 state_sync_task = None.into();
                             }
                             Err(err) => {
-                                error!(?err, "critical: state sync task failed");
+                                error!(?err, "state sync task failed");
                                 panic!("state sync task failed: {err:?}");
                             }
                         }
