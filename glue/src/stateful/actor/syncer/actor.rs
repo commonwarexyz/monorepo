@@ -1,12 +1,17 @@
 use super::{
     mailbox::{Mailbox, Message},
-    BlockDigest, SyncResult,
+    resolve_state_sync_floor, set_sync_in_progress, BlockDigest, SyncResult,
 };
 use crate::stateful::{
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
+use commonware_consensus::{
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
+    simplex::types::Finalization,
+};
+use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_utils::{
@@ -19,11 +24,13 @@ use rand::Rng;
 use tracing::{debug, error};
 
 /// Configuration for [`Syncer`].
-pub struct Config<E, A, R>
+pub struct Config<E, A, R, S, V>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    S: Scheme,
+    V: Variant<ApplicationBlock = A::Block>,
 {
     /// Runtime context used for metadata and database initialization.
     pub context: E,
@@ -37,21 +44,26 @@ where
     /// Per-database resolvers used to fetch state from peers.
     pub resolvers: R,
 
-    /// Anchor where state sync begins.
-    pub starting_anchor: Anchor<BlockDigest<A, E>>,
+    /// Prefix for durable state-sync metadata.
+    pub partition_prefix: String,
 
-    /// Initial targets derived from the resolved startup floor block.
-    pub starting_targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
+    /// Finalized floor marshal should resolve before sync starts.
+    pub finalization: Finalization<S, V::Commitment>,
+
+    /// Marshal mailbox used to query the finalized floor.
+    pub marshal: MarshalMailbox<S, V>,
 
     /// Notifies the stateful actor when state sync has produced an artifact.
     pub sync_complete: oneshot::Sender<SyncResult<E, A>>,
 }
 
-pub struct Syncer<E, A, R>
+pub struct Syncer<E, A, R, S, V>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    S: Scheme,
+    V: Variant<ApplicationBlock = A::Block>,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -71,24 +83,29 @@ where
     /// Per-database resolvers used to fetch state from peers.
     resolvers: R,
 
-    /// Anchor where state sync begins.
-    starting_anchor: Anchor<BlockDigest<A, E>>,
+    /// Prefix for durable state-sync metadata.
+    partition_prefix: String,
 
-    /// Initial targets derived from the resolved startup floor block.
-    starting_targets: <A::Databases as DatabaseSet<E>>::SyncTargets,
+    /// Finalized floor marshal should resolve before sync starts.
+    finalization: Finalization<S, V::Commitment>,
+
+    /// Marshal mailbox used to query the finalized floor.
+    marshal: MarshalMailbox<S, V>,
 
     /// Notifies the stateful actor when state sync has produced an artifact.
     sync_complete: Option<oneshot::Sender<SyncResult<E, A>>>,
 }
 
-impl<E, A, R> Syncer<E, A, R>
+impl<E, A, R, S, V> Syncer<E, A, R, S, V>
 where
     E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     R: Send + Sync + 'static,
+    S: Scheme,
+    V: Variant<ApplicationBlock = A::Block>,
 {
-    pub fn new(config: Config<E, A, R>) -> (Self, Mailbox<E, A>) {
+    pub fn new(config: Config<E, A, R, S, V>) -> (Self, Mailbox<E, A>) {
         let (sender, receiver) = actor_mailbox::new(config.context.child("mailbox"), NZUsize!(1));
         let mailbox = Mailbox::new(sender);
         (
@@ -99,8 +116,9 @@ where
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
-                starting_anchor: config.starting_anchor,
-                starting_targets: config.starting_targets,
+                partition_prefix: config.partition_prefix,
+                finalization: config.finalization,
+                marshal: config.marshal,
                 sync_complete: Some(config.sync_complete),
             },
             mailbox,
@@ -112,13 +130,22 @@ where
     }
 
     pub async fn run(mut self) {
+        let resolved_floor =
+            resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
+        set_sync_in_progress(
+            self.context.as_present(),
+            self.partition_prefix.as_str(),
+            resolved_floor.marker,
+        )
+        .await;
+
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut state_sync_task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
             self.context.child("state_sync"),
             self.db_config,
             self.resolvers,
-            self.starting_anchor,
-            self.starting_targets,
+            resolved_floor.anchor,
+            resolved_floor.targets,
             tip_updates_rx,
             self.sync_config,
         ))));

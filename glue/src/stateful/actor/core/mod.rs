@@ -168,23 +168,16 @@ where
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
-        let resolved_floor =
-            syncer::resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &floor).await;
-        syncer::set_sync_in_progress(
-            self.context.as_present(),
-            self.plan.partition_prefix(),
-            resolved_floor.marker,
-        )
-        .await;
-
+        let partition_prefix = self.plan.partition_prefix().to_string();
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
-            starting_anchor: resolved_floor.anchor,
-            starting_targets: resolved_floor.targets,
+            partition_prefix: partition_prefix.clone(),
+            finalization: floor,
+            marshal: self.marshal.clone(),
             sync_complete,
         });
         let syncing = Syncing {
@@ -193,7 +186,7 @@ where
             application: self.application,
             input_provider: self.input_provider,
             marshal: self.marshal,
-            partition_prefix: self.plan.partition_prefix().to_string(),
+            partition_prefix,
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
             database_subscribers: Vec::new(),
@@ -235,5 +228,187 @@ where
         }
         .start()
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, Stateful};
+    use crate::stateful::{
+        actor::syncer::SyncPlan,
+        db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
+        tests::mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+    };
+    use commonware_consensus::{
+        marshal::{self, ancestry, core::Actor as MarshalActor},
+        simplex::{
+            mocks::scheme as scheme_mocks,
+            types::{Finalization, Finalize, Proposal},
+        },
+        types::{Epoch, FixedEpocher, Round, View, ViewDelta},
+        Application as _, CertifiableBlock as _,
+    };
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, ConstantProvider},
+        sha256::Digest as Sha256Digest,
+    };
+    use commonware_macros::select;
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
+    };
+    use commonware_storage::archive::immutable;
+    use commonware_utils::{channel::mpsc, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+    use std::{convert::Infallible, sync::Arc, time::Duration};
+
+    #[derive(Clone)]
+    struct NoopResolver;
+
+    impl AttachableResolver<TestDb> for NoopResolver {
+        async fn attach_database(&self, _db: Arc<AsyncRwLock<TestDb>>) {}
+    }
+
+    impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: deterministic::Context,
+            _config: Self::Config,
+            _resolver: NoopResolver,
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            Ok(Self)
+        }
+    }
+
+    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
+        immutable::Config {
+            metadata_partition: format!("{partition}-metadata"),
+            freezer_table_partition: format!("{partition}-table"),
+            freezer_table_initial_size: 4,
+            freezer_table_resize_frequency: 2,
+            freezer_table_resize_chunk_size: 2,
+            freezer_key_partition: format!("{partition}-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{partition}-value"),
+            freezer_value_target_size: 128,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{partition}-ordinal"),
+            items_per_section: NZU64!(4),
+            codec_config: (),
+            replay_buffer: NZUsize!(64),
+            freezer_key_write_buffer: NZUsize!(64),
+            freezer_value_write_buffer: NZUsize!(64),
+            ordinal_write_buffer: NZUsize!(64),
+        }
+    }
+
+    fn build_finalization(
+        fixture: &Fixture<TestScheme>,
+        payload: Sha256Digest,
+    ) -> Finalization<TestScheme, Sha256Digest> {
+        let proposal = Proposal::new(
+            Round::new(Epoch::zero(), View::new(1)),
+            View::zero(),
+            payload,
+        );
+        let votes: Vec<_> = fixture
+            .schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+
+        Finalization::from_finalizes(&fixture.verifier, &votes, &Sequential)
+            .expect("finalization quorum")
+    }
+
+    #[test]
+    fn mailbox_rejects_propose_while_floor_resolution_waits() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"pending-floor", 1);
+            let provider = ConstantProvider::new(fixture.schemes[0].clone());
+            let finalization = build_finalization(&fixture, Sha256Digest::from([7; 32]));
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+            let finalizations_by_height = immutable::Archive::init(
+                context.child("finalizations_by_height"),
+                archive_config(page_cache.clone(), "pending-floor-finalizations"),
+            )
+            .await
+            .expect("failed to initialize finalizations archive");
+            let finalized_blocks = immutable::Archive::init(
+                context.child("finalized_blocks"),
+                archive_config(page_cache.clone(), "pending-floor-blocks"),
+            )
+            .await
+            .expect("failed to initialize blocks archive");
+
+            let (_marshal_actor, marshal, _height) =
+                MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
+                    context.child("marshal"),
+                    finalizations_by_height,
+                    finalized_blocks,
+                    marshal::Config {
+                        provider,
+                        epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                        start: marshal::Start::Genesis(TestBlock::new(0, 0)),
+                        partition_prefix: "pending-floor-marshal".to_string(),
+                        mailbox_size: NZUsize!(8),
+                        view_retention_timeout: ViewDelta::new(1),
+                        prunable_items_per_section: NZU64!(4),
+                        page_cache,
+                        replay_buffer: NZUsize!(64),
+                        key_write_buffer: NZUsize!(64),
+                        value_write_buffer: NZUsize!(64),
+                        block_codec_config: (),
+                        max_repair: NZUsize!(1),
+                        max_pending_acks: NZUsize!(1),
+                        strategy: Sequential,
+                    },
+                )
+                .await;
+
+            let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
+            let (stateful, mut mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp,
+                    db_config: (),
+                    input_provider: (),
+                    marshal,
+                    max_pending_acks: NZUsize!(1),
+                    mailbox_size: NZUsize!(8),
+                    plan: plan.with_floor(finalization),
+                    resolvers: NoopResolver,
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: 1,
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                },
+            );
+            let handle = stateful.start();
+
+            select! {
+                result = mailbox.propose(
+                    (context.child("proposal"), TestBlock::new(1, 1).context()),
+                    ancestry::from_iter([]),
+                ) => {
+                    assert!(result.is_none());
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("stateful mailbox stalled while resolving state sync floor");
+                },
+            }
+
+            handle.abort();
+        });
     }
 }
