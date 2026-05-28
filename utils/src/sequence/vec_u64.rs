@@ -68,14 +68,22 @@ impl Read for VecU64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, DecodeRangeExt, Encode};
 
     #[test]
     fn test_vec_u64_matches_vec_encoding() {
-        for value in [0u64, 1, 42, u64::MAX] {
-            let encoded = VecU64(value).encode();
-            assert_eq!(encoded, value.to_be_bytes().to_vec().encode());
-            assert_eq!(u64::from(VecU64::decode(encoded).unwrap()), value);
+        for value in [0u64, 1, 8, 42, 255, 256, u64::MAX - 1, u64::MAX] {
+            let vec = value.to_be_bytes().to_vec();
+            let vec_u64 = VecU64(value);
+
+            // `VecU64` encodes byte-identically to a `Vec<u8>` of the big-endian bytes.
+            assert_eq!(vec_u64.encode(), vec.encode());
+
+            // A `Vec<u8>` reader decodes the bytes written by `VecU64`.
+            assert_eq!(Vec::<u8>::decode_range(vec_u64.encode(), ..).unwrap(), vec);
+
+            // A `VecU64` reader decodes the bytes written as a `Vec<u8>`.
+            assert_eq!(VecU64::decode(vec.encode()).unwrap(), vec_u64);
         }
     }
 
