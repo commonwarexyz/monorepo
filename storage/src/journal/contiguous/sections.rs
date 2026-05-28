@@ -9,6 +9,10 @@
 //!
 //! `Sections` is the steady-state store: historical sections are immutable by construction (no
 //! write API on [`Sealed`]), and only the tail can mutate.
+//!
+//! Both phases share plumbing — partition I/O, metric registration, the prune guard — via the
+//! private [`SectionsCore`] type. Each phase owns its own collection of section handles; only the
+//! shape of that collection differs.
 
 use crate::journal::Error;
 use commonware_formatting::hex;
@@ -33,40 +37,85 @@ pub(super) struct Config {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Open the blob for `section` as an [`Append`].
-async fn open_append<E: Storage>(
-    context: &E,
-    partition: &str,
-    section: u64,
-    write_buffer: usize,
-    page_cache: &CacheRef,
-) -> Result<Append<E::Blob>, Error> {
-    let (blob, size) = context.open(partition, &section.to_be_bytes()).await?;
-    Append::new(blob, size, write_buffer, page_cache.clone())
-        .await
-        .map_err(Error::Runtime)
+/// Shared plumbing for [`SectionsInit`] and [`Sections`]: partition I/O, metrics, and the prune
+/// guard. Both phases embed a `SectionsCore` so blob open/remove, metric registration, and the
+/// prune-guard predicate are defined exactly once.
+struct SectionsCore<E: Storage + Metrics> {
+    context: E,
+    partition: String,
+    page_cache: CacheRef,
+    write_buffer: NonZeroUsize,
+
+    /// Sections pruned during this process's execution. Reads to sections below this value return
+    /// [`Error::AlreadyPrunedToSection`]. Not persisted across restarts. Only meaningful for the
+    /// steady-state [`Sections`]; [`SectionsInit`] ignores it.
+    oldest_retained_section: u64,
+
+    tracked: Gauge,
+    synced: Counter,
+    pruned: Counter,
 }
 
-/// Construct the shared metrics, initializing `tracked` to `n`.
-fn build_metrics<E: Metrics>(context: &E, n: usize) -> (Gauge, Counter, Counter) {
-    let tracked = context.gauge("tracked", "Number of blobs");
-    let synced = context.counter("synced", "Number of syncs");
-    let pruned = context.counter("pruned", "Number of blobs pruned");
-    let _ = tracked.try_set(n);
-    (tracked, synced, pruned)
+impl<E: Storage + Metrics> SectionsCore<E> {
+    /// Build the core from a freshly-scanned partition, initializing `tracked` to `n`.
+    fn build(context: E, cfg: Config, n: usize) -> Self {
+        let tracked = context.gauge("tracked", "Number of blobs");
+        let synced = context.counter("synced", "Number of syncs");
+        let pruned = context.counter("pruned", "Number of blobs pruned");
+        let _ = tracked.try_set(n);
+        Self {
+            context,
+            partition: cfg.partition,
+            page_cache: cfg.page_cache,
+            write_buffer: cfg.write_buffer,
+            oldest_retained_section: 0,
+            tracked,
+            synced,
+            pruned,
+        }
+    }
+
+    /// Open the blob for `section` as an [`Append`].
+    async fn open_append(&self, section: u64) -> Result<Append<E::Blob>, Error> {
+        let (blob, size) = self
+            .context
+            .open(&self.partition, &section.to_be_bytes())
+            .await?;
+        Append::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Remove a section's underlying blob from the partition.
+    async fn remove_blob(&self, section: u64) -> Result<(), Error> {
+        self.context
+            .remove(&self.partition, Some(&section.to_be_bytes()))
+            .await
+            .map_err(Error::Runtime)
+    }
+
+    /// Remove the partition itself. Treats `PartitionMissing` as success.
+    async fn remove_partition(&self) -> Result<(), Error> {
+        match self.context.remove(&self.partition, None).await {
+            Ok(()) | Err(RError::PartitionMissing(_)) => Ok(()),
+            Err(err) => Err(Error::Runtime(err)),
+        }
+    }
+
+    const fn prune_guard(&self, section: u64) -> Result<(), Error> {
+        if section < self.oldest_retained_section {
+            Err(Error::AlreadyPrunedToSection(self.oldest_retained_section))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Pre-tail-install state: every section is open as [`Append`] so the caller can perform recovery
 /// before sealing.
 pub(super) struct SectionsInit<E: Storage + Metrics> {
-    context: E,
-    partition: String,
-    page_cache: CacheRef,
-    write_buffer: NonZeroUsize,
+    core: SectionsCore<E>,
     pending: BTreeMap<u64, Append<E::Blob>>,
-    tracked: Gauge,
-    synced: Counter,
-    pruned: Counter,
 }
 
 impl<E: Storage + Metrics> SectionsInit<E> {
@@ -93,18 +142,8 @@ impl<E: Storage + Metrics> SectionsInit<E> {
             pending.insert(section, append);
         }
 
-        let (tracked, synced, pruned) = build_metrics(&context, pending.len());
-
-        Ok(Self {
-            context,
-            partition: cfg.partition,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.write_buffer,
-            pending,
-            tracked,
-            synced,
-            pruned,
-        })
+        let core = SectionsCore::build(context, cfg, pending.len());
+        Ok(Self { core, pending })
     }
 
     /// All known section numbers, in ascending order.
@@ -153,33 +192,17 @@ impl<E: Storage + Metrics> SectionsInit<E> {
     pub(super) async fn reset(mut self, tail_section: u64) -> Result<Sections<E>, Error> {
         for (section, blob) in take(&mut self.pending) {
             drop(blob);
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
+            self.core.remove_blob(section).await?;
         }
-        let blob = open_append(
-            &self.context,
-            &self.partition,
-            tail_section,
-            self.write_buffer.get(),
-            &self.page_cache,
-        )
-        .await?;
-        let _ = self.tracked.try_set(1);
+        let blob = self.core.open_append(tail_section).await?;
+        let _ = self.core.tracked.try_set(1);
         Ok(Sections {
-            context: self.context,
-            partition: self.partition,
-            page_cache: self.page_cache,
-            write_buffer: self.write_buffer,
+            core: self.core,
             sealed: BTreeMap::new(),
             tail: Some(Tail {
                 section: tail_section,
                 blob,
             }),
-            oldest_retained_section: 0,
-            tracked: self.tracked,
-            synced: self.synced,
-            pruned: self.pruned,
         })
     }
 
@@ -201,15 +224,8 @@ impl<E: Storage + Metrics> SectionsInit<E> {
                 blob: match self.pending.remove(&s) {
                     Some(existing) => existing,
                     None => {
-                        let blob = open_append(
-                            &self.context,
-                            &self.partition,
-                            s,
-                            self.write_buffer.get(),
-                            &self.page_cache,
-                        )
-                        .await?;
-                        self.tracked.inc();
+                        let blob = self.core.open_append(s).await?;
+                        self.core.tracked.inc();
                         blob
                     }
                 },
@@ -223,16 +239,9 @@ impl<E: Storage + Metrics> SectionsInit<E> {
         }
 
         Ok(Sections {
-            context: self.context,
-            partition: self.partition,
-            page_cache: self.page_cache,
-            write_buffer: self.write_buffer,
+            core: self.core,
             sealed,
             tail,
-            oldest_retained_section: 0,
-            tracked: self.tracked,
-            synced: self.synced,
-            pruned: self.pruned,
         })
     }
 }
@@ -245,21 +254,9 @@ struct Tail<B: Blob> {
 /// Steady-state section store. Historical sections are read-only [`Sealed`] handles; only the
 /// tail can mutate.
 pub(super) struct Sections<E: Storage + Metrics> {
-    context: E,
-    partition: String,
-    page_cache: CacheRef,
-    write_buffer: NonZeroUsize,
-
+    core: SectionsCore<E>,
     sealed: BTreeMap<u64, Sealed<E::Blob>>,
     tail: Option<Tail<E::Blob>>,
-
-    /// Sections pruned during this process's execution. Reads to sections below this value return
-    /// [`Error::AlreadyPrunedToSection`]. Not persisted across restarts.
-    oldest_retained_section: u64,
-
-    tracked: Gauge,
-    synced: Counter,
-    pruned: Counter,
 }
 
 impl<E: Storage + Metrics> Sections<E> {
@@ -268,25 +265,6 @@ impl<E: Storage + Metrics> Sections<E> {
         self.tail
             .as_ref()
             .and_then(|t| (t.section == section).then_some(&t.blob))
-    }
-
-    async fn open_append(&self, section: u64) -> Result<Append<E::Blob>, Error> {
-        open_append(
-            &self.context,
-            &self.partition,
-            section,
-            self.write_buffer.get(),
-            &self.page_cache,
-        )
-        .await
-    }
-
-    const fn prune_guard(&self, section: u64) -> Result<(), Error> {
-        if section < self.oldest_retained_section {
-            Err(Error::AlreadyPrunedToSection(self.oldest_retained_section))
-        } else {
-            Ok(())
-        }
     }
 
     /// Oldest section number across `sealed` and the tail.
@@ -332,7 +310,7 @@ impl<E: Storage + Metrics> Sections<E> {
     }
 
     pub(super) async fn section_size(&self, section: u64) -> Result<u64, Error> {
-        self.prune_guard(section)?;
+        self.core.prune_guard(section)?;
         if let Some(s) = self.sealed.get(&section) {
             return Ok(s.size());
         }
@@ -348,7 +326,7 @@ impl<E: Storage + Metrics> Sections<E> {
         offset: u64,
         len: usize,
     ) -> Result<IoBufs, Error> {
-        self.prune_guard(section)?;
+        self.core.prune_guard(section)?;
         if let Some(s) = self.sealed.get(&section) {
             return s.read_at(offset, len).await.map_err(Error::Runtime);
         }
@@ -365,7 +343,7 @@ impl<E: Storage + Metrics> Sections<E> {
         offsets: &[u64],
         item_size: usize,
     ) -> Result<(), Error> {
-        self.prune_guard(section)?;
+        self.core.prune_guard(section)?;
         if let Some(s) = self.sealed.get(&section) {
             return s
                 .read_many_into(buf, offsets, item_size)
@@ -384,7 +362,7 @@ impl<E: Storage + Metrics> Sections<E> {
     /// Synchronous read attempt for a section. Returns `true` only if the full range was satisfied
     /// without I/O.
     pub(super) fn try_read_sync(&self, section: u64, offset: u64, buf: &mut [u8]) -> bool {
-        if section < self.oldest_retained_section {
+        if section < self.core.oldest_retained_section {
             return false;
         }
         if let Some(s) = self.sealed.get(&section) {
@@ -417,7 +395,7 @@ impl<E: Storage + Metrics> Sections<E> {
     /// Sync `section`. No-op unless `section` is the tail (sealed sections are already durable).
     pub(super) async fn sync_section(&self, section: u64) -> Result<(), Error> {
         if let Some(blob) = self.tail_blob(section) {
-            self.synced.inc();
+            self.core.synced.inc();
             blob.sync().await.map_err(Error::Runtime)?;
         }
         Ok(())
@@ -428,8 +406,8 @@ impl<E: Storage + Metrics> Sections<E> {
         if self.tail.is_some() {
             return Err(Error::Corruption("tail already installed".into()));
         }
-        let blob = self.open_append(section).await?;
-        self.tracked.inc();
+        let blob = self.core.open_append(section).await?;
+        self.core.tracked.inc();
         self.tail = Some(Tail { section, blob });
         Ok(())
     }
@@ -444,8 +422,8 @@ impl<E: Storage + Metrics> Sections<E> {
         let sealed = tail.blob.seal().await.map_err(Error::Runtime)?;
         self.sealed.insert(prev_section, sealed);
 
-        let blob = self.open_append(next_section).await?;
-        self.tracked.inc();
+        let blob = self.core.open_append(next_section).await?;
+        self.core.tracked.inc();
         self.tail = Some(Tail {
             section: next_section,
             blob,
@@ -465,13 +443,11 @@ impl<E: Storage + Metrics> Sections<E> {
             let blob = self.sealed.remove(&section).unwrap();
             let size = blob.size();
             drop(blob);
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
+            self.core.remove_blob(section).await?;
             debug!(section, size, "pruned blob");
             pruned = true;
-            self.tracked.dec();
-            self.pruned.inc();
+            self.core.tracked.dec();
+            self.core.pruned.inc();
         }
         if let Some(t) = &self.tail {
             if t.section < min {
@@ -479,17 +455,15 @@ impl<E: Storage + Metrics> Sections<E> {
                 let tail_section = tail.section;
                 let size = tail.blob.size().await;
                 drop(tail.blob);
-                self.context
-                    .remove(&self.partition, Some(&tail_section.to_be_bytes()))
-                    .await?;
+                self.core.remove_blob(tail_section).await?;
                 debug!(section = tail_section, size, "pruned tail blob");
                 pruned = true;
-                self.tracked.dec();
-                self.pruned.inc();
+                self.core.tracked.dec();
+                self.core.pruned.inc();
             }
         }
         if pruned {
-            self.oldest_retained_section = min;
+            self.core.oldest_retained_section = min;
         }
         Ok(pruned)
     }
@@ -501,7 +475,7 @@ impl<E: Storage + Metrics> Sections<E> {
     /// above it are removed). Sections are removed newest-first to preserve a contiguous prefix
     /// in the event of a crash mid-rewind.
     pub(super) async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
+        self.core.prune_guard(section)?;
 
         // Remove tail if it is strictly greater than the target section.
         if let Some(t) = &self.tail {
@@ -509,10 +483,8 @@ impl<E: Storage + Metrics> Sections<E> {
                 let tail = self.tail.take().unwrap();
                 let tail_section = tail.section;
                 drop(tail.blob);
-                self.context
-                    .remove(&self.partition, Some(&tail_section.to_be_bytes()))
-                    .await?;
-                self.tracked.dec();
+                self.core.remove_blob(tail_section).await?;
+                self.core.tracked.dec();
                 debug!(section = tail_section, "removed tail during rewind");
             }
         }
@@ -526,10 +498,8 @@ impl<E: Storage + Metrics> Sections<E> {
         for s in to_remove {
             let blob = self.sealed.remove(&s).unwrap();
             drop(blob);
-            self.context
-                .remove(&self.partition, Some(&s.to_be_bytes()))
-                .await?;
-            self.tracked.dec();
+            self.core.remove_blob(s).await?;
+            self.core.tracked.dec();
             debug!(section = s, "removed sealed during rewind");
         }
 
@@ -551,7 +521,7 @@ impl<E: Storage + Metrics> Sections<E> {
                 self.tail.is_none(),
                 "rewind invariant: tail must be absent before promotion"
             );
-            let blob = self.open_append(section).await?;
+            let blob = self.core.open_append(section).await?;
             let cur = blob.size().await;
             if size < cur {
                 blob.resize(size).await.map_err(Error::Runtime)?;
@@ -586,26 +556,19 @@ impl<E: Storage + Metrics> Sections<E> {
             let size = blob.size();
             drop(blob);
             debug!(section, size, "removed sealed blob");
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
+            self.core.remove_blob(section).await?;
         }
         if let Some(tail) = self.tail.take() {
             let size = tail.blob.size().await;
             drop(tail.blob);
             debug!(section = tail.section, size, "removed tail blob");
-            self.context
-                .remove(&self.partition, Some(&tail.section.to_be_bytes()))
-                .await?;
+            self.core.remove_blob(tail.section).await?;
         }
-        let _ = self.tracked.try_set(0);
-        self.oldest_retained_section = 0;
+        let _ = self.core.tracked.try_set(0);
+        self.core.oldest_retained_section = 0;
 
         if remove_partition {
-            match self.context.remove(&self.partition, None).await {
-                Ok(()) | Err(RError::PartitionMissing(_)) => {}
-                Err(err) => return Err(Error::Runtime(err)),
-            }
+            self.core.remove_partition().await?;
         }
         Ok(())
     }
@@ -616,7 +579,7 @@ impl<E: Storage + Metrics> Sections<E> {
         section: u64,
         buffer: NonZeroUsize,
     ) -> Result<(Replay<E::Blob>, u64), Error> {
-        self.prune_guard(section)?;
+        self.core.prune_guard(section)?;
         if let Some(s) = self.sealed.get(&section) {
             let size = s.size();
             let r = s.replay(buffer).map_err(Error::Runtime)?;
