@@ -229,10 +229,6 @@ without downloading or storing the full operation history.
 - Runtime network sinks and streams are poisoned after send/receive errors or
   cancellation of a partially progressed operation. After that point, later
   calls return `Closed` instead of pretending the object is reusable.
-
-Durability, cancellation, and buffer ownership are more explicit at the runtime
-boundary.
-
 ### Cryptography Building Blocks
 
 The BLS12-381 DKG module now separates the original Feldman-Desmedt construction
