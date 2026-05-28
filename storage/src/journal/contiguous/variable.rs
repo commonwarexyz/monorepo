@@ -2174,7 +2174,7 @@ mod tests {
             let data_blobs = context.scan(&data_partition).await.unwrap();
             assert_eq!(data_blobs.len(), 3);
             for name in &data_blobs[1..] {
-                let (_blob, size) = context.open(&data_partition, &name).await.unwrap();
+                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
                 assert_eq!(size, 0);
             }
 
