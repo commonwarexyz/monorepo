@@ -470,9 +470,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         if offsets_metadata.get(&fixed::CLEAR_TARGET_KEY).is_some() {
             data.clear().await?;
         }
-        let mut offsets =
-            fixed::Journal::<E, u64>::init_with_metadata(offsets_ctx, offsets_cfg, offsets_metadata)
-                .await?;
+        let mut offsets = fixed::Journal::<E, u64>::init_with_metadata(
+            offsets_ctx,
+            offsets_cfg,
+            offsets_metadata,
+        )
+        .await?;
 
         // Validate and align offsets journal to match data journal
         let (pruning_boundary, size) =
