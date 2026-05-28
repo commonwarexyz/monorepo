@@ -299,49 +299,57 @@ macro_rules! impl_current_sync_database {
                 .await
             }
 
-            async fn has_local_target_state(
+            async fn local_boundary_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-            ) -> bool {
-                let Ok(journal) = <$journal>::init(
-                    context.child("local_target_journal_probe"),
-                    config.journal_config(),
-                )
-                .await
-                else {
-                    return false;
-                };
+                journal: &Self::Journal,
+            ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+                if target.range.start() == Location::new(0) {
+                    return Ok(None);
+                }
+
                 let reader = journal.reader().await;
                 let bounds = reader.bounds();
-                if Location::new(bounds.start) > target.range.start() {
-                    return false;
+                if Location::new(bounds.start) > target.range.start()
+                    || Location::new(bounds.end) != target.range.end()
+                {
+                    return Ok(None);
                 }
-                let Ok(inactivity_floor) =
-                    qmdb::find_inactivity_floor_at::<F, _>(&reader, target.range.end(), |op| {
-                        op.has_floor()
-                    })
-                    .await
-                else {
-                    return false;
-                };
+
+                let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
+                    &reader,
+                    target.range.end(),
+                    |op| op.has_floor(),
+                )
+                .await?;
+                drop(reader);
+
+                let hasher = qmdb::hasher::<H>();
+                let merkle = Merkle::<F, _, _, S>::init(
+                    context.child("local_boundary_merkle"),
+                    &hasher,
+                    config.merkle_config.clone(),
+                )
+                .await?;
+                let bounds = merkle.bounds();
+                if bounds.start > target.range.start() || bounds.end != target.range.end() {
+                    return Ok(None);
+                }
 
                 let inactive_peaks = F::inactive_peaks(
                     F::location_to_position(target.range.end()),
                     inactivity_floor,
                 );
-                if !qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context.child("local_target_merkle_probe"),
-                    config.merkle_config.clone(),
-                    target,
-                    inactive_peaks,
-                )
-                .await
-                {
-                    return false;
+                if merkle.root(&hasher, inactive_peaks)? != target.root {
+                    return Ok(None);
                 }
 
-                true
+                merkle
+                    .pinned_nodes_at(target.range.start())
+                    .await
+                    .map(Some)
+                    .map_err(Into::into)
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies

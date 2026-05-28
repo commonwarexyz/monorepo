@@ -1,6 +1,6 @@
 use super::{
     mailbox::{Mailbox, Message},
-    BlockDigest, SyncResult,
+    resolve_state_sync_floor, BlockDigest, StateSyncMetadata, SyncResult,
 };
 use crate::stateful::{
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
@@ -8,7 +8,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
 use commonware_consensus::{
-    marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant},
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -17,11 +17,13 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
+    sync::AsyncMutex,
     NZUsize,
 };
 use futures::SinkExt;
 use rand::Rng;
-use tracing::{debug, error};
+use std::sync::Arc;
+use tracing::debug;
 
 /// Configuration for [`Syncer`].
 pub struct Config<E, A, R, S, V>
@@ -44,6 +46,9 @@ where
     /// Per-database resolvers used to fetch state from peers.
     pub resolvers: R,
 
+    /// Durable state-sync metadata.
+    pub sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
+
     /// Finalized floor marshal should resolve before sync starts.
     pub finalization: Finalization<S, V::Commitment>,
 
@@ -56,7 +61,7 @@ where
 
 pub struct Syncer<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
@@ -79,6 +84,9 @@ where
 
     /// Per-database resolvers used to fetch state from peers.
     resolvers: R,
+
+    /// Durable state-sync metadata.
+    sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
 
     /// Finalized floor marshal should resolve before sync starts.
     finalization: Finalization<S, V::Commitment>,
@@ -110,6 +118,7 @@ where
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
+                sync_metadata: config.sync_metadata,
                 finalization: config.finalization,
                 marshal: config.marshal,
                 sync_complete: Some(config.sync_complete),
@@ -123,15 +132,20 @@ where
     }
 
     pub async fn run(mut self) {
-        let (starting_anchor, starting_targets) =
-            Self::resolve_floor(self.marshal.clone(), self.finalization.clone()).await;
+        let resolved_floor =
+            resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
+        {
+            let mut sync_metadata = self.sync_metadata.lock().await;
+            sync_metadata.begin_sync(resolved_floor.marker).await;
+        }
+
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut state_sync_task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
             self.context.child("state_sync"),
             self.db_config,
             self.resolvers,
-            starting_anchor,
-            starting_targets,
+            resolved_floor.anchor,
+            resolved_floor.targets,
             tip_updates_rx,
             self.sync_config,
         ))));
@@ -141,17 +155,21 @@ where
             on_stopped => {
                 debug!("syncer received stop signal, shutting down");
             },
-            Ok((databases, anchor)) = &mut state_sync_task else {
-                error!("critical: state sync task failed");
-                panic!("state sync task failed");
-            } => {
-                Self::publish_artifact(
-                    &mut self.artifact,
-                    &mut self.sync_complete,
-                    databases,
-                    anchor,
-                );
-                state_sync_task = None.into();
+            result = &mut state_sync_task => {
+                match result {
+                    Ok((databases, anchor)) => {
+                        Self::publish_artifact(
+                            &mut self.artifact,
+                            &mut self.sync_complete,
+                            databases,
+                            anchor,
+                        );
+                        state_sync_task = None.into();
+                    }
+                    Err(err) => {
+                        panic!("state sync task failed: {err:?}");
+                    }
+                }
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down syncer");
@@ -180,9 +198,8 @@ where
                                 );
                                 state_sync_task = None.into();
                             }
-                            Err(_) => {
-                                error!("critical: state sync task failed");
-                                panic!("state sync task failed");
+                            Err(err) => {
+                                panic!("state sync task failed: {err:?}");
                             }
                         }
                         response.send_lossy(self.artifact.clone());
@@ -205,29 +222,5 @@ where
         if let Some(sync_complete) = sync_complete.take() {
             sync_complete.send_lossy(sync_result);
         }
-    }
-
-    /// Resolves the initial [`Anchor`] and sync targets for the state sync process, based
-    /// on the direct [`Finalization`] provided in the configuration.
-    async fn resolve_floor(
-        marshal: MarshalMailbox<S, V>,
-        finalization: Finalization<S, V::Commitment>,
-    ) -> (
-        Anchor<BlockDigest<A, E>>,
-        <A::Databases as DatabaseSet<E>>::SyncTargets,
-    ) {
-        // Wait to retrieve the floor block from marshal. We use `Wait` here,
-        // since marshal triggers a fetch for the floor block if it is not
-        // already available already.
-        let floor = {
-            let block = marshal
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
-                .await
-                .expect("marshal must yield floor block");
-            V::into_inner(block)
-        };
-        let targets = A::sync_targets(&floor);
-
-        (Anchor::from(&floor), targets)
     }
 }

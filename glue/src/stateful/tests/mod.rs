@@ -13,7 +13,9 @@ use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_runtime::deterministic;
 use multi_db_app::MultiDbEngine;
-use properties::{BlockAgreementAtHeight, LateJoinerStateSyncHandoff};
+use properties::{
+    BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
+};
 use single_db_app::SingleDbEngine;
 use std::time::Duration;
 
@@ -139,8 +141,38 @@ fn full_cluster_outage_and_recovery() {
 #[test_group("slow")]
 #[test_traced("DEBUG")]
 fn state_sync_crash_during_sync() {
-    run_state_sync_crash_during_sync(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
-    run_state_sync_crash_during_sync(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
+    run_state_sync_crash_during_sync(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_state_sync()
+            .with_slow_state_sync(),
+    );
+    run_state_sync_crash_during_sync(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_state_sync()
+            .with_slow_state_sync(),
+    );
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+#[should_panic(expected = "runtime timeout")]
+fn state_sync_partitioned_restart_stays_stuck_until_network_heals_single_db() {
+    run_state_sync_partitioned_restart_stays_stuck_until_network_heals(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_state_sync()
+            .with_slow_state_sync(),
+    );
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+#[should_panic(expected = "runtime timeout")]
+fn state_sync_partitioned_restart_stays_stuck_until_network_heals_multi_db() {
+    run_state_sync_partitioned_restart_stays_stuck_until_network_heals(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_state_sync()
+            .with_slow_state_sync(),
+    );
 }
 
 #[test_group("slow")]
@@ -365,6 +397,46 @@ fn state_sync_restart_order<P: PublicKey>(participants: &[P]) -> Vec<P> {
     restart_order
 }
 
+fn state_sync_partitioned_restart_schedule<P>(participants: &[P], late_joiner: P) -> Schedule<P>
+where
+    P: PublicKey,
+{
+    let dead_link = Link {
+        latency: Duration::from_secs(1),
+        jitter: Duration::ZERO,
+        success_rate: 0.0,
+    };
+
+    let mut schedule = Schedule::new();
+    for peer in participants {
+        if peer == &late_joiner {
+            continue;
+        }
+
+        schedule = schedule
+            .at(
+                Duration::from_millis(4500),
+                Action::UpdateLink {
+                    from: late_joiner.clone(),
+                    to: peer.clone(),
+                    link: dead_link.clone(),
+                },
+            )
+            .at(
+                Duration::from_millis(4500),
+                Action::UpdateLink {
+                    from: peer.clone(),
+                    to: late_joiner.clone(),
+                    link: dead_link.clone(),
+                },
+            );
+    }
+
+    schedule
+        .at(Duration::from_secs(5), Action::Crash(late_joiner.clone()))
+        .at(Duration::from_secs(7), Action::Restart(late_joiner))
+}
+
 fn run_lossy<D>(engine: D, link: Link)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -530,13 +602,14 @@ where
         .unwrap();
 }
 
-/// Crash the late joiner mid-sync and restart it, exercising the
-/// `sync_done` metadata recovery path (second boot takes marshal sync).
+/// Crash the late joiner mid-sync and restart it without clearing any state-sync
+/// partitions. The restarted node should resume state sync from a compatible floor.
 fn run_state_sync_crash_during_sync<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
     D::State: ProcessedHeight,
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    CrashDuringStateSyncRecovery: Property<ed25519::PublicKey, D::State>,
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
@@ -545,14 +618,47 @@ where
         .seeds(0..5)
         .crash(Crash::Delay {
             count: 1,
-            after: 20,
+            after: 80,
         })
-        // Crash the late joiner shortly after it starts syncing, then restart.
+        // Crash the late joiner while it is still catching up through startup
+        // state sync, then restart it without clearing any partitions.
         .crash(Crash::Schedule(
             Schedule::new()
                 .at(Duration::from_secs(5), Action::Crash(late_joiner.clone()))
                 .at(Duration::from_secs(7), Action::Restart(late_joiner)),
         ))
+        .exit_condition(ProcessedHeightAtLeast::new(130))
+        .property(CrashDuringStateSyncRecovery)
+        .property(LateJoinerStateSyncHandoff)
+        .property(BlockAgreementAtHeight::new(130))
+        .run()
+        .unwrap();
+}
+
+/// Partition the late joiner, crash it mid-sync, then restart it into the same
+/// partition. Even with restartable state sync, the late joiner still cannot
+/// recover until the network partition heals.
+fn run_state_sync_partitioned_restart_stays_stuck_until_network_heals<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    let participants = engine.participants();
+    let late_joiner = participants[0].clone();
+    PlanBuilder::new(engine)
+        .seeds(0..5)
+        .crash(Crash::Delay {
+            count: 1,
+            after: 20,
+        })
+        .crash(Crash::Schedule(state_sync_partitioned_restart_schedule(
+            &participants,
+            late_joiner,
+        )))
+        .timeout(Duration::from_secs(20))
         .exit_condition(ProcessedHeightAtLeast::new(100))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(100))
